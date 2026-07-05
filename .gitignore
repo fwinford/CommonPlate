@@ -8,3 +8,10 @@ dist
 *.map
 .npm
 .cache
+
+# Xcode / iOS
+DerivedData
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.xcscmblueprint
