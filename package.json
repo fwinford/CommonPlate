@@ -1,7 +1,7 @@
 {
-  "name": "final-project-fwinford",
+  "name": "commonplate",
   "version": "1.0.0",
-  "description": "CommonPlate @ NYU is a web app that helps students share extra meal swipes or food events with others. Students who need a meal can post a short request that includes where they want food from, what they want, a pickup name, and a time window. Students who have extra meal swipes can look at the list of requests, pick one, place the order, and mark it as fulfilled.",
+  "description": "CommonPlate \u2014 a lightweight food request and fulfillment app for campus mutual aid.",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -17,16 +17,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nyu-csci-ua-0467-001-002-fall-2025/final-project-fwinford.git"
+    "url": "git+https://github.com/fwinford/CommonPlate.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "bugs": {
-    "url": "https://github.com/nyu-csci-ua-0467-001-002-fall-2025/final-project-fwinford/issues"
+    "url": "https://github.com/fwinford/CommonPlate/issues"
   },
-  "homepage": "https://github.com/nyu-csci-ua-0467-001-002-fall-2025/final-project-fwinford#readme",
+  "homepage": "https://github.com/fwinford/CommonPlate#readme",
   "dependencies": {
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
