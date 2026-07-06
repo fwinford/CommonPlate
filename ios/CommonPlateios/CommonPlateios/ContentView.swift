@@ -80,7 +80,7 @@ struct RequestFoodView: View {
     @Environment(\.dismiss) private var dismiss
     
     private var endOfToday: Date {
-        Calendar.current.date(bySettingHour: 23, minute: 59, second: 0, of: Date()) ?? Date()
+        Calendar.current.startOfDay(for: Date()).addingTimeInterval(24 * 60 * 60)
     }
     
     private var isEmailValid: Bool {
@@ -156,14 +156,13 @@ struct RequestFoodView: View {
 
                 if timing == .later {
                     DatePicker(
-                        "Around",
+                        "Around what time?",
                         selection: $preferredPickupTime,
                         in: Date()...endOfToday,
                         displayedComponents: [.hourAndMinute]
-                    )
-                }
+                    )                }
 
-                Text("Use the name and approximate time a helper should use when placing the order.")
+                Text("The student placing the order will use this name and approximate time.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
