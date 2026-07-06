@@ -8,16 +8,16 @@ struct ContentView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
 
-                Text("Request food, view active requests, or sign up to help.")
+                Text("Need a meal or want to help someone get one?")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
 
-                NavigationLink("Request Food") {
+                NavigationLink("I need food") {
                     RequestFoodView()
                 }
                 .buttonStyle(.borderedProminent)
 
-                NavigationLink("View Active Requests") {
+                NavigationLink("I can help") {
                     ActiveRequestsView()
                 }
                 .buttonStyle(.bordered)
