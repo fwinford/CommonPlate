@@ -18,7 +18,7 @@ struct ContentView: View {
                 .frame(maxWidth: 280)
                 .buttonStyle(.borderedProminent)
 
-                NavigationLink("I have extra swipes") {
+                NavigationLink("Help with a request") {
                     ActiveRequestsView()
                 }
                 .frame(maxWidth: 280)
@@ -40,7 +40,7 @@ struct ContentView: View {
                         .font(.headline)
 
                     Text("1. A student requests food from an NYU dining spot.")
-                    Text("2. Another student with extra swipes fulfills it.")
+                    Text("2. Another student with extra swipes chooses a request to fulfill.")
                     Text("3. They place the order and share pickup details.")
                     Text("4. The requester gets notified.")
                 }
@@ -65,20 +65,56 @@ struct ContentView: View {
     }
 }
 
+
+
 struct RequestFoodView: View {
-    @State private var foodLocation = ""
+    
+    struct DiningSpot: Identifiable, Hashable {
+        var id: String { name }
+        let name: String
+        let address: String
+    }
+    
+    let diningSpots = [
+        DiningSpot(name: "Crave NYU", address: "John A. Paulson Center, 6th Floor"),
+        DiningSpot(name: "Dunkin' at U-Hall", address: "U-Hall"),
+        DiningSpot(name: "Jasper Kane Cafe", address: "Address to confirm"),
+        DiningSpot(name: "Peet's Coffee at Kimmel", address: "Kimmel Center"),
+        DiningSpot(name: "Cafe 370", address: "BROOKLYN - 370 Jay St"),
+        DiningSpot(name: "Flavor Lab by NYU Eats", address: "Jasper Kane Cafe"),
+        DiningSpot(name: "Cafe 181", address: "John A. Paulson Center, 6th Floor"),
+        DiningSpot(name: "Upstein - Vedge Craft & Smoothie Lab", address: "Weinstein Hall, 5 University Pl #11"),
+        DiningSpot(name: "Upstein - Shareables, Cluckstein, Slidestein", address: "Weinstein Hall, 5 University Pl #11"),
+        DiningSpot(name: "True Burger at UHall", address: "U-Hall, 110 E. 14th"),
+        DiningSpot(name: "Palladium", address: "Palladium Hall, 140 E 14th St")
+    ]
+
+    @State private var selectedDiningSpot: DiningSpot?
     @State private var foodRequest = ""
     @State private var pickupName = ""
     @State private var email = ""
     @State private var phoneNumber = ""
-    @State private var timing = "Now"
+    @State private var timing = "ASAP"
     @State private var pickupWindow = ""
     @State private var showSuccessMessage = false
 
+    
     var body: some View {
         Form {
             Section("Food request") {
-                TextField("NYU dining spot", text: $foodLocation)
+                Picker("NYU dining spot", selection: $selectedDiningSpot) {
+                    Text("Select a spot").tag(nil as DiningSpot?)
+
+                    ForEach(diningSpots) { spot in
+                        Text(spot.name).tag(Optional(spot))
+                    }
+                }
+
+                if let selectedDiningSpot {
+                    Text(selectedDiningSpot.address)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
 
                 TextField("What do you want?", text: $foodRequest, axis: .vertical)
                     .lineLimit(3, reservesSpace: true)
@@ -88,22 +124,26 @@ struct RequestFoodView: View {
                 TextField("Pickup name for the order", text: $pickupName)
 
                 Picker("Timing", selection: $timing) {
-                    Text("Now").tag("Now")
-                    Text("Later").tag("Later")
+                    Text("ASAP").tag("ASAP")
+                    Text("Set time").tag("Set time")
                 }
                 .pickerStyle(.segmented)
 
-                TextField("Pickup window, e.g. 7:00–7:30 PM", text: $pickupWindow)
+                if timing == "Set time" {
+                    TextField("Pickup window, e.g. 7:00–7:30 PM", text: $pickupWindow)
+                }
             }
 
             Section("Contact") {
-                TextField("Email", text: $email)
+                
+                TextField("Email, required", text: $email)
                     .keyboardType(.emailAddress)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
                 TextField("Phone number, optional", text: $phoneNumber)
                     .keyboardType(.phonePad)
+                
             }
 
             Section {
