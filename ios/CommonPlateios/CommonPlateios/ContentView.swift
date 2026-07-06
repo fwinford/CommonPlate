@@ -68,6 +68,32 @@ struct ContentView: View {
 
 
 struct RequestFoodView: View {
+
+    @State private var selectedDiningSpot: DiningSpot?
+    @State private var foodRequest = ""
+    @State private var pickupName = ""
+    @State private var email = ""
+    @State private var phoneNumber = ""
+    @State private var timing: RequestTiming = .asap
+    @State private var preferredPickupTime = Date()
+    @State private var showSuccessMessage = false
+    @Environment(\.dismiss) private var dismiss
+    
+    private var endOfToday: Date {
+        Calendar.current.date(bySettingHour: 23, minute: 59, second: 0, of: Date()) ?? Date()
+    }
+    
+    private var isEmailValid: Bool {
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedEmail.contains("@") && trimmedEmail.contains(".")
+    }
+    
+    private var canSubmit: Bool {
+        selectedDiningSpot != nil &&
+        !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        isEmailValid
+    }
     
     struct DiningSpot: Identifiable, Hashable {
         var id: String { name }
@@ -84,9 +110,9 @@ struct RequestFoodView: View {
     
     let diningSpots = [
         DiningSpot(name: "Crave NYU", address: "John A. Paulson Center, 6th Floor"),
-        DiningSpot(name: "Dunkin' at U-Hall", address: "U-Hall"),
-        DiningSpot(name: "Jasper Kane Cafe", address: "Address to confirm"),
-        DiningSpot(name: "Peet's Coffee at Kimmel", address: "Kimmel Center"),
+        DiningSpot(name: "Dunkin' at U-Hall", address: "U-Hall, 108 E 14th St"),
+        DiningSpot(name: "Jasper Kane Cafe", address: "BROOKLYN, Rogers Hall"),
+        DiningSpot(name: "Peet's Coffee at Kimmel", address: "Kimmel Center, 60 Washington Sq S, 2nd Floor"),
         DiningSpot(name: "Cafe 370", address: "BROOKLYN - 370 Jay St"),
         DiningSpot(name: "Flavor Lab by NYU Eats", address: "Jasper Kane Cafe"),
         DiningSpot(name: "Cafe 181", address: "John A. Paulson Center, 6th Floor"),
@@ -95,15 +121,6 @@ struct RequestFoodView: View {
         DiningSpot(name: "True Burger at UHall", address: "U-Hall, 110 E. 14th"),
         DiningSpot(name: "Palladium", address: "Palladium Hall, 140 E 14th St")
     ]
-
-    @State private var selectedDiningSpot: DiningSpot?
-    @State private var foodRequest = ""
-    @State private var pickupName = ""
-    @State private var email = ""
-    @State private var phoneNumber = ""
-    @State private var timing: RequestTiming = .asap
-    @State private var preferredPickupTime = Date()
-    @State private var showSuccessMessage = false
 
     
     var body: some View {
@@ -139,17 +156,14 @@ struct RequestFoodView: View {
 
                 if timing == .later {
                     DatePicker(
-                        "Around what time?",
+                        "Around",
                         selection: $preferredPickupTime,
+                        in: Date()...endOfToday,
                         displayedComponents: [.hourAndMinute]
                     )
-
-                    Text("This is treated as an approximate pickup time.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
 
-                Text("This helps the student placing the order use the right pickup name and timing.")
+                Text("Use the name and approximate time a helper should use when placing the order.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -160,6 +174,12 @@ struct RequestFoodView: View {
                     .keyboardType(.emailAddress)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                
+                if !email.isEmpty && !isEmailValid {
+                    Text("Enter a valid email address.")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
 
                 TextField("Phone number, optional", text: $phoneNumber)
                     .keyboardType(.phonePad)
@@ -169,7 +189,12 @@ struct RequestFoodView: View {
             Section {
                 Button("Submit Placeholder Request") {
                     showSuccessMessage = true
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        dismiss()
+                    }
                 }
+                .disabled(!canSubmit)
 
                 if showSuccessMessage {
                     Text("Request submitted. Local app data comes on Day 4.")
