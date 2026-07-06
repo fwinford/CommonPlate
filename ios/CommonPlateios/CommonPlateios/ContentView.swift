@@ -17,8 +17,13 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
-                NavigationLink("I can help") {
+                NavigationLink("See who needs food") {
                     ActiveRequestsView()
+                }
+                .buttonStyle(.bordered)
+                
+                NavigationLink("Notify me when someone needs food") {
+                    AlertSignupView()
                 }
                 .buttonStyle(.bordered)
                 
@@ -32,15 +37,13 @@ struct ContentView: View {
                     Text("4. The requester gets notified.")
                 }
 
-                NavigationLink("Get notified about requests") {
-                    AlertSignupView()
-                }
-                .buttonStyle(.bordered)
 
                 NavigationLink("Privacy & Safety") {
                     PrivacySafetyView()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
 
             .padding(.top, 12)
