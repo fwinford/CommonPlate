@@ -8,39 +8,52 @@ struct ContentView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
 
-                Text("Need a meal or want to help someone get one?")
+                Text("Need food, or have extra swipes to share?")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
 
                 NavigationLink("I need food") {
                     RequestFoodView()
                 }
+                .frame(maxWidth: 280)
                 .buttonStyle(.borderedProminent)
 
-                NavigationLink("See who needs food") {
+                NavigationLink("I have extra swipes") {
                     ActiveRequestsView()
                 }
+                .frame(maxWidth: 280)
                 .buttonStyle(.bordered)
                 
-                NavigationLink("Notify me when someone needs food") {
+                Text("Want to help later?")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+                
+                NavigationLink("Notify me") {
                     AlertSignupView()
                 }
+                .frame(maxWidth: 280)
                 .buttonStyle(.bordered)
                 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("How it works")
                         .font(.headline)
 
-                    Text("1. Someone submits a food request.")
-                    Text("2. Helpers view active requests.")
-                    Text("3. A helper fulfills the request.")
+                    Text("1. A student requests food from an NYU dining spot.")
+                    Text("2. Another student with extra swipes fulfills it.")
+                    Text("3. They place the order and share pickup details.")
                     Text("4. The requester gets notified.")
                 }
-
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 12)
+                
+                Divider()
+                    .padding(.top, 12)
 
                 NavigationLink("Privacy & Safety") {
                     PrivacySafetyView()
                 }
+                .frame(maxWidth: 280)
                 .buttonStyle(.plain)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
