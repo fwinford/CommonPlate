@@ -8,7 +8,7 @@ struct ContentView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
 
-                Text("Need food, or have extra swipes to share?")
+                Text("Need food, or have extra meal swipes to share?")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
 
@@ -66,36 +66,61 @@ struct ContentView: View {
 }
 
 struct RequestFoodView: View {
+    @State private var foodLocation = ""
+    @State private var foodRequest = ""
+    @State private var pickupName = ""
+    @State private var email = ""
+    @State private var phoneNumber = ""
+    @State private var timing = "Now"
+    @State private var pickupWindow = ""
     @State private var showSuccessMessage = false
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Request Food")
-                .font(.title)
-                .fontWeight(.semibold)
+        Form {
+            Section("Food request") {
+                TextField("NYU dining spot", text: $foodLocation)
 
-            Text("Form fields will go here on Day 3.")
+                TextField("What do you want?", text: $foodRequest, axis: .vertical)
+                    .lineLimit(3, reservesSpace: true)
+            }
 
-            Button("Submit Placeholder Request") {
-                showSuccessMessage = true
+            Section("Pickup") {
+                TextField("Pickup name for the order", text: $pickupName)
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    dismiss()
+                Picker("Timing", selection: $timing) {
+                    Text("Now").tag("Now")
+                    Text("Later").tag("Later")
+                }
+                .pickerStyle(.segmented)
+
+                TextField("Pickup window, e.g. 7:00–7:30 PM", text: $pickupWindow)
+            }
+
+            Section("Contact") {
+                TextField("Email", text: $email)
+                    .keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                TextField("Phone number, optional", text: $phoneNumber)
+                    .keyboardType(.phonePad)
+            }
+
+            Section {
+                Button("Submit Placeholder Request") {
+                    showSuccessMessage = true
+                }
+
+                if showSuccessMessage {
+                    Text("Request submitted. Local app data comes on Day 4.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .buttonStyle(.borderedProminent)
-            if showSuccessMessage {
-                Text("Request submitted")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 8)
-            }
         }
-        .padding()
         .navigationTitle("Request Food")
-        }
     }
+}
 
 struct ActiveRequestsView: View {
     var body: some View {
