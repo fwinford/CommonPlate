@@ -21,8 +21,18 @@ struct ContentView: View {
                     ActiveRequestsView()
                 }
                 .buttonStyle(.bordered)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("How it works")
+                        .font(.headline)
 
-                NavigationLink("Sign Up for Alerts") {
+                    Text("1. Someone submits a food request.")
+                    Text("2. Helpers view active requests.")
+                    Text("3. A helper fulfills the request.")
+                    Text("4. The requester gets notified.")
+                }
+
+                NavigationLink("Get notified about requests") {
                     AlertSignupView()
                 }
                 .buttonStyle(.bordered)
@@ -32,6 +42,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
             }
+
+            .padding(.top, 12)
             .padding()
         }
     }
