@@ -75,6 +75,13 @@ struct RequestFoodView: View {
         let address: String
     }
     
+    enum RequestTiming: String, CaseIterable, Identifiable {
+        case asap = "ASAP"
+        case later = "Later"
+
+        var id: String { rawValue }
+    }
+    
     let diningSpots = [
         DiningSpot(name: "Crave NYU", address: "John A. Paulson Center, 6th Floor"),
         DiningSpot(name: "Dunkin' at U-Hall", address: "U-Hall"),
@@ -84,7 +91,7 @@ struct RequestFoodView: View {
         DiningSpot(name: "Flavor Lab by NYU Eats", address: "Jasper Kane Cafe"),
         DiningSpot(name: "Cafe 181", address: "John A. Paulson Center, 6th Floor"),
         DiningSpot(name: "Upstein - Vedge Craft & Smoothie Lab", address: "Weinstein Hall, 5 University Pl #11"),
-        DiningSpot(name: "Upstein - Shareables, Cluckstein, Slidestein", address: "Weinstein Hall, 5 University Pl #11"),
+        DiningSpot(name: "Upstein - Shareables, Cluckstein, Slidestein & Taqueria", address: "Weinstein Hall, 5 University Pl #11"),
         DiningSpot(name: "True Burger at UHall", address: "U-Hall, 110 E. 14th"),
         DiningSpot(name: "Palladium", address: "Palladium Hall, 140 E 14th St")
     ]
@@ -94,8 +101,8 @@ struct RequestFoodView: View {
     @State private var pickupName = ""
     @State private var email = ""
     @State private var phoneNumber = ""
-    @State private var timing = "ASAP"
-    @State private var pickupWindow = ""
+    @State private var timing: RequestTiming = .asap
+    @State private var preferredPickupTime = Date()
     @State private var showSuccessMessage = false
 
     
@@ -121,17 +128,30 @@ struct RequestFoodView: View {
             }
 
             Section("Pickup") {
-                TextField("Pickup name for the order", text: $pickupName)
+                TextField("Name to use for the order", text: $pickupName)
 
-                Picker("Timing", selection: $timing) {
-                    Text("ASAP").tag("ASAP")
-                    Text("Set time").tag("Set time")
+                Picker("When do you need it?", selection: $timing) {
+                    ForEach(RequestTiming.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
                 }
                 .pickerStyle(.segmented)
 
-                if timing == "Set time" {
-                    TextField("Pickup window, e.g. 7:00–7:30 PM", text: $pickupWindow)
+                if timing == .later {
+                    DatePicker(
+                        "Around what time?",
+                        selection: $preferredPickupTime,
+                        displayedComponents: [.hourAndMinute]
+                    )
+
+                    Text("This is treated as an approximate pickup time.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
+
+                Text("This helps the student placing the order use the right pickup name and timing.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Contact") {
