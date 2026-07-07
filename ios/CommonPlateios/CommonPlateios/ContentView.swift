@@ -393,14 +393,6 @@ struct RequestDetailView: View {
                 Text("Timing: \(request.timingDescription)")
             }
 
-            Section("Contact") {
-                Text("Email: \(request.email)")
-
-                if !request.phoneNumber.isEmpty {
-                    Text("Phone: \(request.phoneNumber)")
-                }
-            }
-
             Section {
                 NavigationLink("Fulfill Request") {
                     FulfillRequestView()
