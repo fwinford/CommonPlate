@@ -1,6 +1,41 @@
 import SwiftUI
 
+struct DiningSpot: Identifiable, Hashable {
+    var id: String { name }
+    let name: String
+    let address: String
+}
+
+enum RequestTiming: String, CaseIterable, Identifiable {
+    case asap = "ASAP"
+    case later = "Later"
+
+    var id: String { rawValue }
+}
+
+enum FoodRequestStatus: String {
+    case open = "Open"
+    case fulfilled = "Fulfilled"
+}
+
+struct FoodRequest: Identifiable {
+    let id = UUID()
+    let diningSpot: DiningSpot
+    let foodDescription: String
+    let pickupName: String
+    let email: String
+    let phoneNumber: String
+    let timing: RequestTiming
+    let preferredPickupTime: Date?
+    let createdAt = Date()
+    var status: FoodRequestStatus = .open
+}
+
+
 struct ContentView: View {
+    @State private var requests: [FoodRequest] = []
+    
+    
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
@@ -13,13 +48,15 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 NavigationLink("I need food") {
-                    RequestFoodView()
+                    RequestFoodView { newRequest in
+                        requests.append(newRequest)
+                    }
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.borderedProminent)
 
                 NavigationLink("Help with a request") {
-                    ActiveRequestsView()
+                    ActiveRequestsView(requests: requests)
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.bordered)
@@ -68,6 +105,7 @@ struct ContentView: View {
 
 
 struct RequestFoodView: View {
+    let onSubmit: (FoodRequest) -> Void
 
     @State private var selectedDiningSpot: DiningSpot?
     @State private var foodRequest = ""
@@ -93,19 +131,6 @@ struct RequestFoodView: View {
         !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         isEmailValid
-    }
-    
-    struct DiningSpot: Identifiable, Hashable {
-        var id: String { name }
-        let name: String
-        let address: String
-    }
-    
-    enum RequestTiming: String, CaseIterable, Identifiable {
-        case asap = "ASAP"
-        case later = "Later"
-
-        var id: String { rawValue }
     }
     
     let diningSpots = [
@@ -187,6 +212,19 @@ struct RequestFoodView: View {
 
             Section {
                 Button("Submit Placeholder Request") {
+                    guard let selectedDiningSpot else { return }
+
+                    let newRequest = FoodRequest(
+                        diningSpot: selectedDiningSpot,
+                        foodDescription: foodRequest.trimmingCharacters(in: .whitespacesAndNewlines),
+                        pickupName: pickupName.trimmingCharacters(in: .whitespacesAndNewlines),
+                        email: email.trimmingCharacters(in: .whitespacesAndNewlines),
+                        phoneNumber: phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines),
+                        timing: timing,
+                        preferredPickupTime: timing == .later ? preferredPickupTime : nil
+                    )
+
+                    onSubmit(newRequest)
                     showSuccessMessage = true
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -207,13 +245,23 @@ struct RequestFoodView: View {
 }
 
 struct ActiveRequestsView: View {
+    let requests: [FoodRequest]
     var body: some View {
         VStack(spacing: 16) {
             Text("Active Requests")
                 .font(.title)
                 .fontWeight(.semibold)
 
-            Text("Local requests will show here on Day 5.")
+            if requests.isEmpty {
+                Text("Local requests will show here on Day 5.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("\(requests.count) local request saved.")
+                    .foregroundStyle(.secondary)
+
+                Text("The full request list comes on Day 5.")
+                    .foregroundStyle(.secondary)
+            }
 
             NavigationLink("Open Sample Request") {
                 RequestDetailView()
