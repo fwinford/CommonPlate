@@ -80,6 +80,14 @@ struct FoodRequest: Identifiable {
             }
         }
     }
+    
+    var listTimingDescription: String {
+        if shouldShowInASAPSection && timing == .later, let preferredPickupTime {
+            return "Due around \(preferredPickupTime.formatted(date: .omitted, time: .shortened))"
+        }
+
+        return timingDescription
+    }
 }
 
 struct ContentView: View {
@@ -297,17 +305,24 @@ struct RequestFoodView: View {
 struct ActiveRequestsView: View {
     let requests: [FoodRequest]
 
+    private var asapRequests: [FoodRequest] {
+        activeRequests
+            .filter { $0.shouldShowInASAPSection }
+            .sorted { $0.expiresAt < $1.expiresAt }
+    }
+
+    private var laterTodayRequests: [FoodRequest] {
+        activeRequests
+            .filter { !$0.shouldShowInASAPSection }
+            .sorted {
+                ($0.preferredPickupTime ?? $0.createdAt) < ($1.preferredPickupTime ?? $1.createdAt)
+            }
+    }
+    
     private var activeRequests: [FoodRequest] {
         requests.filter { $0.isActive }
     }
 
-    private var asapRequests: [FoodRequest] {
-        activeRequests.filter { $0.shouldShowInASAPSection }
-    }
-
-    private var laterTodayRequests: [FoodRequest] {
-        activeRequests.filter { !$0.shouldShowInASAPSection }
-    }
 
     var body: some View {
         Group {
@@ -351,6 +366,7 @@ struct ActiveRequestsView: View {
         }
         .navigationTitle("Active Requests")
     }
+    
 }
 
 struct RequestRowView: View {
@@ -364,7 +380,7 @@ struct RequestRowView: View {
             Text(request.foodDescription)
                 .lineLimit(2)
 
-            Text(request.timingDescription)
+            Text(request.listTimingDescription)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -380,17 +396,13 @@ struct RequestDetailView: View {
             Section("Food request") {
                 Text(request.diningSpot.name)
                     .font(.headline)
-
                 Text(request.diningSpot.address)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-
                 Text(request.foodDescription)
-            }
-
-            Section("Pickup") {
-                Text("Name: \(request.pickupName)")
-                Text("Timing: \(request.timingDescription)")
+                Text(request.timingDescription)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
