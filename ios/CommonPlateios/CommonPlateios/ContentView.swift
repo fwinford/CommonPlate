@@ -29,8 +29,58 @@ struct FoodRequest: Identifiable {
     let preferredPickupTime: Date?
     let createdAt = Date()
     var status: FoodRequestStatus = .open
-}
 
+    var expiresAt: Date {
+        switch timing {
+        case .asap:
+            return createdAt.addingTimeInterval(5 * 60 * 60)
+
+        case .later:
+            if let preferredPickupTime {
+                return preferredPickupTime.addingTimeInterval(5 * 60 * 60)
+            } else {
+                return createdAt.addingTimeInterval(5 * 60 * 60)
+            }
+        }
+    }
+
+    var isExpired: Bool {
+        Date() >= expiresAt
+    }
+
+    var isActive: Bool {
+        status == .open && !isExpired
+    }
+
+    var shouldShowInASAPSection: Bool {
+        switch timing {
+        case .asap:
+            return true
+
+        case .later:
+            guard let preferredPickupTime else {
+                return false
+            }
+
+            let oneHourFromNow = Date().addingTimeInterval(60 * 60)
+            return preferredPickupTime <= oneHourFromNow
+        }
+    }
+
+    var timingDescription: String {
+        switch timing {
+        case .asap:
+            return "ASAP"
+
+        case .later:
+            if let preferredPickupTime {
+                return "Around \(preferredPickupTime.formatted(date: .omitted, time: .shortened))"
+            } else {
+                return "Later today"
+            }
+        }
+    }
+}
 
 struct ContentView: View {
     @State private var requests: [FoodRequest] = []
@@ -246,48 +296,117 @@ struct RequestFoodView: View {
 
 struct ActiveRequestsView: View {
     let requests: [FoodRequest]
+
+    private var activeRequests: [FoodRequest] {
+        requests.filter { $0.isActive }
+    }
+
+    private var asapRequests: [FoodRequest] {
+        activeRequests.filter { $0.shouldShowInASAPSection }
+    }
+
+    private var laterTodayRequests: [FoodRequest] {
+        activeRequests.filter { !$0.shouldShowInASAPSection }
+    }
+
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Active Requests")
-                .font(.title)
-                .fontWeight(.semibold)
+        Group {
+            if activeRequests.isEmpty {
+                VStack(spacing: 12) {
+                    Text("No active requests right now.")
+                        .font(.headline)
 
-            if requests.isEmpty {
-                Text("Local requests will show here on Day 5.")
-                    .foregroundStyle(.secondary)
+                    Text("When someone requests food, it will appear here.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding()
             } else {
-                Text("\(requests.count) local request saved.")
-                    .foregroundStyle(.secondary)
+                List {
+                    if !asapRequests.isEmpty {
+                        Section("ASAP") {
+                            ForEach(asapRequests) { request in
+                                NavigationLink {
+                                    RequestDetailView(request: request)
+                                } label: {
+                                    RequestRowView(request: request)
+                                }
+                            }
+                        }
+                    }
 
-                Text("The full request list comes on Day 5.")
-                    .foregroundStyle(.secondary)
+                    if !laterTodayRequests.isEmpty {
+                        Section("Later today") {
+                            ForEach(laterTodayRequests) { request in
+                                NavigationLink {
+                                    RequestDetailView(request: request)
+                                } label: {
+                                    RequestRowView(request: request)
+                                }
+                            }
+                        }
+                    }
+                }
             }
-
-            NavigationLink("Open Sample Request") {
-                RequestDetailView()
-            }
-            .buttonStyle(.borderedProminent)
         }
-        .padding()
         .navigationTitle("Active Requests")
     }
 }
 
-struct RequestDetailView: View {
+struct RequestRowView: View {
+    let request: FoodRequest
+
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Request Detail")
-                .font(.title)
-                .fontWeight(.semibold)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(request.diningSpot.name)
+                .font(.headline)
 
-            Text("Details for one food request will appear here.")
+            Text(request.foodDescription)
+                .lineLimit(2)
 
-            NavigationLink("Fulfill Request") {
-                FulfillRequestView()
-            }
-            .buttonStyle(.borderedProminent)
+            Text(request.timingDescription)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
-        .padding()
+        .padding(.vertical, 4)
+    }
+}
+
+struct RequestDetailView: View {
+    let request: FoodRequest
+
+    var body: some View {
+        Form {
+            Section("Food request") {
+                Text(request.diningSpot.name)
+                    .font(.headline)
+
+                Text(request.diningSpot.address)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Text(request.foodDescription)
+            }
+
+            Section("Pickup") {
+                Text("Name: \(request.pickupName)")
+                Text("Timing: \(request.timingDescription)")
+            }
+
+            Section("Contact") {
+                Text("Email: \(request.email)")
+
+                if !request.phoneNumber.isEmpty {
+                    Text("Phone: \(request.phoneNumber)")
+                }
+            }
+
+            Section {
+                NavigationLink("Fulfill Request") {
+                    FulfillRequestView()
+                }
+            }
+        }
         .navigationTitle("Request Detail")
     }
 }
