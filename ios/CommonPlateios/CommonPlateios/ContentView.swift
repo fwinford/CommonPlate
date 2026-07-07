@@ -211,7 +211,7 @@ struct RequestFoodView: View {
             }
 
             Section {
-                Button("Submit Placeholder Request") {
+                Button("Submit Request") {
                     guard let selectedDiningSpot else { return }
 
                     let newRequest = FoodRequest(
@@ -231,10 +231,10 @@ struct RequestFoodView: View {
                         dismiss()
                     }
                 }
-                .disabled(!canSubmit)
+                .disabled(!canSubmit || showSuccessMessage)
 
                 if showSuccessMessage {
-                    Text("Request submitted. Local app data comes on Day 4.")
+                    Text("Request saved locally.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
