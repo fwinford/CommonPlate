@@ -434,6 +434,7 @@ struct RequestRowView: View {
 struct RequestDetailView: View {
     let request: FoodRequest
     let onFulfill: (FoodRequest) -> Void
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         Form {
@@ -451,14 +452,16 @@ struct RequestDetailView: View {
 
             Section {
                 NavigationLink("I'll help with this") {
-                    FulfillRequestView(request: request, onFulfill: onFulfill)
+                    FulfillRequestView(request: request) { updatedRequest in
+                        onFulfill(updatedRequest)
+                        dismiss()
+                    }
                 }
             }
         }
         .navigationTitle("Request Detail")
     }
 }
-
 struct FulfillRequestView: View {
     let request: FoodRequest
     let onFulfill: (FoodRequest) -> Void
@@ -469,6 +472,7 @@ struct FulfillRequestView: View {
     @State private var pickupTimeOrETA = ""
     @State private var noteToRequester = ""
     @State private var showSuccessMessage = false
+    @State private var hasTriedToSubmit = false
     @Environment(\.dismiss) private var dismiss
 
     private var isHelperEmailValid: Bool {
@@ -484,38 +488,25 @@ struct FulfillRequestView: View {
 
     var body: some View {
         Form {
-            
-            Section("How to fulfill") {
-                Text("1. Place this order on Grubhub using the pickup name shown here.")
-                Text("2. Come back and enter the confirmation and pickup time.")
-                Text("3. They’ll use these details to pick up the order.")
+            Text("Place the order on Grubhub with the pickup name below, then come back and enter the confirmation and pickup time. Heads up: someone else may be working on this too.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
 
-                Text("Heads up: someone else may be working on this request too.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            
             Section("Request") {
-                Text(request.diningSpot.name)
-                    .font(.headline)
-
                 Text(request.foodDescription)
 
-                Text("Timing: \(request.timingDescription)")
+                Text("\(request.diningSpot.name) · \(request.timingDescription)")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Order pickup") {
-                Text("Use pickup name: \(request.pickupName)")
+            Section("Pickup name") {
+                Text(request.pickupName)
                     .font(.headline)
-
-                Text("Use this pickup name when placing the order.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
             Section("Your contact") {
-                TextField("Email, required", text: $helperEmail)
+                TextField("Email", text: $helperEmail)
                     .keyboardType(.emailAddress)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -531,16 +522,28 @@ struct FulfillRequestView: View {
             }
 
             Section("Order details") {
-                TextField("Order confirmation or order number, required", text: $orderConfirmation)
+                TextField("Order confirmation or order number", text: $orderConfirmation)
 
-                TextField("Pickup time or ETA, required", text: $pickupTimeOrETA)
+                TextField("Pickup time or ETA", text: $pickupTimeOrETA)
 
                 TextField("Optional note for them", text: $noteToRequester, axis: .vertical)
                     .lineLimit(2, reservesSpace: true)
             }
 
             Section {
+                if hasTriedToSubmit && !canSubmit && !showSuccessMessage {
+                    Text("Enter your email, order confirmation, and pickup time to continue.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Button("I placed the order") {
+                    hasTriedToSubmit = true
+
+                    guard canSubmit else {
+                        return
+                    }
+
                     let fulfillmentDetails = FulfillmentDetails(
                         helperEmail: helperEmail.trimmingCharacters(in: .whitespacesAndNewlines),
                         helperPhoneNumber: helperPhoneNumber.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -556,11 +559,14 @@ struct FulfillRequestView: View {
                     showSuccessMessage = true
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        onFulfill(updatedRequest)
                         dismiss()
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            onFulfill(updatedRequest)
+                        }
                     }
                 }
-                .disabled(!canSubmit || showSuccessMessage)
+                .disabled(showSuccessMessage)
 
                 if showSuccessMessage {
                     Text("Order details shared.")
