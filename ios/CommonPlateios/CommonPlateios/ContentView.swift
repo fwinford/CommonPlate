@@ -407,7 +407,7 @@ struct RequestDetailView: View {
 
             Section {
                 NavigationLink("Fulfill Request") {
-                    FulfillRequestView()
+                    FulfillRequestView(request: request)
                 }
             }
         }
@@ -416,35 +416,91 @@ struct RequestDetailView: View {
 }
 
 struct FulfillRequestView: View {
+    let request: FoodRequest
+
+    @State private var helperEmail = ""
+    @State private var helperPhoneNumber = ""
+    @State private var orderConfirmation = ""
+    @State private var pickupTimeOrETA = ""
+    @State private var noteToRequester = ""
     @State private var showSuccessMessage = false
     @Environment(\.dismiss) private var dismiss
-    
+
+    private var isHelperEmailValid: Bool {
+        let trimmedEmail = helperEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedEmail.contains("@") && trimmedEmail.contains(".")
+    }
+
+    private var canSubmit: Bool {
+        isHelperEmailValid &&
+        !orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !pickupTimeOrETA.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Fulfill Request")
-                .font(.title)
-                .fontWeight(.semibold)
+        Form {
+            Section("Request") {
+                Text(request.diningSpot.name)
+                    .font(.headline)
 
-            Text("Helper/order info form will go here on Day 6.")
+                Text(request.foodDescription)
 
-            Button("Submit Placeholder Fulfillment") {
-                showSuccessMessage = true
+                Text("Timing: \(request.timingDescription)")
+                    .foregroundStyle(.secondary)
+            }
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    dismiss()
+            Section("Order pickup") {
+                Text("Use pickup name: \(request.pickupName)")
+                    .font(.headline)
+
+                Text("Use this pickup name when placing the order.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Your contact") {
+                TextField("Email, required", text: $helperEmail)
+                    .keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                if !helperEmail.isEmpty && !isHelperEmailValid {
+                    Text("Enter a valid email address.")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                TextField("Phone number, optional", text: $helperPhoneNumber)
+                    .keyboardType(.phonePad)
+            }
+
+            Section("Order details") {
+                TextField("Order confirmation or order number", text: $orderConfirmation)
+
+                TextField("Pickup time or ETA", text: $pickupTimeOrETA)
+
+                TextField("Optional note to requester", text: $noteToRequester, axis: .vertical)
+                    .lineLimit(2, reservesSpace: true)
+            }
+
+            Section {
+                Button("Submit Fulfillment") {
+                    showSuccessMessage = true
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        dismiss()
+                    }
+                }
+                .disabled(!canSubmit || showSuccessMessage)
+
+                if showSuccessMessage {
+                    Text("Fulfillment details submitted.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .buttonStyle(.borderedProminent)
-            
-            if showSuccessMessage {
-                Text("Fulfillment submitted")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 8)
-            }
         }
-        .padding()
-        .navigationTitle("Fulfill")
+        .navigationTitle("Fulfill Request")
     }
 }
 
