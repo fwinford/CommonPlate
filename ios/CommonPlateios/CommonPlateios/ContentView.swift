@@ -15,7 +15,17 @@ enum RequestTiming: String, CaseIterable, Identifiable {
 
 enum FoodRequestStatus: String {
     case open = "Open"
-    case fulfilled = "Fulfilled"
+    case placed = "Placed"
+}
+
+struct FulfillmentDetails {
+    let helperEmail: String
+    let helperPhoneNumber: String
+    let orderConfirmation: String
+    let pickupTimeOrETA: String
+    let pickupLocationDetails: String
+    let noteToRequester: String
+    let submittedAt = Date()
 }
 
 struct FoodRequest: Identifiable {
@@ -29,6 +39,7 @@ struct FoodRequest: Identifiable {
     let preferredPickupTime: Date?
     let createdAt = Date()
     var status: FoodRequestStatus = .open
+    var fulfillmentDetails: FulfillmentDetails?
 
     var expiresAt: Date {
         switch timing {
@@ -93,6 +104,14 @@ struct FoodRequest: Identifiable {
 struct ContentView: View {
     @State private var requests: [FoodRequest] = []
     
+    private func markRequestAsPlaced(_ updatedRequest: FoodRequest) {
+        guard let index = requests.firstIndex(where: { $0.id == updatedRequest.id }) else {
+            return
+        }
+
+        requests[index] = updatedRequest
+    }
+    
     
     var body: some View {
         NavigationStack {
@@ -114,7 +133,10 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
 
                 NavigationLink("Help with a request") {
-                    ActiveRequestsView(requests: requests)
+                    ActiveRequestsView(
+                        requests: requests,
+                        onFulfill: markRequestAsPlaced
+                    )
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.bordered)
@@ -304,6 +326,7 @@ struct RequestFoodView: View {
 
 struct ActiveRequestsView: View {
     let requests: [FoodRequest]
+    let onFulfill: (FoodRequest) -> Void
 
     private var asapRequests: [FoodRequest] {
         activeRequests
@@ -342,7 +365,7 @@ struct ActiveRequestsView: View {
                         Section("ASAP") {
                             ForEach(asapRequests) { request in
                                 NavigationLink {
-                                    RequestDetailView(request: request)
+                                    RequestDetailView(request: request, onFulfill: onFulfill)
                                 } label: {
                                     RequestRowView(request: request)
                                 }
@@ -354,7 +377,7 @@ struct ActiveRequestsView: View {
                         Section("Later today") {
                             ForEach(laterTodayRequests) { request in
                                 NavigationLink {
-                                    RequestDetailView(request: request)
+                                    RequestDetailView(request: request, onFulfill: onFulfill)
                                 } label: {
                                     RequestRowView(request: request)
                                 }
@@ -390,6 +413,7 @@ struct RequestRowView: View {
 
 struct RequestDetailView: View {
     let request: FoodRequest
+    let onFulfill: (FoodRequest) -> Void
 
     var body: some View {
         Form {
@@ -407,7 +431,7 @@ struct RequestDetailView: View {
 
             Section {
                 NavigationLink("Fulfill Request") {
-                    FulfillRequestView(request: request)
+                    FulfillRequestView(request: request, onFulfill: onFulfill)
                 }
             }
         }
@@ -417,6 +441,7 @@ struct RequestDetailView: View {
 
 struct FulfillRequestView: View {
     let request: FoodRequest
+    let onFulfill: (FoodRequest) -> Void
 
     @State private var helperEmail = ""
     @State private var helperPhoneNumber = ""
@@ -485,6 +510,20 @@ struct FulfillRequestView: View {
 
             Section {
                 Button("Submit Fulfillment") {
+                    let fulfillmentDetails = FulfillmentDetails(
+                        helperEmail: helperEmail.trimmingCharacters(in: .whitespacesAndNewlines),
+                        helperPhoneNumber: helperPhoneNumber.trimmingCharacters(in: .whitespacesAndNewlines),
+                        orderConfirmation: orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines),
+                        pickupTimeOrETA: pickupTimeOrETA.trimmingCharacters(in: .whitespacesAndNewlines),
+                        pickupLocationDetails: pickupLocationDetails.trimmingCharacters(in: .whitespacesAndNewlines),
+                        noteToRequester: noteToRequester.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+
+                    var updatedRequest = request
+                    updatedRequest.status = .placed
+                    updatedRequest.fulfillmentDetails = fulfillmentDetails
+
+                    onFulfill(updatedRequest)
                     showSuccessMessage = true
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
