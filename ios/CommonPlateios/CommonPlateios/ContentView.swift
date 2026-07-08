@@ -23,7 +23,6 @@ struct FulfillmentDetails {
     let helperPhoneNumber: String
     let orderConfirmation: String
     let pickupTimeOrETA: String
-    let pickupLocationDetails: String
     let noteToRequester: String
     let submittedAt = Date()
 }
@@ -159,7 +158,7 @@ struct ContentView: View {
                     Text("1. A student requests food from an NYU dining spot.")
                     Text("2. Another student with extra swipes chooses a request to fulfill.")
                     Text("3. They place the order and share pickup details.")
-                    Text("4. The requester gets notified.")
+                    Text("4. Pickup details are shared with the student.")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 12)
@@ -195,6 +194,7 @@ struct RequestFoodView: View {
     @State private var timing: RequestTiming = .asap
     @State private var preferredPickupTime = Date()
     @State private var showSuccessMessage = false
+    @State private var hasTriedToSubmit = false
     @Environment(\.dismiss) private var dismiss
     
     private var endOfToday: Date {
@@ -211,6 +211,14 @@ struct RequestFoodView: View {
         !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         isEmailValid
+    }
+    
+    private var hasStartedRequestForm: Bool {
+        selectedDiningSpot != nil ||
+        !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        !pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        !phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     
     let diningSpots = [
@@ -265,7 +273,8 @@ struct RequestFoodView: View {
                         selection: $preferredPickupTime,
                         in: Date()...endOfToday,
                         displayedComponents: [.hourAndMinute]
-                    )                }
+                    )
+                }
 
                 Text("The student placing the order will use this name and approximate time.")
                     .font(.footnote)
@@ -291,8 +300,19 @@ struct RequestFoodView: View {
             }
 
             Section {
+                
+                if hasTriedToSubmit && !canSubmit && !showSuccessMessage {
+                    Text("Complete the dining spot, food request, pickup name, and email to submit.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                
                 Button("Submit Request") {
-                    guard let selectedDiningSpot else { return }
+                    hasTriedToSubmit = true
+
+                    guard canSubmit, let selectedDiningSpot else {
+                        return
+                    }
 
                     let newRequest = FoodRequest(
                         diningSpot: selectedDiningSpot,
@@ -311,10 +331,10 @@ struct RequestFoodView: View {
                         dismiss()
                     }
                 }
-                .disabled(!canSubmit || showSuccessMessage)
-
+                .disabled(showSuccessMessage)
+                
                 if showSuccessMessage {
-                    Text("Request saved locally.")
+                    Text("Request posted!")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -430,7 +450,7 @@ struct RequestDetailView: View {
             }
 
             Section {
-                NavigationLink("Fulfill Request") {
+                NavigationLink("I'll help with this") {
                     FulfillRequestView(request: request, onFulfill: onFulfill)
                 }
             }
@@ -464,6 +484,17 @@ struct FulfillRequestView: View {
 
     var body: some View {
         Form {
+            
+            Section("How to fulfill") {
+                Text("1. Place this order on Grubhub using the pickup name shown here.")
+                Text("2. Come back and enter the confirmation and pickup time.")
+                Text("3. They’ll use these details to pick up the order.")
+
+                Text("Heads up: someone else may be working on this request too.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            
             Section("Request") {
                 Text(request.diningSpot.name)
                     .font(.headline)
@@ -500,22 +531,21 @@ struct FulfillRequestView: View {
             }
 
             Section("Order details") {
-                TextField("Order confirmation or order number", text: $orderConfirmation)
+                TextField("Order confirmation or order number, required", text: $orderConfirmation)
 
-                TextField("Pickup time or ETA", text: $pickupTimeOrETA)
+                TextField("Pickup time or ETA, required", text: $pickupTimeOrETA)
 
-                TextField("Optional note to requester", text: $noteToRequester, axis: .vertical)
+                TextField("Optional note for them", text: $noteToRequester, axis: .vertical)
                     .lineLimit(2, reservesSpace: true)
             }
 
             Section {
-                Button("Submit Fulfillment") {
+                Button("I placed the order") {
                     let fulfillmentDetails = FulfillmentDetails(
                         helperEmail: helperEmail.trimmingCharacters(in: .whitespacesAndNewlines),
                         helperPhoneNumber: helperPhoneNumber.trimmingCharacters(in: .whitespacesAndNewlines),
                         orderConfirmation: orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines),
                         pickupTimeOrETA: pickupTimeOrETA.trimmingCharacters(in: .whitespacesAndNewlines),
-                        pickupLocationDetails: pickupLocationDetails.trimmingCharacters(in: .whitespacesAndNewlines),
                         noteToRequester: noteToRequester.trimmingCharacters(in: .whitespacesAndNewlines)
                     )
 
@@ -523,17 +553,17 @@ struct FulfillRequestView: View {
                     updatedRequest.status = .placed
                     updatedRequest.fulfillmentDetails = fulfillmentDetails
 
-                    onFulfill(updatedRequest)
                     showSuccessMessage = true
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        onFulfill(updatedRequest)
                         dismiss()
                     }
                 }
                 .disabled(!canSubmit || showSuccessMessage)
 
                 if showSuccessMessage {
-                    Text("Fulfillment details submitted.")
+                    Text("Order details shared.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
