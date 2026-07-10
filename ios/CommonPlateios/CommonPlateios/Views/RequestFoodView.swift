@@ -101,6 +101,10 @@ struct RequestFoodView: View {
                 Text("The student placing the order will use this name and approximate time.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+
+                Text("Requests expire after a few hours so the list stays current.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Contact") {

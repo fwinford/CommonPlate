@@ -34,6 +34,6 @@ struct RequestDetailView: View {
                 }
             }
         }
-        .navigationTitle("Request Detail")
+        .navigationTitle("Request")
     }
 }
