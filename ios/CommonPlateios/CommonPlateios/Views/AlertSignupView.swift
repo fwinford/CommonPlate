@@ -1,5 +1,5 @@
 //
-//  AlertSignupView 2.swift
+//  AlertSignupView.swift
 //  CommonPlateios
 //
 //  Created by faith on 7/9/26.

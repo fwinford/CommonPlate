@@ -17,7 +17,6 @@ struct FulfillRequestView: View {
     @State private var noteToRequester = ""
     @State private var showSuccessMessage = false
     @State private var hasTriedToSubmit = false
-    @Environment(\.dismiss) private var dismiss
 
     private var isHelperEmailValid: Bool {
         let trimmedEmail = helperEmail.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -109,11 +108,7 @@ struct FulfillRequestView: View {
                     showSuccessMessage = true
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        dismiss()
-
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            onFulfill(updatedRequest)
-                        }
+                        onFulfill(updatedRequest)
                     }
                 }
                 .disabled(showSuccessMessage)
