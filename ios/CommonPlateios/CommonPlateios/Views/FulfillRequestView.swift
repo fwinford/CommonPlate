@@ -29,24 +29,31 @@ struct FulfillRequestView: View {
         !orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !pickupTimeOrETA.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+    
 
     var body: some View {
         Form {
-            Text("Place the order on Grubhub with the pickup name below, then come back and enter the confirmation and pickup time. Heads up: someone else may be working on this too.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            Section("Before you submit") {
+                Text("Place the order on Grubhub using the pickup name below, then come back and enter the confirmation and pickup time.")
 
-            Section("Request") {
+                Text("Someone else may be working on this request too.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Order info") {
                 Text(request.foodDescription)
 
                 Text("\(request.diningSpot.name) · \(request.timingDescription)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-            }
 
-            Section("Pickup name") {
-                Text(request.pickupName)
-                    .font(.headline)
+                HStack {
+                    Text("Pickup name")
+                    Spacer()
+                    Text(request.pickupName)
+                        .fontWeight(.semibold)
+                }
             }
 
             Section("Your contact") {
