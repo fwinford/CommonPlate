@@ -29,7 +29,6 @@ struct FulfillRequestView: View {
         !orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !pickupTimeOrETA.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-    
 
     var body: some View {
         Form {
@@ -126,6 +125,6 @@ struct FulfillRequestView: View {
                 }
             }
         }
-        .navigationTitle("Fulfill Request")
+        .navigationTitle("Help with Request")
     }
 }

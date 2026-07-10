@@ -96,7 +96,7 @@ struct FoodRequest: Identifiable {
             }
         }
     }
-    
+
     var listTimingDescription: String {
         if shouldShowInASAPSection && timing == .later, let preferredPickupTime {
             return "Due around \(preferredPickupTime.formatted(date: .omitted, time: .shortened))"

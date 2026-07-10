@@ -23,11 +23,10 @@ struct ActiveRequestsView: View {
                 ($0.preferredPickupTime ?? $0.createdAt) < ($1.preferredPickupTime ?? $1.createdAt)
             }
     }
-    
+
     private var activeRequests: [FoodRequest] {
         requests.filter { $0.isActive }
     }
-
 
     var body: some View {
         Group {
@@ -66,14 +65,11 @@ struct ActiveRequestsView: View {
                             }
                         }
                     }
-                    
-                    
                 }
             }
         }
         .navigationTitle("Active Requests")
     }
-    
 }
 
 struct RequestRowView: View {

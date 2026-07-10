@@ -19,23 +19,23 @@ struct RequestFoodView: View {
     @State private var showSuccessMessage = false
     @State private var hasTriedToSubmit = false
     @Environment(\.dismiss) private var dismiss
-    
+
     private var endOfToday: Date {
         Calendar.current.startOfDay(for: Date()).addingTimeInterval(24 * 60 * 60)
     }
-    
+
     private var isEmailValid: Bool {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedEmail.contains("@") && trimmedEmail.contains(".")
     }
-    
+
     private var canSubmit: Bool {
         selectedDiningSpot != nil &&
         !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         isEmailValid
     }
-    
+
     private var hasStartedRequestForm: Bool {
         selectedDiningSpot != nil ||
         !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
@@ -43,7 +43,7 @@ struct RequestFoodView: View {
         !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
         !phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-    
+
     let diningSpots = [
         DiningSpot(name: "Crave NYU", address: "John A. Paulson Center, 6th Floor"),
         DiningSpot(name: "Dunkin' at U-Hall", address: "U-Hall, 108 E 14th St"),
@@ -58,7 +58,6 @@ struct RequestFoodView: View {
         DiningSpot(name: "Palladium", address: "Palladium Hall, 140 E 14th St")
     ]
 
-    
     var body: some View {
         Form {
             Section("Food request") {
@@ -105,12 +104,11 @@ struct RequestFoodView: View {
             }
 
             Section("Contact") {
-                
                 TextField("Email, required", text: $email)
                     .keyboardType(.emailAddress)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                
+
                 if !email.isEmpty && !isEmailValid {
                     Text("Enter a valid email address.")
                         .font(.footnote)
@@ -119,17 +117,15 @@ struct RequestFoodView: View {
 
                 TextField("Phone number, optional", text: $phoneNumber)
                     .keyboardType(.phonePad)
-                
             }
 
             Section {
-                
                 if hasTriedToSubmit && !canSubmit && !showSuccessMessage {
                     Text("Complete the dining spot, food request, pickup name, and email to submit.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                
+
                 Button("Submit Request") {
                     hasTriedToSubmit = true
 
@@ -155,7 +151,7 @@ struct RequestFoodView: View {
                     }
                 }
                 .disabled(showSuccessMessage)
-                
+
                 if showSuccessMessage {
                     Text("Request posted!")
                         .font(.subheadline)
@@ -166,4 +162,3 @@ struct RequestFoodView: View {
         .navigationTitle("Request Food")
     }
 }
-

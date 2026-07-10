@@ -1,9 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
-    
     @State private var requests: [FoodRequest] = []
-    
+
     private func markRequestAsPlaced(_ updatedRequest: FoodRequest) {
         guard let index = requests.firstIndex(where: { $0.id == updatedRequest.id }) else {
             return
@@ -11,8 +10,7 @@ struct ContentView: View {
 
         requests[index] = updatedRequest
     }
-    
-    
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
@@ -40,18 +38,18 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.bordered)
-                
+
                 Text("Want to help later?")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
-                
-                NavigationLink("Notify me") {
+
+                NavigationLink("About alerts") {
                     AlertSignupView()
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.bordered)
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("How it works")
                         .font(.headline)
@@ -63,7 +61,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 12)
-                
+
                 Divider()
                     .padding(.top, 12)
 
