@@ -7,32 +7,27 @@
 import SwiftUI
 
 struct AlertSignupView: View {
-    @State private var showSuccessMessage = false
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         VStack(spacing: 16) {
-            Text("Sign Up for Alerts")
+            Text("Get Notified")
                 .font(.title)
                 .fontWeight(.semibold)
 
-            Text("Helpers will enter their email or phone here.")
+            Text("Soon, helpers will be able to sign up for alerts when new food requests are posted.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
 
-            Button("Submit Placeholder Signup"){
-                showSuccessMessage = true
+            Text("For now, check Active Requests to see what still needs help.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    dismiss()
-                }
+            Button("Got it") {
+                dismiss()
             }
             .buttonStyle(.borderedProminent)
-            
-            if showSuccessMessage {
-                Text("Alert signup submitted")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 8)
-            }
+            .padding(.top, 8)
         }
         .padding()
         .navigationTitle("Alerts")
