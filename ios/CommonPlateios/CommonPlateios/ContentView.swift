@@ -20,7 +20,7 @@ struct ContentView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
 
-                Text("Need food, or have extra meal swipes to share?")
+                Text("Need food, or have extra meal swipes you can use to help?")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
 
@@ -56,10 +56,10 @@ struct ContentView: View {
                     Text("How it works")
                         .font(.headline)
 
-                    Text("1. A student requests food from an NYU dining spot.")
-                    Text("2. Another student with extra swipes chooses a request to fulfill.")
-                    Text("3. They place the order and share pickup details.")
-                    Text("4. Pickup details are shared with the student.")
+                    Text("1. A student posts a food request from an NYU dining spot.")
+                    Text("2. Another student with extra meal swipes chooses a request to help with.")
+                    Text("3. They place the order and enter pickup details.")
+                    Text("4. The student uses those details to pick up their food.")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 12)
