@@ -36,7 +36,7 @@ struct ActiveRequestsView: View {
                     Text("No active requests right now.")
                         .font(.headline)
 
-                    Text("When someone requests food, it will appear here.")
+                    Text("Requests here still need help. They expire after a few hours so the list stays current.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
@@ -66,6 +66,8 @@ struct ActiveRequestsView: View {
                             }
                         }
                     }
+                    
+                    
                 }
             }
         }
