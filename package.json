@@ -1,10 +1,10 @@
 {
   "name": "commonplate",
   "version": "1.0.0",
-  "description": "CommonPlate \u2014 a lightweight food request and fulfillment app for campus mutual aid.",
+  "description": "CommonPlate — a lightweight food request and fulfillment app for campus mutual aid.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
     "build:client": "node build-client.mjs",
     "dev": "npm run build:client && tsx watch app.ts",
     "build": "npm run build:client && tsc",
@@ -31,10 +31,11 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "express-rate-limit": "^8.2.1",
-    "mongoose": "^8.19.3",
     "helmet": "^7.0.0",
+    "mongoose": "^8.19.3",
     "node-cron": "^4.2.1",
-    "resend": "^6.4.2"
+    "resend": "^6.4.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.5",
@@ -42,13 +43,14 @@
     "@types/mongoose": "^5.11.96",
     "@types/node": "^24.10.0",
     "@types/node-cron": "^3.0.11",
+    "@typescript-eslint/eslint-plugin": "^6.9.0",
+    "@typescript-eslint/parser": "^6.9.0",
+    "depcheck": "^1.4.2",
     "esbuild": "^0.26.0",
+    "eslint": "^8.48.0",
+    "ts-prune": "^0.8.3",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "ts-prune": "^0.8.3",
-    "depcheck": "^1.4.2",
-    "eslint": "^8.48.0",
-    "@typescript-eslint/parser": "^6.9.0",
-    "@typescript-eslint/eslint-plugin": "^6.9.0"
+    "vitest": "^4.1.10"
   }
 }
