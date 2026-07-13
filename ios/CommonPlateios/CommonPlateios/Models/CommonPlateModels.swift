@@ -53,6 +53,38 @@ struct FoodRequest: Identifiable {
     var status: RequestStatus
     var fulfillmentDetails: FulfillmentDetails?
 
+    /// Canonical initializer: all backend-owned values (`id`, `createdAt`,
+    /// `expiresAt`, `status`) are supplied explicitly, never generated locally.
+    /// This is the production construction path once DTOs are mapped to domain
+    /// models (RequestService, not part of this task).
+    init(
+        id: String,
+        diningSpot: DiningSpot,
+        foodDescription: String,
+        pickupName: String,
+        email: String,
+        phoneNumber: String,
+        timing: RequestTiming,
+        preferredPickupTime: Date?,
+        createdAt: Date,
+        expiresAt: Date,
+        status: RequestStatus,
+        fulfillmentDetails: FulfillmentDetails? = nil
+    ) {
+        self.id = id
+        self.diningSpot = diningSpot
+        self.foodDescription = foodDescription
+        self.pickupName = pickupName
+        self.email = email
+        self.phoneNumber = phoneNumber
+        self.timing = timing
+        self.preferredPickupTime = preferredPickupTime
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.status = status
+        self.fulfillmentDetails = fulfillmentDetails
+    }
+
     /// Temporary local/mock-compatible initializer for screens still using local
     /// simulation (no backend connected yet). Generates a local ID/timestamps and
     /// a client-side expiration; must not be used once screens are backend-backed.

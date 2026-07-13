@@ -88,13 +88,16 @@ struct ClaimResponseDTO: Decodable {
 
 // MARK: - Fulfillment
 
-/// Fields currently accepted by `POST /api/request/:id/fulfill`. `note` and
-/// `contactMessage` are kept distinct and both optional: whether they remain
-/// separate or are consolidated is an open Day 5 question, not decided here.
+/// Fields currently accepted by `POST /api/request/:id/fulfill` (app.ts: `orderNumber`,
+/// `eta`, `note`, `fulfillerEmail`, `contactMessage`). `note` and `contactMessage` are
+/// kept distinct and both optional: whether they remain separate or are consolidated
+/// is an open Day 5 question, not decided here. `eta` matches the currently accepted
+/// wire key; do not rename to `etaText` (that is a persisted `Request` field, not the
+/// request-body key) unless the endpoint's accepted contract changes.
 struct FulfillmentPayload: Encodable {
     let fulfillerEmail: String
     let orderNumber: String
-    let etaText: String
+    let eta: String
     let note: String?
     let contactMessage: String?
 }
