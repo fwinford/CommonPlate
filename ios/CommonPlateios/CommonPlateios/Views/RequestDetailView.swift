@@ -16,9 +16,11 @@ struct RequestDetailView: View {
             Section("Food request") {
                 Text(request.diningSpot.name)
                     .font(.headline)
-                Text(request.diningSpot.address)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                if let address = request.diningSpot.address {
+                    Text(address)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Text(request.foodDescription)
                 Text(request.timingDescription)
                     .font(.footnote)

@@ -49,7 +49,7 @@ struct FulfillRequestView: View {
                 HStack {
                     Text("Pickup name")
                     Spacer()
-                    Text(request.pickupName)
+                    Text(request.localContext?.pickupName ?? "—")
                         .fontWeight(.semibold)
                 }
             }

@@ -69,8 +69,8 @@ struct RequestFoodView: View {
                     }
                 }
 
-                if let selectedDiningSpot {
-                    Text(selectedDiningSpot.address)
+                if let address = selectedDiningSpot?.address {
+                    Text(address)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
