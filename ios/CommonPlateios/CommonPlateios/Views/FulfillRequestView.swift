@@ -7,8 +7,8 @@
 import SwiftUI
 
 struct FulfillRequestView: View {
-    let request: FoodRequest
-    let onFulfill: (FoodRequest) -> Void
+    let request: LocalSimulatedRequest
+    let onFulfill: (LocalSimulatedRequest) -> Void
 
     @State private var helperEmail = ""
     @State private var helperPhoneNumber = ""
@@ -40,16 +40,16 @@ struct FulfillRequestView: View {
             }
 
             Section("Order info") {
-                Text(request.foodDescription)
+                Text(request.canonicalRequest.foodDescription)
 
-                Text("\(request.diningSpot.name) · \(request.timingDescription)")
+                Text("\(request.canonicalRequest.diningSpot.name) · \(request.canonicalRequest.timingDescription)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
                 HStack {
                     Text("Pickup name")
                     Spacer()
-                    Text(request.localContext?.pickupName ?? "—")
+                    Text(request.pickupName)
                         .fontWeight(.semibold)
                 }
             }
@@ -93,7 +93,7 @@ struct FulfillRequestView: View {
                         return
                     }
 
-                    let fulfillmentDetails = FulfillmentDetails(
+                    let fulfillmentDetails = LocalSimulationFulfillmentDetails(
                         helperEmail: helperEmail.trimmingCharacters(in: .whitespacesAndNewlines),
                         helperPhoneNumber: helperPhoneNumber.trimmingCharacters(in: .whitespacesAndNewlines),
                         orderConfirmation: orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -102,7 +102,7 @@ struct FulfillRequestView: View {
                     )
 
                     var updatedRequest = request
-                    updatedRequest.status = .placed
+                    updatedRequest.canonicalRequest.status = .placed
                     updatedRequest.fulfillmentDetails = fulfillmentDetails
 
                     showSuccessMessage = true

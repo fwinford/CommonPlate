@@ -1,9 +1,9 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var requests: [FoodRequest] = []
+    @State private var requests: [LocalSimulatedRequest] = []
 
-    private func markRequestAsPlaced(_ updatedRequest: FoodRequest) {
+    private func markRequestAsPlaced(_ updatedRequest: LocalSimulatedRequest) {
         guard let index = requests.firstIndex(where: { $0.id == updatedRequest.id }) else {
             return
         }

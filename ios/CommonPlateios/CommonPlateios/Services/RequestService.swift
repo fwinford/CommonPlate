@@ -240,8 +240,8 @@ struct RequestService {
     /// Maps a public `RequestResponseDTO` (list/detail/create/claim/fulfill's
     /// embedded `request`) to the canonical domain model. Never fabricates
     /// requester-private fields (`pickupName`, `email`, `phoneNumber`) — the
-    /// public wire shape never carries them, so they are left `nil` rather
-    /// than defaulted to placeholders.
+    /// public wire shape never carries them, and `FoodRequest` has no properties
+    /// in which to store them.
     ///
     /// An unrecognized wire status value throws (via `RequestStatusWire`'s
     /// `Decodable` conformance failing at decode time) rather than silently

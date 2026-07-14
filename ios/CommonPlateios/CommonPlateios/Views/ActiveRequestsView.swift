@@ -7,25 +7,26 @@
 import SwiftUI
 
 struct ActiveRequestsView: View {
-    let requests: [FoodRequest]
-    let onFulfill: (FoodRequest) -> Void
+    let requests: [LocalSimulatedRequest]
+    let onFulfill: (LocalSimulatedRequest) -> Void
 
-    private var asapRequests: [FoodRequest] {
+    private var asapRequests: [LocalSimulatedRequest] {
         activeRequests
-            .filter { $0.shouldShowInASAPSection }
-            .sorted { $0.expiresAt < $1.expiresAt }
+            .filter { $0.canonicalRequest.shouldShowInASAPSection }
+            .sorted { $0.canonicalRequest.expiresAt < $1.canonicalRequest.expiresAt }
     }
 
-    private var laterTodayRequests: [FoodRequest] {
+    private var laterTodayRequests: [LocalSimulatedRequest] {
         activeRequests
-            .filter { !$0.shouldShowInASAPSection }
+            .filter { !$0.canonicalRequest.shouldShowInASAPSection }
             .sorted {
-                ($0.preferredPickupTime ?? $0.createdAt) < ($1.preferredPickupTime ?? $1.createdAt)
+                ($0.canonicalRequest.preferredPickupTime ?? $0.canonicalRequest.createdAt) <
+                    ($1.canonicalRequest.preferredPickupTime ?? $1.canonicalRequest.createdAt)
             }
     }
 
-    private var activeRequests: [FoodRequest] {
-        requests.filter { $0.isActive }
+    private var activeRequests: [LocalSimulatedRequest] {
+        requests.filter { $0.canonicalRequest.isActive }
     }
 
     var body: some View {
@@ -73,14 +74,14 @@ struct ActiveRequestsView: View {
 }
 
 struct RequestRowView: View {
-    let request: FoodRequest
+    let request: LocalSimulatedRequest
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(request.diningSpot.name)
+            Text(request.canonicalRequest.diningSpot.name)
                 .font(.headline)
 
-            Text(request.foodDescription)
+            Text(request.canonicalRequest.foodDescription)
                 .lineLimit(2)
 
             Text(request.listTimingDescription)

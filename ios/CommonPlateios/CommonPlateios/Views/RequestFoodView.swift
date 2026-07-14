@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct RequestFoodView: View {
-    let onSubmit: (FoodRequest) -> Void
+    let onSubmit: (LocalSimulatedRequest) -> Void
 
     @State private var selectedDiningSpot: DiningSpot?
     @State private var foodRequest = ""
@@ -137,12 +137,10 @@ struct RequestFoodView: View {
                         return
                     }
 
-                    let newRequest = FoodRequest(
+                    let newRequest = LocalSimulatedRequest(
                         diningSpot: selectedDiningSpot,
                         foodDescription: foodRequest.trimmingCharacters(in: .whitespacesAndNewlines),
                         pickupName: pickupName.trimmingCharacters(in: .whitespacesAndNewlines),
-                        email: email.trimmingCharacters(in: .whitespacesAndNewlines),
-                        phoneNumber: phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines),
                         timing: timing,
                         preferredPickupTime: timing == .later ? preferredPickupTime : nil
                     )
