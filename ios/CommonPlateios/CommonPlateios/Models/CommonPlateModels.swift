@@ -61,6 +61,9 @@ struct FoodRequest: Identifiable {
     let id: String
     let diningSpot: DiningSpot
     let foodDescription: String
+    let pickupWindowText: String
+    let windowStart: Date?
+    let windowEnd: Date?
     let timing: RequestTiming
     let preferredPickupTime: Date?
     let createdAt: Date
@@ -70,16 +73,16 @@ struct FoodRequest: Identifiable {
     /// Non-nil only for locally-simulated requests; see `LocalRequestContext`.
     var localContext: LocalRequestContext?
 
-    /// Canonical initializer: all backend-owned values (`id`, `createdAt`,
-    /// `expiresAt`, `status`) are supplied explicitly, never generated locally.
-    /// This is the production construction path once DTOs are mapped to domain
-    /// models (RequestService, not part of this task).
+    /// Canonical initializer: all backend-owned values are supplied explicitly,
+    /// never generated locally. Legacy timing properties remain derived only for
+    /// compatibility with screens that are not connected to networking yet.
     init(
         id: String,
         diningSpot: DiningSpot,
         foodDescription: String,
-        timing: RequestTiming,
-        preferredPickupTime: Date?,
+        pickupWindowText: String,
+        windowStart: Date?,
+        windowEnd: Date?,
         createdAt: Date,
         expiresAt: Date,
         status: RequestStatus,
@@ -88,8 +91,11 @@ struct FoodRequest: Identifiable {
         self.id = id
         self.diningSpot = diningSpot
         self.foodDescription = foodDescription
-        self.timing = timing
-        self.preferredPickupTime = preferredPickupTime
+        self.pickupWindowText = pickupWindowText
+        self.windowStart = windowStart
+        self.windowEnd = windowEnd
+        self.timing = windowStart != nil || windowEnd != nil ? .later : .asap
+        self.preferredPickupTime = windowStart ?? windowEnd
         self.createdAt = createdAt
         self.expiresAt = expiresAt
         self.status = status
@@ -115,11 +121,19 @@ struct FoodRequest: Identifiable {
         self.localContext = LocalRequestContext(pickupName: pickupName, email: email, phoneNumber: phoneNumber)
         self.timing = timing
         self.preferredPickupTime = preferredPickupTime
+        self.windowStart = timing == .later ? preferredPickupTime : nil
+        self.windowEnd = nil
         self.createdAt = Date()
         switch timing {
         case .asap:
+            self.pickupWindowText = "ASAP"
             self.expiresAt = createdAt.addingTimeInterval(5 * 60 * 60)
         case .later:
+            if let preferredPickupTime {
+                self.pickupWindowText = "Around \(preferredPickupTime.formatted(date: .omitted, time: .shortened))"
+            } else {
+                self.pickupWindowText = "Later today"
+            }
             self.expiresAt = (preferredPickupTime ?? createdAt).addingTimeInterval(5 * 60 * 60)
         }
         self.status = .open
@@ -150,20 +164,14 @@ struct FoodRequest: Identifiable {
     }
 
     var timingDescription: String {
-        switch timing {
-        case .asap:
-            return "ASAP"
-
-        case .later:
-            if let preferredPickupTime {
-                return "Around \(preferredPickupTime.formatted(date: .omitted, time: .shortened))"
-            } else {
-                return "Later today"
-            }
-        }
+        pickupWindowText
     }
 
     var listTimingDescription: String {
+        guard localContext != nil else {
+            return pickupWindowText
+        }
+
         if shouldShowInASAPSection && timing == .later, let preferredPickupTime {
             return "Due around \(preferredPickupTime.formatted(date: .omitted, time: .shortened))"
         }

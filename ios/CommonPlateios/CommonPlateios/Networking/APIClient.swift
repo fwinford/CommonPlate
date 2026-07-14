@@ -23,6 +23,7 @@ enum APIClientError: Error {
     case invalidURL
     case transport(Error)
     case unexpectedStatus(Int)
+    case encoding(Error)
     case decoding(Error)
     case apiError(code: String, message: String)
 }
@@ -87,8 +88,10 @@ struct APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         do {
             request.httpBody = try encoder.encode(body)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
-            throw APIClientError.decoding(error)
+            throw APIClientError.encoding(error)
         }
         return try await execute(request)
     }
@@ -113,13 +116,22 @@ struct APIClient {
     }
 
     private func execute<Response: Decodable>(_ request: URLRequest) async throws -> Response {
+        try Task.checkCancellation()
+
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             throw APIClientError.transport(error)
         }
+
+        try Task.checkCancellation()
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIClientError.transport(URLError(.badServerResponse))

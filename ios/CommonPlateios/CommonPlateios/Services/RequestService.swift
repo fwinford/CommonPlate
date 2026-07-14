@@ -27,12 +27,16 @@ enum RequestServiceError: Error {
     /// mapped to a dedicated case. Carries the backend's own values as-is —
     /// this is not a guessed/invented code, just a passthrough.
     case serverError(code: String, message: String)
-    /// Network/transport failure or a response that failed to decode.
+    /// A failure known not to represent an uncertain POST outcome.
     case transport(underlying: Error)
-    /// A fulfillment POST failed at the transport layer after the request may
-    /// have already been applied server-side; the outcome cannot be
-    /// determined from this response alone. Callers must not retry
-    /// automatically and should prompt a refresh instead.
+    /// A create POST may have been applied server-side, but iOS did not
+    /// receive and validate a usable success response.
+    case ambiguousCreateOutcome(underlying: Error)
+    /// A claim POST may have succeeded server-side, but iOS did not receive
+    /// and validate the one-time claim credentials.
+    case ambiguousClaimOutcome(underlying: Error)
+    /// A fulfillment POST may have been applied server-side, but iOS did not
+    /// receive and validate a usable success response.
     case ambiguousFulfillmentOutcome(underlying: Error)
     /// Client-side precondition failure, not a backend response: no local
     /// active claim exists for the request being fulfilled.
@@ -71,6 +75,8 @@ struct RequestService {
                 method: .get
             )
             return try response.requests.map(Self.mapPublicRequest)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw Self.translate(error)
         }
@@ -78,26 +84,61 @@ struct RequestService {
 
     /// `POST /api/request`
     func createRequest(_ payload: CreateRequestPayload) async throws -> FoodRequest {
+        try Task.checkCancellation()
+
+        let response: RequestDetailResponseDTO
         do {
-            let response: RequestDetailResponseDTO = try await client.send(
+            response = try await client.send(
                 path: "/api/request",
                 method: .post,
                 body: payload
             )
-            return try Self.mapPublicRequest(response.request)
+        } catch is CancellationError {
+            throw RequestServiceError.ambiguousCreateOutcome(underlying: CancellationError())
+        } catch let error as APIClientError {
+            switch error {
+            case .transport, .decoding:
+                throw RequestServiceError.ambiguousCreateOutcome(underlying: error)
+            default:
+                throw Self.translate(error)
+            }
         } catch {
             throw Self.translate(error)
+        }
+
+        do {
+            return try Self.mapPublicRequest(response.request)
+        } catch {
+            throw RequestServiceError.ambiguousCreateOutcome(underlying: error)
         }
     }
 
     /// `POST /api/request/:id/claim`
     func claimRequest(id: String) async throws -> ClaimOutcome {
+        try Task.checkCancellation()
+
+        let response: ClaimResponseDTO
         do {
-            let response: ClaimResponseDTO = try await client.send(
+            response = try await client.send(
                 path: "/api/request/\(id)/claim",
                 method: .post,
                 body: EmptyBody()
             )
+        } catch is CancellationError {
+            throw RequestServiceError.ambiguousClaimOutcome(underlying: CancellationError())
+        } catch let error as APIClientError {
+            switch error {
+            case .transport, .decoding:
+                throw RequestServiceError.ambiguousClaimOutcome(underlying: error)
+            default:
+                throw Self.translate(error)
+            }
+        } catch {
+            throw Self.translate(error)
+        }
+
+        do {
+            try Self.validateResponseRequestID(response.request.id, expected: id)
             let request = try Self.mapPublicRequest(response.request)
             return ClaimOutcome(
                 request: request,
@@ -106,7 +147,7 @@ struct RequestService {
                 claimExpiresAt: response.claimExpiresAt
             )
         } catch {
-            throw Self.translate(error)
+            throw RequestServiceError.ambiguousClaimOutcome(underlying: error)
         }
     }
 
@@ -130,19 +171,20 @@ struct RequestService {
                 contactMessage: contactMessage
             )
         )
+        try Task.checkCancellation()
+
+        let response: FulfillResponseDTO
         do {
-            let response: FulfillResponseDTO = try await client.send(
+            response = try await client.send(
                 path: "/api/request/\(id)/fulfill",
                 method: .post,
                 body: payload
             )
-            let request = try Self.mapPublicRequest(response.request)
-            return FulfillOutcome(request: request, notificationStatus: response.notification.status)
+        } catch is CancellationError {
+            throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: CancellationError())
         } catch let error as APIClientError {
             switch error {
-            case .transport, .unexpectedStatus:
-                // The POST may have already applied server-side; the caller
-                // must not retry and should treat this as ambiguous.
+            case .transport, .decoding:
                 throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
             default:
                 throw Self.translate(error)
@@ -150,9 +192,30 @@ struct RequestService {
         } catch {
             throw Self.translate(error)
         }
+
+        do {
+            try Self.validateResponseRequestID(response.request.id, expected: id)
+            let request = try Self.mapPublicRequest(response.request)
+            return FulfillOutcome(request: request, notificationStatus: response.notification.status)
+        } catch {
+            throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
+        }
     }
 
     // MARK: - Mapping
+
+    private static func validateResponseRequestID(_ responseID: String, expected requestID: String) throws {
+        guard responseID == requestID else {
+            throw APIClientError.decoding(
+                DecodingError.dataCorrupted(
+                    .init(
+                        codingPath: [],
+                        debugDescription: "Response request ID does not match the requested resource"
+                    )
+                )
+            )
+        }
+    }
 
     /// Maps a public `RequestResponseDTO` (list/detail/create/claim/fulfill's
     /// embedded `request`) to the canonical domain model. Never fabricates
@@ -164,13 +227,13 @@ struct RequestService {
     /// `Decodable` conformance failing at decode time) rather than silently
     /// mapping to an incorrect lifecycle state.
     private static func mapPublicRequest(_ dto: RequestResponseDTO) throws -> FoodRequest {
-        let hasStructuredWindow = dto.windowStart != nil || dto.windowEnd != nil
         return FoodRequest(
             id: dto.id,
             diningSpot: DiningSpot(name: dto.vendor, address: nil),
             foodDescription: dto.food,
-            timing: hasStructuredWindow ? .later : .asap,
-            preferredPickupTime: dto.windowStart ?? dto.windowEnd,
+            pickupWindowText: dto.pickupWindowText,
+            windowStart: dto.windowStart,
+            windowEnd: dto.windowEnd,
             createdAt: dto.createdAt,
             expiresAt: dto.expiresAt,
             status: dto.status.domainStatus
@@ -198,7 +261,7 @@ struct RequestService {
                 return .notFound
             }
             return .transport(underlying: clientError)
-        case .decoding, .invalidURL:
+        case .encoding, .decoding, .invalidURL:
             return .transport(underlying: clientError)
         case .transport(let underlying):
             return .transport(underlying: underlying)

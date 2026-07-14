@@ -37,11 +37,13 @@ final class RequestStore: ObservableObject {
 
     @Published private(set) var isFulfilling = false
     @Published private(set) var fulfillError: RequestServiceError?
+    @Published private(set) var confirmedFulfillmentOutcome: FulfillOutcome?
 
     /// The helper's active claim, if any. Memory-only; see `ActiveClaim`.
     @Published private(set) var activeClaim: ActiveClaim?
 
     private let service: RequestService
+    private var fetchGeneration = 0
 
     init(service: RequestService) {
         self.service = service
@@ -50,24 +52,40 @@ final class RequestStore: ObservableObject {
     /// `GET /api/requests`. Preserves existing `requests` on failure so a
     /// transient refresh error doesn't blank the list.
     func fetchRequests() async {
+        fetchGeneration += 1
+        let generation = fetchGeneration
         isFetching = true
         fetchError = nil
-        defer { isFetching = false }
+        defer {
+            if generation == fetchGeneration {
+                isFetching = false
+            }
+        }
         do {
-            requests = try await service.fetchRequests()
+            let fetchedRequests = try await service.fetchRequests()
+            guard generation == fetchGeneration else { return }
+            requests = fetchedRequests
+        } catch is CancellationError {
+            return
         } catch {
+            guard generation == fetchGeneration else { return }
             fetchError = Self.asServiceError(error)
         }
     }
 
-    /// `POST /api/request`. Not automatically retried on failure.
-    func createRequest(_ payload: CreateRequestPayload) async {
+    /// `POST /api/request`. Not automatically retried on failure, including
+    /// when the service reports an ambiguous create outcome.
+    func createRequest(_ payload: CreateRequestPayload) async throws {
+        guard !isCreating else { return }
         isCreating = true
         createError = nil
         defer { isCreating = false }
         do {
             let created = try await service.createRequest(payload)
+            invalidateCurrentFetch()
             requests.append(created)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             createError = Self.asServiceError(error)
         }
@@ -75,12 +93,15 @@ final class RequestStore: ObservableObject {
 
     /// `POST /api/request/:id/claim`. Local list state and the in-memory
     /// active claim are updated only after the backend confirms the claim.
-    func claim(requestID: String) async {
+    /// An ambiguous response never fabricates claim credentials.
+    func claim(requestID: String) async throws {
+        guard !isClaiming else { return }
         isClaiming = true
         claimError = nil
         defer { isClaiming = false }
         do {
             let outcome = try await service.claimRequest(id: requestID)
+            invalidateCurrentFetch()
             applyConfirmed(outcome.request)
             activeClaim = ActiveClaim(
                 requestID: outcome.request.id,
@@ -88,6 +109,8 @@ final class RequestStore: ObservableObject {
                 claimToken: outcome.claimToken,
                 claimExpiresAt: outcome.claimExpiresAt
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             claimError = Self.asServiceError(error)
         }
@@ -103,7 +126,9 @@ final class RequestStore: ObservableObject {
         eta: String,
         note: String?,
         contactMessage: String?
-    ) async {
+    ) async throws {
+        guard !isFulfilling else { return }
+        confirmedFulfillmentOutcome = nil
         guard let activeClaim, activeClaim.requestID == requestID else {
             fulfillError = .noActiveClaim
             return
@@ -122,12 +147,24 @@ final class RequestStore: ObservableObject {
                 note: note,
                 contactMessage: contactMessage
             )
+            invalidateCurrentFetch()
             applyConfirmed(outcome.request)
-            // Confirmed fulfillment invalidates the claim; nothing durable to clean up.
-            self.activeClaim = nil
+            confirmedFulfillmentOutcome = outcome
+            if self.activeClaim?.requestID == requestID,
+               self.activeClaim?.claimToken == activeClaim.claimToken {
+                self.activeClaim = nil
+            }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             fulfillError = Self.asServiceError(error)
         }
+    }
+
+    private func invalidateCurrentFetch() {
+        guard isFetching else { return }
+        fetchGeneration += 1
+        isFetching = false
     }
 
     private func applyConfirmed(_ request: FoodRequest) {
