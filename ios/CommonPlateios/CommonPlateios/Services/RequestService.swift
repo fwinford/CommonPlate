@@ -110,7 +110,9 @@ struct RequestService {
         }
 
         do {
-            return try Self.mapPublicRequest(response.request)
+            let request = try Self.mapPublicRequest(response.request)
+            try Self.validateResponseStatus(request.status, expected: .open)
+            return request
         } catch {
             throw RequestServiceError.ambiguousCreateOutcome(underlying: error)
         }
@@ -143,6 +145,7 @@ struct RequestService {
         do {
             try Self.validateResponseRequestID(response.request.id, expected: id)
             let request = try Self.mapPublicRequest(response.request)
+            try Self.validateResponseStatus(request.status, expected: .claimed)
             return ClaimOutcome(
                 request: request,
                 pickupName: response.pickupName,
@@ -199,6 +202,7 @@ struct RequestService {
         do {
             try Self.validateResponseRequestID(response.request.id, expected: id)
             let request = try Self.mapPublicRequest(response.request)
+            try Self.validateResponseStatus(request.status, expected: .placed)
             return FulfillOutcome(request: request, notificationStatus: response.notification.status)
         } catch {
             throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
@@ -214,6 +218,19 @@ struct RequestService {
                     .init(
                         codingPath: [],
                         debugDescription: "Response request ID does not match the requested resource"
+                    )
+                )
+            )
+        }
+    }
+
+    private static func validateResponseStatus(_ status: RequestStatus, expected: RequestStatus) throws {
+        guard status.rawValue == expected.rawValue else {
+            throw APIClientError.decoding(
+                DecodingError.dataCorrupted(
+                    .init(
+                        codingPath: [],
+                        debugDescription: "Response lifecycle status \(status.rawValue) does not match expected status \(expected.rawValue)"
                     )
                 )
             )
