@@ -41,6 +41,9 @@ enum RequestServiceError: Error {
     /// Client-side precondition failure, not a backend response: no local
     /// active claim exists for the request being fulfilled.
     case noActiveClaim
+    /// Store-level precondition failure: an operation of the same kind is
+    /// already running, so no second service call was started.
+    case operationInProgress
 }
 
 /// Result of a successful claim, mirroring the backend's claim response shape.

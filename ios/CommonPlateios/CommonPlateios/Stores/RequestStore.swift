@@ -74,9 +74,12 @@ final class RequestStore: ObservableObject {
     }
 
     /// `POST /api/request`. Not automatically retried on failure, including
-    /// when the service reports an ambiguous create outcome.
+    /// when the service reports an ambiguous create outcome. Returns normally
+    /// only after the confirmed request has been added to local state.
     func createRequest(_ payload: CreateRequestPayload) async throws {
-        guard !isCreating else { return }
+        guard !isCreating else {
+            throw RequestServiceError.operationInProgress
+        }
         isCreating = true
         createError = nil
         defer { isCreating = false }
@@ -87,15 +90,20 @@ final class RequestStore: ObservableObject {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            createError = Self.asServiceError(error)
+            let serviceError = Self.asServiceError(error)
+            createError = serviceError
+            throw serviceError
         }
     }
 
     /// `POST /api/request/:id/claim`. Local list state and the in-memory
     /// active claim are updated only after the backend confirms the claim.
-    /// An ambiguous response never fabricates claim credentials.
+    /// An ambiguous response never fabricates claim credentials. Returns
+    /// normally only after both confirmed request and claim state are updated.
     func claim(requestID: String) async throws {
-        guard !isClaiming else { return }
+        guard !isClaiming else {
+            throw RequestServiceError.operationInProgress
+        }
         isClaiming = true
         claimError = nil
         defer { isClaiming = false }
@@ -112,13 +120,16 @@ final class RequestStore: ObservableObject {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            claimError = Self.asServiceError(error)
+            let serviceError = Self.asServiceError(error)
+            claimError = serviceError
+            throw serviceError
         }
     }
 
     /// `POST /api/request/:id/fulfill`. Requires the in-memory active claim
     /// for `requestID`; not automatically retried on failure, including when
     /// the outcome is ambiguous (`RequestServiceError.ambiguousFulfillmentOutcome`).
+    /// Returns normally only after confirmed request/notification state is applied.
     func fulfill(
         requestID: String,
         fulfillerEmail: String,
@@ -127,11 +138,13 @@ final class RequestStore: ObservableObject {
         note: String?,
         contactMessage: String?
     ) async throws {
-        guard !isFulfilling else { return }
+        guard !isFulfilling else {
+            throw RequestServiceError.operationInProgress
+        }
         confirmedFulfillmentOutcome = nil
         guard let activeClaim, activeClaim.requestID == requestID else {
             fulfillError = .noActiveClaim
-            return
+            throw RequestServiceError.noActiveClaim
         }
 
         isFulfilling = true
@@ -157,7 +170,9 @@ final class RequestStore: ObservableObject {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            fulfillError = Self.asServiceError(error)
+            let serviceError = Self.asServiceError(error)
+            fulfillError = serviceError
+            throw serviceError
         }
     }
 
