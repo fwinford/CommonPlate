@@ -50,6 +50,7 @@ final class RequestStore: ObservableObject {
 
     private let service: RequestService
     private var fetchGeneration = 0
+    private var collectionRevision = 0
 
     init(service: RequestService) {
         self.service = service
@@ -65,6 +66,7 @@ final class RequestStore: ObservableObject {
     func fetchRequests() async {
         fetchGeneration += 1
         let generation = fetchGeneration
+        let startingCollectionRevision = collectionRevision
         let isRefresh = hasSuccessfullyFetchedRequests
 
         if isRefresh {
@@ -87,7 +89,10 @@ final class RequestStore: ObservableObject {
 
         do {
             let fetchedRequests = try await service.fetchActiveRequests()
-            guard generation == fetchGeneration else { return }
+            guard generation == fetchGeneration,
+                  startingCollectionRevision == collectionRevision else {
+                return
+            }
             requests = fetchedRequests
             hasSuccessfullyFetchedRequests = true
             if isRefresh {
@@ -98,7 +103,10 @@ final class RequestStore: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
-            guard generation == fetchGeneration else { return }
+            guard generation == fetchGeneration,
+                  startingCollectionRevision == collectionRevision else {
+                return
+            }
             if isRefresh {
                 refreshError = Self.asServiceError(error)
             } else {
@@ -119,7 +127,7 @@ final class RequestStore: ObservableObject {
         defer { isCreating = false }
         do {
             let created = try await service.createRequest(payload)
-            invalidateCurrentFetch()
+            advanceCollectionRevision()
             requests.append(created)
         } catch is CancellationError {
             throw CancellationError()
@@ -143,7 +151,7 @@ final class RequestStore: ObservableObject {
         defer { isClaiming = false }
         do {
             let outcome = try await service.claimRequest(id: requestID)
-            invalidateCurrentFetch()
+            advanceCollectionRevision()
             applyConfirmed(outcome.request)
             activeClaim = ActiveClaim(
                 requestID: outcome.request.id,
@@ -194,7 +202,7 @@ final class RequestStore: ObservableObject {
                 note: note,
                 contactMessage: contactMessage
             )
-            invalidateCurrentFetch()
+            advanceCollectionRevision()
             applyConfirmed(outcome.request)
             confirmedFulfillmentOutcome = outcome
             if self.activeClaim?.requestID == requestID,
@@ -210,11 +218,11 @@ final class RequestStore: ObservableObject {
         }
     }
 
-    private func invalidateCurrentFetch() {
-        guard isFetching else { return }
-        fetchGeneration += 1
-        isLoadingInitialRequests = false
-        isRefreshingRequests = false
+    /// Marks a backend-confirmed canonical collection change. Fetches capture
+    /// this revision when they start, so a response based on older canonical
+    /// state cannot overwrite a later create, claim, or fulfillment result.
+    private func advanceCollectionRevision() {
+        collectionRevision += 1
     }
 
     private func applyConfirmed(_ request: FoodRequest) {

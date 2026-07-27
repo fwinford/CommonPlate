@@ -2,26 +2,73 @@ import Foundation
 import XCTest
 @testable import CommonPlateios
 
+final class RequestFetchingGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: (() -> Void)?
+    private var isOpen = false
+
+    var isWaiting: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return completion != nil
+    }
+
+    func wait(_ completion: @escaping () -> Void) {
+        lock.lock()
+        if isOpen {
+            lock.unlock()
+            completion()
+        } else {
+            self.completion = completion
+            lock.unlock()
+        }
+    }
+
+    func open() {
+        lock.lock()
+        isOpen = true
+        let completion = completion
+        self.completion = nil
+        lock.unlock()
+        completion?()
+    }
+}
+
 final class RequestFetchingURLProtocol: URLProtocol {
     struct Stub {
         let statusCode: Int
         let data: Data
         let errorCode: URLError.Code?
         let delay: TimeInterval
+        let gate: RequestFetchingGate?
 
         static func response(
             statusCode: Int = 200,
             data: Data,
-            delay: TimeInterval = 0
+            delay: TimeInterval = 0,
+            gate: RequestFetchingGate? = nil
         ) -> Stub {
-            Stub(statusCode: statusCode, data: data, errorCode: nil, delay: delay)
+            Stub(
+                statusCode: statusCode,
+                data: data,
+                errorCode: nil,
+                delay: delay,
+                gate: gate
+            )
         }
 
         static func failure(
             _ errorCode: URLError.Code,
-            delay: TimeInterval = 0
+            delay: TimeInterval = 0,
+            gate: RequestFetchingGate? = nil
         ) -> Stub {
-            Stub(statusCode: 0, data: Data(), errorCode: errorCode, delay: delay)
+            Stub(
+                statusCode: 0,
+                data: Data(),
+                errorCode: errorCode,
+                delay: delay,
+                gate: gate
+            )
         }
     }
 
@@ -83,7 +130,9 @@ final class RequestFetchingURLProtocol: URLProtocol {
             self.client?.urlProtocolDidFinishLoading(self)
         }
 
-        if stub.delay > 0 {
+        if let gate = stub.gate {
+            gate.wait(completeRequest)
+        } else if stub.delay > 0 {
             DispatchQueue.global().asyncAfter(
                 deadline: .now() + stub.delay,
                 execute: completeRequest
@@ -207,6 +256,182 @@ final class RequestFetchingTests: XCTestCase {
         XCTAssertNil(store.initialFetchError)
     }
 
+    func testNewestFetchWinsWhenOlderFetchCompletesLast() async {
+        let store = makeStore()
+        let olderFetchGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: listResponse([requestObject(id: "older")]),
+            gate: olderFetchGate
+        ))
+
+        let olderFetch = Task {
+            await store.fetchRequests()
+        }
+        await waitUntil { olderFetchGate.isWaiting }
+
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "newer")
+        ])))
+        let newerFetch = Task {
+            await store.fetchRequests()
+        }
+        await newerFetch.value
+
+        XCTAssertEqual(store.requests.map(\.id), ["newer"])
+        XCTAssertFalse(store.isLoadingInitialRequests)
+
+        olderFetchGate.open()
+        await olderFetch.value
+
+        XCTAssertEqual(store.requests.map(\.id), ["newer"])
+        XCTAssertTrue(store.hasSuccessfullyFetchedRequests)
+        XCTAssertFalse(store.isLoadingInitialRequests)
+        XCTAssertFalse(store.isRefreshingRequests)
+    }
+
+    func testConfirmedClaimInvalidatesOlderFetchSnapshot() async throws {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "meal-a")
+        ])))
+        await store.fetchRequests()
+
+        let olderRefreshGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: listResponse([requestObject(id: "meal-a", status: "requested")]),
+            gate: olderRefreshGate
+        ))
+        let olderRefresh = Task {
+            await store.fetchRequests()
+        }
+        await waitUntil { olderRefreshGate.isWaiting }
+
+        RequestFetchingURLProtocol.enqueue(.response(data: claimResponse(
+            requestObject: requestObject(id: "meal-a", status: "claimed")
+        )))
+        try await store.claim(requestID: "meal-a")
+
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+        XCTAssertTrue(store.isRefreshingRequests)
+
+        olderRefreshGate.open()
+        await olderRefresh.value
+
+        XCTAssertEqual(store.requests.map(\.id), ["meal-a"])
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+        XCTAssertFalse(store.isRefreshingRequests)
+        XCTAssertNil(store.refreshError)
+    }
+
+    func testFetchStartedAfterConfirmedMutationCanReplaceCollection() async throws {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "meal-a")
+        ])))
+        await store.fetchRequests()
+
+        RequestFetchingURLProtocol.enqueue(.response(data: claimResponse(
+            requestObject: requestObject(id: "meal-a", status: "claimed")
+        )))
+        try await store.claim(requestID: "meal-a")
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "currently-available")
+        ])))
+        await store.fetchRequests()
+
+        XCTAssertEqual(store.requests.map(\.id), ["currently-available"])
+        XCTAssertEqual(store.requests.first?.status, .open)
+        XCTAssertNil(store.refreshError)
+    }
+
+    func testConfirmedMutationMakesOlderFetchFailureSilentAndCleansRefreshState() async throws {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "meal-a")
+        ])))
+        await store.fetchRequests()
+
+        let olderRefreshGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.failure(
+            .timedOut,
+            gate: olderRefreshGate
+        ))
+        let olderRefresh = Task {
+            await store.fetchRequests()
+        }
+        await waitUntil { olderRefreshGate.isWaiting }
+
+        RequestFetchingURLProtocol.enqueue(.response(data: claimResponse(
+            requestObject: requestObject(id: "meal-a", status: "claimed")
+        )))
+        try await store.claim(requestID: "meal-a")
+
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+        XCTAssertTrue(store.isRefreshingRequests)
+
+        olderRefreshGate.open()
+        await olderRefresh.value
+
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+        XCTAssertNil(store.refreshError)
+        XCTAssertFalse(store.isLoadingInitialRequests)
+        XCTAssertFalse(store.isRefreshingRequests)
+    }
+
+    func testIgnoredStaleResponsesPreserveNewerErrorAndDoNotPublishStaleError() async {
+        let storeWithNewerError = makeStore()
+        let staleSuccessGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: listResponse([requestObject(id: "stale-success")]),
+            gate: staleSuccessGate
+        ))
+        let staleSuccess = Task {
+            await storeWithNewerError.fetchRequests()
+        }
+        await waitUntil { staleSuccessGate.isWaiting }
+
+        RequestFetchingURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await storeWithNewerError.fetchRequests()
+
+        XCTAssertNotNil(storeWithNewerError.initialFetchError)
+        XCTAssertFalse(storeWithNewerError.isLoadingInitialRequests)
+
+        staleSuccessGate.open()
+        await staleSuccess.value
+
+        XCTAssertNotNil(storeWithNewerError.initialFetchError)
+        XCTAssertFalse(storeWithNewerError.hasSuccessfullyFetchedRequests)
+        XCTAssertTrue(storeWithNewerError.requests.isEmpty)
+        XCTAssertFalse(storeWithNewerError.isLoadingInitialRequests)
+
+        let storeWithNewerSuccess = makeStore()
+        let staleFailureGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.failure(
+            .timedOut,
+            gate: staleFailureGate
+        ))
+        let staleFailure = Task {
+            await storeWithNewerSuccess.fetchRequests()
+        }
+        await waitUntil { staleFailureGate.isWaiting }
+
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "newer-success")
+        ])))
+        await storeWithNewerSuccess.fetchRequests()
+
+        staleFailureGate.open()
+        await staleFailure.value
+
+        XCTAssertEqual(storeWithNewerSuccess.requests.map(\.id), ["newer-success"])
+        XCTAssertNil(storeWithNewerSuccess.initialFetchError)
+        XCTAssertNil(storeWithNewerSuccess.refreshError)
+        XCTAssertFalse(storeWithNewerSuccess.isLoadingInitialRequests)
+        XCTAssertFalse(storeWithNewerSuccess.isRefreshingRequests)
+    }
+
     private func makeStore() -> RequestStore {
         RequestStore(service: makeService())
     }
@@ -224,6 +449,17 @@ final class RequestFetchingTests: XCTestCase {
 
     private func listResponse(_ requestObjects: [String]) -> Data {
         Data(#"{"requests":[\#(requestObjects.joined(separator: ","))]}"#.utf8)
+    }
+
+    private func claimResponse(requestObject: String) -> Data {
+        Data("""
+        {
+          "request": \(requestObject),
+          "pickupName": "Taylor",
+          "claimToken": "claim-token",
+          "claimExpiresAt": "2026-07-20T19:15:00.000Z"
+        }
+        """.utf8)
     }
 
     private func requestObject(
