@@ -9,14 +9,6 @@ import SwiftUI
 struct ActiveRequestsView: View {
     @ObservedObject var store: RequestStore
 
-    private var asapRequests: [FoodRequest] {
-        store.requests.filter { $0.timing == .asap }
-    }
-
-    private var laterTodayRequests: [FoodRequest] {
-        store.requests.filter { $0.timing == .later }
-    }
-
     var body: some View {
         Group {
             if !store.hasSuccessfullyFetchedRequests {
@@ -28,19 +20,30 @@ struct ActiveRequestsView: View {
             }
         }
         .navigationTitle("Active Requests")
+        // `.task` starts once per appearance and is not restarted by ordinary
+        // body re-evaluation, so redraws cannot start a fetch loop; the
+        // `isFetching` guard additionally covers an appearance that lands while
+        // a pull-to-refresh or Try Again fetch is still running. On the first
+        // appearance this is the initial load. On a later appearance,
+        // `fetchRequests()` sees `hasSuccessfullyFetchedRequests` and classifies
+        // the call as a refresh, which keeps the current meals visible while it
+        // runs and keeps them if it fails.
         .task {
-            guard !store.hasSuccessfullyFetchedRequests,
-                  store.initialFetchError == nil,
-                  !store.isFetching else {
+            guard !store.isFetching else {
                 return
             }
             await store.fetchRequests()
         }
     }
 
+    /// Shown until a fetch has succeeded at least once. A fetch that is
+    /// cancelled, or whose snapshot is ignored because a confirmed mutation
+    /// advanced the collection revision, ends with no success and no published
+    /// error — so recovery is offered whenever a fetch has been attempted and is
+    /// no longer running, rather than only when `initialFetchError` is non-nil.
     @ViewBuilder
     private var initialState: some View {
-        if store.initialFetchError != nil {
+        if store.hasAttemptedRequestFetch && !store.isFetching {
             VStack(spacing: 12) {
                 Text("We couldn’t load who needs help right now.")
                     .font(.headline)
@@ -54,7 +57,6 @@ struct ActiveRequestsView: View {
                     fetchRequests()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(store.isFetching)
             }
             .padding()
         } else {
@@ -91,6 +93,14 @@ struct ActiveRequestsView: View {
         }
     }
 
+    /// Backend order is authoritative and is rendered as-is. The public list
+    /// response carries no server-evaluated timing category, and the backend's
+    /// ASAP rule ("no `windowStart`, or `windowStart` within an hour of server
+    /// time") cannot be reproduced on device without trusting the device clock.
+    /// Splitting on whether `windowStart`/`windowEnd` merely exist misclassified
+    /// imminent meals as "Later Today", so the requests are shown as one list
+    /// until the API provides a timing category. Per-row timing text still comes
+    /// from the backend's canonical `pickupWindowText`.
     private var requestsList: some View {
         List {
             if store.refreshError != nil {
@@ -99,26 +109,12 @@ struct ActiveRequestsView: View {
                 }
             }
 
-            if !asapRequests.isEmpty {
-                Section("ASAP") {
-                    ForEach(asapRequests) { request in
-                        NavigationLink {
-                            RequestDetailView(request: request)
-                        } label: {
-                            RequestRowView(request: request)
-                        }
-                    }
-                }
-            }
-
-            if !laterTodayRequests.isEmpty {
-                Section("Later Today") {
-                    ForEach(laterTodayRequests) { request in
-                        NavigationLink {
-                            RequestDetailView(request: request)
-                        } label: {
-                            RequestRowView(request: request)
-                        }
+            Section("Meals needing help") {
+                ForEach(store.requests) { request in
+                    NavigationLink {
+                        RequestDetailView(request: request)
+                    } label: {
+                        RequestRowView(request: request)
                     }
                 }
             }

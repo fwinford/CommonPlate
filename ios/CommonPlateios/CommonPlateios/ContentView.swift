@@ -2,7 +2,6 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var requestStore: RequestStore
-    @State private var locallyCreatedRequests: [LocalSimulatedRequest] = []
 
     init() {
         let client = APIClient(configuration: .localSimulator)
@@ -22,9 +21,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 NavigationLink("I need food") {
-                    RequestFoodView { newRequest in
-                        locallyCreatedRequests.append(newRequest)
-                    }
+                    RequestFoodView()
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.borderedProminent)

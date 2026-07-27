@@ -263,6 +263,77 @@ final class RequestFetchingTests: XCTestCase {
         )
     }
 
+    /// An initial fetch whose snapshot is invalidated by a confirmed mutation
+    /// publishes no error, so `initialFetchError` alone cannot tell the view
+    /// whether to offer recovery. The store must still report that a fetch was
+    /// attempted and has finished, which is what `ActiveRequestsView` uses to
+    /// show "Try Again" instead of an endless `ProgressView`.
+    func testInitialFetchInvalidatedByConfirmedMutationEndsInRetryableState() async throws {
+        let store = makeStore()
+        XCTAssertFalse(store.hasAttemptedRequestFetch)
+
+        let initialFetchGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: listResponse([requestObject(id: "never-applied")]),
+            gate: initialFetchGate
+        ))
+        let initialFetch = Task {
+            await store.fetchRequests()
+        }
+        await waitUntil { initialFetchGate.isWaiting }
+
+        XCTAssertTrue(store.hasAttemptedRequestFetch)
+        XCTAssertTrue(store.isLoadingInitialRequests)
+
+        RequestFetchingURLProtocol.enqueue(.response(data: claimResponse(
+            requestObject: requestObject(id: "meal-a", status: "claimed")
+        )))
+        try await store.claim(requestID: "meal-a")
+
+        initialFetchGate.open()
+        await initialFetch.value
+
+        // The confirmed mutation still owns the collection.
+        XCTAssertEqual(store.requests.map(\.id), ["meal-a"])
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+
+        // Loading ended, no successful fetch was recorded, and no error exists...
+        XCTAssertFalse(store.isFetching)
+        XCTAssertFalse(store.isLoadingInitialRequests)
+        XCTAssertFalse(store.isRefreshingRequests)
+        XCTAssertFalse(store.hasSuccessfullyFetchedRequests)
+        XCTAssertNil(store.initialFetchError)
+        XCTAssertNil(store.refreshError)
+
+        // ...but the attempt is recorded, so recovery is offered.
+        XCTAssertTrue(store.hasAttemptedRequestFetch)
+    }
+
+    /// Same terminal shape, reached by cancelling the initial fetch instead.
+    func testCancelledInitialFetchEndsInRetryableState() async {
+        let store = makeStore()
+        let cancelledFetchGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: listResponse([requestObject(id: "never-applied")]),
+            gate: cancelledFetchGate
+        ))
+
+        let initialFetch = Task {
+            await store.fetchRequests()
+        }
+        await waitUntil { cancelledFetchGate.isWaiting }
+
+        initialFetch.cancel()
+        cancelledFetchGate.open()
+        await initialFetch.value
+
+        XCTAssertFalse(store.isFetching)
+        XCTAssertFalse(store.hasSuccessfullyFetchedRequests)
+        XCTAssertTrue(store.requests.isEmpty)
+        XCTAssertNil(store.initialFetchError)
+        XCTAssertTrue(store.hasAttemptedRequestFetch)
+    }
+
     func testRefreshFailurePreservesLoadedRequestsWhileRefreshingAndAfterFailure() async {
         let store = makeStore()
         RequestFetchingURLProtocol.enqueue(.response(data: listResponse([

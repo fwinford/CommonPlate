@@ -6,9 +6,12 @@
 //
 import SwiftUI
 
+/// Requester-facing request form. Submission is paused: the Week 1 prototype
+/// submitted into local-only state that no longer has a reader, which reported
+/// success for a request that was never persisted anywhere. The form stays
+/// visible so the flow can be reviewed, but the submit action is disabled until
+/// Day 3 connects it to `POST /api/request` through `RequestStore`.
 struct RequestFoodView: View {
-    let onSubmit: (LocalSimulatedRequest) -> Void
-
     @State private var selectedDiningSpot: DiningSpot?
     @State private var foodRequest = ""
     @State private var pickupName = ""
@@ -16,9 +19,6 @@ struct RequestFoodView: View {
     @State private var phoneNumber = ""
     @State private var timing: RequestTiming = .asap
     @State private var preferredPickupTime = Date()
-    @State private var showSuccessMessage = false
-    @State private var hasTriedToSubmit = false
-    @Environment(\.dismiss) private var dismiss
 
     private var endOfToday: Date {
         Calendar.current.startOfDay(for: Date()).addingTimeInterval(24 * 60 * 60)
@@ -27,13 +27,6 @@ struct RequestFoodView: View {
     private var isEmailValid: Bool {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedEmail.contains("@") && trimmedEmail.contains(".")
-    }
-
-    private var canSubmit: Bool {
-        selectedDiningSpot != nil &&
-        !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        isEmailValid
     }
 
     private var hasStartedRequestForm: Bool {
@@ -124,41 +117,15 @@ struct RequestFoodView: View {
             }
 
             Section {
-                if hasTriedToSubmit && !canSubmit && !showSuccessMessage {
-                    Text("Complete the dining spot, food request, pickup name, and email to submit.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                // Intentionally inert until Day 3 wires this to the backend
+                // create flow. Nothing is persisted locally or remotely, so the
+                // action must not report success or dismiss the form.
+                Button("Submit Request") {}
+                    .disabled(true)
 
-                Button("Submit Request") {
-                    hasTriedToSubmit = true
-
-                    guard canSubmit, let selectedDiningSpot else {
-                        return
-                    }
-
-                    let newRequest = LocalSimulatedRequest(
-                        diningSpot: selectedDiningSpot,
-                        foodDescription: foodRequest.trimmingCharacters(in: .whitespacesAndNewlines),
-                        pickupName: pickupName.trimmingCharacters(in: .whitespacesAndNewlines),
-                        timing: timing,
-                        preferredPickupTime: timing == .later ? preferredPickupTime : nil
-                    )
-
-                    onSubmit(newRequest)
-                    showSuccessMessage = true
-
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        dismiss()
-                    }
-                }
-                .disabled(showSuccessMessage)
-
-                if showSuccessMessage {
-                    Text("Request posted!")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+                Text("Posting a meal request is temporarily unavailable.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Request Food")

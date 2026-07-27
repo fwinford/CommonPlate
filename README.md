@@ -43,3 +43,43 @@ Requests can have one fulfillment. Events and requests are automatically deleted
 ```bash
 npm install
 npm run dev
+```
+
+## UI test fixture
+
+The database selected by `MONGO_URI` must itself have an explicit
+development/test-style name, such as `test`, `commonplate_dev`,
+`commonplate_test`, or `commonplate_local`. An arbitrary MongoDB URI is not
+acceptable: `NODE_ENV=development` or a development-labeled cluster alone does
+not make its selected database safe. Generic or production-like database names
+such as `commonplate`, `prod`, `production`, and `commonplate-production` are
+refused.
+
+Prerequisites:
+
+```env
+NODE_ENV=development
+ALLOW_LOCAL_SEED=true
+MONGO_URI=<URI selecting a clearly named development/test database>
+```
+
+Commands:
+
+```bash
+npm run seed:ui
+npm run dev
+curl http://localhost:3000/api/requests
+npm run seed:ui:cleanup
+```
+
+The seed command replaces any prior matching fixture with one short-lived fake
+meal request for local web and iOS UI testing. It writes through the existing
+Request model without calling the application POST route, so it sends no email
+or subscriber alert. The cleanup command removes only the fixture matching the
+dedicated QA vendor, food, email, pickup name, and pickup-window values.
+
+Never run this tool against a production database. The script requires
+`ALLOW_LOCAL_SEED=true`, rejects production mode and production-like database
+names, and prints only the selected database name rather than the MongoDB URI.
+The local `.env` file remains untracked and must not contain committed
+credentials.

@@ -9,6 +9,8 @@
     "dev": "npm run build:client && tsx watch app.ts",
     "build": "npm run build:client && tsc",
     "start": "node dist/app.js",
+    "seed:ui": "tsx scripts/seed-ui-request.ts seed",
+    "seed:ui:cleanup": "tsx scripts/seed-ui-request.ts cleanup",
     "lint": "eslint --ext .js,.ts src",
     "typecheck": "tsc --noEmit",
     "prune": "ts-prune",

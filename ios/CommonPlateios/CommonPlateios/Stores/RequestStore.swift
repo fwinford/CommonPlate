@@ -30,6 +30,15 @@ final class RequestStore: ObservableObject {
     /// This remains false after an initial failure, but becomes true for a
     /// successful empty response.
     @Published private(set) var hasSuccessfullyFetchedRequests = false
+
+    /// True once `fetchRequests()` has been entered at least once, regardless of
+    /// how that fetch ended. Separates "no fetch has been attempted yet" from
+    /// "a fetch finished without producing a usable collection". The second case
+    /// publishes no error — it happens when a fetch is cancelled, or when its
+    /// snapshot is ignored because a confirmed mutation advanced
+    /// `collectionRevision` — so callers cannot rely on `initialFetchError`
+    /// alone to decide whether recovery should be offered.
+    @Published private(set) var hasAttemptedRequestFetch = false
     @Published private(set) var isLoadingInitialRequests = false
     @Published private(set) var isRefreshingRequests = false
     @Published private(set) var initialFetchError: RequestServiceError?
@@ -64,6 +73,7 @@ final class RequestStore: ObservableObject {
     /// initial load (including retries after an initial failure). Later calls
     /// are refreshes that preserve the current collection until success.
     func fetchRequests() async {
+        hasAttemptedRequestFetch = true
         fetchGeneration += 1
         let generation = fetchGeneration
         let startingCollectionRevision = collectionRevision
