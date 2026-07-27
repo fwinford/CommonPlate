@@ -7,33 +7,27 @@
 import SwiftUI
 
 struct RequestDetailView: View {
-    let request: LocalSimulatedRequest
-    let onFulfill: (LocalSimulatedRequest) -> Void
-    @Environment(\.dismiss) private var dismiss
+    let request: FoodRequest
 
     var body: some View {
         Form {
             Section("Food request") {
-                Text(request.canonicalRequest.diningSpot.name)
+                Text(request.diningSpot.name)
                     .font(.headline)
-                if let address = request.canonicalRequest.diningSpot.address {
+                if let address = request.diningSpot.address {
                     Text(address)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                Text(request.canonicalRequest.foodDescription)
-                Text(request.canonicalRequest.timingDescription)
+                Text(request.foodDescription)
+                Text(request.timingDescription)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
             Section {
-                NavigationLink("I'll help with this") {
-                    FulfillRequestView(request: request) { updatedRequest in
-                        onFulfill(updatedRequest)
-                        dismiss()
-                    }
-                }
+                Text("Helping with this meal is temporarily unavailable.")
+                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Request")

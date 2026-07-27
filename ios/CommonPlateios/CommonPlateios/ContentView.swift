@@ -1,14 +1,13 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var requests: [LocalSimulatedRequest] = []
+    @StateObject private var requestStore: RequestStore
+    @State private var locallyCreatedRequests: [LocalSimulatedRequest] = []
 
-    private func markRequestAsPlaced(_ updatedRequest: LocalSimulatedRequest) {
-        guard let index = requests.firstIndex(where: { $0.id == updatedRequest.id }) else {
-            return
-        }
-
-        requests[index] = updatedRequest
+    init() {
+        let client = APIClient(configuration: .localSimulator)
+        let service = RequestService(client: client)
+        _requestStore = StateObject(wrappedValue: RequestStore(service: service))
     }
 
     var body: some View {
@@ -24,17 +23,14 @@ struct ContentView: View {
 
                 NavigationLink("I need food") {
                     RequestFoodView { newRequest in
-                        requests.append(newRequest)
+                        locallyCreatedRequests.append(newRequest)
                     }
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.borderedProminent)
 
                 NavigationLink("Help with a request") {
-                    ActiveRequestsView(
-                        requests: requests,
-                        onFulfill: markRequestAsPlaced
-                    )
+                    ActiveRequestsView(store: requestStore)
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.bordered)

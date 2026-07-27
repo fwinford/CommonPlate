@@ -74,6 +74,7 @@ final class RequestFetchingURLProtocol: URLProtocol {
 
     private static let lock = NSLock()
     private nonisolated(unsafe) static var stubs: [Stub] = []
+    private nonisolated(unsafe) static var requestedPaths: [String] = []
 
     static func enqueue(_ stub: Stub) {
         lock.lock()
@@ -84,7 +85,14 @@ final class RequestFetchingURLProtocol: URLProtocol {
     static func reset() {
         lock.lock()
         stubs.removeAll()
+        requestedPaths.removeAll()
         lock.unlock()
+    }
+
+    static var capturedRequestedPaths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestedPaths
     }
 
     private static func dequeue() -> Stub? {
@@ -103,6 +111,10 @@ final class RequestFetchingURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
+        Self.lock.lock()
+        Self.requestedPaths.append(request.url?.path ?? "")
+        Self.lock.unlock()
+
         guard let stub = Self.dequeue() else {
             client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
             return
@@ -225,6 +237,30 @@ final class RequestFetchingTests: XCTestCase {
         XCTAssertTrue(failedStore.requests.isEmpty)
         XCTAssertNotNil(failedStore.initialFetchError)
         XCTAssertNil(failedStore.refreshError)
+    }
+
+    func testRetryAfterInitialFailureUsesTheSameFetchPath() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.failure(.notConnectedToInternet))
+
+        await store.fetchRequests()
+
+        XCTAssertFalse(store.hasSuccessfullyFetchedRequests)
+        XCTAssertNotNil(store.initialFetchError)
+
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "loaded-on-retry")
+        ])))
+
+        await store.fetchRequests()
+
+        XCTAssertTrue(store.hasSuccessfullyFetchedRequests)
+        XCTAssertEqual(store.requests.map(\.id), ["loaded-on-retry"])
+        XCTAssertNil(store.initialFetchError)
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/requests", "/api/requests"]
+        )
     }
 
     func testRefreshFailurePreservesLoadedRequestsWhileRefreshingAndAfterFailure() async {
