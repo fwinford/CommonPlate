@@ -74,12 +74,11 @@ struct FoodRequest: Identifiable {
         self.status = status
     }
 
-    var isExpired: Bool {
-        Date() >= expiresAt
-    }
-
+    /// Convenience for the unconnected Week 1 prototype only. Backend list
+    /// membership is authoritative, so device time must not decide whether a
+    /// fetched request remains available.
     var isActive: Bool {
-        status == .open && !isExpired
+        status == .open
     }
 
     var shouldShowInASAPSection: Bool {

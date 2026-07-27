@@ -71,7 +71,7 @@ struct RequestService {
     }
 
     /// `GET /api/requests`
-    func fetchRequests() async throws -> [FoodRequest] {
+    func fetchActiveRequests() async throws -> [FoodRequest] {
         do {
             let response: RequestListResponseDTO = try await client.send(
                 path: "/api/requests",

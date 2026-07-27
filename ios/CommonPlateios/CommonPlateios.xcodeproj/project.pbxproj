@@ -6,11 +6,27 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		A1B2C3072FFAE669008E06A4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DCF2C8FA2FFAE669008E06A4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DCF2C9012FFAE669008E06A4;
+			remoteInfo = CommonPlateios;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		A1B2C3012FFAE669008E06A4 /* CommonPlateiosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CommonPlateiosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DCF2C9022FFAE669008E06A4 /* CommonPlateios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CommonPlateios.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		A1B2C3022FFAE669008E06A4 /* CommonPlateiosTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CommonPlateiosTests;
+			sourceTree = "<group>";
+		};
 		DCF2C9042FFAE669008E06A4 /* CommonPlateios */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = CommonPlateios;
@@ -19,6 +35,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		A1B2C3052FFAE669008E06A4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DCF2C8FF2FFAE669008E06A4 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -33,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				DCF2C9042FFAE669008E06A4 /* CommonPlateios */,
+				A1B2C3022FFAE669008E06A4 /* CommonPlateiosTests */,
 				DCF2C9032FFAE669008E06A4 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				DCF2C9022FFAE669008E06A4 /* CommonPlateios.app */,
+				A1B2C3012FFAE669008E06A4 /* CommonPlateiosTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,6 +73,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		A1B2C3032FFAE669008E06A4 /* CommonPlateiosTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C30B2FFAE669008E06A4 /* Build configuration list for PBXNativeTarget "CommonPlateiosTests" */;
+			buildPhases = (
+				A1B2C3042FFAE669008E06A4 /* Sources */,
+				A1B2C3052FFAE669008E06A4 /* Frameworks */,
+				A1B2C3062FFAE669008E06A4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A1B2C3082FFAE669008E06A4 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A1B2C3022FFAE669008E06A4 /* CommonPlateiosTests */,
+			);
+			name = CommonPlateiosTests;
+			packageProductDependencies = (
+			);
+			productName = CommonPlateiosTests;
+			productReference = A1B2C3012FFAE669008E06A4 /* CommonPlateiosTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		DCF2C9012FFAE669008E06A4 /* CommonPlateios */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = DCF2C90D2FFAE66A008E06A4 /* Build configuration list for PBXNativeTarget "CommonPlateios" */;
@@ -80,6 +128,10 @@
 				LastSwiftUpdateCheck = 2660;
 				LastUpgradeCheck = 2660;
 				TargetAttributes = {
+					A1B2C3032FFAE669008E06A4 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = DCF2C9012FFAE669008E06A4;
+					};
 					DCF2C9012FFAE669008E06A4 = {
 						CreatedOnToolsVersion = 26.6;
 					};
@@ -100,11 +152,19 @@
 			projectRoot = "";
 			targets = (
 				DCF2C9012FFAE669008E06A4 /* CommonPlateios */,
+				A1B2C3032FFAE669008E06A4 /* CommonPlateiosTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		A1B2C3062FFAE669008E06A4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DCF2C9002FFAE669008E06A4 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -115,6 +175,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		A1B2C3042FFAE669008E06A4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DCF2C8FE2FFAE669008E06A4 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -124,7 +191,51 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		A1B2C3082FFAE669008E06A4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DCF2C9012FFAE669008E06A4 /* CommonPlateios */;
+			targetProxy = A1B2C3072FFAE669008E06A4 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		A1B2C3092FFAE669008E06A4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fwinford.CommonPlateiosTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CommonPlateios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/CommonPlateios";
+			};
+			name = Debug;
+		};
+		A1B2C30A2FFAE669008E06A4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fwinford.CommonPlateiosTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CommonPlateios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/CommonPlateios";
+			};
+			name = Release;
+		};
 		DCF2C90B2FFAE66A008E06A4 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -309,6 +420,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		A1B2C30B2FFAE669008E06A4 /* Build configuration list for PBXNativeTarget "CommonPlateiosTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3092FFAE669008E06A4 /* Debug */,
+				A1B2C30A2FFAE669008E06A4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		DCF2C8FD2FFAE669008E06A4 /* Build configuration list for PBXProject "CommonPlateios" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

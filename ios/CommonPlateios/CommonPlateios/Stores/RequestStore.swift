@@ -26,8 +26,14 @@ struct ActiveClaim {
 final class RequestStore: ObservableObject {
     @Published private(set) var requests: [FoodRequest] = []
 
-    @Published private(set) var isFetching = false
-    @Published private(set) var fetchError: RequestServiceError?
+    /// False until `GET /api/requests` has returned successfully at least once.
+    /// This remains false after an initial failure, but becomes true for a
+    /// successful empty response.
+    @Published private(set) var hasSuccessfullyFetchedRequests = false
+    @Published private(set) var isLoadingInitialRequests = false
+    @Published private(set) var isRefreshingRequests = false
+    @Published private(set) var initialFetchError: RequestServiceError?
+    @Published private(set) var refreshError: RequestServiceError?
 
     @Published private(set) var isCreating = false
     @Published private(set) var createError: RequestServiceError?
@@ -49,27 +55,55 @@ final class RequestStore: ObservableObject {
         self.service = service
     }
 
-    /// `GET /api/requests`. Preserves existing `requests` on failure so a
-    /// transient refresh error doesn't blank the list.
+    var isFetching: Bool {
+        isLoadingInitialRequests || isRefreshingRequests
+    }
+
+    /// `GET /api/requests`. Before the first successful response this is an
+    /// initial load (including retries after an initial failure). Later calls
+    /// are refreshes that preserve the current collection until success.
     func fetchRequests() async {
         fetchGeneration += 1
         let generation = fetchGeneration
-        isFetching = true
-        fetchError = nil
+        let isRefresh = hasSuccessfullyFetchedRequests
+
+        if isRefresh {
+            isRefreshingRequests = true
+            refreshError = nil
+        } else {
+            isLoadingInitialRequests = true
+            initialFetchError = nil
+        }
+
         defer {
             if generation == fetchGeneration {
-                isFetching = false
+                if isRefresh {
+                    isRefreshingRequests = false
+                } else {
+                    isLoadingInitialRequests = false
+                }
             }
         }
+
         do {
-            let fetchedRequests = try await service.fetchRequests()
+            let fetchedRequests = try await service.fetchActiveRequests()
             guard generation == fetchGeneration else { return }
             requests = fetchedRequests
+            hasSuccessfullyFetchedRequests = true
+            if isRefresh {
+                refreshError = nil
+            } else {
+                initialFetchError = nil
+            }
         } catch is CancellationError {
             return
         } catch {
             guard generation == fetchGeneration else { return }
-            fetchError = Self.asServiceError(error)
+            if isRefresh {
+                refreshError = Self.asServiceError(error)
+            } else {
+                initialFetchError = Self.asServiceError(error)
+            }
         }
     }
 
@@ -179,7 +213,8 @@ final class RequestStore: ObservableObject {
     private func invalidateCurrentFetch() {
         guard isFetching else { return }
         fetchGeneration += 1
-        isFetching = false
+        isLoadingInitialRequests = false
+        isRefreshingRequests = false
     }
 
     private func applyConfirmed(_ request: FoodRequest) {
