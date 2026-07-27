@@ -103,6 +103,8 @@ import {
   RequestListDocument,
 } from "./src/requestListResponse.js";
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
+import { escapeHtml } from "./src/htmlEscape.js";
+import { registerFulfillmentPause } from "./src/fulfillmentRoute.js";
 
 // small helpers
 function isValidId(id: any) {
@@ -111,16 +113,6 @@ function isValidId(id: any) {
   } catch (_) {
     return false;
   }
-}
-
-function escapeHtml(str: any) {
-  if (str == null) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 // --- Environment validation (fail fast with clear message) ---
@@ -419,7 +411,13 @@ app.delete("/api/request/:id", async (req: Request, res: Response, next: NextFun
   }
 });
 
-// api: mark a request as fulfilled (create Fulfillment, update Request, notify requester)
+// Day 2 pause: this route terminates before the limiter and every legacy side
+// effect. Day 5 will remove this refusal and replace the unreachable handler
+// below with the claim-authorized atomic implementation.
+registerFulfillmentPause(app);
+
+// Legacy fulfillment logic retained but unreachable while the Day 2 pause is
+// registered above.
 app.post("/api/request/:id/fulfill", limiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;

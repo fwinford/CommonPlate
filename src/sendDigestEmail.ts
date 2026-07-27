@@ -1,5 +1,6 @@
 import { IRequest, ISubscriber } from "../models/db.js";
 import { sendEmailSafe } from "./emailHelpers.js";
+import { escapeHtml } from "./htmlEscape.js";
 
 // Helper to send a digest email to a subscriber
 export async function sendDigestEmail(subscriber: ISubscriber, requests: IRequest[]) {
@@ -9,8 +10,8 @@ export async function sendDigestEmail(subscriber: ISubscriber, requests: IReques
   const unsubUrl = `${BASE_URL}/api/unsubscribe?token=${encodeURIComponent(subscriber.unsubToken)}`;
   const htmlList = requests.map(req => `
     <li>
-      <strong>${req.vendor}</strong> — ${req.food}<br>
-      <em>${req.pickupWindowText}</em><br>
+      <strong>${escapeHtml(req.vendor)}</strong> — ${escapeHtml(req.food)}<br>
+      <em>${escapeHtml(req.pickupWindowText)}</em><br>
       <a href="${requestListUrl}">View meal request</a>
     </li>
   `).join("");

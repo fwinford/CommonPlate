@@ -1,19 +1,10 @@
 import { IRequest, ISubscriber } from "../models/db.js";
 import { Resend } from "resend";
+import { escapeHtml } from "./htmlEscape.js";
 
 const FROM_EMAIL = process.env.FROM_EMAIL || "CommonPlate <onboarding@resend.dev>";
 const BASE_URL = process.env.BASE_URL || "https://commonplatenyu.org";
 const resend = new Resend(process.env.RESEND_API_KEY);
-
-function escapeHtml(str: any) {
-	if (str == null) return '';
-	return String(str)
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;')
-		.replace(/'/g, '&#39;');
-}
 
 // Robust email sender: wraps resend.emails.send and handles errors
 export async function sendEmailSafe(opts: Parameters<typeof resend.emails.send>[0]): Promise<{ success: boolean; error?: string; }> {
@@ -37,13 +28,16 @@ export async function sendNewRequestAlert(subscriber: ISubscriber, request: IReq
 	if (!subscriber.unsubToken) throw new Error("Missing unsubToken");
 	const requestListUrl = `${BASE_URL.replace(/\/+$/, "")}/`;
 	const unsubUrl = `${BASE_URL}/api/unsubscribe?token=${encodeURIComponent(subscriber.unsubToken)}`;
+	const htmlVendor = escapeHtml(request.vendor);
+	const htmlFood = escapeHtml(request.food);
+	const htmlPickupWindow = escapeHtml(request.pickupWindowText);
 	const html = `
-		<h2>New meal request: ${request.vendor} · ${request.pickupWindowText}</h2>
-		<ul>
-			<li><strong>Vendor:</strong> ${request.vendor}</li>
-			<li><strong>Food:</strong> ${request.food}</li>
-			<li><strong>Pickup Window:</strong> ${request.pickupWindowText}</li>
-		</ul>
+			<h2>New meal request: ${htmlVendor} · ${htmlPickupWindow}</h2>
+			<ul>
+				<li><strong>Vendor:</strong> ${htmlVendor}</li>
+				<li><strong>Food:</strong> ${htmlFood}</li>
+				<li><strong>Pickup Window:</strong> ${htmlPickupWindow}</li>
+			</ul>
 		<p><a href="${requestListUrl}">View meal request</a></p>
 		<hr>
 		<p style="font-size:0.9em;">To unsubscribe from these alerts, <a href="${unsubUrl}">click here</a>.</p>

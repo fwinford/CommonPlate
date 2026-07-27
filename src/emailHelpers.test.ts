@@ -22,7 +22,7 @@ const requesterPhone = "555-0100";
 const pickupName = "Requester Private Name";
 const claimToken = "private-claim-token";
 
-function request(): IRequest {
+function request(overrides: Record<string, unknown> = {}): IRequest {
   return {
     _id: "64b000000000000000000001",
     vendor: "Campus Market",
@@ -36,6 +36,7 @@ function request(): IRequest {
     createdAt: new Date("2026-07-26T18:00:00.000Z"),
     updatedAt: new Date("2026-07-26T18:00:00.000Z"),
     expiresAt: new Date("2026-07-26T22:00:00.000Z"),
+    ...overrides,
   } as unknown as IRequest;
 }
 
@@ -90,6 +91,36 @@ describe("helper new-request alert email", () => {
     expect(allHelperContent).not.toContain(claimToken);
     expect(allHelperContent).not.toContain("/fulfill");
     expect(allHelperContent).not.toMatch(/order this|fulfill this|claim/i);
+  });
+
+  it("renders requester markup as text without double escaping", async () => {
+    resendSend.mockResolvedValue({});
+    const injectedVendor = `Campus & <img src=x onerror="alert('vendor')">`;
+    const injectedFood = `<a href="https://attacker.invalid">Free meal</a>`;
+    const injectedPickupWindow = `5 < 6 & "soon"`;
+
+    await sendNewRequestAlert(
+      subscriber(),
+      request({
+        vendor: injectedVendor,
+        food: injectedFood,
+        pickupWindowText: injectedPickupWindow,
+      })
+    );
+
+    const email = resendSend.mock.calls[0][0] as { html: string };
+    expect(email.html).toContain(
+      `Campus &amp; &lt;img src=x onerror=&quot;alert(&#39;vendor&#39;)&quot;&gt;`
+    );
+    expect(email.html).toContain(
+      `&lt;a href=&quot;https://attacker.invalid&quot;&gt;Free meal&lt;/a&gt;`
+    );
+    expect(email.html).toContain(`5 &lt; 6 &amp; &quot;soon&quot;`);
+    expect(email.html).not.toContain(injectedVendor);
+    expect(email.html).not.toContain(injectedFood);
+    expect(email.html).not.toContain(injectedPickupWindow);
+    expect(email.html).not.toContain("&amp;amp;");
+    expect(email.html).not.toContain("&amp;lt;");
   });
 });
 
