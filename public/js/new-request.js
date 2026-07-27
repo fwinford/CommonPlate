@@ -1,11 +1,40 @@
 // src/client/new-request.ts
-document.addEventListener("DOMContentLoaded", () => {
+var REQUEST_POSTING_PAUSED_MESSAGE = "Posting a meal request is temporarily unavailable.";
+async function fetchPublicActionsPaused() {
+  try {
+    const response = await fetch("/api/public-actions");
+    if (!response.ok) return true;
+    const body = await response.json();
+    return body?.paused !== false;
+  } catch {
+    return true;
+  }
+}
+function applyRequestFormPause(root) {
+  const notice = root.getElementById("pause-notice");
+  const submitBtn = root.getElementById("submit-btn");
+  if (notice) {
+    notice.textContent = REQUEST_POSTING_PAUSED_MESSAGE;
+    notice.hidden = false;
+  }
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.setAttribute("aria-disabled", "true");
+  }
+}
+document.addEventListener("DOMContentLoaded", async () => {
   const form = document.getElementById("request-form");
   const submitBtn = document.getElementById("submit-btn");
   const errorMsg = document.getElementById("error-message");
   const successMsg = document.getElementById("success-message");
   const windowTypeRadios = document.querySelectorAll('input[name="windowType"]');
   const timeRangeFields = document.getElementById("time-range-fields");
+  if (submitBtn) submitBtn.disabled = true;
+  if (await fetchPublicActionsPaused()) {
+    applyRequestFormPause(document);
+    return;
+  }
+  if (submitBtn) submitBtn.disabled = false;
   windowTypeRadios.forEach((radio) => {
     radio.addEventListener("change", (e) => {
       const target = e.target;
@@ -98,4 +127,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 });
+export {
+  REQUEST_POSTING_PAUSED_MESSAGE,
+  applyRequestFormPause,
+  fetchPublicActionsPaused
+};
 //# sourceMappingURL=new-request.js.map

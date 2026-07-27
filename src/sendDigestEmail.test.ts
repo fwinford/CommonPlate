@@ -1,5 +1,6 @@
 import type { IRequest, ISubscriber } from "../models/db.js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
 
 const { sendEmailSafe } = vi.hoisted(() => ({
   sendEmailSafe: vi.fn(),
@@ -45,8 +46,30 @@ function subscriber(): ISubscriber {
   } as unknown as ISubscriber;
 }
 
+// These cases describe the resumed send path; the paused case is asserted
+// separately below.
+beforeEach(() => {
+  vi.stubEnv(PUBLIC_ACTIONS_PAUSED_ENV, "false");
+});
+
 afterEach(() => {
   sendEmailSafe.mockReset();
+  vi.unstubAllEnvs();
+});
+
+describe("helper digest email while public actions are paused", () => {
+  it("refuses to send rather than returning as if delivered", async () => {
+    vi.stubEnv(PUBLIC_ACTIONS_PAUSED_ENV, "true");
+    sendEmailSafe.mockResolvedValue({ success: true });
+
+    await expect(
+      sendDigestEmail(subscriber(), [
+        request("64b000000000000000000001", "Private Name", "private@example.edu"),
+      ])
+    ).rejects.toThrow(PUBLIC_ACTIONS_PAUSED_ENV);
+
+    expect(sendEmailSafe).not.toHaveBeenCalled();
+  });
 });
 
 describe("helper digest email", () => {

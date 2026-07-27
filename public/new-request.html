@@ -21,6 +21,11 @@
   <main class="container">
     <section class="form-section">
       <h2>Request a Meal</h2>
+
+      <!-- Shown before any data entry while public actions are paused.
+           Copy and visibility are owned by src/client/new-request.ts. -->
+      <div id="pause-notice" class="pause-message" role="status" hidden></div>
+
       <p>We're here to help. Be sure to look at the meal exchange menu on Grubhub.</p>
 
       <form id="request-form" class="meal-form">

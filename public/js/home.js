@@ -28,6 +28,31 @@ function formatMealRequestWindow(start, end, fallback) {
 
 // src/client/home.ts
 var WEB_ORDERING_UNAVAILABLE_MESSAGE = "Ordering from the web is temporarily unavailable.";
+var ALERTS_UNAVAILABLE_MESSAGE = "Meal request alerts are temporarily unavailable.";
+async function fetchPublicActionsPaused() {
+  try {
+    const response = await fetch("/api/public-actions");
+    if (!response.ok) return true;
+    const body = await response.json();
+    return body?.paused !== false;
+  } catch {
+    return true;
+  }
+}
+function applySubscriptionPause(root) {
+  const subscribeBtn = root.getElementById("subscribe-cta-btn");
+  const subscribePanel = root.getElementById("subscribe-panel");
+  const unavailable = root.getElementById("alerts-unavailable");
+  if (subscribeBtn) subscribeBtn.hidden = true;
+  if (subscribePanel) {
+    subscribePanel.hidden = true;
+    subscribePanel.style.display = "none";
+  }
+  if (unavailable) {
+    unavailable.textContent = ALERTS_UNAVAILABLE_MESSAGE;
+    unavailable.hidden = false;
+  }
+}
 function clientEscapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -109,6 +134,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const subscribeEmail = document.getElementById("subscribe-email");
   const subscribeCancel = document.getElementById("subscribe-cancel");
   const subscribeMessage = document.getElementById("subscribe-message");
+  void fetchPublicActionsPaused().then((paused) => {
+    if (paused) applySubscriptionPause(document);
+  });
   if (subscribeBtn && subscribePanel && subscribeForm && subscribeEmail && subscribeCancel && subscribeMessage) {
     subscribeBtn.addEventListener("click", () => {
       subscribePanel.style.display = "block";
@@ -217,7 +245,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 });
 export {
+  ALERTS_UNAVAILABLE_MESSAGE,
   WEB_ORDERING_UNAVAILABLE_MESSAGE,
+  applySubscriptionPause,
+  fetchPublicActionsPaused,
   publicRequestWindowText,
   renderPublicRequestCard,
   renderPublicRequestDetail,

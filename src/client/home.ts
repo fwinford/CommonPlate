@@ -21,6 +21,45 @@ export interface PublicRequestListResponse {
 export const WEB_ORDERING_UNAVAILABLE_MESSAGE =
   "Ordering from the web is temporarily unavailable.";
 
+export const ALERTS_UNAVAILABLE_MESSAGE =
+  "Meal request alerts are temporarily unavailable.";
+
+/**
+ * Asks the server whether public actions are paused. Any failure is treated as
+ * paused: no address should be accepted while confirmation and unsubscribe are
+ * incomplete, so the safe direction is to withhold the signup control.
+ */
+export async function fetchPublicActionsPaused(): Promise<boolean> {
+  try {
+    const response = await fetch('/api/public-actions');
+    if (!response.ok) return true;
+    const body = await response.json();
+    return body?.paused !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Replaces the alerts signup control with a neutral unavailable message.
+ * Browsing is untouched — only the subscription entry point is withheld.
+ */
+export function applySubscriptionPause(root: Document): void {
+  const subscribeBtn = root.getElementById('subscribe-cta-btn');
+  const subscribePanel = root.getElementById('subscribe-panel');
+  const unavailable = root.getElementById('alerts-unavailable');
+
+  if (subscribeBtn) subscribeBtn.hidden = true;
+  if (subscribePanel) {
+    subscribePanel.hidden = true;
+    subscribePanel.style.display = 'none';
+  }
+  if (unavailable) {
+    unavailable.textContent = ALERTS_UNAVAILABLE_MESSAGE;
+    unavailable.hidden = false;
+  }
+}
+
 // Utility function to escape HTML and prevent XSS
 function clientEscapeHtml(text: string): string {
   const div = document.createElement('div');
@@ -114,6 +153,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   const subscribeEmail = document.getElementById('subscribe-email') as HTMLInputElement | null;
   const subscribeCancel = document.getElementById('subscribe-cancel');
   const subscribeMessage = document.getElementById('subscribe-message');
+
+  // Fire-and-forget so the pause probe never delays browsing. The signup
+  // control is withheld as soon as the answer arrives; the server refuses
+  // POST /api/subscribe throughout, so no address can be accepted meanwhile.
+  void fetchPublicActionsPaused().then((paused) => {
+    if (paused) applySubscriptionPause(document);
+  });
 
   if (subscribeBtn && subscribePanel && subscribeForm && subscribeEmail && subscribeCancel && subscribeMessage) {
     subscribeBtn.addEventListener('click', () => {

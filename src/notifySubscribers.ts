@@ -1,8 +1,17 @@
 import { Subscriber, System, SendLog, IRequest, ISubscriber, Request as MealRequest } from "../models/db.js";
 import { sendNewRequestAlert } from "./emailHelpers.js";
+import { isPublicActionsPaused, logPausedSkip } from "./publicActionsPause.js";
 
 // Helper to select and notify up to 2 eligible subscribers in round-robin fashion
 export async function notifySubscribersForRequest(request: IRequest) {
+  // Guarded here rather than only at the create route because this function is
+  // also called directly (scripts/trigger-notify.ts). Returning before the
+  // SendLog claim means a skipped alert leaves no delivery record behind.
+  if (isPublicActionsPaused()) {
+    logPausedSkip(`real-time alert for request ${request._id}`);
+    return;
+  }
+
   console.log(`[notify] called for request ${request._id} vendor=${request.vendor} pickupWindow=${request.pickupWindowText}`);
 
   // Idempotency: only skip if there's already a successful send for this request.
@@ -116,6 +125,14 @@ export async function notifySubscribersForRequest(request: IRequest) {
 // Notify a single subscriber about recent un-notified requests (used after double-opt-in)
 export async function notifySubscriberAboutRecentRequests(subscriber: ISubscriber) {
   if (!subscriber) return;
+
+  if (isPublicActionsPaused()) {
+    logPausedSkip(
+      `recent-request alerts for subscriber ${String(subscriber._id)}`
+    );
+    return;
+  }
+
   console.log(`[notify:on-confirm] called for subscriber ${String(subscriber._id)} <${subscriber.email}>`);
   try {
     // Respect confirmed status and bounced flag

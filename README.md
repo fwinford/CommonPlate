@@ -45,6 +45,43 @@ npm install
 npm run dev
 ```
 
+## public actions pause
+
+While the create → claim → fulfill path is incomplete, the deployed site must
+not accept a meal request nobody can fulfill, must not invite helpers into a
+paused flow, and must not accept a subscriber before confirmation and
+unsubscribe work. One environment value carries that decision:
+
+```env
+PUBLIC_ACTIONS_PAUSED=true
+```
+
+When on, these are unavailable:
+
+- `POST /api/request` — refused before validation, email, database write, and
+  subscriber notification
+- `POST /api/subscribe` — refused before any subscriber is created or confirmed
+- real-time new-request alerts, post-subscription recent-request alerts, and
+  the hourly digest — skipped without recording a delivery
+- the web request form's submit action and the homepage alerts signup control
+
+Public meal browsing (`GET /api/requests`, `GET /api/request/:id`) stays
+available in both states.
+
+Rules:
+
+- set `true` on the deployed site until the full flow is restored;
+- local Days 3–5 development may set `false` to keep the create and
+  subscription APIs available;
+- a missing, empty, or unrecognized value is treated as **paused**, so a
+  forgotten deployment variable cannot silently re-open posting. Only `false`
+  or `0` resumes public actions;
+- this is a temporary rollout safety control, not a product feature. Removing
+  it requires the create → claim → fulfill path to be truthful and working;
+- legacy fulfillment (`POST /api/request/:id/fulfill`) is refused independently
+  of this value and stays refused even when it is `false`. Only the Day 5
+  atomic replacement lifts that refusal.
+
 ## UI test fixture
 
 The database selected by `MONGO_URI` must itself have an explicit

@@ -61,6 +61,58 @@ function publicRequest(
   };
 }
 
+describe("homepage subscription pause", () => {
+  function heroRoot() {
+    const subscribeBtn = { hidden: false };
+    const subscribePanel = { hidden: false, style: { display: "block" } };
+    const unavailable = { textContent: "", hidden: true };
+    const elements: Record<string, unknown> = {
+      "subscribe-cta-btn": subscribeBtn,
+      "subscribe-panel": subscribePanel,
+      "alerts-unavailable": unavailable,
+    };
+
+    return {
+      subscribeBtn,
+      subscribePanel,
+      unavailable,
+      root: {
+        getElementById: (id: string) => elements[id] ?? null,
+      } as unknown as Document,
+    };
+  }
+
+  it("withholds the signup control and explains why", () => {
+    const { subscribeBtn, subscribePanel, unavailable, root } = heroRoot();
+
+    home.applySubscriptionPause(root);
+
+    expect(subscribeBtn.hidden).toBe(true);
+    expect(subscribePanel.hidden).toBe(true);
+    expect(subscribePanel.style.display).toBe("none");
+    expect(unavailable.textContent).toBe(home.ALERTS_UNAVAILABLE_MESSAGE);
+    expect(unavailable.hidden).toBe(false);
+  });
+
+  it("fails closed when the pause state cannot be read", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+
+    await expect(home.fetchPublicActionsPaused()).resolves.toBe(true);
+  });
+
+  it("restores the signup control only on an explicit false", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ paused: false }),
+      })
+    );
+
+    await expect(home.fetchPublicActionsPaused()).resolves.toBe(false);
+  });
+});
+
 describe("public request-list web contract", () => {
   it("decodes requests from the canonical response wrapper", () => {
     const request = publicRequest();

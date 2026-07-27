@@ -12,6 +12,10 @@ import SwiftUI
 /// visible so the flow can be reviewed, but the submit action is disabled until
 /// Day 3 connects it to `POST /api/request` through `RequestStore`.
 struct RequestFoodView: View {
+    /// Locked product copy. Shared by the notice above the fields and the
+    /// disabled control's accessibility hint so the two cannot drift apart.
+    static let pauseNotice = "Posting a meal request is temporarily unavailable."
+
     @State private var selectedDiningSpot: DiningSpot?
     @State private var foodRequest = ""
     @State private var pickupName = ""
@@ -53,6 +57,14 @@ struct RequestFoodView: View {
 
     var body: some View {
         Form {
+            // First section on purpose: the student learns that posting is
+            // paused before spending effort on the fields, not after reaching
+            // a dimmed Submit at the bottom.
+            Section {
+                Text(Self.pauseNotice)
+                    .font(.subheadline)
+            }
+
             Section("Food request") {
                 Picker("NYU dining spot", selection: $selectedDiningSpot) {
                     Text("Select a spot").tag(nil as DiningSpot?)
@@ -122,8 +134,12 @@ struct RequestFoodView: View {
                 // action must not report success or dismiss the form.
                 Button("Submit Request") {}
                     .disabled(true)
+                    .accessibilityHint(Self.pauseNotice)
 
-                Text("Posting a meal request is temporarily unavailable.")
+                // Kept alongside the disabled control as well as at the top:
+                // on a small device the two are more than a screen apart, so
+                // the dimmed button still needs its reason in place.
+                Text(Self.pauseNotice)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

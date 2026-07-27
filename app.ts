@@ -6,6 +6,13 @@
 // Hourly cron job: send digest emails for requests with no real-time notifications
 cron.schedule("5 * * * *", async () => {
   try {
+    const { isPublicActionsPaused, logPausedSkip } = await import("./src/publicActionsPause.js");
+    // Checked before any query or send so a suppressed digest writes no
+    // SendLog at all — a skipped notification must never look delivered.
+    if (isPublicActionsPaused()) {
+      logPausedSkip("hourly subscriber digest");
+      return;
+    }
     const { Request: MealRequest, Subscriber, SendLog } = await import("./models/db.js");
     const { sendDigestEmail } = await import("./src/sendDigestEmail.js");
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -105,6 +112,12 @@ import {
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
 import { escapeHtml } from "./src/htmlEscape.js";
 import { registerFulfillmentPause } from "./src/fulfillmentRoute.js";
+import {
+  CREATE_UNAVAILABLE_MESSAGE,
+  SUBSCRIBE_UNAVAILABLE_MESSAGE,
+  isPublicActionsPaused,
+  pausePublicAction,
+} from "./src/publicActionsPause.js";
 
 // small helpers
 function isValidId(id: any) {
@@ -168,8 +181,17 @@ app.get("/request/new", (req: Request, res: Response) => {
   res.sendFile(path.join(process.cwd(), "public", "new-request.html"));
 });
 
+// Read-only pause state for the web pages, which cannot read server
+// environment values. Carries no configuration detail beyond the decision
+// itself; the pages fail closed if this request does not succeed.
+app.get("/api/public-actions", (req: Request, res: Response) => {
+  res.json({ paused: isPublicActionsPaused() });
+});
+
 // api: subscribe to digest emails (creates a pending Subscriber and sends confirmation)
-app.post('/api/subscribe', limiter, async (req: Request, res: Response, next: NextFunction) => {
+// The pause runs ahead of the limiter so no subscriber is created or confirmed,
+// no confirmation email is sent, and no recent-request alerts are dispatched.
+app.post('/api/subscribe', pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE), limiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email } = req.body || {};
     if (!email || typeof email !== 'string') return res.status(400).json({ error: 'missing email' });
@@ -310,7 +332,11 @@ app.get("/api/active-subscriber-count", async (req: Request, res: Response, next
 });
 
 // api: create a new meal request
-app.post("/api/request", limiter, async (req: Request, res: Response, next: NextFunction) => {
+// The pause runs ahead of the limiter and the handler so a paused create
+// performs no validation side effect, sends no confirmation email, writes no
+// request, and notifies no subscribers. Nobody may post a meal that nobody
+// can fulfill while the fulfillment path is unavailable.
+app.post("/api/request", pausePublicAction(CREATE_UNAVAILABLE_MESSAGE), limiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     // ---- basic required fields ----
     const { vendor, food, pickupName, pickupWindowText, email, windowStart, windowEnd } = req.body || {};
@@ -414,6 +440,11 @@ app.delete("/api/request/:id", async (req: Request, res: Response, next: NextFun
 // Day 2 pause: this route terminates before the limiter and every legacy side
 // effect. Day 5 will remove this refusal and replace the unreachable handler
 // below with the claim-authorized atomic implementation.
+//
+// Intentionally NOT wired to PUBLIC_ACTIONS_PAUSED. That flag is a temporary
+// rollout control that local development sets to false; this refusal guards
+// the non-atomic legacy fulfillment path, which must stay unreachable even
+// then. Only Day 5's atomic replacement may lift it.
 registerFulfillmentPause(app);
 
 // Legacy fulfillment logic retained but unreachable while the Day 2 pause is

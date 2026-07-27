@@ -26,6 +26,10 @@
           <a href="/request/new" class="btn btn-primary meal-alerts-btn">Request Food</a>
           <button id="subscribe-cta-btn" class="btn btn-primary subscribe-btn meal-alerts-btn">Get Meal Request Alerts</button>
         </div>
+
+        <!-- Replaces the alerts control while public actions are paused.
+             Copy and visibility are owned by src/client/home.ts. -->
+        <p id="alerts-unavailable" class="subscribe-helper" role="status" hidden></p>
         <div class="subscriber-count-hero" style="margin-top:1.5rem; text-align:center;">
           <span id="active-subscriber-hero" style="font-size:1.1rem; color:#6b6b6b; background:#f6f2ff; border-radius:8px; padding:0.5em 1em; display:inline-block;">Loading volunteer count...</span>
         </div>

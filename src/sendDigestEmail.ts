@@ -1,9 +1,22 @@
 import { IRequest, ISubscriber } from "../models/db.js";
 import { sendEmailSafe } from "./emailHelpers.js";
 import { escapeHtml } from "./htmlEscape.js";
+import {
+  PUBLIC_ACTIONS_PAUSED_ENV,
+  isPublicActionsPaused,
+} from "./publicActionsPause.js";
 
 // Helper to send a digest email to a subscriber
 export async function sendDigestEmail(subscriber: ISubscriber, requests: IRequest[]) {
+  // The hourly cron already returns before reaching this function while
+  // paused. This throws rather than returning quietly so that any other
+  // caller fails loudly instead of recording a digest that was never sent.
+  if (isPublicActionsPaused()) {
+    throw new Error(
+      `Refusing to send a digest while ${PUBLIC_ACTIONS_PAUSED_ENV} is on`
+    );
+  }
+
   if (!subscriber.unsubToken) throw new Error("Missing unsubToken");
   const BASE_URL = process.env.BASE_URL || "https://commonplatenyu.org";
   const requestListUrl = `${BASE_URL.replace(/\/+$/, "")}/`;

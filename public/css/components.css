@@ -608,12 +608,20 @@
   margin-top: 0.5rem;
 }
 
-.error-message, 
-.success-message {
+.error-message,
+.success-message,
+.pause-message {
   padding: 1.25rem 1.5rem;
   border-radius: 14px;
   border-left: 4px solid;
   font-weight: 500;
+}
+
+/* Temporary rollout pause. Neutral on purpose — nothing has gone wrong. */
+.pause-message {
+  background: #f6f2ff;
+  color: #4b3f72;
+  border-left-color: #b9a7e8;
 }
 
 .error-message { 
