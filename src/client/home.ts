@@ -2,16 +2,20 @@
 // Fetch and display meal requests on the homepage
 import { formatMealRequestWindow } from "../utils/date.js";
 
-interface MealRequest {
-  _id: string;
+export interface PublicMealRequest {
+  id: string;
   vendor: string;
   food: string;
-  pickupName: string;
   pickupWindowText: string;
-  windowStart?: string;
-  windowEnd?: string;
-  isAsap?: boolean;
-  status: string;
+  windowStart: string | null;
+  windowEnd: string | null;
+  status: 'requested';
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface PublicRequestListResponse {
+  requests: PublicMealRequest[];
 }
 
 
@@ -22,13 +26,35 @@ function clientEscapeHtml(text: string): string {
   return div.innerHTML;
 }
 
+export function requestsFromResponse(
+  response: PublicRequestListResponse
+): PublicMealRequest[] {
+  return response.requests;
+}
+
+export function publicRequestWindowText(request: PublicMealRequest): string {
+  return formatMealRequestWindow(
+    request.windowStart ?? undefined,
+    request.windowEnd ?? undefined,
+    request.pickupWindowText
+  );
+}
+
+export function renderPublicRequestCard(request: PublicMealRequest): string {
+  return `
+          <div class="request-card" data-request-id="${clientEscapeHtml(request.id)}">
+            <div class="card-window">${clientEscapeHtml(publicRequestWindowText(request))}</div>
+            <div class="card-pickup">${clientEscapeHtml(request.food)} · ${clientEscapeHtml(request.vendor)}</div>
+            <button class="card-action-btn" data-id="${clientEscapeHtml(request.id)}">Order This</button>
+          </div>
+        `;
+}
+
 // Show request detail modal
-function clientShowRequestDetail(request: MealRequest): void {
+function clientShowRequestDetail(request: PublicMealRequest): void {
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
-  const windowText = request.isAsap
-    ? 'ASAP (within the next hour)'
-    : formatMealRequestWindow(request.windowStart, request.windowEnd, request.pickupWindowText || 'Not specified');
+  const windowText = publicRequestWindowText(request);
   modal.innerHTML = `
     <div class="modal-content">
       <button class="modal-close" aria-label="Close">&times;</button>
@@ -39,10 +65,6 @@ function clientShowRequestDetail(request: MealRequest): void {
         <div class="detail-group">
           <label>Pickup Window</label>
           <p class="detail-window">${clientEscapeHtml(windowText)}</p>
-        </div>
-        <div class="detail-group">
-          <label>Pickup Name</label>
-          <p>${clientEscapeHtml(request.pickupName)}</p>
         </div>
         <div class="detail-group">
           <label>What They Want</label>
@@ -69,7 +91,7 @@ function clientShowRequestDetail(request: MealRequest): void {
     if (e.target === modal) closeModal();
   });
   modal.querySelector('.modal-order-btn')?.addEventListener('click', () => {
-    window.location.href = `/request/${request._id}/fulfill`;
+    window.location.href = `/request/${request.id}/fulfill`;
     closeModal();
   });
   setTimeout(() => {
@@ -173,7 +195,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Fetch requests
     const requestsResponse = await fetch('/api/requests');
     if (requestsResponse.ok) {
-      const requests: MealRequest[] = await requestsResponse.json();
+      const response: PublicRequestListResponse = await requestsResponse.json();
+      const requests = requestsFromResponse(response);
       
       // Update activity stats
       if (activeCountEl) {
@@ -187,28 +210,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (requests.length === 0) {
         requestsList.innerHTML = '<p class="loading">No active requests right now.</p>';
       } else {
-        // Helper to format window start/end concisely
-        const formatWindow = (start?: string, end?: string, fallback?: string) => {
-          return formatMealRequestWindow(start, end, fallback);
-        };
-
-  requestsList.innerHTML = requests.map(req => {
-          let windowText = 'Time window not specified';
-          if (req.isAsap) {
-            windowText = 'ASAP (within the next hour)';
-          } else if (req.windowStart || req.windowEnd) {
-            windowText = formatWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
-          } else {
-            windowText = req.pickupWindowText || 'Time window not specified';
-          }
-
-          return `
-          <div class="request-card" data-request-id="${clientEscapeHtml(req._id)}">
-            <div class="card-window">${clientEscapeHtml(windowText)}</div>
-            <div class="card-pickup">Pickup: ${clientEscapeHtml(req.pickupName)}</div>
-            <button class="card-action-btn" data-id="${clientEscapeHtml(req._id)}">Order This</button>
-          </div>
-        `}).join('');
+        requestsList.innerHTML = requests.map(renderPublicRequestCard).join('');
         
         // Make the button go directly to the fulfill page
         document.querySelectorAll('.card-action-btn').forEach(btn => {
@@ -227,7 +229,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if ((e.target as HTMLElement).classList.contains('card-action-btn')) return;
             
             const requestId = (card as HTMLElement).dataset.requestId;
-            const request = requests.find(r => r._id === requestId);
+            const request = requests.find(r => r.id === requestId);
             if (request) {
               clientShowRequestDetail(request);
             }

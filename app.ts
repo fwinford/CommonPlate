@@ -98,6 +98,10 @@ import { Request as MealRequest, Fulfillment, Subscriber } from "./models/db.js"
 import rateLimit from "express-rate-limit";
 import cron from "node-cron";
 import { Resend } from "resend";
+import {
+  buildPublicRequestListResponse,
+  RequestListDocument,
+} from "./src/requestListResponse.js";
 
 // small helpers
 function isValidId(id: any) {
@@ -266,34 +270,24 @@ app.post('/admin/test-fulfillment', async (req: Request, res: Response) => {
 // api: get all active requests
 app.get("/api/requests", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    // Fetch open requests. We'll compute an "isAsap" flag and order by timing:
+    // Fetch available requests and order them by timing:
     // - ASAP items (no windowStart or windowStart within next hour) come first, ordered by createdAt ascending (earliest first)
     // - Scheduled items come after, ordered by windowStart ascending
-    const docs = await MealRequest.find({ status: "requested" }).limit(200).lean().exec();
-
     const now = new Date();
-    const hourLater = new Date(now.getTime() + 60 * 60 * 1000);
+    const docs = await MealRequest.find({
+      status: "requested",
+      expiresAt: { $gt: now },
+    })
+      .limit(200)
+      .lean()
+      .exec();
 
-    const processed = docs.map((d: any) => {
-      const windowStart = d.windowStart ? new Date(d.windowStart) : null;
-      const isAsap = !windowStart || (windowStart && windowStart <= hourLater);
-      return { ...d, isAsap };
-    });
-
-    const asapList = processed
-      .filter((r: any) => r.isAsap)
-      .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-    const scheduledList = processed
-      .filter((r: any) => !r.isAsap)
-      .sort((a: any, b: any) => {
-        const aStart = a.windowStart ? new Date(a.windowStart).getTime() : new Date(a.createdAt).getTime();
-        const bStart = b.windowStart ? new Date(b.windowStart).getTime() : new Date(b.createdAt).getTime();
-        return aStart - bStart;
-      });
-
-    const ordered = asapList.concat(scheduledList).slice(0, 20);
-    res.json(ordered);
+    res.json(
+      buildPublicRequestListResponse(
+        docs as unknown as RequestListDocument[],
+        now
+      )
+    );
   } catch (err) {
     next(err);
   }

@@ -32,10 +32,29 @@ function clientEscapeHtml(text) {
   div.textContent = text;
   return div.innerHTML;
 }
+function requestsFromResponse(response) {
+  return response.requests;
+}
+function publicRequestWindowText(request) {
+  return formatMealRequestWindow(
+    request.windowStart ?? void 0,
+    request.windowEnd ?? void 0,
+    request.pickupWindowText
+  );
+}
+function renderPublicRequestCard(request) {
+  return `
+          <div class="request-card" data-request-id="${clientEscapeHtml(request.id)}">
+            <div class="card-window">${clientEscapeHtml(publicRequestWindowText(request))}</div>
+            <div class="card-pickup">${clientEscapeHtml(request.food)} \xB7 ${clientEscapeHtml(request.vendor)}</div>
+            <button class="card-action-btn" data-id="${clientEscapeHtml(request.id)}">Order This</button>
+          </div>
+        `;
+}
 function clientShowRequestDetail(request) {
   const modal = document.createElement("div");
   modal.className = "modal-overlay";
-  const windowText = request.isAsap ? "ASAP (within the next hour)" : formatMealRequestWindow(request.windowStart, request.windowEnd, request.pickupWindowText || "Not specified");
+  const windowText = publicRequestWindowText(request);
   modal.innerHTML = `
     <div class="modal-content">
       <button class="modal-close" aria-label="Close">&times;</button>
@@ -46,10 +65,6 @@ function clientShowRequestDetail(request) {
         <div class="detail-group">
           <label>Pickup Window</label>
           <p class="detail-window">${clientEscapeHtml(windowText)}</p>
-        </div>
-        <div class="detail-group">
-          <label>Pickup Name</label>
-          <p>${clientEscapeHtml(request.pickupName)}</p>
         </div>
         <div class="detail-group">
           <label>What They Want</label>
@@ -76,7 +91,7 @@ function clientShowRequestDetail(request) {
     if (e.target === modal) closeModal();
   });
   modal.querySelector(".modal-order-btn")?.addEventListener("click", () => {
-    window.location.href = `/request/${request._id}/fulfill`;
+    window.location.href = `/request/${request.id}/fulfill`;
     closeModal();
   });
   setTimeout(() => {
@@ -167,7 +182,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     const requestsResponse = await fetch("/api/requests");
     if (requestsResponse.ok) {
-      const requests = await requestsResponse.json();
+      const response = await requestsResponse.json();
+      const requests = requestsFromResponse(response);
       if (activeCountEl) {
         const activeCount = requests.length;
         activeCountEl.textContent = activeCount === 1 ? "1 active request right now" : `${activeCount} active requests right now`;
@@ -176,26 +192,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (requests.length === 0) {
         requestsList.innerHTML = '<p class="loading">No active requests right now.</p>';
       } else {
-        const formatWindow = (start, end, fallback) => {
-          return formatMealRequestWindow(start, end, fallback);
-        };
-        requestsList.innerHTML = requests.map((req) => {
-          let windowText = "Time window not specified";
-          if (req.isAsap) {
-            windowText = "ASAP (within the next hour)";
-          } else if (req.windowStart || req.windowEnd) {
-            windowText = formatWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
-          } else {
-            windowText = req.pickupWindowText || "Time window not specified";
-          }
-          return `
-          <div class="request-card" data-request-id="${clientEscapeHtml(req._id)}">
-            <div class="card-window">${clientEscapeHtml(windowText)}</div>
-            <div class="card-pickup">Pickup: ${clientEscapeHtml(req.pickupName)}</div>
-            <button class="card-action-btn" data-id="${clientEscapeHtml(req._id)}">Order This</button>
-          </div>
-        `;
-        }).join("");
+        requestsList.innerHTML = requests.map(renderPublicRequestCard).join("");
         document.querySelectorAll(".card-action-btn").forEach((btn) => {
           btn.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -207,7 +204,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           card.addEventListener("click", (e) => {
             if (e.target.classList.contains("card-action-btn")) return;
             const requestId = card.dataset.requestId;
-            const request = requests.find((r) => r._id === requestId);
+            const request = requests.find((r) => r.id === requestId);
             if (request) {
               clientShowRequestDetail(request);
             }
@@ -222,4 +219,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (requestsList) requestsList.innerHTML = '<p class="loading">Error loading requests.</p>';
   }
 });
+export {
+  publicRequestWindowText,
+  renderPublicRequestCard,
+  requestsFromResponse
+};
 //# sourceMappingURL=home.js.map
