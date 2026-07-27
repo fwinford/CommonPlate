@@ -27,6 +27,7 @@ function formatMealRequestWindow(start, end, fallback) {
 }
 
 // src/client/home.ts
+var WEB_ORDERING_UNAVAILABLE_MESSAGE = "Ordering from the web is temporarily unavailable.";
 function clientEscapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -44,27 +45,19 @@ function publicRequestWindowText(request) {
 }
 function renderPublicRequestCard(request) {
   return `
-          <div class="request-card" data-request-id="${clientEscapeHtml(request.id)}">
+            <div class="request-card" data-request-id="${clientEscapeHtml(request.id)}">
             <div class="card-window">${clientEscapeHtml(publicRequestWindowText(request))}</div>
             <div class="card-pickup">${clientEscapeHtml(request.food)} \xB7 ${clientEscapeHtml(request.vendor)}</div>
-            <button class="card-action-btn" data-id="${clientEscapeHtml(request.id)}">Order This</button>
+            <button class="card-action-btn" type="button" disabled aria-disabled="true">${WEB_ORDERING_UNAVAILABLE_MESSAGE}</button>
           </div>
         `;
 }
-function clientShowRequestDetail(request) {
-  const modal = document.createElement("div");
-  modal.className = "modal-overlay";
-  const windowText = publicRequestWindowText(request);
-  modal.innerHTML = `
-    <div class="modal-content">
-      <button class="modal-close" aria-label="Close">&times;</button>
-      <div class="modal-header">
-        <h2>Request Details</h2>
-      </div>
+function renderPublicRequestDetail(request) {
+  return `
       <div class="modal-body">
         <div class="detail-group">
           <label>Pickup Window</label>
-          <p class="detail-window">${clientEscapeHtml(windowText)}</p>
+          <p class="detail-window">${clientEscapeHtml(publicRequestWindowText(request))}</p>
         </div>
         <div class="detail-group">
           <label>What They Want</label>
@@ -75,12 +68,27 @@ function clientShowRequestDetail(request) {
           <p>${clientEscapeHtml(request.vendor)}</p>
         </div>
       </div>
+  `;
+}
+function renderPublicRequestModal(request) {
+  return `
+    <div class="modal-content">
+      <button class="modal-close" aria-label="Close">&times;</button>
+      <div class="modal-header">
+        <h2>Request Details</h2>
+      </div>
+      ${renderPublicRequestDetail(request)}
       <div class="modal-actions">
-        <button class="btn btn-primary modal-order-btn">I'll Order This</button>
+        <button class="btn btn-primary modal-order-btn" type="button" disabled aria-disabled="true">${WEB_ORDERING_UNAVAILABLE_MESSAGE}</button>
         <button class="btn btn-secondary modal-cancel-btn">Maybe Later</button>
       </div>
     </div>
   `;
+}
+function clientShowRequestDetail(request) {
+  const modal = document.createElement("div");
+  modal.className = "modal-overlay";
+  modal.innerHTML = renderPublicRequestModal(request);
   document.body.appendChild(modal);
   const closeModal = () => {
     modal.remove();
@@ -89,10 +97,6 @@ function clientShowRequestDetail(request) {
   modal.querySelector(".modal-cancel-btn")?.addEventListener("click", closeModal);
   modal.addEventListener("click", (e) => {
     if (e.target === modal) closeModal();
-  });
-  modal.querySelector(".modal-order-btn")?.addEventListener("click", () => {
-    window.location.href = `/request/${request.id}/fulfill`;
-    closeModal();
   });
   setTimeout(() => {
     modal.querySelector(".modal-close")?.focus();
@@ -193,13 +197,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         requestsList.innerHTML = '<p class="loading">No active requests right now.</p>';
       } else {
         requestsList.innerHTML = requests.map(renderPublicRequestCard).join("");
-        document.querySelectorAll(".card-action-btn").forEach((btn) => {
-          btn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            const requestId = btn.dataset.id;
-            window.location.href = `/request/${requestId}/fulfill`;
-          });
-        });
         document.querySelectorAll(".request-card").forEach((card) => {
           card.addEventListener("click", (e) => {
             if (e.target.classList.contains("card-action-btn")) return;
@@ -220,8 +217,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 });
 export {
+  WEB_ORDERING_UNAVAILABLE_MESSAGE,
   publicRequestWindowText,
   renderPublicRequestCard,
+  renderPublicRequestDetail,
+  renderPublicRequestModal,
   requestsFromResponse
 };
 //# sourceMappingURL=home.js.map

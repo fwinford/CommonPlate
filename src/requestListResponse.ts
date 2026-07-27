@@ -1,34 +1,43 @@
-export type RequestListDate = Date | string;
+export type RequestResponseDate = Date | string;
 
-export interface RequestListDocument {
+export interface PublicRequestDocument {
   _id: unknown;
   vendor: string;
   food: string;
   pickupWindowText: string;
-  windowStart?: RequestListDate | null;
-  windowEnd?: RequestListDate | null;
+  windowStart?: RequestResponseDate | null;
+  windowEnd?: RequestResponseDate | null;
   status: string;
-  createdAt: RequestListDate;
-  expiresAt?: RequestListDate | null;
+  createdAt: RequestResponseDate;
+  expiresAt: RequestResponseDate;
 }
 
-export interface PublicRequestResponse {
+export interface RequestListDocument
+  extends Omit<PublicRequestDocument, "expiresAt"> {
+  expiresAt?: RequestResponseDate | null;
+}
+
+export interface PublicRequestResponse<Status extends string = string> {
   id: string;
   vendor: string;
   food: string;
   pickupWindowText: string;
-  windowStart: RequestListDate | null;
-  windowEnd: RequestListDate | null;
-  status: "requested";
-  createdAt: RequestListDate;
-  expiresAt: RequestListDate;
+  windowStart: RequestResponseDate | null;
+  windowEnd: RequestResponseDate | null;
+  status: Status;
+  createdAt: RequestResponseDate;
+  expiresAt: RequestResponseDate;
 }
 
 export interface PublicRequestListResponse {
-  requests: PublicRequestResponse[];
+  requests: PublicRequestResponse<"requested">[];
 }
 
-function dateValue(value: RequestListDate | null | undefined): number {
+export interface PublicRequestDetailResponse {
+  request: PublicRequestResponse;
+}
+
+function dateValue(value: RequestResponseDate | null | undefined): number {
   return value == null ? Number.NaN : new Date(value).getTime();
 }
 
@@ -37,12 +46,36 @@ function isAvailable(
   serverNow: Date
 ): document is RequestListDocument & {
   status: "requested";
-  expiresAt: RequestListDate;
+  expiresAt: RequestResponseDate;
 } {
   return (
     document.status === "requested" &&
     dateValue(document.expiresAt) > serverNow.getTime()
   );
+}
+
+export function mapPublicRequestFields<Status extends string>(
+  document: PublicRequestDocument & { status: Status }
+): PublicRequestResponse<Status> {
+  return {
+    id: String(document._id),
+    vendor: document.vendor,
+    food: document.food,
+    pickupWindowText: document.pickupWindowText,
+    windowStart: document.windowStart ?? null,
+    windowEnd: document.windowEnd ?? null,
+    status: document.status,
+    createdAt: document.createdAt,
+    expiresAt: document.expiresAt,
+  };
+}
+
+export function buildPublicRequestDetailResponse(
+  document: PublicRequestDocument
+): PublicRequestDetailResponse {
+  return {
+    request: mapPublicRequestFields(document),
+  };
 }
 
 export function buildPublicRequestListResponse(
@@ -74,16 +107,6 @@ export function buildPublicRequestListResponse(
   });
 
   return {
-    requests: available.slice(0, 20).map((document) => ({
-      id: String(document._id),
-      vendor: document.vendor,
-      food: document.food,
-      pickupWindowText: document.pickupWindowText,
-      windowStart: document.windowStart ?? null,
-      windowEnd: document.windowEnd ?? null,
-      status: document.status,
-      createdAt: document.createdAt,
-      expiresAt: document.expiresAt,
-    })),
+    requests: available.slice(0, 20).map(mapPublicRequestFields),
   };
 }

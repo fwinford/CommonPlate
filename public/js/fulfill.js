@@ -27,6 +27,23 @@ function formatMealRequestWindow(start, end, fallback) {
 }
 
 // src/client/fulfill.ts
+var WEB_ORDERING_UNAVAILABLE_MESSAGE = "Ordering from the web is temporarily unavailable.";
+function isLegacyWebOrderingAvailable() {
+  return false;
+}
+function showLegacyWebOrderingUnavailable(root) {
+  const form = root.getElementById("fulfill-form");
+  const submitBtn = root.getElementById("submit-btn");
+  const errorMsg = root.getElementById("error-message");
+  const summary = root.getElementById("request-summary");
+  if (form) form.hidden = true;
+  if (submitBtn) submitBtn.disabled = true;
+  if (summary) summary.textContent = WEB_ORDERING_UNAVAILABLE_MESSAGE;
+  if (errorMsg) {
+    errorMsg.textContent = WEB_ORDERING_UNAVAILABLE_MESSAGE;
+    errorMsg.style.display = "block";
+  }
+}
 async function fetchRequest(id) {
   const resp = await fetch(`/api/request/${id}`);
   if (!resp.ok) throw new Error("Request not found");
@@ -48,6 +65,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const orderNumberVal = document.getElementById("order-number-val");
   const orderNumberDisplay = document.getElementById("order-number-display");
   if (!form || !submitBtn || !errorMsg || !successMsg) return;
+  if (!isLegacyWebOrderingAvailable()) {
+    showLegacyWebOrderingUnavailable(document);
+    return;
+  }
   const pathParts = window.location.pathname.split("/").filter(Boolean);
   const requestId = pathParts.length >= 2 ? pathParts[1] : null;
   if (!requestId) {
@@ -240,4 +261,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 });
+export {
+  WEB_ORDERING_UNAVAILABLE_MESSAGE,
+  isLegacyWebOrderingAvailable,
+  showLegacyWebOrderingUnavailable
+};
 //# sourceMappingURL=fulfill.js.map

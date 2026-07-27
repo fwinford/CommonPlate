@@ -4,6 +4,28 @@ import { formatMealRequestWindow } from "../utils/date.js";
 
 // Handles the fulfill page: shows request details and submits order number + ETA text
 
+export const WEB_ORDERING_UNAVAILABLE_MESSAGE =
+  "Ordering from the web is temporarily unavailable.";
+
+export function isLegacyWebOrderingAvailable(): boolean {
+  return false;
+}
+
+export function showLegacyWebOrderingUnavailable(root: Document): void {
+  const form = root.getElementById('fulfill-form') as HTMLFormElement | null;
+  const submitBtn = root.getElementById('submit-btn') as HTMLButtonElement | null;
+  const errorMsg = root.getElementById('error-message') as HTMLDivElement | null;
+  const summary = root.getElementById('request-summary') as HTMLElement | null;
+
+  if (form) form.hidden = true;
+  if (submitBtn) submitBtn.disabled = true;
+  if (summary) summary.textContent = WEB_ORDERING_UNAVAILABLE_MESSAGE;
+  if (errorMsg) {
+    errorMsg.textContent = WEB_ORDERING_UNAVAILABLE_MESSAGE;
+    errorMsg.style.display = 'block';
+  }
+}
+
 async function fetchRequest(id: string) {
   const resp = await fetch(`/api/request/${id}`);
   if (!resp.ok) throw new Error('Request not found');
@@ -29,6 +51,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // ...existing code...
 
   if (!form || !submitBtn || !errorMsg || !successMsg) return;
+
+  if (!isLegacyWebOrderingAvailable()) {
+    showLegacyWebOrderingUnavailable(document);
+    return;
+  }
 
   // Extract request id from URL: /request/:id/fulfill
   const pathParts = window.location.pathname.split('/').filter(Boolean);

@@ -35,21 +35,20 @@ export async function sendEmailSafe(opts: Parameters<typeof resend.emails.send>[
 
 export async function sendNewRequestAlert(subscriber: ISubscriber, request: IRequest) {
 	if (!subscriber.unsubToken) throw new Error("Missing unsubToken");
-	const fulfillUrl = `${BASE_URL}/request/${request._id}/fulfill`;
+	const requestListUrl = `${BASE_URL.replace(/\/+$/, "")}/`;
 	const unsubUrl = `${BASE_URL}/api/unsubscribe?token=${encodeURIComponent(subscriber.unsubToken)}`;
 	const html = `
 		<h2>New meal request: ${request.vendor} · ${request.pickupWindowText}</h2>
 		<ul>
 			<li><strong>Vendor:</strong> ${request.vendor}</li>
 			<li><strong>Food:</strong> ${request.food}</li>
-			<li><strong>Pickup Name:</strong> ${request.pickupName}</li>
 			<li><strong>Pickup Window:</strong> ${request.pickupWindowText}</li>
 		</ul>
-		<p><a href="${fulfillUrl}">Click here to fulfill this request</a></p>
+		<p><a href="${requestListUrl}">View meal request</a></p>
 		<hr>
 		<p style="font-size:0.9em;">To unsubscribe from these alerts, <a href="${unsubUrl}">click here</a>.</p>
 	`;
-	const text = `New meal request: ${request.vendor} · ${request.pickupWindowText}\n\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Name: ${request.pickupName}\nPickup Window: ${request.pickupWindowText}\n\nFulfill: ${fulfillUrl}\n\nTo unsubscribe: ${unsubUrl}`;
+	const text = `New meal request: ${request.vendor} · ${request.pickupWindowText}\n\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Window: ${request.pickupWindowText}\n\nView meal request: ${requestListUrl}\n\nTo unsubscribe: ${unsubUrl}`;
 	await sendEmailSafe({
 		from: FROM_EMAIL,
 		to: subscriber.email,

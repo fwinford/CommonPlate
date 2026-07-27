@@ -18,6 +18,8 @@ export interface PublicRequestListResponse {
   requests: PublicMealRequest[];
 }
 
+export const WEB_ORDERING_UNAVAILABLE_MESSAGE =
+  "Ordering from the web is temporarily unavailable.";
 
 // Utility function to escape HTML and prevent XSS
 function clientEscapeHtml(text: string): string {
@@ -42,29 +44,20 @@ export function publicRequestWindowText(request: PublicMealRequest): string {
 
 export function renderPublicRequestCard(request: PublicMealRequest): string {
   return `
-          <div class="request-card" data-request-id="${clientEscapeHtml(request.id)}">
+            <div class="request-card" data-request-id="${clientEscapeHtml(request.id)}">
             <div class="card-window">${clientEscapeHtml(publicRequestWindowText(request))}</div>
             <div class="card-pickup">${clientEscapeHtml(request.food)} · ${clientEscapeHtml(request.vendor)}</div>
-            <button class="card-action-btn" data-id="${clientEscapeHtml(request.id)}">Order This</button>
+            <button class="card-action-btn" type="button" disabled aria-disabled="true">${WEB_ORDERING_UNAVAILABLE_MESSAGE}</button>
           </div>
         `;
 }
 
-// Show request detail modal
-function clientShowRequestDetail(request: PublicMealRequest): void {
-  const modal = document.createElement('div');
-  modal.className = 'modal-overlay';
-  const windowText = publicRequestWindowText(request);
-  modal.innerHTML = `
-    <div class="modal-content">
-      <button class="modal-close" aria-label="Close">&times;</button>
-      <div class="modal-header">
-        <h2>Request Details</h2>
-      </div>
+export function renderPublicRequestDetail(request: PublicMealRequest): string {
+  return `
       <div class="modal-body">
         <div class="detail-group">
           <label>Pickup Window</label>
-          <p class="detail-window">${clientEscapeHtml(windowText)}</p>
+          <p class="detail-window">${clientEscapeHtml(publicRequestWindowText(request))}</p>
         </div>
         <div class="detail-group">
           <label>What They Want</label>
@@ -75,12 +68,30 @@ function clientShowRequestDetail(request: PublicMealRequest): void {
           <p>${clientEscapeHtml(request.vendor)}</p>
         </div>
       </div>
+  `;
+}
+
+export function renderPublicRequestModal(request: PublicMealRequest): string {
+  return `
+    <div class="modal-content">
+      <button class="modal-close" aria-label="Close">&times;</button>
+      <div class="modal-header">
+        <h2>Request Details</h2>
+      </div>
+      ${renderPublicRequestDetail(request)}
       <div class="modal-actions">
-        <button class="btn btn-primary modal-order-btn">I'll Order This</button>
+        <button class="btn btn-primary modal-order-btn" type="button" disabled aria-disabled="true">${WEB_ORDERING_UNAVAILABLE_MESSAGE}</button>
         <button class="btn btn-secondary modal-cancel-btn">Maybe Later</button>
       </div>
     </div>
   `;
+}
+
+// Show request detail modal
+function clientShowRequestDetail(request: PublicMealRequest): void {
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = renderPublicRequestModal(request);
   document.body.appendChild(modal);
   const closeModal = () => {
     modal.remove();
@@ -89,10 +100,6 @@ function clientShowRequestDetail(request: PublicMealRequest): void {
   modal.querySelector('.modal-cancel-btn')?.addEventListener('click', closeModal);
   modal.addEventListener('click', (e) => {
     if (e.target === modal) closeModal();
-  });
-  modal.querySelector('.modal-order-btn')?.addEventListener('click', () => {
-    window.location.href = `/request/${request.id}/fulfill`;
-    closeModal();
   });
   setTimeout(() => {
     (modal.querySelector('.modal-close') as HTMLElement)?.focus();
@@ -211,17 +218,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         requestsList.innerHTML = '<p class="loading">No active requests right now.</p>';
       } else {
         requestsList.innerHTML = requests.map(renderPublicRequestCard).join('');
-        
-        // Make the button go directly to the fulfill page
-        document.querySelectorAll('.card-action-btn').forEach(btn => {
-          btn.addEventListener('click', (e) => {
-            e.stopPropagation(); // Prevent card click
-            const requestId = (btn as HTMLElement).dataset.id;
-            // Go directly to fulfill page
-            window.location.href = `/request/${requestId}/fulfill`;
-          });
-        });
-        
+
         // Add click handlers for request cards (view details)
         document.querySelectorAll('.request-card').forEach(card => {
           card.addEventListener('click', (e) => {

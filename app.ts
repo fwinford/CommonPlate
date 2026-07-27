@@ -102,6 +102,7 @@ import {
   buildPublicRequestListResponse,
   RequestListDocument,
 } from "./src/requestListResponse.js";
+import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
 
 // small helpers
 function isValidId(id: any) {
@@ -118,7 +119,7 @@ function escapeHtml(str: any) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/\"/g, '&quot;')
+    .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
 
@@ -294,23 +295,7 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
 });
 
 // api: get single request by id
-app.get("/api/request/:id", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { id } = req.params;
-    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid request id' });
-    const doc = await MealRequest.findById(id).lean().exec();
-    if (!doc) return res.status(404).json({ error: 'Request not found' });
-
-    const now = new Date();
-    const hourLater = new Date(now.getTime() + 60 * 60 * 1000);
-    const windowStart = doc.windowStart ? new Date(doc.windowStart) : null;
-    const isAsap = !windowStart || (windowStart && windowStart <= hourLater);
-
-    res.json({ ...doc, isAsap });
-  } catch (err) {
-    next(err);
-  }
-});
+app.get("/api/request/:id", getPublicRequestDetail);
 
 // api: get stats (total meals shared)
 app.get("/api/stats", async (req: Request, res: Response, next: NextFunction) => {
@@ -519,7 +504,7 @@ if (process.env.CRON_ENABLED === 'true') {
 }
 
 // ---- error handler (must be last) ----
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
   console.error("Error:", err);
   res.status(500).json({ error: "Internal server error" });
 });

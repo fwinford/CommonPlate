@@ -81,12 +81,47 @@ describe("public request-list web contract", () => {
     const html = home.renderPublicRequestCard(request);
 
     expect(html).toContain('data-request-id="request-123"');
-    expect(html).toContain('data-id="request-123"');
+    expect(html).toContain("Vegetable rice bowl");
+    expect(html).toContain("Campus Market");
+    expect(html).toContain(home.WEB_ORDERING_UNAVAILABLE_MESSAGE);
+    expect(html).toContain("disabled");
+    expect(html).not.toContain("Order This");
+    expect(html).not.toContain("/fulfill");
+    expect(html).not.toContain("Requester Private Name");
+    expect(html).not.toContain("requester@example.edu");
+    expect(html).not.toContain("private-token");
+  });
+
+  it("renders public request detail without expecting or displaying private fields", () => {
+    const request = {
+      ...publicRequest(),
+      pickupName: "Requester Private Name",
+      email: "requester@example.edu",
+      claimToken: "private-token",
+    };
+
+    const html = home.renderPublicRequestDetail(request);
+
+    expect(html).toContain('class="modal-body"');
+    expect(html).toContain("ASAP (within the next hour)");
     expect(html).toContain("Vegetable rice bowl");
     expect(html).toContain("Campus Market");
     expect(html).not.toContain("Requester Private Name");
     expect(html).not.toContain("requester@example.edu");
     expect(html).not.toContain("private-token");
+    expect(html).not.toContain("Pickup Name");
+  });
+
+  it("does not render a homepage link or action to the legacy fulfillment route", () => {
+    const cardHtml = home.renderPublicRequestCard(publicRequest());
+    const modalHtml = home.renderPublicRequestModal(publicRequest());
+
+    expect(modalHtml).toContain(home.WEB_ORDERING_UNAVAILABLE_MESSAGE);
+    expect(modalHtml).toContain("disabled");
+    expect(modalHtml).not.toContain("I'll Order This");
+    expect(`${cardHtml}${modalHtml}`).not.toMatch(
+      /href=|\/request\/.*\/fulfill/
+    );
   });
 
   it("uses canonical timing display fields without consulting device time", () => {
