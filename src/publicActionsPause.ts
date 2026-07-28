@@ -44,7 +44,7 @@ export function isPublicActionsPaused(
  * validation, email, database write, or subscriber notification can run, and
  * so the response cannot reveal whether the payload would otherwise be valid.
  */
-export function pausePublicAction(message: string) {
+export function pausePublicAction(message: string, errorCode?: string) {
   return function refusePausedPublicAction(
     _req: Request,
     res: Response,
@@ -55,7 +55,11 @@ export function pausePublicAction(message: string) {
       return;
     }
 
-    res.status(503).json({ error: message });
+    res.status(503).json(
+      errorCode
+        ? { error: { code: errorCode, message } }
+        : { error: message }
+    );
   };
 }
 

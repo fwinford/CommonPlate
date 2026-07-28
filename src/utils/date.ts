@@ -9,7 +9,11 @@ export function formatMealRequestWindow(start?: string | Date, end?: string | Da
   try {
     const s = start ? new Date(start) : null;
     const e = end ? new Date(end) : null;
-    const optsDate: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+    const optsDate: Intl.DateTimeFormatOptions = {
+      month: 'short',
+      day: 'numeric',
+      timeZone: 'America/New_York',
+    };
     const optsTime: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' };
 
     if (s && e) {

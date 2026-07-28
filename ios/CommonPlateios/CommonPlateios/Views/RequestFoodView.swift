@@ -6,39 +6,133 @@
 //
 import SwiftUI
 
-/// Requester-facing request form. Submission is paused: the Week 1 prototype
-/// submitted into local-only state that no longer has a reader, which reported
-/// success for a request that was never persisted anywhere. The form stays
-/// visible so the flow can be reviewed, but the submit action is disabled until
-/// Day 3 connects it to `POST /api/request` through `RequestStore`.
+enum RequestFoodFormError: Error, Equatable {
+    case missingDiningSpot
+    case missingFood
+    case missingPickupName
+    case invalidEmail
+    case invalidScheduledTime
+
+    var message: String {
+        switch self {
+        case .missingDiningSpot:
+            return "Choose an NYU dining spot."
+        case .missingFood:
+            return "Tell us what food you need."
+        case .missingPickupName:
+            return "Enter the name to use for the order."
+        case .invalidEmail:
+            return "Enter a valid email address."
+        case .invalidScheduledTime:
+            return "Choose a pickup time that leaves a full 30-minute window today."
+        }
+    }
+}
+
+enum RequestCreatePresentationError: Equatable {
+    case invalidRequest
+    case requestLimitReached
+    case publicActionsPaused
+    case creationFailed
+    case ambiguous
+    case operationInProgress
+
+    var message: String {
+        switch self {
+        case .invalidRequest:
+            return "Check the information you entered and try again."
+        case .requestLimitReached:
+            return "The daily request limit has been reached. Please try again tomorrow."
+        case .publicActionsPaused:
+            return "Request posting is temporarily unavailable."
+        case .creationFailed:
+            return "We couldn’t post your request. Please try again in a moment."
+        case .ambiguous:
+            return "We couldn’t confirm whether your request was posted. Check Active Requests before submitting again."
+        case .operationInProgress:
+            return "Your request is already being posted."
+        }
+    }
+
+    static func map(_ error: Error) -> RequestCreatePresentationError {
+        guard let serviceError = error as? RequestServiceError else {
+            return .creationFailed
+        }
+
+        switch serviceError {
+        case .serverError(let code, _):
+            switch code {
+            case "INVALID_REQUEST":
+                return .invalidRequest
+            case "REQUEST_LIMIT_REACHED":
+                return .requestLimitReached
+            case "PUBLIC_ACTIONS_PAUSED":
+                return .publicActionsPaused
+            case "REQUEST_CREATION_FAILED":
+                return .creationFailed
+            default:
+                return .creationFailed
+            }
+        case .ambiguousCreateOutcome:
+            return .ambiguous
+        case .operationInProgress:
+            return .operationInProgress
+        default:
+            return .creationFailed
+        }
+    }
+}
+
+/// Requester-facing request form. Temporary input and presentation state stay
+/// here; confirmed canonical collection state is owned by `RequestStore`.
 struct RequestFoodView: View {
-    /// Locked product copy. Shared by the notice above the fields and the
-    /// disabled control's accessibility hint so the two cannot drift apart.
-    static let pauseNotice = "Posting a meal request is temporarily unavailable."
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var store: RequestStore
 
     @State private var selectedDiningSpot: DiningSpot?
     @State private var foodRequest = ""
     @State private var pickupName = ""
     @State private var email = ""
-    @State private var phoneNumber = ""
     @State private var timing: RequestTiming = .asap
     @State private var preferredPickupTime = Date()
+    @State private var formError: RequestFoodFormError?
+    @State private var submissionError: RequestCreatePresentationError?
+    @State private var didCreateRequest = false
+
+    private var calendar: Calendar {
+        Calendar.current
+    }
 
     private var endOfToday: Date {
-        Calendar.current.startOfDay(for: Date()).addingTimeInterval(24 * 60 * 60)
+        Self.endOfDay(containing: Date(), calendar: calendar) ?? Date()
+    }
+
+    private var latestScheduledStart: Date {
+        Self.latestScheduledStart(on: Date(), calendar: calendar) ?? endOfToday
+    }
+
+    private var scheduledStartRange: ClosedRange<Date> {
+        let now = Date()
+        return min(now, latestScheduledStart)...latestScheduledStart
     }
 
     private var isEmailValid: Bool {
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedEmail.contains("@") && trimmedEmail.contains(".")
+        Self.isValidEmail(email)
     }
 
-    private var hasStartedRequestForm: Bool {
-        selectedDiningSpot != nil ||
-        !foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-        !pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-        !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-        !phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private var isScheduledWindowValid: Bool {
+        guard timing == .later else {
+            return true
+        }
+        return Self.isValidScheduledWindow(
+            startingAt: preferredPickupTime,
+            now: Date(),
+            calendar: calendar
+        )
+    }
+
+    private var canAttemptSubmission: Bool {
+        submissionError != .ambiguous
     }
 
     let diningSpots = [
@@ -56,13 +150,53 @@ struct RequestFoodView: View {
     ]
 
     var body: some View {
+        Group {
+            if didCreateRequest {
+                successView
+            } else {
+                requestForm
+            }
+        }
+        .navigationTitle("Request Food")
+    }
+
+    private var successView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 52))
+                .foregroundStyle(.green)
+                .accessibilityHidden(true)
+
+            Text("Request posted")
+                .font(.title)
+                .fontWeight(.bold)
+
+            Text("Your request is now visible to helpers. It will expire automatically if it is not fulfilled.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+
+            Button("Back to Home") {
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding()
+    }
+
+    private var requestForm: some View {
         Form {
-            // First section on purpose: the student learns that posting is
-            // paused before spending effort on the fields, not after reaching
-            // a dimmed Submit at the bottom.
-            Section {
-                Text(Self.pauseNotice)
-                    .font(.subheadline)
+            if let formError {
+                Section {
+                    Text(formError.message)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("request-form-error")
+                }
+            } else if let submissionError {
+                Section {
+                    Text(submissionError.message)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("request-submission-error")
+                }
             }
 
             Section("Food request") {
@@ -93,14 +227,29 @@ struct RequestFoodView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .onChange(of: timing) { _, newTiming in
+                    guard newTiming == .later else {
+                        return
+                    }
+                    preferredPickupTime = min(
+                        max(preferredPickupTime, Date()),
+                        latestScheduledStart
+                    )
+                }
 
                 if timing == .later {
                     DatePicker(
                         "Around what time?",
                         selection: $preferredPickupTime,
-                        in: Date()...endOfToday,
+                        in: scheduledStartRange,
                         displayedComponents: [.hourAndMinute]
                     )
+
+                    if !isScheduledWindowValid {
+                        Text(RequestFoodFormError.invalidScheduledTime.message)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 Text("The student placing the order will use this name and approximate time.")
@@ -119,31 +268,168 @@ struct RequestFoodView: View {
                     .autocorrectionDisabled()
 
                 if !email.isEmpty && !isEmailValid {
-                    Text("Enter a valid email address.")
+                    Text(RequestFoodFormError.invalidEmail.message)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
-
-                TextField("Phone number, optional", text: $phoneNumber)
-                    .keyboardType(.phonePad)
             }
 
             Section {
-                // Intentionally inert until Day 3 wires this to the backend
-                // create flow. Nothing is persisted locally or remotely, so the
-                // action must not report success or dismiss the form.
-                Button("Submit Request") {}
-                    .disabled(true)
-                    .accessibilityHint(Self.pauseNotice)
-
-                // Kept alongside the disabled control as well as at the top:
-                // on a small device the two are more than a screen apart, so
-                // the dimmed button still needs its reason in place.
-                Text(Self.pauseNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Button {
+                    Task {
+                        await submit()
+                    }
+                } label: {
+                    if store.isCreating {
+                        HStack {
+                            ProgressView()
+                            Text("Posting…")
+                        }
+                    } else {
+                        Text("Submit Request")
+                    }
+                }
+                .disabled(!canAttemptSubmission || store.isCreating)
             }
         }
-        .navigationTitle("Request Food")
+    }
+
+    @MainActor
+    private func submit() async {
+        formError = nil
+        submissionError = nil
+
+        let payload: CreateRequestPayload
+        do {
+            payload = try Self.makePayload(
+                selectedDiningSpot: selectedDiningSpot,
+                foodRequest: foodRequest,
+                pickupName: pickupName,
+                email: email,
+                timing: timing,
+                preferredPickupTime: preferredPickupTime,
+                now: Date(),
+                calendar: calendar
+            )
+        } catch let validationError as RequestFoodFormError {
+            formError = validationError
+            return
+        } catch {
+            submissionError = .creationFailed
+            return
+        }
+
+        do {
+            try await store.createRequest(payload)
+            didCreateRequest = true
+        } catch {
+            submissionError = RequestCreatePresentationError.map(error)
+        }
+    }
+
+    static func makePayload(
+        selectedDiningSpot: DiningSpot?,
+        foodRequest: String,
+        pickupName: String,
+        email: String,
+        timing: RequestTiming,
+        preferredPickupTime: Date,
+        now: Date,
+        calendar: Calendar
+    ) throws -> CreateRequestPayload {
+        guard let selectedDiningSpot else {
+            throw RequestFoodFormError.missingDiningSpot
+        }
+
+        let trimmedVendor = selectedDiningSpot.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedVendor.isEmpty else {
+            throw RequestFoodFormError.missingDiningSpot
+        }
+
+        let trimmedFood = foodRequest.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedFood.isEmpty else {
+            throw RequestFoodFormError.missingFood
+        }
+
+        let trimmedPickupName = pickupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPickupName.isEmpty else {
+            throw RequestFoodFormError.missingPickupName
+        }
+
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidEmail(trimmedEmail) else {
+            throw RequestFoodFormError.invalidEmail
+        }
+
+        switch timing {
+        case .asap:
+            return CreateRequestPayload(
+                vendor: trimmedVendor,
+                food: trimmedFood,
+                pickupName: trimmedPickupName,
+                email: trimmedEmail,
+                timing: .asap,
+                windowStart: nil,
+                windowEnd: nil
+            )
+        case .later:
+            guard isValidScheduledWindow(
+                startingAt: preferredPickupTime,
+                now: now,
+                calendar: calendar
+            ),
+            let windowEnd = calendar.date(
+                byAdding: .minute,
+                value: 30,
+                to: preferredPickupTime
+            ) else {
+                throw RequestFoodFormError.invalidScheduledTime
+            }
+
+            return CreateRequestPayload(
+                vendor: trimmedVendor,
+                food: trimmedFood,
+                pickupName: trimmedPickupName,
+                email: trimmedEmail,
+                timing: .scheduled,
+                windowStart: preferredPickupTime,
+                windowEnd: windowEnd
+            )
+        }
+    }
+
+    static func endOfDay(containing date: Date, calendar: Calendar) -> Date? {
+        calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
+    }
+
+    static func latestScheduledStart(on date: Date, calendar: Calendar) -> Date? {
+        guard let endOfDay = endOfDay(containing: date, calendar: calendar) else {
+            return nil
+        }
+        return calendar.date(byAdding: .minute, value: -30, to: endOfDay)
+    }
+
+    static func isValidScheduledWindow(
+        startingAt start: Date,
+        now: Date,
+        calendar: Calendar
+    ) -> Bool {
+        guard start >= now,
+              let end = calendar.date(byAdding: .minute, value: 30, to: start),
+              end > start,
+              let dayEnd = endOfDay(containing: now, calendar: calendar) else {
+            return false
+        }
+        return end <= dayEnd
+    }
+
+    static func isValidEmail(_ value: String) -> Bool {
+        let trimmedEmail = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let atIndex = trimmedEmail.firstIndex(of: "@"),
+              atIndex != trimmedEmail.startIndex,
+              atIndex != trimmedEmail.index(before: trimmedEmail.endIndex) else {
+            return false
+        }
+        return trimmedEmail[trimmedEmail.index(after: atIndex)...].contains(".")
     }
 }

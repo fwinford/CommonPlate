@@ -57,7 +57,7 @@ describe("public actions pause configuration", () => {
   });
 });
 
-async function callGuardedRoute(message: string): Promise<{
+async function callGuardedRoute(message: string, errorCode?: string): Promise<{
   status: number;
   body: unknown;
   handler: ReturnType<typeof vi.fn>;
@@ -66,7 +66,7 @@ async function callGuardedRoute(message: string): Promise<{
   testApp.use(express.json());
 
   const handler = vi.fn((_req, res) => res.status(201).json({ created: true }));
-  testApp.post("/guarded", pausePublicAction(message), handler);
+  testApp.post("/guarded", pausePublicAction(message, errorCode), handler);
 
   const server = createServer(testApp);
   await new Promise<void>((resolve) => {
@@ -91,13 +91,21 @@ async function callGuardedRoute(message: string): Promise<{
 }
 
 describe("pausePublicAction middleware", () => {
-  it("refuses with a flat 503 and never reaches the handler while paused", async () => {
+  it("refuses create with the Day 3 envelope and never reaches the handler while paused", async () => {
     vi.stubEnv(PUBLIC_ACTIONS_PAUSED_ENV, "true");
 
-    const result = await callGuardedRoute(CREATE_UNAVAILABLE_MESSAGE);
+    const result = await callGuardedRoute(
+      CREATE_UNAVAILABLE_MESSAGE,
+      "PUBLIC_ACTIONS_PAUSED"
+    );
 
     expect(result.status).toBe(503);
-    expect(result.body).toEqual({ error: CREATE_UNAVAILABLE_MESSAGE });
+    expect(result.body).toEqual({
+      error: {
+        code: "PUBLIC_ACTIONS_PAUSED",
+        message: CREATE_UNAVAILABLE_MESSAGE,
+      },
+    });
     expect(result.handler).not.toHaveBeenCalled();
   });
 

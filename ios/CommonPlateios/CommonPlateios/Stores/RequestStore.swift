@@ -6,7 +6,7 @@
 //
 // Coordinates RequestService calls and updates local state only after
 // confirmed backend responses, per docs/week-2-integration-spec.md. Owns no
-// SwiftUI screen; no view is connected to this store as part of this task.
+// SwiftUI screen; views call its operation-specific methods.
 import Combine
 import Foundation
 
@@ -138,7 +138,7 @@ final class RequestStore: ObservableObject {
         do {
             let created = try await service.createRequest(payload)
             advanceCollectionRevision()
-            requests.append(created)
+            applyConfirmed(created)
         } catch is CancellationError {
             throw CancellationError()
         } catch {

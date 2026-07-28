@@ -539,6 +539,188 @@ final class RequestFetchingTests: XCTestCase {
         XCTAssertFalse(storeWithNewerSuccess.isRefreshingRequests)
     }
 
+    func testCreateDecodesWrappedCanonicalResponseAndMapsRequestedStatus() async throws {
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: requestObject(
+                id: "created-asap",
+                vendor: "Palladium",
+                food: "Chicken bowl",
+                pickupWindowText: "ASAP (within the next hour)",
+                status: "requested",
+                createdAt: "2026-07-28T16:00:00.123Z",
+                expiresAt: "2026-07-28T21:00:00.000Z"
+            ))
+        ))
+
+        let created = try await makeService().createRequest(makeCreatePayload())
+
+        XCTAssertEqual(created.id, "created-asap")
+        XCTAssertEqual(created.status, .open)
+        XCTAssertEqual(created.diningSpot.name, "Palladium")
+        XCTAssertEqual(created.foodDescription, "Chicken bowl")
+        XCTAssertEqual(created.pickupWindowText, "ASAP (within the next hour)")
+        XCTAssertNil(created.windowStart)
+        XCTAssertNil(created.windowEnd)
+        XCTAssertEqual(created.createdAt, try iso8601Date("2026-07-28T16:00:00.123Z"))
+        XCTAssertEqual(created.expiresAt, try iso8601Date("2026-07-28T21:00:00.000Z"))
+    }
+
+    func testCreatePreservesStructuredBackendErrorCodes() async {
+        let expectedCodes = [
+            "INVALID_REQUEST",
+            "REQUEST_LIMIT_REACHED",
+            "PUBLIC_ACTIONS_PAUSED",
+            "REQUEST_CREATION_FAILED"
+        ]
+
+        for code in expectedCodes {
+            RequestFetchingURLProtocol.enqueue(.response(
+                statusCode: 400,
+                data: Data(
+                    #"{"error":{"code":"\#(code)","message":"backend detail"}}"#.utf8
+                )
+            ))
+
+            do {
+                _ = try await makeService().createRequest(makeCreatePayload())
+                XCTFail("Expected \(code) to be rejected")
+            } catch RequestServiceError.serverError(let actualCode, let message) {
+                XCTAssertEqual(actualCode, code)
+                XCTAssertEqual(message, "backend detail")
+            } catch {
+                XCTFail("Unexpected error for \(code): \(error)")
+            }
+        }
+    }
+
+    func testDuplicateCreateIsRejectedBeforeSecondRequestStarts() async throws {
+        let store = makeStore()
+        let createGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: requestObject(id: "created-once")),
+            gate: createGate
+        ))
+
+        let firstCreate = Task {
+            try await store.createRequest(makeCreatePayload())
+        }
+        await waitUntil { createGate.isWaiting }
+
+        XCTAssertTrue(store.isCreating)
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("A duplicate create should not start")
+        } catch RequestServiceError.operationInProgress {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected duplicate-create error: \(error)")
+        }
+        XCTAssertEqual(RequestFetchingURLProtocol.capturedRequestedPaths, ["/api/request"])
+
+        createGate.open()
+        try await firstCreate.value
+
+        XCTAssertFalse(store.isCreating)
+        XCTAssertEqual(store.requests.map(\.id), ["created-once"])
+    }
+
+    func testConfirmedCreateUpsertsCanonicalRequestByBackendID() async throws {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "same-id", food: "Old food")
+        ])))
+        await store.fetchRequests()
+
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: requestObject(
+                id: "same-id",
+                food: "Canonical created food",
+                createdAt: "2026-07-28T16:00:00.000Z"
+            ))
+        ))
+        try await store.createRequest(makeCreatePayload())
+
+        XCTAssertEqual(store.requests.count, 1)
+        XCTAssertEqual(store.requests.first?.id, "same-id")
+        XCTAssertEqual(store.requests.first?.foodDescription, "Canonical created food")
+        XCTAssertEqual(
+            store.requests.first?.createdAt,
+            try iso8601Date("2026-07-28T16:00:00.000Z")
+        )
+    }
+
+    func testConfirmedCreateInvalidatesOlderFetchSnapshot() async throws {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: "already-visible")
+        ])))
+        await store.fetchRequests()
+
+        let olderRefreshGate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: listResponse([requestObject(id: "already-visible")]),
+            gate: olderRefreshGate
+        ))
+        let olderRefresh = Task {
+            await store.fetchRequests()
+        }
+        await waitUntil { olderRefreshGate.isWaiting }
+
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: requestObject(id: "newly-created"))
+        ))
+        try await store.createRequest(makeCreatePayload())
+
+        XCTAssertEqual(store.requests.map(\.id), ["already-visible", "newly-created"])
+        XCTAssertTrue(store.isRefreshingRequests)
+
+        olderRefreshGate.open()
+        await olderRefresh.value
+
+        XCTAssertEqual(store.requests.map(\.id), ["already-visible", "newly-created"])
+        XCTAssertFalse(store.isRefreshingRequests)
+        XCTAssertNil(store.refreshError)
+    }
+
+    func testAmbiguousCreateDoesNotInsertRequest() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.failure(.networkConnectionLost))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("Transport loss after submission should be ambiguous")
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected ambiguous-create error: \(error)")
+        }
+
+        XCTAssertTrue(store.requests.isEmpty)
+        XCTAssertFalse(store.isCreating)
+        if case .ambiguousCreateOutcome? = store.createError {
+            // Expected.
+        } else {
+            XCTFail("The store should publish the ambiguous outcome")
+        }
+    }
+
+    func testCreatedResponseRemainsSuccessWithoutAnEmailDeliveryField() async throws {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: requestObject(id: "created-despite-email"))
+        ))
+
+        try await store.createRequest(makeCreatePayload())
+
+        XCTAssertEqual(store.requests.map(\.id), ["created-despite-email"])
+        XCTAssertNil(store.createError)
+    }
+
     private func makeStore() -> RequestStore {
         RequestStore(service: makeService())
     }
@@ -567,6 +749,22 @@ final class RequestFetchingTests: XCTestCase {
           "claimExpiresAt": "2026-07-20T19:15:00.000Z"
         }
         """.utf8)
+    }
+
+    private func createResponse(requestObject: String) -> Data {
+        Data(#"{"request":\#(requestObject)}"#.utf8)
+    }
+
+    private func makeCreatePayload() -> CreateRequestPayload {
+        CreateRequestPayload(
+            vendor: "Palladium",
+            food: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .asap,
+            windowStart: nil,
+            windowEnd: nil
+        )
     }
 
     private func requestObject(

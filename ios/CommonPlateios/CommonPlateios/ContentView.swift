@@ -21,7 +21,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 NavigationLink("I need food") {
-                    RequestFoodView()
+                    RequestFoodView(store: requestStore)
                 }
                 .frame(maxWidth: 280)
                 .buttonStyle(.borderedProminent)

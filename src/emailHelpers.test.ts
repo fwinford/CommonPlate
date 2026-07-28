@@ -152,18 +152,18 @@ describe("requester email separation", () => {
   });
 
   it("keeps requester confirmation pickup information intact", () => {
-    const appSource = readFileSync(
-      new URL("../app.ts", import.meta.url),
+    const routeSource = readFileSync(
+      new URL("./createRequestRoute.ts", import.meta.url),
       "utf8"
     );
-    const confirmationStart = appSource.indexOf(
+    const confirmationStart = routeSource.indexOf(
       'subject: "Request Confirmed - CommonPlate"'
     );
-    const confirmationEnd = appSource.indexOf(
+    const confirmationEnd = routeSource.indexOf(
       "      });",
       confirmationStart
     );
-    const requesterConfirmation = appSource.slice(
+    const requesterConfirmation = routeSource.slice(
       confirmationStart,
       confirmationEnd
     );
@@ -171,8 +171,10 @@ describe("requester email separation", () => {
     expect(confirmationStart).toBeGreaterThan(-1);
     expect(confirmationEnd).toBeGreaterThan(confirmationStart);
     expect(requesterConfirmation).toContain(
-      "<strong>Pickup Name:</strong> ${sPickupName}"
+      "<strong>Pickup Name:</strong> ${htmlPickupName}"
     );
-    expect(requesterConfirmation).toContain("Pickup Name: ${pickupName}");
+    expect(requesterConfirmation).toContain(
+      "Pickup Name: ${request.pickupName}"
+    );
   });
 });

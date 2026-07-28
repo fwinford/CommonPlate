@@ -22,7 +22,9 @@ describe("public action routes are mounted behind the pause", () => {
   it("guards POST /api/request before the limiter and handler", () => {
     const line = registrationLine(/app\.post\("\/api\/request",[^\n]*/);
 
-    expect(line).toContain("pausePublicAction(CREATE_UNAVAILABLE_MESSAGE)");
+    expect(line).toContain(
+      "pausePublicAction(CREATE_UNAVAILABLE_MESSAGE, \"PUBLIC_ACTIONS_PAUSED\")"
+    );
     expect(line.indexOf("pausePublicAction")).toBeLessThan(
       line.indexOf("limiter")
     );

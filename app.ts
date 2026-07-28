@@ -110,7 +110,7 @@ import {
   RequestListDocument,
 } from "./src/requestListResponse.js";
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
-import { escapeHtml } from "./src/htmlEscape.js";
+import { createRequest } from "./src/createRequestRoute.js";
 import { registerFulfillmentPause } from "./src/fulfillmentRoute.js";
 import {
   CREATE_UNAVAILABLE_MESSAGE,
@@ -336,89 +336,7 @@ app.get("/api/active-subscriber-count", async (req: Request, res: Response, next
 // performs no validation side effect, sends no confirmation email, writes no
 // request, and notifies no subscribers. Nobody may post a meal that nobody
 // can fulfill while the fulfillment path is unavailable.
-app.post("/api/request", pausePublicAction(CREATE_UNAVAILABLE_MESSAGE), limiter, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    // ---- basic required fields ----
-    const { vendor, food, pickupName, pickupWindowText, email, windowStart, windowEnd } = req.body || {};
-    if (!vendor || !food || !pickupName || !pickupWindowText || !email)
-      return res.status(400).json({ error: "missing fields" });
-
-    // Enforce max 3 requests per email per calendar day (server local date)
-    try {
-      const now = new Date();
-      const startOfDay = new Date(now);
-      startOfDay.setHours(0, 0, 0, 0);
-      const todaysCount = await MealRequest.countDocuments({
-        email: email,
-        createdAt: { $gte: startOfDay },
-      });
-      if (todaysCount >= 3) {
-        return res.status(429).json({ error: 'You have reached the limit of 3 requests today' });
-      }
-    } catch (countErr) {
-      console.error('Failed to enforce daily limit:', countErr);
-      // fall through — don't block request creation on a count error
-    }
-
-    // parse structured window times when provided
-    const parsedWindowStart = windowStart ? new Date(windowStart) : undefined;
-    const parsedWindowEnd = windowEnd ? new Date(windowEnd) : undefined;
-
-    // Reserve an _id so we can reference it in the confirmation email before creating the DB record.
-    const reservedId = new mongoose.Types.ObjectId();
-
-    // ---- send confirmation email first. If the email fails, do NOT create the request.
-    try {
-      const sVendor = escapeHtml(vendor);
-      const sFood = escapeHtml(food);
-      const sPickupName = escapeHtml(pickupName);
-      const sPickupWindow = escapeHtml(pickupWindowText);
-      await resend.emails.send({
-        from: "CommonPlate <noreply@commonplatenyu.org>",
-        to: email,
-        subject: "Request Confirmed - CommonPlate",
-        html: `
-          <h2>Your meal request has been submitted!</h2>
-          <p><strong>Vendor:</strong> ${sVendor}</p>
-          <p><strong>Food:</strong> ${sFood}</p>
-          <p><strong>Pickup Name:</strong> ${sPickupName}</p>
-          <p><strong>Pickup Window:</strong> ${sPickupWindow}</p>
-          <p>We'll notify you when someone fulfills your request.</p>
-          <p>Request ID: ${reservedId.toString()}</p>
-        `,
-        text: `Your meal request has been submitted!\nVendor: ${vendor}\nFood: ${food}\nPickup Name: ${pickupName}\nPickup Window: ${pickupWindowText}\nRequest ID: ${reservedId.toString()}`,
-      });
-    } catch (emailErr) {
-      console.error("[email] Confirmation email send failed:", emailErr);
-      return res.status(502).json({ error: 'Failed to send confirmation email; request not created' });
-    }
-
-    // ---- create the document (expiration defaults to 24 hours via schema) ----
-    const doc = await MealRequest.create({
-      _id: reservedId,
-      vendor,
-      food,
-      pickupName,
-      email,
-      pickupWindowText,
-      windowStart: parsedWindowStart,
-      windowEnd: parsedWindowEnd,
-    });
-
-    // Trigger real-time notifications to subscribers and await completion (do not fail the request on notify errors)
-    try {
-      const { notifySubscribersForRequest } = await import("./src/notifySubscribers.js");
-      await notifySubscribersForRequest(doc as any);
-    } catch (err) {
-      console.error('[route] notifySubscribersForRequest failed for request', doc._id, err);
-      // notification failures are logged but do not affect the request creation response
-    }
-
-    return res.status(201).json({ id: doc._id });
-  } catch (err) {
-    next(err);
-  }
-});
+app.post("/api/request", pausePublicAction(CREATE_UNAVAILABLE_MESSAGE, "PUBLIC_ACTIONS_PAUSED"), limiter, createRequest);
 
 // api: delete a meal request (temporary for testing)
 app.delete("/api/request/:id", async (req: Request, res: Response, next: NextFunction) => {
