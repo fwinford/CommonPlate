@@ -85,6 +85,27 @@ struct RequestService {
         }
     }
 
+    /// `GET /api/public-actions`
+    ///
+    /// Returns the backend's pause decision for public mutations. Read-only
+    /// and ungated, so it is safe to call before the requester has entered
+    /// anything. This method does not decide the fail-closed policy — it
+    /// reports success or throws, and the caller treats any failure as
+    /// "posting unavailable".
+    func fetchPublicActionsPaused() async throws -> Bool {
+        do {
+            let response: PublicActionsStateDTO = try await client.send(
+                path: "/api/public-actions",
+                method: .get
+            )
+            return response.paused
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
     /// `POST /api/request`
     func createRequest(_ payload: CreateRequestPayload) async throws -> FoodRequest {
         try Task.checkCancellation()

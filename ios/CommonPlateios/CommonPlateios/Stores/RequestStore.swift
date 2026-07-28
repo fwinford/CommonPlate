@@ -22,6 +22,26 @@ struct ActiveClaim {
     let claimExpiresAt: Date
 }
 
+/// Whether `POST /api/request` may be offered to the requester, as resolved
+/// from `GET /api/public-actions`.
+///
+/// Deliberately narrow: this describes request creation only. It is not an
+/// app-wide configuration cache, and no other flow reads it. Presentation is
+/// fail-closed — `.unknown`, `.paused`, and `.unavailable` all mean the
+/// requester form must not be shown, and only `.available` may reveal it.
+/// `.paused` and `.unavailable` stay distinct because the product must not
+/// claim posting is paused when it simply could not find out.
+enum RequestCreationAvailability: Equatable {
+    /// No answer yet: the probe has not run, is running, or was cancelled.
+    case unknown
+    /// The backend reported `paused: false`.
+    case available
+    /// The backend reported `paused: true`.
+    case paused
+    /// The probe failed, returned a non-success status, or could not be decoded.
+    case unavailable
+}
+
 @MainActor
 final class RequestStore: ObservableObject {
     @Published private(set) var requests: [FoodRequest] = []
@@ -44,6 +64,10 @@ final class RequestStore: ObservableObject {
     @Published private(set) var initialFetchError: RequestServiceError?
     @Published private(set) var refreshError: RequestServiceError?
 
+    /// Fail-closed availability of request creation. Starts `.unknown` so a
+    /// screen that has not yet probed cannot reveal the requester form.
+    @Published private(set) var requestCreationAvailability: RequestCreationAvailability = .unknown
+
     @Published private(set) var isCreating = false
     @Published private(set) var createError: RequestServiceError?
 
@@ -60,6 +84,7 @@ final class RequestStore: ObservableObject {
     private let service: RequestService
     private var fetchGeneration = 0
     private var collectionRevision = 0
+    private var isCheckingRequestCreationAvailability = false
 
     init(service: RequestService) {
         self.service = service
@@ -122,6 +147,37 @@ final class RequestStore: ObservableObject {
             } else {
                 initialFetchError = Self.asServiceError(error)
             }
+        }
+    }
+
+    /// `GET /api/public-actions`. Resolves whether the requester form may be
+    /// shown at all.
+    ///
+    /// Fail-closed in both directions: the state is reset to `.unknown` before
+    /// the probe starts, so a screen can never keep showing the form on the
+    /// strength of an earlier answer, and every failure — transport, non-2xx,
+    /// or an undecodable body — resolves to `.unavailable` rather than
+    /// `.available`. A cancelled probe returns to `.unknown` instead, because
+    /// cancellation is not evidence that posting is unavailable; both states
+    /// withhold the form, so nothing is revealed either way.
+    ///
+    /// A concurrent second call is dropped rather than restarting the probe,
+    /// so a redraw cannot reset a check that is already in flight.
+    func refreshRequestCreationAvailability() async {
+        guard !isCheckingRequestCreationAvailability else {
+            return
+        }
+        isCheckingRequestCreationAvailability = true
+        requestCreationAvailability = .unknown
+        defer { isCheckingRequestCreationAvailability = false }
+
+        do {
+            let paused = try await service.fetchPublicActionsPaused()
+            requestCreationAvailability = paused ? .paused : .available
+        } catch is CancellationError {
+            requestCreationAvailability = .unknown
+        } catch {
+            requestCreationAvailability = .unavailable
         }
     }
 

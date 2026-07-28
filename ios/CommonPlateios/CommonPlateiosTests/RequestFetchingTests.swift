@@ -721,6 +721,147 @@ final class RequestFetchingTests: XCTestCase {
         XCTAssertNil(store.createError)
     }
 
+    // MARK: - Request-creation availability (GET /api/public-actions)
+
+    func testAvailabilityStartsUnknownAndProbesNothingUntilAsked() {
+        let store = makeStore()
+
+        XCTAssertEqual(store.requestCreationAvailability, .unknown)
+        XCTAssertTrue(RequestFetchingURLProtocol.capturedRequestedPaths.isEmpty)
+    }
+
+    func testUnpausedBackendMakesRequestCreationAvailable() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: publicActionsResponse(paused: false)))
+
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .available)
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/public-actions"]
+        )
+    }
+
+    /// The probe is the only request made while paused: nothing the requester
+    /// could have typed is transmitted, because no form was ever offered.
+    func testPausedBackendBlocksCreationAndSendsNoCreateRequest() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: publicActionsResponse(paused: true)))
+
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .paused)
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/public-actions"]
+        )
+        XCTAssertFalse(
+            RequestFetchingURLProtocol.capturedRequestedPaths.contains("/api/request")
+        )
+        XCTAssertFalse(store.isCreating)
+        XCTAssertNil(store.createError)
+        XCTAssertTrue(store.requests.isEmpty)
+    }
+
+    func testTransportFailureDuringAvailabilityCheckFailsClosed() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.failure(.notConnectedToInternet))
+
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .unavailable)
+        XCTAssertFalse(
+            RequestFetchingURLProtocol.capturedRequestedPaths.contains("/api/request")
+        )
+    }
+
+    func testNonSuccessStatusDuringAvailabilityCheckFailsClosed() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: Data(#"{"error":{"code":"SERVER_ERROR","message":"boom"}}"#.utf8)
+        ))
+
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .unavailable)
+    }
+
+    func testUndecodableAvailabilityBodyFailsClosed() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: Data(#"{"paused":"maybe"}"#.utf8)))
+
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .unavailable)
+    }
+
+    /// A stale `.available` answer must not survive into the next check, or a
+    /// re-entered screen would show the fields before the current probe replies.
+    func testAvailabilityResetsToUnknownWhileRecheckingAfterAnAvailableAnswer() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: publicActionsResponse(paused: false)))
+        await store.refreshRequestCreationAvailability()
+        XCTAssertEqual(store.requestCreationAvailability, .available)
+
+        let gate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: publicActionsResponse(paused: true),
+            gate: gate
+        ))
+
+        let recheck = Task { await store.refreshRequestCreationAvailability() }
+        await waitUntil { gate.isWaiting }
+
+        XCTAssertEqual(store.requestCreationAvailability, .unknown)
+
+        gate.open()
+        await recheck.value
+
+        XCTAssertEqual(store.requestCreationAvailability, .paused)
+    }
+
+    /// The submit-time backstop still classifies a `503 PUBLIC_ACTIONS_PAUSED`
+    /// for the case where the backend pauses after the screen's probe resolved.
+    func testCreateRefusedAfterAvailabilityCheckStillMapsToTheLockedPauseCopy() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: publicActionsResponse(paused: false)))
+        await store.refreshRequestCreationAvailability()
+        XCTAssertEqual(store.requestCreationAvailability, .available)
+
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 503,
+            data: Data(#"""
+            {"error":{"code":"PUBLIC_ACTIONS_PAUSED","message":"Posting meal requests is temporarily unavailable"}}
+            """#.utf8)
+        ))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("Expected a paused refusal")
+        } catch {
+            guard case .serverError(let code, _) = error as? RequestServiceError else {
+                return XCTFail("Expected a serverError, got \(error)")
+            }
+            XCTAssertEqual(code, "PUBLIC_ACTIONS_PAUSED")
+            XCTAssertEqual(
+                RequestCreatePresentationError.map(error),
+                .publicActionsPaused
+            )
+            XCTAssertEqual(
+                RequestCreatePresentationError.map(error).message,
+                "Posting a meal request is temporarily unavailable."
+            )
+        }
+
+        XCTAssertTrue(store.requests.isEmpty)
+    }
+
+    private func publicActionsResponse(paused: Bool) -> Data {
+        Data(#"{"paused":\#(paused)}"#.utf8)
+    }
+
     private func makeStore() -> RequestStore {
         RequestStore(service: makeService())
     }

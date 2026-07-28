@@ -44,9 +44,9 @@ enum RequestCreatePresentationError: Equatable {
         case .requestLimitReached:
             return "The daily request limit has been reached. Please try again tomorrow."
         case .publicActionsPaused:
-            // Locked copy, shared verbatim with the web request form
-            // (`REQUEST_POSTING_PAUSED_MESSAGE`) and asserted on both sides.
-            return "Posting a meal request is temporarily unavailable."
+            // One source for the locked sentence, so the notice shown before
+            // data entry and this submit-time backstop cannot drift apart.
+            return RequestFoodView.pauseNotice
         case .creationFailed:
             return "We couldn’t post your request. Please try again in a moment."
         case .ambiguous:
@@ -85,9 +85,34 @@ enum RequestCreatePresentationError: Equatable {
     }
 }
 
+/// What the requester screen shows. Availability is resolved before any field
+/// exists, so `.form` — the only state with editable private fields and a
+/// submit control — is reachable only from a confirmed `.available` answer.
+enum RequestFormPresentation: Equatable {
+    /// Availability is still unknown. No fields, no submit.
+    case checkingAvailability
+    /// Posting is confirmed available: the Day 3 form renders normally.
+    case form
+    /// Posting is paused, or availability could not be established. `retryable`
+    /// is false for a paused backend, where retrying changes nothing.
+    case unavailable(message: String, retryable: Bool)
+    /// A create was confirmed by the backend.
+    case success
+}
+
 /// Requester-facing request form. Temporary input and presentation state stay
 /// here; confirmed canonical collection state is owned by `RequestStore`.
 struct RequestFoodView: View {
+    /// Locked product copy. Shared verbatim with the web request form
+    /// (`REQUEST_POSTING_PAUSED_MESSAGE`) and asserted on both sides.
+    static let pauseNotice = "Posting a meal request is temporarily unavailable."
+
+    /// Shown when the pause probe itself failed. Deliberately not the locked
+    /// sentence: the app does not know that posting is paused, only that it
+    /// could not find out, and it must not claim otherwise.
+    static let availabilityUnknownNotice =
+        "We couldn’t check whether posting is available right now. Please try again in a moment."
+
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: RequestStore
 
@@ -153,13 +178,72 @@ struct RequestFoodView: View {
 
     var body: some View {
         Group {
-            if didCreateRequest {
+            switch Self.presentation(
+                availability: store.requestCreationAvailability,
+                didCreateRequest: didCreateRequest
+            ) {
+            case .success:
                 successView
-            } else {
+            case .checkingAvailability:
+                availabilityCheckView
+            case .unavailable(let message, let retryable):
+                unavailableView(message: message, retryable: retryable)
+            case .form:
                 requestForm
             }
         }
         .navigationTitle("Request Food")
+        // Runs before anything is rendered, and the pre-probe state is
+        // `.unknown`, so the form cannot flash while the answer is pending.
+        .task {
+            await store.refreshRequestCreationAvailability()
+        }
+    }
+
+    /// Fail-closed presentation rule. Only a confirmed `.available` reaches
+    /// `.form`; every other availability state withholds the fields entirely
+    /// rather than merely disabling submission.
+    static func presentation(
+        availability: RequestCreationAvailability,
+        didCreateRequest: Bool
+    ) -> RequestFormPresentation {
+        if didCreateRequest {
+            return .success
+        }
+
+        switch availability {
+        case .available:
+            return .form
+        case .unknown:
+            return .checkingAvailability
+        case .paused:
+            return .unavailable(message: pauseNotice, retryable: false)
+        case .unavailable:
+            return .unavailable(message: availabilityUnknownNotice, retryable: true)
+        }
+    }
+
+    private var availabilityCheckView: some View {
+        ProgressView("Checking availability…")
+            .padding()
+    }
+
+    private func unavailableView(message: String, retryable: Bool) -> some View {
+        VStack(spacing: 16) {
+            Text(message)
+                .multilineTextAlignment(.center)
+                .accessibilityIdentifier("request-unavailable-notice")
+
+            if retryable {
+                Button("Try Again") {
+                    Task {
+                        await store.refreshRequestCreationAvailability()
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
     }
 
     private var successView: some View {

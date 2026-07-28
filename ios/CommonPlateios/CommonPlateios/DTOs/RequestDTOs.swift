@@ -61,6 +61,12 @@ struct RequestDetailResponseDTO: Decodable {
     let request: RequestResponseDTO
 }
 
+/// `GET /api/public-actions` → `{ "paused": boolean }`. Read-only and ungated.
+/// It carries the pause decision and no configuration detail beyond it.
+struct PublicActionsStateDTO: Decodable {
+    let paused: Bool
+}
+
 // MARK: - Create
 
 /// Payload for `POST /api/request`. Must never include backend-owned

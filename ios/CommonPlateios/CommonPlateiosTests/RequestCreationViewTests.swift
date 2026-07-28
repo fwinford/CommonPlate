@@ -134,9 +134,91 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testPausedCreateUsesTheLockedSentenceSharedWithTheWebForm() {
         XCTAssertEqual(
+            RequestFoodView.pauseNotice,
+            "Posting a meal request is temporarily unavailable."
+        )
+        XCTAssertEqual(
             RequestCreatePresentationError.publicActionsPaused.message,
             "Posting a meal request is temporarily unavailable."
         )
+    }
+
+    // MARK: - Availability gating
+
+    @MainActor
+    func testAvailablePostingShowsTheForm() {
+        XCTAssertEqual(
+            RequestFoodView.presentation(availability: .available, didCreateRequest: false),
+            .form
+        )
+    }
+
+    @MainActor
+    func testPausedPostingHidesTheFormAndShowsTheLockedSentence() {
+        let presentation = RequestFoodView.presentation(
+            availability: .paused,
+            didCreateRequest: false
+        )
+
+        XCTAssertEqual(
+            presentation,
+            .unavailable(
+                message: "Posting a meal request is temporarily unavailable.",
+                retryable: false
+            )
+        )
+        XCTAssertNotEqual(presentation, .form)
+    }
+
+    /// Fail-closed: a probe that could not be completed or decoded must not
+    /// reveal the fields, and must not claim posting is paused when the app
+    /// only failed to find out.
+    @MainActor
+    func testFailedAvailabilityCheckHidesTheFormWithoutClaimingItIsPaused() {
+        let presentation = RequestFoodView.presentation(
+            availability: .unavailable,
+            didCreateRequest: false
+        )
+
+        XCTAssertEqual(
+            presentation,
+            .unavailable(
+                message: RequestFoodView.availabilityUnknownNotice,
+                retryable: true
+            )
+        )
+        XCTAssertNotEqual(presentation, .form)
+        XCTAssertNotEqual(RequestFoodView.availabilityUnknownNotice, RequestFoodView.pauseNotice)
+    }
+
+    /// No form may render while the answer is pending, so the private fields
+    /// cannot flash into view before availability is known.
+    @MainActor
+    func testUnknownAvailabilityShowsNeitherFormNorAnUnavailableClaim() {
+        XCTAssertEqual(
+            RequestFoodView.presentation(availability: .unknown, didCreateRequest: false),
+            .checkingAvailability
+        )
+    }
+
+    /// A confirmed create keeps its success screen regardless of what the
+    /// availability probe last reported.
+    @MainActor
+    func testConfirmedCreateShowsSuccessInEveryAvailabilityState() {
+        for availability in [
+            RequestCreationAvailability.unknown,
+            .available,
+            .paused,
+            .unavailable
+        ] {
+            XCTAssertEqual(
+                RequestFoodView.presentation(
+                    availability: availability,
+                    didCreateRequest: true
+                ),
+                .success
+            )
+        }
     }
 
     private var utcCalendar: Calendar {
