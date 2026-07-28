@@ -28,8 +28,10 @@ import { Request as MealRequest } from "../models/db.js";
 import { createRequest } from "./createRequestRoute.js";
 
 const requestId = new mongoose.Types.ObjectId("64b000000000000000000001");
+/** Frozen backend creation time; the route's `new Date()` resolves to this. */
 const createdAt = new Date("2026-07-28T16:00:00.000Z");
-const expiresAt = new Date("2026-07-29T16:00:00.000Z");
+/** Five hours after `createdAt`. */
+const asapExpiresAt = new Date("2026-07-28T21:00:00.000Z");
 
 function canonicalAsap(overrides: Record<string, unknown> = {}) {
   return {
@@ -72,7 +74,9 @@ function persistedDocument(input: Record<string, unknown>) {
     status: "requested",
     createdAt,
     updatedAt: createdAt,
-    expiresAt,
+    // Deliberately no `expiresAt` override: the persisted document echoes
+    // whatever the route wrote, so the response assertions prove the canonical
+    // backend expiration rather than a fixture constant.
     pickupName: input.pickupName,
     email: input.email,
     claimToken: "private-claim-token",
@@ -87,6 +91,11 @@ let createDocument: ReturnType<typeof vi.spyOn>;
 let consoleError: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
+  // Only `Date` is faked, so the route's single backend creation-time value is
+  // deterministic without a clock abstraction and without stalling timers.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(createdAt);
+
   resendSend.mockReset();
   resendSend.mockResolvedValue({ data: { id: "email-id" }, error: null });
   notifySubscribersForRequest.mockReset();
@@ -105,6 +114,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("POST /api/request validation and persistence", () => {
@@ -121,6 +131,7 @@ describe("POST /api/request validation and persistence", () => {
       pickupWindowText: "ASAP (within the next hour)",
       windowStart: undefined,
       windowEnd: undefined,
+      expiresAt: asapExpiresAt,
     });
     expect(context.status).toHaveBeenCalledWith(201);
   });
@@ -297,7 +308,7 @@ describe("POST /api/request validation and persistence", () => {
       windowEnd: "2026-07-28T18:00:00.000Z",
       status: "requested",
       createdAt: "2026-07-28T16:00:00.000Z",
-      expiresAt: "2026-07-29T16:00:00.000Z",
+      expiresAt: "2026-07-28T18:00:00.000Z",
     });
     expect(body.request).not.toHaveProperty("email");
     expect(body.request).not.toHaveProperty("pickupName");
@@ -313,7 +324,247 @@ describe("POST /api/request validation and persistence", () => {
     expect(persistedInput).not.toHaveProperty("_id");
     expect(persistedInput).not.toHaveProperty("status");
     expect(persistedInput).not.toHaveProperty("createdAt");
-    expect(persistedInput).not.toHaveProperty("expiresAt");
+    // `expiresAt` is written by the backend, unlike the fields above, which
+    // stay owned by Mongo/Mongoose.
+    expect(persistedInput.expiresAt).toEqual(
+      new Date("2026-07-28T18:00:00.000Z")
+    );
+  });
+});
+
+describe("POST /api/request backend-owned expiration", () => {
+  it("expires an ASAP request five hours after the backend creation time", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    const persistedInput = createDocument.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    const persistedExpiration = persistedInput.expiresAt as Date;
+
+    expect(persistedExpiration).toEqual(asapExpiresAt);
+    expect(
+      persistedExpiration.getTime() - createdAt.getTime()
+    ).toBe(5 * 60 * 60 * 1000);
+    expect(context.status).toHaveBeenCalledWith(201);
+  });
+
+  it("expires a scheduled request exactly at the validated windowEnd", async () => {
+    const context = routeContext(canonicalScheduled());
+
+    await createRequest(context.req, context.res);
+
+    const persistedInput = createDocument.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+
+    expect(persistedInput.expiresAt).toEqual(
+      new Date("2026-07-28T18:00:00.000Z")
+    );
+    expect(persistedInput.expiresAt).toEqual(persistedInput.windowEnd);
+  });
+
+  it("never leaves a created request on the schema's 24-hour fallback", async () => {
+    const dayAfterCreation = new Date(
+      createdAt.getTime() + 24 * 60 * 60 * 1000
+    );
+
+    for (const body of [canonicalAsap(), canonicalScheduled()]) {
+      const context = routeContext(body);
+      await createRequest(context.req, context.res);
+    }
+
+    for (const call of createDocument.mock.calls) {
+      const persistedInput = call[0] as Record<string, unknown>;
+      expect(persistedInput.expiresAt).toBeInstanceOf(Date);
+      expect(
+        (persistedInput.expiresAt as Date).getTime()
+      ).toBeLessThan(dayAfterCreation.getTime());
+    }
+  });
+
+  it("ignores a client-supplied expiration on both create shapes", async () => {
+    const clientExpiration = "2030-01-01T00:00:00.000Z";
+
+    const canonical = routeContext(
+      canonicalAsap({ expiresAt: clientExpiration })
+    );
+    await createRequest(canonical.req, canonical.res);
+
+    const legacy = routeContext({
+      vendor: "Campus Market",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email: "requester@example.edu",
+      pickupWindowText: "Legacy display",
+      expiresAt: clientExpiration,
+    });
+    await createRequest(legacy.req, legacy.res);
+
+    expect(canonical.status).toHaveBeenCalledWith(400);
+    expect(legacy.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("returns the canonical expiration in the successful public response", async () => {
+    const asap = routeContext(canonicalAsap());
+    await createRequest(asap.req, asap.res);
+
+    const scheduled = routeContext(canonicalScheduled());
+    await createRequest(scheduled.req, scheduled.res);
+
+    const asapBody = JSON.parse(
+      JSON.stringify(asap.json.mock.calls[0][0])
+    ) as Record<string, Record<string, unknown>>;
+    const scheduledBody = JSON.parse(
+      JSON.stringify(scheduled.json.mock.calls[0][0])
+    ) as Record<string, Record<string, unknown>>;
+
+    expect(asapBody.request.expiresAt).toBe("2026-07-28T21:00:00.000Z");
+    expect(scheduledBody.request.expiresAt).toBe("2026-07-28T18:00:00.000Z");
+    expect(scheduledBody.request.expiresAt).toBe(
+      scheduledBody.request.windowEnd
+    );
+  });
+
+  it("rejects a scheduled window that has already ended", async () => {
+    const context = routeContext(
+      canonicalScheduled({
+        windowStart: "2026-07-28T14:00:00.000Z",
+        windowEnd: "2026-07-28T15:00:00.000Z",
+      })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: "INVALID_REQUEST",
+        message: "Invalid request payload",
+      },
+    });
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects a scheduled window ending exactly at the backend now", async () => {
+    const context = routeContext(
+      canonicalScheduled({
+        windowStart: "2026-07-28T15:00:00.000Z",
+        windowEnd: "2026-07-28T16:00:00.000Z",
+      })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("accepts a window that has already started but has not ended", async () => {
+    const context = routeContext(
+      canonicalScheduled({
+        windowStart: "2026-07-28T15:59:00.000Z",
+        windowEnd: "2026-07-28T16:30:00.000Z",
+      })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    const persistedInput = createDocument.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(persistedInput.expiresAt).toEqual(
+      new Date("2026-07-28T16:30:00.000Z")
+    );
+  });
+
+  it("accepts a fully future window and expires it at windowEnd", async () => {
+    const context = routeContext(canonicalScheduled());
+
+    await createRequest(context.req, context.res);
+
+    const persistedInput = createDocument.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    const body = JSON.parse(
+      JSON.stringify(context.json.mock.calls[0][0])
+    ) as Record<string, Record<string, unknown>>;
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(persistedInput.expiresAt).toEqual(
+      new Date("2026-07-28T18:00:00.000Z")
+    );
+    expect(body.request.expiresAt).toBe("2026-07-28T18:00:00.000Z");
+  });
+
+  it("applies the same window rule to the legacy compatibility path", async () => {
+    function legacy(windowStart: string, windowEnd: string) {
+      return {
+        vendor: "Campus Market",
+        food: "Vegetable rice bowl",
+        pickupName: "Requester Private Name",
+        email: "requester@example.edu",
+        pickupWindowText: "Legacy display",
+        windowStart,
+        windowEnd,
+      };
+    }
+
+    const ended = routeContext(
+      legacy("2026-07-28T14:00:00.000Z", "2026-07-28T15:00:00.000Z")
+    );
+    await createRequest(ended.req, ended.res);
+
+    const endingNow = routeContext(
+      legacy("2026-07-28T15:00:00.000Z", "2026-07-28T16:00:00.000Z")
+    );
+    await createRequest(endingNow.req, endingNow.res);
+
+    expect(ended.status).toHaveBeenCalledWith(400);
+    expect(endingNow.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+
+    const stillOpen = routeContext(
+      legacy("2026-07-28T15:59:00.000Z", "2026-07-28T16:30:00.000Z")
+    );
+    await createRequest(stillOpen.req, stillOpen.res);
+
+    expect(stillOpen.status).toHaveBeenCalledWith(201);
+    const persistedInput = createDocument.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(persistedInput.expiresAt).toEqual(
+      new Date("2026-07-28T16:30:00.000Z")
+    );
+  });
+
+  it("creates nothing and expires nothing for an invalid request", async () => {
+    const context = routeContext(canonicalScheduled({ windowEnd: undefined }));
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
   });
 });
 

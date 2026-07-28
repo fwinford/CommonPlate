@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 let newRequest: typeof import("./new-request.js");
@@ -63,19 +64,48 @@ describe("web request form pause", () => {
 });
 
 describe("web request form reads the canonical create response", () => {
-  it("takes the request id from the canonical wrapper", () => {
-    expect(newRequest.submissionSuccessText("64b000000000000000000001")).toBe(
-      "Request submitted successfully! Check your email for confirmation. Request ID: 64b000000000000000000001"
+  it("confirms submission and takes the request id from the canonical wrapper", () => {
+    const message = newRequest.submissionSuccessText(
+      "64b000000000000000000001"
     );
+
+    expect(message).toBe(
+      "Request submitted successfully! Request ID: 64b000000000000000000001"
+    );
+    expect(message).toContain("submitted successfully");
+    expect(message).toContain("64b000000000000000000001");
   });
 
   it("never renders an undefined request id", () => {
     expect(newRequest.submissionSuccessText(undefined)).toBe(
-      "Request submitted successfully! Check your email for confirmation."
+      "Request submitted successfully!"
     );
     expect(newRequest.submissionSuccessText(undefined)).not.toContain(
       "undefined"
     );
+  });
+
+  /// Persistence succeeds independently of requester email delivery, so the
+  /// success message must not promise a message that may never be sent.
+  it("promises no email delivery", () => {
+    for (const message of [
+      newRequest.submissionSuccessText("64b000000000000000000001"),
+      newRequest.submissionSuccessText(undefined),
+    ]) {
+      for (const forbidden of [
+        "email",
+        "e-mail",
+        "confirmation",
+        "confirm",
+        "inbox",
+        "sent",
+        "send",
+        "receive",
+        "check your",
+      ]) {
+        expect(message.toLowerCase()).not.toContain(forbidden);
+      }
+    }
   });
 
   it("reads the message out of the structured error envelope", () => {
@@ -90,6 +120,52 @@ describe("web request form reads the canonical create response", () => {
   it("still reads the legacy flat error string", () => {
     expect(newRequest.errorMessage("missing fields")).toBe("missing fields");
     expect(newRequest.errorMessage(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * The email hint is static markup, so it is asserted against the page source
+ * rather than through the bundled script. The same sentence is asserted on
+ * iOS in `RequestCreationViewTests`; both halves must exist or the two
+ * requester forms can explain the same required field differently.
+ */
+describe("web request form explains why it needs an email", () => {
+  const pageSource = readFileSync(
+    new URL("../../public/new-request.html", import.meta.url),
+    "utf8"
+  );
+
+  function emailHint(): string {
+    const match = pageSource.match(
+      /<input[^>]*id="email"[^>]*>\s*<small>([^<]*)<\/small>/
+    );
+    expect(match, "no <small> hint found after the email input").not.toBeNull();
+    return match![1];
+  }
+
+  it("states the purpose and the privacy guarantee", () => {
+    expect(emailHint()).toBe(
+      "We use your email to coordinate updates about your request. Helpers never see it."
+    );
+  });
+
+  /// Requester confirmation is sent after persistence and cannot undo it, so
+  /// a `201` does not prove any message was sent.
+  it("guarantees no email delivery", () => {
+    const hint = emailHint().toLowerCase();
+
+    for (const forbidden of [
+      "we'll send",
+      "we will send",
+      "confirmation",
+      "confirm",
+      "notify",
+      "inbox",
+      "receipt",
+      "check your",
+    ]) {
+      expect(hint).not.toContain(forbidden);
+    }
   });
 });
 

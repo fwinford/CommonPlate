@@ -93,6 +93,35 @@ interface ValidatedCreateRequest {
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+/**
+ * How long an ASAP request stays available after backend creation.
+ *
+ * This is an absolute duration between two instants, not a calendar offset,
+ * so it is unaffected by day boundaries or DST transitions.
+ */
+const ASAP_LIFETIME_MS = 5 * 60 * 60 * 1000;
+
+/**
+ * Backend-owned expiration. The client never supplies it — both create
+ * schemas are `.strict()`, and this value is written explicitly rather than
+ * left to the schema's 24-hour `pre("save")` fallback, so the persisted
+ * expiration always matches what the requester is told.
+ *
+ * ASAP: five hours after the backend creation time.
+ * Scheduled: the validated canonical `windowEnd`, so a request cannot outlive
+ * the pickup window it was posted for. Validation guarantees that end is still
+ * in the future, so a created request is never already expired.
+ */
+function requestExpiration(
+  validated: ValidatedCreateRequest,
+  createdAt: Date
+): Date {
+  if (validated.timing === "scheduled" && validated.windowEnd) {
+    return validated.windowEnd;
+  }
+  return new Date(createdAt.getTime() + ASAP_LIFETIME_MS);
+}
+
 function errorEnvelope(code: string, message: string) {
   return { error: { code, message } };
 }
@@ -105,7 +134,24 @@ function hasTiming(value: unknown): boolean {
   );
 }
 
-function validateCreateRequest(body: unknown): ValidatedCreateRequest | null {
+/**
+ * A scheduled window must still have time left on it. Since `expiresAt` is the
+ * validated `windowEnd`, a window that has already ended would create a request
+ * that is expired the moment it is written — invisible to every helper.
+ *
+ * Only the end is checked against server time. A window that has already
+ * started but has not ended is still usable, so `windowStart` is deliberately
+ * allowed to be in the past; `windowEnd > windowStart` is enforced separately
+ * by the schemas.
+ */
+function isUsableScheduledWindow(windowEnd: Date, now: Date): boolean {
+  return windowEnd.getTime() > now.getTime();
+}
+
+function validateCreateRequest(
+  body: unknown,
+  now: Date
+): ValidatedCreateRequest | null {
   if (hasTiming(body)) {
     const result = canonicalSchema.safeParse(body);
     if (!result.success) return null;
@@ -123,6 +169,8 @@ function validateCreateRequest(body: unknown): ValidatedCreateRequest | null {
 
     const windowStart = new Date(result.data.windowStart);
     const windowEnd = new Date(result.data.windowEnd);
+    if (!isUsableScheduledWindow(windowEnd, now)) return null;
+
     return {
       vendor: result.data.vendor,
       food: result.data.food,
@@ -154,6 +202,8 @@ function validateCreateRequest(body: unknown): ValidatedCreateRequest | null {
 
   const windowStart = new Date(result.data.windowStart!);
   const windowEnd = new Date(result.data.windowEnd!);
+  if (!isUsableScheduledWindow(windowEnd, now)) return null;
+
   return {
     vendor: result.data.vendor,
     food: result.data.food,
@@ -216,7 +266,12 @@ export async function createRequest(
   req: Request,
   res: Response
 ): Promise<Response> {
-  const validated = validateCreateRequest(req.body);
+  // One backend creation-time value for the whole handler: scheduled-window
+  // validation, the daily-limit window, and the ASAP expiration are all
+  // measured from the same instant.
+  const now = new Date();
+
+  const validated = validateCreateRequest(req.body, now);
   if (!validated) {
     return res
       .status(400)
@@ -224,7 +279,6 @@ export async function createRequest(
   }
 
   try {
-    const now = new Date();
     const startOfDay = new Date(now);
     startOfDay.setHours(0, 0, 0, 0);
 
@@ -253,6 +307,7 @@ export async function createRequest(
       pickupWindowText: validated.pickupWindowText,
       windowStart: validated.windowStart,
       windowEnd: validated.windowEnd,
+      expiresAt: requestExpiration(validated, now),
     });
 
     const response = buildPublicRequestDetailResponse(

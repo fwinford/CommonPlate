@@ -63,10 +63,14 @@ export function errorMessage(error: RequestResponse['error']): string | undefine
   return typeof error === 'string' ? error : error?.message;
 }
 
+/// States only what the `201` proves: the request was validated and persisted.
+/// It deliberately does not mention email. Requester confirmation is now sent
+/// after persistence and cannot undo it (`src/createRequestRoute.ts`), so a
+/// send that fails still returns `201` — promising a message here would tell
+/// the student to wait for something that may never arrive.
 export function submissionSuccessText(requestId?: string): string {
-  const confirmation =
-    'Request submitted successfully! Check your email for confirmation.';
-  return requestId ? `${confirmation} Request ID: ${requestId}` : confirmation;
+  const submitted = 'Request submitted successfully!';
+  return requestId ? `${submitted} Request ID: ${requestId}` : submitted;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

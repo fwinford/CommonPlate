@@ -26,8 +26,8 @@ function errorMessage(error) {
   return typeof error === "string" ? error : error?.message;
 }
 function submissionSuccessText(requestId) {
-  const confirmation = "Request submitted successfully! Check your email for confirmation.";
-  return requestId ? `${confirmation} Request ID: ${requestId}` : confirmation;
+  const submitted = "Request submitted successfully!";
+  return requestId ? `${submitted} Request ID: ${requestId}` : submitted;
 }
 document.addEventListener("DOMContentLoaded", async () => {
   const form = document.getElementById("request-form");

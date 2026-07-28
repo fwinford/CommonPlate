@@ -706,6 +706,15 @@ final class RequestFetchingTests: XCTestCase {
         } else {
             XCTFail("The store should publish the ambiguous outcome")
         }
+
+        // The POST may already have succeeded server-side, so exactly one
+        // create must have been sent — no automatic retry.
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths.filter {
+                $0 == "/api/request"
+            }.count,
+            1
+        )
     }
 
     func testCreatedResponseRemainsSuccessWithoutAnEmailDeliveryField() async throws {

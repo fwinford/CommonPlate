@@ -14,7 +14,7 @@ const SystemSchema = new Schema<ISystem>({
 export const System = mongoose.models.System || mongoose.model<ISystem>("System", SystemSchema);
 // db.ts
 // Mongoose schemas for CommonPlate
-// - Request: meal requests (auto-delete in 24h)
+// - Request: meal requests (TTL-deleted at `expiresAt`; 24h only when unset)
 // - Fulfillment: log when an order is placed
 
 import mongoose, { Schema, Document, Types } from "mongoose";
@@ -100,7 +100,12 @@ const RequestSchema = new Schema<IRequest>({
   expiresAt: { type: Date, index: { expireAfterSeconds: 0 } },
 }, { timestamps: true });
 
-// Set 24h TTL if not already set
+// `expiresAt` drives TTL deletion through the index above: Mongo removes the
+// document once that timestamp passes. Product routes may set the expiration
+// explicitly — `POST /api/request` does, writing five hours out for ASAP and
+// the validated `windowEnd` for scheduled requests — and an explicit value is
+// always kept. The 24-hour value below is only a fallback for writers that
+// provide no `expiresAt`, so no request can be persisted without a TTL.
 RequestSchema.pre("save", function (next) {
   if (!this.expiresAt) {
     const dayMs = 24 * 60 * 60 * 1000;

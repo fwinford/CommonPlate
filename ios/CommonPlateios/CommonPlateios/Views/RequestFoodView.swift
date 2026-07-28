@@ -113,6 +113,37 @@ struct RequestFoodView: View {
     static let availabilityUnknownNotice =
         "We couldn’t check whether posting is available right now. Please try again in a moment."
 
+    /// Why a required email is collected, shown at the point of collection.
+    /// Shared verbatim with the web form's email hint
+    /// (`public/new-request.html`) and asserted on both sides. It states the
+    /// purpose and the privacy guarantee the API actually enforces — public
+    /// list/detail and claim responses never carry requester email — without
+    /// promising that any particular message is sent or delivered, because
+    /// persistence now succeeds independently of email delivery.
+    static let emailPurposeNotice =
+        "We use your email to coordinate updates about your request. Helpers never see it."
+
+    /// Requester-facing expiration copy. These two sentences must stay equal to
+    /// the backend contract in `src/createRequestRoute.ts`, which writes
+    /// `expiresAt` explicitly at creation: an ASAP request expires five hours
+    /// after the backend creation time, and a scheduled request expires at its
+    /// validated `windowEnd`. Neither sentence promises fulfillment.
+    static let asapExpirationNotice =
+        "Your request is now visible to helpers. It will expire in 5 hours if it is not fulfilled."
+    static let scheduledExpirationNotice =
+        "Your request is now visible to helpers. It will expire when the pickup window ends if it is not fulfilled."
+
+    /// Shown beneath the single scheduled-time control, which collects only a
+    /// start; the end is derived. The student would otherwise have no way to
+    /// know what helpers actually see.
+    static let scheduledWindowNotice =
+        "Helpers will see a 30-minute pickup window starting at this time."
+
+    /// Shown when no full 30-minute window fits before the next calendar-day
+    /// boundary. Scheduling is withheld rather than offered as an unusable
+    /// picker; tomorrow scheduling is not part of this flow.
+    static let scheduledUnavailableNotice = "Scheduled pickups reopen tomorrow."
+
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: RequestStore
 
@@ -125,6 +156,10 @@ struct RequestFoodView: View {
     @State private var formError: RequestFoodFormError?
     @State private var submissionError: RequestCreatePresentationError?
     @State private var didCreateRequest = false
+    /// The timing of the request the backend confirmed, captured at submission
+    /// so the success screen states that request's real expiration rather than
+    /// whatever the picker happens to show afterwards.
+    @State private var confirmedTiming: RequestTiming = .asap
 
     private var calendar: Calendar {
         Calendar.current
@@ -158,8 +193,16 @@ struct RequestFoodView: View {
         )
     }
 
+    private var isScheduledTimingAvailable: Bool {
+        Self.isScheduledTimingAvailable(now: Date(), calendar: calendar)
+    }
+
+    private var timingOptions: [RequestTiming] {
+        Self.availableTimingOptions(now: Date(), calendar: calendar)
+    }
+
     private var canAttemptSubmission: Bool {
-        submissionError != .ambiguous
+        Self.allowsSubmission(after: submissionError)
     }
 
     let diningSpots = [
@@ -257,9 +300,10 @@ struct RequestFoodView: View {
                 .font(.title)
                 .fontWeight(.bold)
 
-            Text("Your request is now visible to helpers. It will expire automatically if it is not fulfilled.")
+            Text(Self.expirationNotice(for: confirmedTiming))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("request-success-expiration")
 
             Button("Back to Home") {
                 dismiss()
@@ -282,6 +326,17 @@ struct RequestFoodView: View {
                     Text(submissionError.message)
                         .foregroundStyle(.red)
                         .accessibilityIdentifier("request-submission-error")
+
+                    // The ambiguous outcome disables submission permanently and
+                    // offers no retry, so without a way out the student is left
+                    // on a form they cannot use. Leaving is the only action;
+                    // the entered values stay untouched until they choose it.
+                    if Self.showsReturnHomeAction(for: submissionError) {
+                        Button("Back to Home") {
+                            dismiss()
+                        }
+                        .accessibilityIdentifier("request-ambiguous-dismiss")
+                    }
                 }
             }
 
@@ -307,8 +362,11 @@ struct RequestFoodView: View {
             Section("Pickup") {
                 TextField("Name to use for the order", text: $pickupName)
 
+                // Only the timings a full 30-minute window can still fit into
+                // are offered, so "Later" cannot be selected when it is
+                // impossible.
                 Picker("When do you need it?", selection: $timing) {
-                    ForEach(RequestTiming.allCases) { option in
+                    ForEach(timingOptions) { option in
                         Text(option.rawValue).tag(option)
                     }
                 }
@@ -323,13 +381,25 @@ struct RequestFoodView: View {
                     )
                 }
 
-                if timing == .later {
+                if !isScheduledTimingAvailable {
+                    Text(Self.scheduledUnavailableNotice)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("scheduled-unavailable-notice")
+                }
+
+                if timing == .later && isScheduledTimingAvailable {
                     DatePicker(
                         "Around what time?",
                         selection: $preferredPickupTime,
                         in: scheduledStartRange,
                         displayedComponents: [.hourAndMinute]
                     )
+
+                    Text(Self.scheduledWindowNotice)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("scheduled-window-notice")
 
                     if !isScheduledWindowValid {
                         Text(RequestFoodFormError.invalidScheduledTime.message)
@@ -342,9 +412,10 @@ struct RequestFoodView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
-                Text("Requests expire after a few hours so the list stays current.")
+                Text(Self.formExpirationNotice(for: timing))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("request-form-expiration")
             }
 
             Section("Contact") {
@@ -358,6 +429,10 @@ struct RequestFoodView: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
+
+                Text(Self.emailPurposeNotice)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -407,10 +482,68 @@ struct RequestFoodView: View {
 
         do {
             try await store.createRequest(payload)
+            confirmedTiming = timing
             didCreateRequest = true
         } catch {
             submissionError = RequestCreatePresentationError.map(error)
         }
+    }
+
+    /// Success-screen expiration copy for the timing the backend confirmed.
+    static func expirationNotice(for timing: RequestTiming) -> String {
+        switch timing {
+        case .asap:
+            return asapExpirationNotice
+        case .later:
+            return scheduledExpirationNotice
+        }
+    }
+
+    /// Pre-submission expiration copy. It replaces a vague "a few hours"
+    /// sentence that matched neither backend rule.
+    static func formExpirationNotice(for timing: RequestTiming) -> String {
+        switch timing {
+        case .asap:
+            return "An ASAP request expires 5 hours after you post it."
+        case .later:
+            return "A scheduled request expires when the pickup window ends."
+        }
+    }
+
+    /// An ambiguous create is the only state that gets an escape action. The
+    /// POST may already have succeeded, so submission stays disabled and no
+    /// retry is offered — leaving is the only safe move. Confirmed backend
+    /// rejections are recoverable in place and must not receive it.
+    static func showsReturnHomeAction(
+        for error: RequestCreatePresentationError?
+    ) -> Bool {
+        error == .ambiguous
+    }
+
+    /// Submission stays disabled after an ambiguous outcome, so a request that
+    /// may already exist cannot be posted a second time.
+    static func allowsSubmission(
+        after error: RequestCreatePresentationError?
+    ) -> Bool {
+        error != .ambiguous
+    }
+
+    /// Scheduling is possible only while a full 30-minute window still fits
+    /// before the next calendar-day boundary. Both the boundary and the
+    /// 30-minute addition come from `Calendar`, never raw second arithmetic.
+    static func isScheduledTimingAvailable(now: Date, calendar: Calendar) -> Bool {
+        isValidScheduledWindow(startingAt: now, now: now, calendar: calendar)
+    }
+
+    /// The timings the picker may offer. "Later" is withheld entirely rather
+    /// than presented as an unusable date picker.
+    static func availableTimingOptions(
+        now: Date,
+        calendar: Calendar
+    ) -> [RequestTiming] {
+        isScheduledTimingAvailable(now: now, calendar: calendar)
+            ? RequestTiming.allCases
+            : [.asap]
     }
 
     static func makePayload(
