@@ -62,6 +62,37 @@ describe("web request form pause", () => {
   });
 });
 
+describe("web request form reads the canonical create response", () => {
+  it("takes the request id from the canonical wrapper", () => {
+    expect(newRequest.submissionSuccessText("64b000000000000000000001")).toBe(
+      "Request submitted successfully! Check your email for confirmation. Request ID: 64b000000000000000000001"
+    );
+  });
+
+  it("never renders an undefined request id", () => {
+    expect(newRequest.submissionSuccessText(undefined)).toBe(
+      "Request submitted successfully! Check your email for confirmation."
+    );
+    expect(newRequest.submissionSuccessText(undefined)).not.toContain(
+      "undefined"
+    );
+  });
+
+  it("reads the message out of the structured error envelope", () => {
+    expect(
+      newRequest.errorMessage({
+        code: "REQUEST_LIMIT_REACHED",
+        message: "You have reached the daily limit of 3 meal requests",
+      })
+    ).toBe("You have reached the daily limit of 3 meal requests");
+  });
+
+  it("still reads the legacy flat error string", () => {
+    expect(newRequest.errorMessage("missing fields")).toBe("missing fields");
+    expect(newRequest.errorMessage(undefined)).toBeUndefined();
+  });
+});
+
 describe("web request form pause probe", () => {
   it("reports paused when the server says so", async () => {
     vi.stubGlobal(

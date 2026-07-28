@@ -50,9 +50,23 @@ interface RequestFormData {
   windowEnd?: string;
 }
 
+/// `POST /api/request` returns the canonical `{ request: {...} }` wrapper and
+/// the `{ error: { code, message } }` envelope. Other refusals reaching this
+/// page (the paused 503) still use the legacy flat `{ error: "message" }`, so
+/// both shapes are accepted until that migration finishes.
 interface RequestResponse {
-  id: string;
-  error?: string;
+  request?: { id: string };
+  error?: string | { code: string; message: string };
+}
+
+export function errorMessage(error: RequestResponse['error']): string | undefined {
+  return typeof error === 'string' ? error : error?.message;
+}
+
+export function submissionSuccessText(requestId?: string): string {
+  const confirmation =
+    'Request submitted successfully! Check your email for confirmation.';
+  return requestId ? `${confirmation} Request ID: ${requestId}` : confirmation;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -167,11 +181,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       const result: RequestResponse = await response.json();
 
       if (!response.ok) {
-        throw new Error(result.error || 'Failed to submit request');
+        throw new Error(errorMessage(result.error) || 'Failed to submit request');
       }
 
       // Success!
-      successMsg.textContent = `Request submitted successfully! Check your email for confirmation. Request ID: ${result.id}`;
+      successMsg.textContent = submissionSuccessText(result.request?.id);
       successMsg.style.display = 'block';
       form.reset();
 

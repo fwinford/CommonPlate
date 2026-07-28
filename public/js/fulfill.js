@@ -7,7 +7,11 @@ function formatMealRequestWindow(start, end, fallback) {
   try {
     const s = start ? new Date(start) : null;
     const e = end ? new Date(end) : null;
-    const optsDate = { month: "short", day: "numeric" };
+    const optsDate = {
+      month: "short",
+      day: "numeric",
+      timeZone: "America/New_York"
+    };
     const optsTime = { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York" };
     if (s && e) {
       const sameDay = s.toLocaleDateString("en-US", { timeZone: "America/New_York" }) === e.toLocaleDateString("en-US", { timeZone: "America/New_York" });

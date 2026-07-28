@@ -44,7 +44,9 @@ enum RequestCreatePresentationError: Equatable {
         case .requestLimitReached:
             return "The daily request limit has been reached. Please try again tomorrow."
         case .publicActionsPaused:
-            return "Request posting is temporarily unavailable."
+            // Locked copy, shared verbatim with the web request form
+            // (`REQUEST_POSTING_PAUSED_MESSAGE`) and asserted on both sides.
+            return "Posting a meal request is temporarily unavailable."
         case .creationFailed:
             return "We couldn’t post your request. Please try again in a moment."
         case .ambiguous:

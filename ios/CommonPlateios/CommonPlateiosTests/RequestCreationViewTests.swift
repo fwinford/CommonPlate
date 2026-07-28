@@ -127,6 +127,18 @@ final class RequestCreationViewTests: XCTestCase {
         )
     }
 
+    /// The web form asserts this same sentence against
+    /// `REQUEST_POSTING_PAUSED_MESSAGE` (`src/client/new-request.test.ts`).
+    /// Both halves must exist, or the two clients can drift apart unnoticed —
+    /// which is exactly what happened when the iOS pause tests were removed.
+    @MainActor
+    func testPausedCreateUsesTheLockedSentenceSharedWithTheWebForm() {
+        XCTAssertEqual(
+            RequestCreatePresentationError.publicActionsPaused.message,
+            "Posting a meal request is temporarily unavailable."
+        )
+    }
+
     private var utcCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

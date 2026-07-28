@@ -22,6 +22,13 @@ function applyRequestFormPause(root) {
     submitBtn.setAttribute("aria-disabled", "true");
   }
 }
+function errorMessage(error) {
+  return typeof error === "string" ? error : error?.message;
+}
+function submissionSuccessText(requestId) {
+  const confirmation = "Request submitted successfully! Check your email for confirmation.";
+  return requestId ? `${confirmation} Request ID: ${requestId}` : confirmation;
+}
 document.addEventListener("DOMContentLoaded", async () => {
   const form = document.getElementById("request-form");
   const submitBtn = document.getElementById("submit-btn");
@@ -109,17 +116,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.error || "Failed to submit request");
+        throw new Error(errorMessage(result.error) || "Failed to submit request");
       }
-      successMsg.textContent = `Request submitted successfully! Check your email for confirmation. Request ID: ${result.id}`;
+      successMsg.textContent = submissionSuccessText(result.request?.id);
       successMsg.style.display = "block";
       form.reset();
       setTimeout(() => {
         window.location.href = "/";
       }, 3e3);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      errorMsg.textContent = `Error: ${errorMessage}`;
+      const errorMessage2 = error instanceof Error ? error.message : "Unknown error";
+      errorMsg.textContent = `Error: ${errorMessage2}`;
       errorMsg.style.display = "block";
     } finally {
       submitBtn.disabled = false;
@@ -130,6 +137,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 export {
   REQUEST_POSTING_PAUSED_MESSAGE,
   applyRequestFormPause,
-  fetchPublicActionsPaused
+  errorMessage,
+  fetchPublicActionsPaused,
+  submissionSuccessText
 };
 //# sourceMappingURL=new-request.js.map
