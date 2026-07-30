@@ -50,6 +50,12 @@ enum RequestServiceError: Error {
     /// Store-level precondition failure: an operation of the same kind is
     /// already running, so no second service call was started.
     case operationInProgress
+    /// Store-level precondition failure: a confirmed claim on a *different*
+    /// request is already held, so this one cannot be claimed. Kept distinct
+    /// from `operationInProgress` because the helper's situation and next step
+    /// are different — nothing is in flight, they are already committed
+    /// elsewhere — and one message cannot honestly describe both.
+    case existingActiveClaim
 }
 
 /// Result of a successful claim, mirroring the backend's claim response shape.

@@ -10,15 +10,37 @@ struct ActiveRequestsView: View {
     @ObservedObject var store: RequestStore
     @State private var presentedClaimUnavailableNotice: ClaimUnavailableNotice?
 
+    /// The public list minus a request this helper is actively holding. The
+    /// backend already excludes actively claimed requests from `GET
+    /// /api/requests`; this covers the window before the next refresh, so the
+    /// same request is never both pinned above and advertised below as though
+    /// it were still open to anyone.
+    private var availableRequests: [FoodRequest] {
+        Self.availableRequests(
+            store.requests,
+            activeClaimRequestID: store.activeClaim?.requestID
+        )
+    }
+
+    static func availableRequests(
+        _ requests: [FoodRequest],
+        activeClaimRequestID: String?
+    ) -> [FoodRequest] {
+        guard let activeClaimRequestID else {
+            return requests
+        }
+        return requests.filter { $0.id != activeClaimRequestID }
+    }
+
     var body: some View {
-        Group {
-            if !store.hasSuccessfullyFetchedRequests {
-                initialState
-            } else if store.requests.isEmpty {
-                emptyState
-            } else {
-                requestsList
-            }
+        VStack(spacing: 0) {
+            // Pinned above every list state, including loading and empty: a
+            // reservation the helper is holding must stay reachable even when
+            // the public list has nothing in it.
+            activeReservationItem
+
+            listContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Active Requests")
         // The claim conflict happened on a screen that has since been
@@ -63,6 +85,65 @@ struct ActiveRequestsView: View {
             }
             await store.fetchRequests()
         }
+    }
+
+    @ViewBuilder
+    private var listContent: some View {
+        if !store.hasSuccessfullyFetchedRequests {
+            initialState
+        } else if availableRequests.isEmpty {
+            emptyState
+        } else {
+            requestsList
+        }
+    }
+
+    /// The helper's own reservation, kept reachable independently of the public
+    /// list. It reads only from confirmed store state, sends no request, and
+    /// re-enters the existing claimant flow rather than starting a second claim
+    /// — which also makes a claim that confirmed after its detail screen was
+    /// dismissed reachable instead of stranded.
+    @ViewBuilder
+    private var activeReservationItem: some View {
+        if let claim = store.activeClaim {
+            NavigationLink {
+                FulfillRequestView(request: claim.request, store: store)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Self.activeReservationTitle)
+                        .font(.headline)
+
+                    Text(claim.request.diningSpot.name)
+                        .font(.subheadline)
+
+                    Text(claim.request.foodDescription)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+
+                    Text(Self.reservedUntilText(claim.claimExpiresAt))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.secondary.opacity(0.12))
+                )
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .accessibilityIdentifier("active-reservation-item")
+        }
+    }
+
+    static let activeReservationTitle = "You’re helping with a request"
+
+    /// The authoritative backend deadline, shown without a countdown.
+    static func reservedUntilText(_ claimExpiresAt: Date) -> String {
+        "Reserved until \(claimExpiresAt.formatted(date: .omitted, time: .shortened))"
     }
 
     /// Shown until a fetch has succeeded at least once. A fetch that is
@@ -139,7 +220,7 @@ struct ActiveRequestsView: View {
             }
 
             Section("Meals needing help") {
-                ForEach(store.requests) { request in
+                ForEach(availableRequests) { request in
                     NavigationLink {
                         RequestDetailView(request: request, store: store)
                     } label: {

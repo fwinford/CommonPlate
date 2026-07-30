@@ -84,11 +84,21 @@ enum ClaimExtensionPresentationError: Equatable {
 /// the single place the pickup name is readable, and it never holds the raw
 /// claim token — extension goes through `RequestStore`, which owns the token.
 struct FulfillRequestView: View {
-    /// Locked one-time extension prompt copy.
-    static let extensionPromptTitle = "Still ordering?"
+    /// The one-time extension prompt asks about the *reservation*, not about
+    /// ordering: order submission does not exist yet, so "Still ordering?" would
+    /// ask a helper to confirm an activity this screen tells them not to start.
+    static let extensionPromptTitle = "Need more time?"
+
+    /// Extending is the only thing this prompt can do. Declining keeps the
+    /// current deadline — it is not a way to give the request back, and the
+    /// wording must not suggest otherwise.
+    static let extensionAcceptTitle = "Give me 5 more minutes"
+    static let extensionDeclineTitle = "Keep my current time"
 
     let request: FoodRequest
     @ObservedObject var store: RequestStore
+
+    @Environment(\.dismiss) private var dismiss
 
     /// The claim this screen is showing. Nil once the store ends the flow —
     /// which pops the screen — so the body never renders claimant-private data
@@ -109,9 +119,17 @@ struct FulfillRequestView: View {
                 }
 
                 Section("Reservation") {
-                    Text(Self.fulfillmentUnavailableNotice)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("fulfillment-unavailable-notice")
+                    // The one instruction on this screen that protects a real
+                    // order from being placed. It cannot read as incidental
+                    // small print next to an invitation to help.
+                    Label {
+                        Text(Self.fulfillmentUnavailableNotice)
+                            .font(.headline)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                    }
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("fulfillment-unavailable-notice")
 
                     Text(Self.reservationNotice(claimExpiresAt: claim.claimExpiresAt))
                         .font(.footnote)
@@ -147,6 +165,16 @@ struct FulfillRequestView: View {
             }
         }
         .navigationTitle("Help with Request")
+        // The claim ending — expiration, or a backend verdict that the
+        // reservation is no longer ours — closes this screen from either entry
+        // path, so claimant-private state is never left on display without a
+        // live claim behind it and the notice lands on Active Requests. Back
+        // navigation does not clear `activeClaim`, so it does not trigger this.
+        .onChange(of: store.activeClaim?.requestID) { _, activeRequestID in
+            if activeRequestID != request.id {
+                dismiss()
+            }
+        }
     }
 
     private var extensionPromptSection: some View {
@@ -166,13 +194,13 @@ struct FulfillRequestView: View {
                         Text("Adding time…")
                     }
                 } else {
-                    Text("Give me 5 more minutes")
+                    Text(Self.extensionAcceptTitle)
                 }
             }
             .disabled(store.isExtendingClaim)
             .accessibilityIdentifier("claim-extension-accept")
 
-            Button("Not right now") {
+            Button(Self.extensionDeclineTitle) {
                 store.dismissClaimExtensionPrompt()
             }
             .disabled(store.isExtendingClaim)

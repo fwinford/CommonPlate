@@ -23,8 +23,10 @@ enum ClaimPresentationError: Equatable {
     /// The claim POST may have been applied server-side without iOS seeing the
     /// credentials. Never retried automatically.
     case ambiguous
-    /// A claim is already running for this helper.
+    /// A claim on *this* request is already in flight for this helper.
     case operationInProgress
+    /// A confirmed reservation on a different request is already held.
+    case existingActiveClaim
     /// `INTERNAL_FAILURE`, transport loss before submission, or an unmapped code.
     case couldNotStart
 
@@ -45,6 +47,8 @@ enum ClaimPresentationError: Equatable {
             return "We couldn’t confirm whether you started helping with this request. Check Active Requests before trying again."
         case .operationInProgress:
             return "You’re already starting to help with this request."
+        case .existingActiveClaim:
+            return "You’re already helping with another request. Finish that one or wait for its reservation to end."
         case .couldNotStart:
             return "We couldn’t start helping with this request. Please try again in a moment."
         }
@@ -80,6 +84,8 @@ enum ClaimPresentationError: Equatable {
             return .ambiguous
         case .operationInProgress:
             return .operationInProgress
+        case .existingActiveClaim:
+            return .existingActiveClaim
         default:
             return .couldNotStart
         }
@@ -104,20 +110,13 @@ struct RequestDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    /// Navigation is driven straight from confirmed store state, so there is no
-    /// second source of truth that could open the fulfillment flow before the
-    /// backend granted the claim. Dismissing (including a back swipe) leaves the
-    /// claim flow through the store rather than stranding the claim.
-    private var isShowingClaimedFlow: Binding<Bool> {
-        Binding(
-            get: { Self.opensClaimedFlow(activeClaim: store.activeClaim, requestID: request.id) },
-            set: { isShowing in
-                if !isShowing {
-                    store.leaveActiveClaimFlow()
-                }
-            }
-        )
-    }
+    /// Whether the claimant flow is pushed from this screen. Entering is driven
+    /// only by confirmed store state (see `onChange` below), so nothing can open
+    /// the flow before the backend granted the claim. Leaving is ordinary
+    /// navigation: Back writes `false` here and touches no claim state, because
+    /// dismissing a screen is not a decision to give up a reservation the
+    /// backend still holds.
+    @State private var isPresentingClaimedFlow = false
 
     /// The single rule for entering the claimant-only flow: a confirmed claim
     /// for *this* request exists in memory. There is no loading, optimistic, or
@@ -163,45 +162,29 @@ struct RequestDetailView: View {
             }
 
             Section {
-                if let inlineClaimError {
-                    Text(inlineClaimError.message)
-                        .foregroundStyle(
-                            inlineClaimError == .publicActionsPaused
-                                ? Color.secondary
-                                : Color.red
-                        )
-                        .accessibilityIdentifier("claim-error")
-                }
-
-                // A confirmed pause and an unconfirmed claim both withdraw the
-                // action: one because the backend will refuse it, the other
-                // because the POST may already have been applied.
-                if Self.showsClaimAction(for: inlineClaimError) {
-                    Button {
-                        startClaim()
-                    } label: {
-                        if store.isClaiming(requestID: request.id) {
-                            HStack {
-                                ProgressView()
-                                Text("Starting…")
-                            }
-                        } else {
-                            Text(Self.claimActionTitle)
-                        }
-                    }
-                    // Request-scoped: an in-flight claim on another request must
-                    // not silently grey out this one. The store's own mutex
-                    // stays authoritative and refuses the duplicate with
-                    // `operationInProgress`, which explains itself in copy
-                    // rather than leaving a dead control on screen.
-                    .disabled(store.isClaiming(requestID: request.id))
-                    .accessibilityIdentifier("claim-action")
+                if Self.opensClaimedFlow(activeClaim: store.activeClaim, requestID: request.id) {
+                    // Already reserved by this helper. Offering the claim action
+                    // again would only produce a refusal, so this screen becomes
+                    // a way back into the reservation they already hold.
+                    continueHelpingLink
+                } else {
+                    claimSection
                 }
             }
         }
         .navigationTitle("Request")
-        .navigationDestination(isPresented: isShowingClaimedFlow) {
+        .navigationDestination(isPresented: $isPresentingClaimedFlow) {
             FulfillRequestView(request: request, store: store)
+        }
+        // Confirmed claim success is the only thing that opens the flow. The
+        // claim ending closes it; a manual Back leaves `activeClaim` untouched,
+        // so this does not fire and the reservation survives the navigation.
+        .onChange(of: store.activeClaim?.requestID) { _, activeRequestID in
+            if activeRequestID == request.id {
+                isPresentingClaimedFlow = true
+            } else if isPresentingClaimedFlow {
+                isPresentingClaimedFlow = false
+            }
         }
         // A stale detail screen must never outlive the backend's verdict.
         .onChange(of: store.claimUnavailableNotice?.id) { _, noticeID in
@@ -214,15 +197,110 @@ struct RequestDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private var continueHelpingLink: some View {
+        if let activeClaim = store.activeClaim {
+            NavigationLink {
+                FulfillRequestView(request: request, store: store)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Self.continueHelpingTitle)
+                    Text(ActiveRequestsView.reservedUntilText(activeClaim.claimExpiresAt))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityIdentifier("claim-continue")
+        }
+    }
+
+    @ViewBuilder
+    private var claimSection: some View {
+        let inlineClaimError = self.inlineClaimError
+
+        if let inlineClaimError {
+            Text(inlineClaimError.message)
+                .foregroundStyle(
+                    inlineClaimError == .publicActionsPaused
+                        ? Color.secondary
+                        : Color.red
+                )
+                .accessibilityIdentifier("claim-error")
+        }
+
+        // Rather than leave the helper tapping an action that can only be
+        // refused, send them to the reservation that is blocking this one.
+        if inlineClaimError == .existingActiveClaim, let activeClaim = store.activeClaim {
+            NavigationLink {
+                FulfillRequestView(request: activeClaim.request, store: store)
+            } label: {
+                Text(Self.goToActiveReservationTitle)
+            }
+            .accessibilityIdentifier("go-to-active-reservation")
+        }
+
+        // A confirmed pause and an unconfirmed claim both withdraw the
+        // action: one because the backend will refuse it, the other
+        // because the POST may already have been applied.
+        if Self.showsClaimAction(for: inlineClaimError) {
+            // Stated before the tap, because the tap is the commitment: it
+            // reserves the request immediately and there is no way to hand it
+            // back early. Deliberately vague about the length — the backend caps
+            // the reservation at the request's own expiration, so a full fifteen
+            // minutes is never guaranteed.
+            Text(Self.claimConsequenceNotice)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("claim-consequence-notice")
+
+            Button {
+                startClaim()
+            } label: {
+                if store.isClaiming(requestID: request.id) {
+                    HStack {
+                        ProgressView()
+                        Text("Starting…")
+                    }
+                } else {
+                    Text(Self.claimActionTitle)
+                }
+            }
+            // Request-scoped: an in-flight claim on another request must
+            // not silently grey out this one. The store's own mutex
+            // stays authoritative and refuses the duplicate with
+            // `operationInProgress`, which explains itself in copy
+            // rather than leaving a dead control on screen.
+            .disabled(store.isClaiming(requestID: request.id))
+            .accessibilityIdentifier("claim-action")
+        }
+    }
+
     /// Locked action title: tapping it claims immediately, with no confirmation
     /// step in between.
     static let claimActionTitle = "Help with this request"
 
+    /// What the tap actually does, said before it happens. One tap is enough —
+    /// a confirmation screen would not add understanding, but an unexplained
+    /// action would leave a helper reserving a real student's meal, and blocking
+    /// every other helper from it, without knowing they had done so.
+    static let claimConsequenceNotice =
+        "Tapping this reserves the request for you for a few minutes, so no one else starts the same order."
+
+    /// Re-entry for a request this helper already reserved.
+    static let continueHelpingTitle = "Continue helping with this request"
+
+    /// Re-entry for the *other* request whose reservation is blocking this one.
+    static let goToActiveReservationTitle = "Go to the request you’re helping with"
+
     /// The claim action is withheld only where offering it would be untruthful:
-    /// a paused backend will refuse it, and an unconfirmed claim may already
-    /// have succeeded, so a second attempt could double-book the helper.
+    /// a paused backend will refuse it, an unconfirmed claim may already have
+    /// succeeded so a second attempt could double-book the helper, and an
+    /// existing reservation elsewhere makes this claim impossible until that one
+    /// ends.
     static func showsClaimAction(for error: ClaimPresentationError?) -> Bool {
-        error != .publicActionsPaused && error != .ambiguous
+        error != .publicActionsPaused
+            && error != .ambiguous
+            && error != .existingActiveClaim
     }
 
     private func startClaim() {

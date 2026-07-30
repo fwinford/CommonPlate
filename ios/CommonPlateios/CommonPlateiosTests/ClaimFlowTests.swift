@@ -379,8 +379,10 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.claim(requestID: requestB)
             XCTFail("A second claim must not start while one is already held")
-        } catch RequestServiceError.operationInProgress {
-            // Expected: refused before any request is built.
+        } catch RequestServiceError.existingActiveClaim {
+            // Expected: refused before any request is built, and reported as
+            // "you already hold another reservation" rather than "this one is
+            // already starting".
         } catch {
             XCTFail("Unexpected second-claim error: \(error)")
         }
@@ -464,7 +466,7 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.claim(requestID: requestB)
             XCTFail("A delayed confirmed claim must still block a second claim")
-        } catch RequestServiceError.operationInProgress {
+        } catch RequestServiceError.existingActiveClaim {
             // Expected.
         } catch {
             XCTFail("Unexpected second-claim error: \(error)")
@@ -1460,6 +1462,373 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertFalse(store.isShowingClaimExtensionPrompt)
         await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
         await waitUntil { !store.isFetching }
+    }
+
+    // MARK: - Day 4 product-safety copy
+
+    /// The tap is the commitment, so its consequence has to be on screen before
+    /// it — and viewing a request still claims nothing.
+    func testClaimConsequenceIsExplainedBeforeTheTapAndViewingClaimsNothing() async throws {
+        let notice = RequestDetailView.claimConsequenceNotice
+        XCTAssertTrue(notice.localizedCaseInsensitiveContains("reserves"))
+        XCTAssertTrue(notice.localizedCaseInsensitiveContains("no one else"))
+        // Never promise a duration the backend caps at the request's own
+        // expiration, and never imply the order or the requester are involved.
+        XCTAssertFalse(notice.contains("15"))
+        XCTAssertFalse(notice.localizedCaseInsensitiveContains("notif"))
+        XCTAssertFalse(notice.localizedCaseInsensitiveContains("placed"))
+
+        // The notice ships with the action it explains.
+        XCTAssertTrue(RequestDetailView.showsClaimAction(for: nil))
+
+        // Opening a request sends nothing; only the explicit tap does.
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: requestID, status: "open")
+        ])))
+        await store.fetchRequests()
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, ["/api/requests"])
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths,
+            ["/api/requests", "/api/request/\(requestID)/claim"]
+        )
+    }
+
+    /// Onboarding must not instruct a helper to do the one thing the claimant
+    /// screen exists to forbid.
+    func testHomeScreenNoLongerTellsHelpersToPlaceAnOrder() {
+        let steps = ContentView.howItWorksSteps
+
+        XCTAssertFalse(steps.contains("3. They place the order and enter pickup details."))
+        XCTAssertTrue(steps[2].contains("Ordering is coming soon"))
+        XCTAssertTrue(steps[2].localizedCaseInsensitiveContains("reserve"))
+
+        // Any step that mentions ordering must mark it as not yet available.
+        for step in steps where step.localizedCaseInsensitiveContains("order") {
+            XCTAssertTrue(
+                step.contains("Ordering is coming soon") || step.contains("When ordering is ready"),
+                "Ordering must be described as unavailable: \(step)"
+            )
+        }
+    }
+
+    func testExtensionPromptUsesReservationFocusedCopy() {
+        XCTAssertEqual(FulfillRequestView.extensionPromptTitle, "Need more time?")
+        XCTAssertEqual(FulfillRequestView.extensionAcceptTitle, "Give me 5 more minutes")
+        XCTAssertEqual(FulfillRequestView.extensionDeclineTitle, "Keep my current time")
+
+        // The prompt asks about the reservation, not about an activity this
+        // build tells the helper not to start...
+        for copy in [
+            FulfillRequestView.extensionPromptTitle,
+            FulfillRequestView.extensionAcceptTitle,
+            FulfillRequestView.extensionDeclineTitle
+        ] {
+            XCTAssertFalse(
+                copy.localizedCaseInsensitiveContains("ordering"),
+                "Extension copy must not ask about ordering: \(copy)"
+            )
+        }
+
+        // ...and declining must not read as handing the request back, which the
+        // app cannot do.
+        for word in ["cancel", "release", "give up", "stop"] {
+            XCTAssertFalse(
+                FulfillRequestView.extensionDeclineTitle.localizedCaseInsensitiveContains(word),
+                "Declining must not suggest releasing the claim: \(word)"
+            )
+        }
+    }
+
+    /// High-priority safety copy. Locked: do not weaken.
+    func testLockedExpirationCopyIsUnchanged() {
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableTitle(for: .claimExpired),
+            "Your reservation expired."
+        )
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableDetail(for: .claimExpired),
+            "Please don’t place an order for that request. Someone else may already be helping."
+        )
+        // The locked race-conflict sentence is likewise untouched.
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableTitle(for: .alreadyClaimed),
+            "Someone else just started helping with this request."
+        )
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableTitle(for: .noLongerAvailable),
+            "This request is no longer available."
+        )
+    }
+
+    // MARK: - Pinned active reservation
+
+    func testConfirmedClaimProducesOnePinnedReservationItem() async throws {
+        let store = makeStore()
+        let claimExpiresAt = Date().addingTimeInterval(12 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimExpiresAt: claimExpiresAt)))
+        try await store.claim(requestID: requestID)
+
+        // The pinned item renders entirely from confirmed claim state, so it
+        // survives the request leaving the public collection.
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.request.id, requestID)
+        XCTAssertEqual(claim.request.diningSpot.name, "Crave NYU")
+        XCTAssertEqual(claim.request.foodDescription, "Rice bowl")
+        XCTAssertEqual(
+            ActiveRequestsView.reservedUntilText(claim.claimExpiresAt),
+            "Reserved until \(claimExpiresAt.formatted(date: .omitted, time: .shortened))"
+        )
+        XCTAssertEqual(
+            ActiveRequestsView.activeReservationTitle,
+            "You’re helping with a request"
+        )
+
+        // It is not a second copy of the public row: the claimed request is
+        // withheld from the available list while it is held.
+        XCTAssertEqual(store.requests.map(\.id), [requestID])
+        XCTAssertTrue(
+            ActiveRequestsView.availableRequests(
+                store.requests,
+                activeClaimRequestID: claim.requestID
+            ).isEmpty
+        )
+        // ...and nothing is filtered when no claim is held.
+        XCTAssertEqual(
+            ActiveRequestsView.availableRequests(store.requests, activeClaimRequestID: nil)
+                .map(\.id),
+            [requestID]
+        )
+    }
+
+    /// The claim confirms after its detail screen is gone and the backend has
+    /// stopped advertising the request. Without a pinned entry point that is a
+    /// live reservation with no route to it anywhere in the app.
+    func testDelayedClaimSuccessIsReachableThroughThePinnedItem() async throws {
+        let store = makeStore()
+        let claimGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(), gate: claimGate))
+
+        let claimTask = Task { try await store.claim(requestID: requestID) }
+        await waitUntil { claimGate.isWaiting }
+        // The detail screen is dismissed while the claim is still in flight.
+        XCTAssertNil(store.activeClaim)
+
+        claimGate.open()
+        try await claimTask.value
+
+        // The public list no longer carries the request — it is actively claimed.
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        await store.fetchRequests()
+        XCTAssertTrue(store.requests.isEmpty)
+
+        // The reservation is still reachable, with everything the pinned item
+        // needs to identify and re-enter it.
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.requestID, requestID)
+        XCTAssertEqual(claim.pickupName, "Taylor")
+        XCTAssertEqual(claim.request.foodDescription, "Rice bowl")
+    }
+
+    func testReenteringFromThePinnedItemSendsNoSecondClaim() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+
+        let pathsAfterClaim = ClaimFlowURLProtocol.capturedPaths
+        XCTAssertEqual(pathsAfterClaim, ["/api/request/\(requestID)/claim"])
+
+        // Re-entry reads existing store state. Nothing re-fetches, and the flow
+        // opens for exactly the claimed request.
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertTrue(
+            RequestDetailView.opensClaimedFlow(activeClaim: claim, requestID: requestID)
+        )
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsAfterClaim)
+
+        // A claim call on the same request would be refused before the network,
+        // so re-entry can never become a second reservation.
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("Re-entry must not start a second claim")
+        } catch RequestServiceError.operationInProgress {
+            // Expected: the same request, already held.
+        } catch {
+            XCTFail("Unexpected re-entry error: \(error)")
+        }
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsAfterClaim)
+    }
+
+    // MARK: - Non-destructive Back
+
+    /// Back is navigation, not a decision to give up a reservation the backend
+    /// still holds. Nothing in the store is cleared by leaving the screen, so
+    /// the claim, its private token, its deadline, and its lifecycle timer all
+    /// survive and the helper can re-enter. (The gesture itself is verified on
+    /// device; this pins the store behavior it now depends on.)
+    func testBackingOutOfTheClaimantFlowPreservesTheClaimAndAllowsReentry() async throws {
+        let store = makeStore()
+        let claimExpiresAt = Date().addingTimeInterval(10 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimToken: "token-for-a",
+            claimExpiresAt: claimExpiresAt
+        )))
+        try await store.claim(requestID: requestID)
+
+        let pathsAfterClaim = ClaimFlowURLProtocol.capturedPaths
+
+        // Dismissing the claimant screen performs no store mutation at all.
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.requestID, requestID)
+        XCTAssertEqual(claim.pickupName, "Taylor")
+        XCTAssertEqual(
+            claim.claimExpiresAt.timeIntervalSince1970,
+            claimExpiresAt.timeIntervalSince1970,
+            accuracy: 0.01
+        )
+        XCTAssertTrue(claim.isExtensionAvailable)
+        XCTAssertFalse(claim.hasUsedExtension)
+        // No release request exists, and Back must not invent one.
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsAfterClaim)
+
+        // Re-entry is offered for this request...
+        XCTAssertTrue(
+            RequestDetailView.opensClaimedFlow(activeClaim: store.activeClaim, requestID: requestID)
+        )
+
+        // ...and token ownership survived, so the reservation is still fully
+        // operable rather than a presentation with nothing behind it.
+        ClaimFlowURLProtocol.enqueue(.response(data: extensionResponse(
+            claimExpiresAt: claimExpiresAt.addingTimeInterval(5 * 60),
+            claimExtendedAt: Date()
+        )))
+        await store.extendActiveClaim()
+
+        let extensionRequest = try XCTUnwrap(ClaimFlowURLProtocol.capturedRequests.last)
+        XCTAssertEqual(extensionRequest.path, "/api/request/\(requestID)/claim/extend")
+        XCTAssertEqual(
+            try XCTUnwrap(extensionRequest.bodyObject)["claimToken"] as? String,
+            "token-for-a"
+        )
+        XCTAssertTrue(try XCTUnwrap(store.activeClaim).hasUsedExtension)
+    }
+
+    /// Expiration remains the thing that ends a claim — the pinned item and every
+    /// claimant-private value go with it.
+    func testExpirationClearsThePinnedItemAndPrivateClaimState() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimExpiresAt: Date().addingTimeInterval(0.2)
+        )))
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        try await store.claim(requestID: requestID)
+        XCTAssertNotNil(store.activeClaim)
+
+        await waitUntil { store.claimUnavailableNotice?.reason == .claimExpired }
+
+        // No claim means no pinned item, no pickup name, and no re-entry.
+        XCTAssertNil(store.activeClaim)
+        XCTAssertFalse(
+            RequestDetailView.opensClaimedFlow(
+                activeClaim: store.activeClaim,
+                requestID: requestID
+            )
+        )
+        XCTAssertFalse(store.isShowingClaimExtensionPrompt)
+        // Nothing is filtered out of the public list any more either.
+        XCTAssertEqual(
+            ActiveRequestsView.availableRequests(
+                store.requests,
+                activeClaimRequestID: store.activeClaim?.requestID
+            ).count,
+            store.requests.count
+        )
+
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    // MARK: - Distinct claim-blocking messages
+
+    func testInFlightDuplicateAndExistingClaimProduceDistinctMessages() async throws {
+        let requestB = "meal-b"
+        let store = makeStore()
+        let claimGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(), gate: claimGate))
+
+        // In flight on this request: nothing is held yet, the tap is simply
+        // already running.
+        let claimTask = Task { try await store.claim(requestID: requestID) }
+        await waitUntil { claimGate.isWaiting }
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("A duplicate in-flight claim must be refused")
+        } catch {
+            XCTAssertEqual(ClaimPresentationError.map(error), .operationInProgress)
+        }
+
+        claimGate.open()
+        try await claimTask.value
+
+        // A confirmed reservation elsewhere is a different situation and gets a
+        // different sentence.
+        do {
+            try await store.claim(requestID: requestB)
+            XCTFail("A claim must be refused while another reservation is held")
+        } catch {
+            XCTAssertEqual(ClaimPresentationError.map(error), .existingActiveClaim)
+        }
+
+        XCTAssertNotEqual(
+            ClaimPresentationError.operationInProgress.message,
+            ClaimPresentationError.existingActiveClaim.message
+        )
+        XCTAssertEqual(
+            ClaimPresentationError.existingActiveClaim.message,
+            "You’re already helping with another request. Finish that one or wait for its reservation to end."
+        )
+        // The action is withdrawn rather than left to be tapped into the same
+        // refusal; the screen offers a way back to the held reservation instead.
+        XCTAssertFalse(RequestDetailView.showsClaimAction(for: .existingActiveClaim))
+        XCTAssertTrue(RequestDetailView.showsClaimAction(for: .operationInProgress))
+        XCTAssertEqual(try XCTUnwrap(store.activeClaim).requestID, requestID)
+    }
+
+    // MARK: - Declining an extension
+
+    func testDecliningTheExtensionKeepsTheCurrentReservationActive() async throws {
+        let store = makeStore()
+        let claimExpiresAt = Date().addingTimeInterval(
+            RequestStore.claimExtensionPromptLead + 0.2
+        )
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimExpiresAt: claimExpiresAt,
+            requestExpiresAt: Date().addingTimeInterval(60 * 60)
+        )))
+        try await store.claim(requestID: requestID)
+        await waitUntil { store.isShowingClaimExtensionPrompt }
+
+        store.dismissClaimExtensionPrompt()
+
+        // Declining retires the prompt only. The reservation, its deadline, and
+        // its private state are untouched — it is not a release.
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.requestID, requestID)
+        XCTAssertEqual(claim.pickupName, "Taylor")
+        XCTAssertEqual(
+            claim.claimExpiresAt.timeIntervalSince1970,
+            claimExpiresAt.timeIntervalSince1970,
+            accuracy: 0.01
+        )
+        XCTAssertFalse(store.isShowingClaimExtensionPrompt)
+        XCTAssertTrue(store.hasResolvedClaimExtensionPrompt)
+        XCTAssertNil(store.claimExtensionError)
+        // Declining sends nothing at all.
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, ["/api/request/\(requestID)/claim"])
     }
 
     // MARK: - Helpers

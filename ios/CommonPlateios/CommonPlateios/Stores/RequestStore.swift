@@ -21,12 +21,24 @@ import Foundation
 /// that a full five-minute extension cannot fit and skip a prompt that could
 /// only fail.
 struct ActiveClaimPresentation {
-    let requestID: String
+    /// The confirmed public request this claim reserves, exactly as the claim
+    /// response returned it. Held so the claimant flow can be re-entered from
+    /// Active Requests after the detail screen that started the claim is gone —
+    /// including a claim that confirmed late — without re-fetching, re-claiming,
+    /// or depending on the request still appearing in the public collection.
+    let request: FoodRequest
     let pickupName: String
-    let requestExpiresAt: Date
     fileprivate(set) var claimExpiresAt: Date
     fileprivate(set) var claimExtendedAt: Date?
     fileprivate(set) var isExtensionAvailable: Bool
+
+    var requestID: String {
+        request.id
+    }
+
+    var requestExpiresAt: Date {
+        request.expiresAt
+    }
 
     /// The one permitted extension has been granted, so no further prompt or
     /// extension request may be made.
@@ -334,16 +346,23 @@ final class RequestStore: ObservableObject {
     /// second claim POST.
     ///
     /// Only one confirmed claim may be held locally at a time. A second claim
-    /// is refused the same way for the same reason: `beginActiveClaim` would
-    /// otherwise replace the first claim's presentation, its private token, and
-    /// its lifecycle timer, leaving that request reserved on the backend with
-    /// no local claimant state and no way to reach its pickup name. Week 2 has
-    /// no release endpoint, so the only safe answer is not to start the second
-    /// claim. Returning to the active request's detail still routes into its
-    /// existing flow through `activeClaim`, which needs no new claim call.
+    /// is refused because `beginActiveClaim` would otherwise replace the first
+    /// claim's presentation, its private token, and its lifecycle timer,
+    /// leaving that request reserved on the backend with no local claimant
+    /// state and no way to reach its pickup name. Week 2 has no release
+    /// endpoint, so the only safe answer is not to start the second claim.
+    /// Returning to the active request still routes into its existing flow
+    /// through `activeClaim`, which needs no new claim call.
+    ///
+    /// The refusal is reported as `existingActiveClaim` when the held claim
+    /// belongs to a *different* request, so the helper can be pointed at the
+    /// reservation they actually hold instead of being told they are already
+    /// starting to help with the request in front of them.
     func claim(requestID: String) async throws {
-        guard activeClaim == nil else {
-            throw RequestServiceError.operationInProgress
+        if let activeClaim {
+            throw activeClaim.requestID == requestID
+                ? RequestServiceError.operationInProgress
+                : RequestServiceError.existingActiveClaim
         }
         guard !isClaiming else {
             throw RequestServiceError.operationInProgress
@@ -369,9 +388,8 @@ final class RequestStore: ObservableObject {
             applyConfirmed(outcome.request)
             beginActiveClaim(
                 presentation: ActiveClaimPresentation(
-                    requestID: outcome.request.id,
+                    request: outcome.request,
                     pickupName: outcome.pickupName,
-                    requestExpiresAt: outcome.request.expiresAt,
                     claimExpiresAt: outcome.claimExpiresAt,
                     claimExtendedAt: nil,
                     isExtensionAvailable: true
@@ -483,11 +501,19 @@ final class RequestStore: ObservableObject {
         resolveClaimExtensionPrompt()
     }
 
-    /// Leaves the claim flow: the in-memory claim and its raw token are dropped,
-    /// the local timer is cancelled, and Active Requests is refreshed from
-    /// backend truth. Week 2 has no release endpoint, so this abandons the
+    /// Ends the claim locally: the in-memory claim and its raw token are
+    /// dropped, the local timer is cancelled, and Active Requests is refreshed
+    /// from backend truth. Week 2 has no release endpoint, so this abandons the
     /// reservation locally rather than returning it — the backend reopens it on
     /// its own schedule when the claim lapses.
+    ///
+    /// Deliberately **not** wired to Back or a swipe dismissal. Leaving the
+    /// claimant screen is navigation, not a decision to give up a reservation
+    /// the backend still holds; dropping the pickup name and token there left
+    /// the request blocked for every other helper with no local way back in.
+    /// This stays the seam for an explicit end-of-flow action — today only the
+    /// tests exercise it — and Day 5 fulfillment clears the same state through
+    /// `clearActiveClaim` after confirmed placement.
     func leaveActiveClaimFlow() {
         clearActiveClaim()
         refreshRequestsAfterClaimConflict()
