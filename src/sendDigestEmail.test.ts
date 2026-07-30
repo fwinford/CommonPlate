@@ -27,7 +27,7 @@ function request(
     email: privateRequesterEmail,
     requesterPhone: "555-0100",
     claimToken: "private-claim-token",
-    status: "requested",
+    status: "open",
     createdAt: new Date("2026-07-26T18:00:00.000Z"),
     updatedAt: new Date("2026-07-26T18:00:00.000Z"),
     expiresAt: new Date("2026-07-26T22:00:00.000Z"),

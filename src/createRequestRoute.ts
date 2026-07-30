@@ -299,6 +299,7 @@ export async function createRequest(
       console.error("[route] Failed to enforce request daily limit");
     }
 
+    const expiresAt = requestExpiration(validated, now);
     const document = await MealRequest.create({
       vendor: validated.vendor,
       food: validated.food,
@@ -307,7 +308,9 @@ export async function createRequest(
       pickupWindowText: validated.pickupWindowText,
       windowStart: validated.windowStart,
       windowEnd: validated.windowEnd,
-      expiresAt: requestExpiration(validated, now),
+      status: "open",
+      expiresAt,
+      deleteAt: expiresAt,
     });
 
     const response = buildPublicRequestDetailResponse(

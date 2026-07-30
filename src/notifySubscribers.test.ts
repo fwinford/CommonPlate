@@ -105,6 +105,7 @@ describe("notification dispatch when public actions are resumed", () => {
   it("resumes the real-time path past the pause guard", async () => {
     // Reaching the idempotency check proves the guard did not short-circuit;
     // reporting an existing successful send stops the rest of the flow.
+    models.Request.exists.mockResolvedValue({ _id: request()._id });
     models.SendLog.exists.mockResolvedValue({ _id: "already-sent" });
 
     await notifySubscribersForRequest(request());
@@ -121,5 +122,32 @@ describe("notification dispatch when public actions are resumed", () => {
     await notifySubscriberAboutRecentRequests(subscriber());
 
     expect(models.Request.find).toHaveBeenCalledOnce();
+    expect(models.Request.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expiresAt: { $gt: expect.any(Date) },
+        $or: [
+          { status: "open" },
+          {
+            status: "claimed",
+            claimExpiresAt: { $lte: expect.any(Date) },
+          },
+        ],
+      })
+    );
+  });
+
+  it("does not advertise a request that became actively claimed", async () => {
+    models.Request.exists.mockResolvedValue(null);
+
+    await notifySubscribersForRequest(request());
+
+    expect(models.Request.exists).toHaveBeenCalledWith(
+      expect.objectContaining({
+        _id: request()._id,
+        $or: expect.any(Array),
+      })
+    );
+    expect(models.SendLog.exists).not.toHaveBeenCalled();
+    expect(sendNewRequestAlert).not.toHaveBeenCalled();
   });
 });

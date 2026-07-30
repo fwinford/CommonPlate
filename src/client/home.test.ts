@@ -54,7 +54,7 @@ function publicRequest(
     pickupWindowText: "ASAP (within the next hour)",
     windowStart: null,
     windowEnd: null,
-    status: "requested",
+    status: "open",
     createdAt: "2026-07-26T18:00:00.000Z",
     expiresAt: "2026-07-26T22:00:00.000Z",
     ...overrides,

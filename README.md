@@ -42,8 +42,46 @@ Requests can have one fulfillment. Events and requests are automatically deleted
 
 ```bash
 npm install
+cp .env.example .env
+# Set MONGO_URI, RESEND_API_KEY, and a unique CLAIM_TOKEN_HMAC_SECRET
+# containing at least 32 UTF-8 bytes.
 npm run dev
 ```
+
+Claim and claim-extension mutations fail closed unless
+`CLAIM_TOKEN_HMAC_SECRET` is configured. The raw 32-byte base64url claim token
+is returned only to the winning claimant; MongoDB stores only its
+HMAC-SHA-256 digest. Do not reuse a sample or checked-in value as the secret.
+
+### Day 4 rollout order
+
+Pre-Day-4 request records are disposable. There is no backfill and no
+compatibility layer, so these steps must run in this order, once per database:
+
+1. **Configure the HMAC secret.** Set `CLAIM_TOKEN_HMAC_SECRET` to at least 32
+   UTF-8 bytes of unique random material. The process exits at startup without
+   it.
+2. **Clear the disposable old requests.** Anything with `status: "requested"`
+   or without `deleteAt` predates Day 4 and must go.
+
+   ```bash
+   mongosh "$MONGO_URI" --eval 'db.requests.deleteMany({})'
+   ```
+3. **Deploy and run the Day 4 code**, so every new record is written in the new
+   format (`status: "open"`, `deleteAt` set alongside `expiresAt`).
+4. **Run the TTL migration**, moving TTL responsibility from `expiresAt` to
+   private `deleteAt`.
+
+   ```bash
+   npm run migrate:request-ttl
+   ```
+5. **Reseed local UI data** where needed: `npm run seed:ui`.
+
+The migration refuses, exits non-zero, and changes no index if any request
+still has `status: "requested"` or is missing `deleteAt` — the existing
+`expiresAt` TTL protection stays intact so no record is left with no deletion
+path. Once the collection is clean it creates `request_deleteAt_ttl` first,
+then removes only single-field TTL indexes on `expiresAt`.
 
 ## public actions pause
 
@@ -60,6 +98,8 @@ When on, these are unavailable:
 
 - `POST /api/request` — refused before validation, email, database write, and
   subscriber notification
+- `POST /api/request/:id/claim` and `/api/request/:id/claim/extend` — refused
+  before token generation, rate limiting, or database work
 - `POST /api/subscribe` — refused before any subscriber is created or confirmed
 - real-time new-request alerts, post-subscription recent-request alerts, and
   the hourly digest — skipped without recording a delivery

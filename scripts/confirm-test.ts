@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
-import { Subscriber } from '../models/db.ts';
+import { Subscriber } from '../models/db.js';
 
 (async ()=>{
   try {

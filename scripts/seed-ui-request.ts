@@ -81,10 +81,12 @@ export function buildExactFixtureFilter() {
 }
 
 export function buildFixtureDocument(now = new Date()) {
+  const expiresAt = new Date(now.getTime() + FIXTURE_LIFETIME_MS);
   return {
     ...UI_FIXTURE_MARKER,
-    status: "requested" as const,
-    expiresAt: new Date(now.getTime() + FIXTURE_LIFETIME_MS),
+    status: "open" as const,
+    expiresAt,
+    deleteAt: expiresAt,
   };
 }
 

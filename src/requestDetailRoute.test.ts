@@ -17,13 +17,16 @@ function requestDocument(overrides: Record<string, unknown> = {}) {
     phone: "555-0102",
     windowStart: new Date("2026-07-26T20:00:00.000Z"),
     windowEnd: new Date("2026-07-26T21:00:00.000Z"),
-    status: "requested",
+    status: "open",
     createdAt: new Date("2026-07-26T18:00:00.000Z"),
     expiresAt: new Date("2026-07-26T22:00:00.000Z"),
     claimToken: "raw-token",
     claimTokenHash: "hashed-token",
     claimTokenDigest: "digested-token",
     claimExpiresAt: new Date("2026-07-26T19:15:00.000Z"),
+    claimedAt: new Date("2026-07-26T19:00:00.000Z"),
+    claimExtendedAt: null,
+    deleteAt: new Date("2026-07-26T22:00:00.000Z"),
     orderNumber: "private-order-number",
     eta: new Date("2026-07-26T20:30:00.000Z"),
     etaText: "30 minutes",
@@ -73,7 +76,7 @@ describe("GET /api/request/:id", () => {
         pickupWindowText: "1:00 PM – 2:00 PM",
         windowStart: new Date("2026-07-26T20:00:00.000Z"),
         windowEnd: new Date("2026-07-26T21:00:00.000Z"),
-        status: "requested",
+        status: "open",
         createdAt: new Date("2026-07-26T18:00:00.000Z"),
         expiresAt: new Date("2026-07-26T22:00:00.000Z"),
       },
@@ -105,6 +108,9 @@ describe("GET /api/request/:id", () => {
     expect(serializedResponse.request).not.toHaveProperty("claimTokenHash");
     expect(serializedResponse.request).not.toHaveProperty("claimTokenDigest");
     expect(serializedResponse.request).not.toHaveProperty("claimExpiresAt");
+    expect(serializedResponse.request).not.toHaveProperty("claimedAt");
+    expect(serializedResponse.request).not.toHaveProperty("claimExtendedAt");
+    expect(serializedResponse.request).not.toHaveProperty("deleteAt");
     expect(serializedResponse.request).not.toHaveProperty("orderNumber");
     expect(serializedResponse.request).not.toHaveProperty("eta");
     expect(serializedResponse.request).not.toHaveProperty("etaText");

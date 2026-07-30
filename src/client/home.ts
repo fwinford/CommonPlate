@@ -9,7 +9,7 @@ export interface PublicMealRequest {
   pickupWindowText: string;
   windowStart: string | null;
   windowEnd: string | null;
-  status: 'requested';
+  status: 'open';
   createdAt: string;
   expiresAt: string;
 }

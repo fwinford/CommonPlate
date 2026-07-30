@@ -14,7 +14,7 @@ const SystemSchema = new Schema<ISystem>({
 export const System = mongoose.models.System || mongoose.model<ISystem>("System", SystemSchema);
 // db.ts
 // Mongoose schemas for CommonPlate
-// - Request: meal requests (TTL-deleted at `expiresAt`; 24h only when unset)
+// - Request: meal requests (TTL-deleted at private `deleteAt`)
 // - Fulfillment: log when an order is placed
 
 import mongoose, { Schema, Document, Types } from "mongoose";
@@ -76,11 +76,16 @@ export interface IRequest extends Document {
   email: string;
   windowStart?: Date;
   windowEnd?: Date;
-  status: "requested" | "placed";
+  status: "open" | "claimed" | "placed";
   orderNumber?: string;
   eta?: Date;
   etaText?: string;
   expiresAt?: Date;
+  deleteAt?: Date;
+  claimedAt?: Date;
+  claimExpiresAt?: Date;
+  claimExtendedAt?: Date | null;
+  claimTokenDigest?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -93,23 +98,38 @@ const RequestSchema = new Schema<IRequest>({
   email: { type: String, required: true, trim: true, lowercase: true },
   windowStart: { type: Date },
   windowEnd: { type: Date },
-  status: { type: String, enum: ["requested", "placed"], default: "requested" },
+  status: {
+    type: String,
+    enum: ["open", "claimed", "placed"],
+    default: "open",
+  },
   orderNumber: { type: String, trim: true },
   eta: { type: Date },
   etaText: { type: String, trim: true },
-  expiresAt: { type: Date, index: { expireAfterSeconds: 0 } },
+  expiresAt: { type: Date },
+  deleteAt: {
+    type: Date,
+    index: {
+      expireAfterSeconds: 0,
+      name: "request_deleteAt_ttl",
+    },
+  },
+  claimedAt: { type: Date },
+  claimExpiresAt: { type: Date },
+  claimExtendedAt: { type: Date, default: null },
+  claimTokenDigest: { type: String, select: false },
 }, { timestamps: true });
 
-// `expiresAt` drives TTL deletion through the index above: Mongo removes the
-// document once that timestamp passes. Product routes may set the expiration
-// explicitly — `POST /api/request` does, writing five hours out for ASAP and
-// the validated `windowEnd` for scheduled requests — and an explicit value is
-// always kept. The 24-hour value below is only a fallback for writers that
-// provide no `expiresAt`, so no request can be persisted without a TTL.
+// `expiresAt` is the availability deadline. `deleteAt` is private retention
+// state and owns physical TTL deletion. For every unplaced request both values
+// are identical. Day 5 may move only `deleteAt` when placement is authoritative.
 RequestSchema.pre("save", function (next) {
   if (!this.expiresAt) {
     const dayMs = 24 * 60 * 60 * 1000;
     this.expiresAt = new Date(Date.now() + dayMs);
+  }
+  if (this.status !== "placed" && !this.deleteAt) {
+    this.deleteAt = this.expiresAt;
   }
   next();
 });

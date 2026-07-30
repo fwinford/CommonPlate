@@ -1,6 +1,7 @@
 import { Subscriber, System, SendLog, IRequest, ISubscriber, Request as MealRequest } from "../models/db.js";
 import { sendNewRequestAlert } from "./emailHelpers.js";
 import { isPublicActionsPaused, logPausedSkip } from "./publicActionsPause.js";
+import { buildEffectiveAvailabilityFilter } from "./requestAvailability.js";
 
 // Helper to select and notify up to 2 eligible subscribers in round-robin fashion
 export async function notifySubscribersForRequest(request: IRequest) {
@@ -13,6 +14,20 @@ export async function notifySubscribersForRequest(request: IRequest) {
   }
 
   console.log(`[notify] called for request ${request._id} vendor=${request.vendor} pickupWindow=${request.pickupWindowText}`);
+
+  // Creation and notification are separate side effects. Re-check effective
+  // availability so a fast claim cannot be advertised after it was reserved.
+  const availabilityNow = new Date();
+  const isStillAvailable = await MealRequest.exists({
+    _id: request._id,
+    ...buildEffectiveAvailabilityFilter(availabilityNow),
+  });
+  if (!isStillAvailable) {
+    console.log(
+      `[notify] request ${request._id} is no longer available, skipping`
+    );
+    return;
+  }
 
   // Idempotency: only skip if there's already a successful send for this request.
   // This allows retries when previous attempts failed while still preventing duplicate
@@ -156,9 +171,13 @@ export async function notifySubscriberAboutRecentRequests(subscriber: ISubscribe
       return;
     }
 
-    // Find recent open requests (within TTL — 24 hours)
+    // Find effectively available requests created within the last 24 hours.
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recentRequests = await MealRequest.find({ status: 'requested', createdAt: { $gte: since } }).sort({ createdAt: -1 }).limit(50).lean();
+    const availabilityNow = new Date();
+    const recentRequests = await MealRequest.find({
+      createdAt: { $gte: since },
+      ...buildEffectiveAvailabilityFilter(availabilityNow),
+    }).sort({ createdAt: -1 }).limit(50).lean();
     if (!recentRequests.length) {
       console.log(`[notify:on-confirm] no recent requests to notify ${String(subscriber._id)}`);
       return;

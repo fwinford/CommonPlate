@@ -71,6 +71,66 @@ describe("public action routes are mounted behind the pause", () => {
     );
   });
 
+  it("guards claim and extension before independent rate-limit buckets", () => {
+    const claimRoute = appSource.match(
+      /app\.post\(\s*CLAIM_ROUTE_PATH,\s*pauseDay4Mutation,\s*claimRateLimiter,\s*claimRequest\s*\)/
+    );
+    const extensionRoute = appSource.match(
+      /app\.post\(\s*CLAIM_EXTENSION_ROUTE_PATH,\s*pauseDay4Mutation,\s*claimExtensionRateLimiter,\s*extendClaim\s*\)/
+    );
+
+    expect(claimRoute).not.toBeNull();
+    expect(extensionRoute).not.toBeNull();
+    expect(claimRoute![0]).not.toContain("claimExtensionRateLimiter");
+    expect(extensionRoute![0]).not.toContain("claimRateLimiter,");
+  });
+
+  it("removes the temporary unauthenticated DELETE route", () => {
+    expect(appSource).not.toMatch(/app\.delete\(\s*["']\/api\/request\/:id/);
+    expect(appSource).not.toContain("findByIdAndDelete");
+  });
+
+  it("uses effective availability for list and digest queries", () => {
+    const listStart = appSource.indexOf(
+      'app.get("/api/requests"'
+    );
+    const listEnd = appSource.indexOf(
+      'app.get("/api/request/:id"',
+      listStart
+    );
+    const digestStart = appSource.indexOf(
+      'cron.schedule("5 * * * *"'
+    );
+    // The digest cron ends where the next cron begins. This sentinel must match
+    // the real five-field expression in app.ts — a sentinel that is never found
+    // yields -1 and silently widens the slice to almost the whole file.
+    const digestEnd = appSource.indexOf(
+      'cron.schedule("0 3 * * *"',
+      digestStart
+    );
+
+    expect(listStart).toBeGreaterThan(-1);
+    expect(listEnd).toBeGreaterThan(listStart);
+    expect(digestStart).toBeGreaterThan(-1);
+    expect(digestEnd).toBeGreaterThan(digestStart);
+
+    expect(
+      appSource.slice(listStart, listEnd)
+    ).toContain("buildEffectiveAvailabilityFilter(now)");
+    expect(
+      appSource.slice(digestStart, digestEnd)
+    ).toContain("buildEffectiveAvailabilityFilter(digestNow)");
+  });
+
+  it("uses deleteAt for backup physical cleanup", () => {
+    expect(appSource).toContain(
+      "MealRequest.deleteMany({ deleteAt: { $lte: now } })"
+    );
+    expect(appSource).not.toContain(
+      "MealRequest.deleteMany({ expiresAt: { $lte: now } })"
+    );
+  });
+
   it("checks the pause in the digest cron before any query or send", () => {
     const cronStart = appSource.indexOf('cron.schedule("5 * * * *"');
     const pauseCheck = appSource.indexOf("isPublicActionsPaused()", cronStart);

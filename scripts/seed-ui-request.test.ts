@@ -69,14 +69,15 @@ describe("UI request fixture", () => {
     expect(buildExactFixtureFilter()).toEqual(UI_FIXTURE_MARKER);
   });
 
-  it("builds a requested fixture expiring in two hours", () => {
+  it("builds an open fixture with matching availability and deletion deadlines", () => {
     const now = new Date("2026-07-26T12:00:00.000Z");
     const fixture = buildFixtureDocument(now);
 
     expect(fixture).toMatchObject({
       ...UI_FIXTURE_MARKER,
-      status: "requested",
+      status: "open",
     });
     expect(fixture.expiresAt.toISOString()).toBe("2026-07-26T14:00:00.000Z");
+    expect(fixture.deleteAt).toEqual(fixture.expiresAt);
   });
 });

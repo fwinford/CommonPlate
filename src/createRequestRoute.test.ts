@@ -71,7 +71,7 @@ function persistedDocument(input: Record<string, unknown>) {
   return {
     _id: requestId,
     ...input,
-    status: "requested",
+    status: "open",
     createdAt,
     updatedAt: createdAt,
     // Deliberately no `expiresAt` override: the persisted document echoes
@@ -131,7 +131,9 @@ describe("POST /api/request validation and persistence", () => {
       pickupWindowText: "ASAP (within the next hour)",
       windowStart: undefined,
       windowEnd: undefined,
+      status: "open",
       expiresAt: asapExpiresAt,
+      deleteAt: asapExpiresAt,
     });
     expect(context.status).toHaveBeenCalledWith(201);
   });
@@ -306,7 +308,7 @@ describe("POST /api/request validation and persistence", () => {
       pickupWindowText: "Jul 28, 1:00 PM – 2:00 PM",
       windowStart: "2026-07-28T17:00:00.000Z",
       windowEnd: "2026-07-28T18:00:00.000Z",
-      status: "requested",
+      status: "open",
       createdAt: "2026-07-28T16:00:00.000Z",
       expiresAt: "2026-07-28T18:00:00.000Z",
     });
@@ -316,19 +318,25 @@ describe("POST /api/request validation and persistence", () => {
     expect(body.request).not.toHaveProperty("claimToken");
     expect(body.request).not.toHaveProperty("orderNumber");
     expect(body.request).not.toHaveProperty("notificationStatus");
+    expect(body.request).not.toHaveProperty("deleteAt");
+    expect(body.request).not.toHaveProperty("claimedAt");
+    expect(body.request).not.toHaveProperty("claimExpiresAt");
+    expect(body.request).not.toHaveProperty("claimExtendedAt");
+    expect(body.request).not.toHaveProperty("claimTokenDigest");
 
     const persistedInput = createDocument.mock.calls[0][0] as Record<
       string,
       unknown
     >;
     expect(persistedInput).not.toHaveProperty("_id");
-    expect(persistedInput).not.toHaveProperty("status");
+    expect(persistedInput.status).toBe("open");
     expect(persistedInput).not.toHaveProperty("createdAt");
     // `expiresAt` is written by the backend, unlike the fields above, which
     // stay owned by Mongo/Mongoose.
     expect(persistedInput.expiresAt).toEqual(
       new Date("2026-07-28T18:00:00.000Z")
     );
+    expect(persistedInput.deleteAt).toEqual(persistedInput.expiresAt);
   });
 });
 

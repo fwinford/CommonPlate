@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
-import { Request as MealRequest, SendLog, Subscriber } from '../models/db.ts';
+import { Request as MealRequest, SendLog, Subscriber } from '../models/db.js';
 
 (async function(){
   try{

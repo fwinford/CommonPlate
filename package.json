@@ -5,6 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
+    "test:mongo": "node scripts/run-mongo-integration.mjs",
+    "migrate:request-ttl": "tsx scripts/migrate-request-ttl-index.ts",
     "build:client": "node build-client.mjs",
     "dev": "npm run build:client && tsx watch app.ts",
     "build": "npm run build:client && tsc",

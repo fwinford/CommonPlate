@@ -1,3 +1,5 @@
+import { isEffectivelyAvailable } from "./requestAvailability.js";
+
 export type RequestResponseDate = Date | string;
 
 export interface PublicRequestDocument {
@@ -15,6 +17,7 @@ export interface PublicRequestDocument {
 export interface RequestListDocument
   extends Omit<PublicRequestDocument, "expiresAt"> {
   expiresAt?: RequestResponseDate | null;
+  claimExpiresAt?: RequestResponseDate | null;
 }
 
 export interface PublicRequestResponse<Status extends string = string> {
@@ -29,8 +32,14 @@ export interface PublicRequestResponse<Status extends string = string> {
   expiresAt: RequestResponseDate;
 }
 
+/**
+ * The list advertises availability, not storage. An expired claim stays
+ * persisted as `claimed` — nothing here mutates it — but a request that is
+ * effectively available is advertised as `open`, so a single wire value never
+ * has to mean both "claimable" and "someone is already helping".
+ */
 export interface PublicRequestListResponse {
-  requests: PublicRequestResponse<"requested">[];
+  requests: PublicRequestResponse<"open">[];
 }
 
 export interface PublicRequestDetailResponse {
@@ -45,13 +54,10 @@ function isAvailable(
   document: RequestListDocument,
   serverNow: Date
 ): document is RequestListDocument & {
-  status: "requested";
+  status: "open" | "claimed";
   expiresAt: RequestResponseDate;
 } {
-  return (
-    document.status === "requested" &&
-    dateValue(document.expiresAt) > serverNow.getTime()
-  );
+  return isEffectivelyAvailable(document, serverNow);
 }
 
 export function mapPublicRequestFields<Status extends string>(
@@ -107,6 +113,10 @@ export function buildPublicRequestListResponse(
   });
 
   return {
-    requests: available.slice(0, 20).map(mapPublicRequestFields),
+    requests: available.slice(0, 20).map((document) => ({
+      ...mapPublicRequestFields(document),
+      // Derived from effective availability, never written back to the record.
+      status: "open" as const,
+    })),
   };
 }

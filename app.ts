@@ -15,9 +15,14 @@ cron.schedule("5 * * * *", async () => {
     }
     const { Request: MealRequest, Subscriber, SendLog } = await import("./models/db.js");
     const { sendDigestEmail } = await import("./src/sendDigestEmail.js");
+    const { buildEffectiveAvailabilityFilter } = await import("./src/requestAvailability.js");
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const digestNow = new Date();
     // Find requests created in the last hour with no SendLog
-    const recentRequests = await MealRequest.find({ createdAt: { $gte: oneHourAgo } }).lean();
+    const recentRequests = await MealRequest.find({
+      createdAt: { $gte: oneHourAgo },
+      ...buildEffectiveAvailabilityFilter(digestNow),
+    }).lean();
     const notifiedRequestIds = new Set((await SendLog.find({ requestId: { $in: recentRequests.map(r => r._id) } }).lean()).map(l => String(l.requestId)));
     const unnotified = recentRequests.filter(r => !notifiedRequestIds.has(String(r._id)));
     if (!unnotified.length) return;
@@ -113,6 +118,17 @@ import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
 import { createRequest } from "./src/createRequestRoute.js";
 import { registerFulfillmentPause } from "./src/fulfillmentRoute.js";
 import {
+  CLAIM_EXTENSION_ROUTE_PATH,
+  CLAIM_ROUTE_PATH,
+  claimExtensionRateLimiter,
+  claimRateLimiter,
+  claimRequest,
+  extendClaim,
+  pauseDay4Mutation,
+} from "./src/claimRoute.js";
+import { readClaimTokenHmacSecret } from "./src/claimToken.js";
+import { buildEffectiveAvailabilityFilter } from "./src/requestAvailability.js";
+import {
   CREATE_UNAVAILABLE_MESSAGE,
   SUBSCRIBE_UNAVAILABLE_MESSAGE,
   isPublicActionsPaused,
@@ -136,6 +152,14 @@ if (!MONGO_URI) {
 }
 if (!RESEND_API_KEY) {
   console.error("Missing required environment variable: RESEND_API_KEY");
+  process.exit(1);
+}
+try {
+  readClaimTokenHmacSecret();
+} catch (error) {
+  console.error(
+    error instanceof Error ? error.message : "Invalid claim-token HMAC secret"
+  );
   process.exit(1);
 }
 
@@ -289,10 +313,7 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
     // - ASAP items (no windowStart or windowStart within next hour) come first, ordered by createdAt ascending (earliest first)
     // - Scheduled items come after, ordered by windowStart ascending
     const now = new Date();
-    const docs = await MealRequest.find({
-      status: "requested",
-      expiresAt: { $gt: now },
-    })
+    const docs = await MealRequest.find(buildEffectiveAvailabilityFilter(now))
       .limit(200)
       .lean()
       .exec();
@@ -338,22 +359,20 @@ app.get("/api/active-subscriber-count", async (req: Request, res: Response, next
 // can fulfill while the fulfillment path is unavailable.
 app.post("/api/request", pausePublicAction(CREATE_UNAVAILABLE_MESSAGE, "PUBLIC_ACTIONS_PAUSED"), limiter, createRequest);
 
-// api: delete a meal request (temporary for testing)
-app.delete("/api/request/:id", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { id } = req.params;
-    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid request id' });
-    const result = await MealRequest.findByIdAndDelete(id);
-    
-    if (!result) {
-      return res.status(404).json({ error: "Request not found" });
-    }
-    
-    res.json({ success: true, message: "Request deleted" });
-  } catch (err) {
-    next(err);
-  }
-});
+// Claim mutations are paused before their independent rate-limit buckets and
+// before token generation or database work.
+app.post(
+  CLAIM_ROUTE_PATH,
+  pauseDay4Mutation,
+  claimRateLimiter,
+  claimRequest
+);
+app.post(
+  CLAIM_EXTENSION_ROUTE_PATH,
+  pauseDay4Mutation,
+  claimExtensionRateLimiter,
+  extendClaim
+);
 
 // Day 2 pause: this route terminates before the limiter and every legacy side
 // effect. Day 5 will remove this refusal and replace the unreachable handler
@@ -440,7 +459,7 @@ if (process.env.CRON_ENABLED === 'true') {
   cron.schedule("0 * * * *", async () => {
     try {
       const now = new Date();
-      const result = await MealRequest.deleteMany({ expiresAt: { $lte: now } });
+      const result = await MealRequest.deleteMany({ deleteAt: { $lte: now } });
       console.log(`[cron] Deleted ${result.deletedCount} expired requests at ${now.toISOString()}`);
     } catch (err) {
       console.error("[cron] Cleanup failed:", err);
