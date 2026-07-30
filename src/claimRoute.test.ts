@@ -25,6 +25,11 @@ import {
   generateClaimToken,
 } from "./claimToken.js";
 import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
+import {
+  CLAIM_MINIMUM_REMAINING_MS,
+  buildEffectiveAvailabilityFilter,
+  isEffectivelyAvailable,
+} from "./requestAvailability.js";
 
 const requestId = new mongoose.Types.ObjectId("64b000000000000000000001");
 const now = new Date("2026-07-30T16:00:00.000Z");
@@ -160,6 +165,35 @@ describe("POST /api/request/:id/claim", () => {
     expect(JSON.stringify(body.request)).not.toMatch(
       /pickupName|email|deleteAt|claimedAt|claimExtendedAt|claimTokenDigest/
     );
+  });
+
+  it("gates claiming on the same rule that gates advertising", async () => {
+    // Both sides read the identical clause from the shared helper, so a request
+    // can never be advertised in a window where claiming must refuse it.
+    const atomic = mockAtomicResult(document());
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    const [filter] = atomic.mock.calls[0] as any[];
+    expect(filter.expiresAt).toEqual(
+      buildEffectiveAvailabilityFilter(now).expiresAt
+    );
+    expect(filter.$or).toEqual(buildEffectiveAvailabilityFilter(now).$or);
+
+    const exactMinimum = new Date(
+      now.getTime() + CLAIM_MINIMUM_REMAINING_MS
+    );
+    expect(filter.expiresAt.$gte).toEqual(exactMinimum);
+    expect(
+      isEffectivelyAvailable({ status: "open", expiresAt: exactMinimum }, now)
+    ).toBe(true);
+    expect(
+      isEffectivelyAvailable(
+        { status: "open", expiresAt: new Date(exactMinimum.getTime() - 1) },
+        now
+      )
+    ).toBe(false);
   });
 
   it("returns the locked conflict and no claimant data when an active claim wins first", async () => {

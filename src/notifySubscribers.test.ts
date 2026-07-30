@@ -1,6 +1,13 @@
 import type { IRequest, ISubscriber } from "../models/db.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
+import {
+  CLAIM_MINIMUM_REMAINING_MS,
+  buildEffectiveAvailabilityFilter,
+  isEffectivelyAvailable,
+} from "./requestAvailability.js";
+
+const alertInstant = new Date("2026-07-30T16:00:00.000Z");
 
 const { models, sendNewRequestAlert } = vi.hoisted(() => {
   const collection = () => ({
@@ -124,7 +131,7 @@ describe("notification dispatch when public actions are resumed", () => {
     expect(models.Request.find).toHaveBeenCalledOnce();
     expect(models.Request.find).toHaveBeenCalledWith(
       expect.objectContaining({
-        expiresAt: { $gt: expect.any(Date) },
+        expiresAt: { $gt: expect.any(Date), $gte: expect.any(Date) },
         $or: [
           { status: "open" },
           {
@@ -133,6 +140,63 @@ describe("notification dispatch when public actions are resumed", () => {
           },
         ],
       })
+    );
+  });
+
+  it("excludes short-lived requests from real-time helper alerts", async () => {
+    // Frozen so the captured instant in the module is knowable exactly.
+    vi.useFakeTimers();
+    vi.setSystemTime(alertInstant);
+    models.Request.exists.mockResolvedValue(null);
+
+    try {
+      await notifySubscribersForRequest(request());
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(models.Request.exists).toHaveBeenCalledWith({
+      _id: request()._id,
+      ...buildEffectiveAvailabilityFilter(alertInstant),
+    });
+    // A request expiring inside the next five minutes fails that filter, so no
+    // alert is ever sent for it.
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "open",
+          expiresAt: new Date(
+            alertInstant.getTime() + CLAIM_MINIMUM_REMAINING_MS - 1
+          ),
+        },
+        alertInstant
+      )
+    ).toBe(false);
+    expect(sendNewRequestAlert).not.toHaveBeenCalled();
+  });
+
+  it("excludes short-lived requests from recent-request notification queries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(alertInstant);
+    models.Request.find.mockReturnValue({
+      sort: () => ({ limit: () => ({ lean: () => Promise.resolve([]) }) }),
+    });
+
+    try {
+      await notifySubscriberAboutRecentRequests(subscriber());
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const filter = models.Request.find.mock.calls[0][0];
+    expect(filter).toEqual({
+      createdAt: {
+        $gte: new Date(alertInstant.getTime() - 24 * 60 * 60 * 1000),
+      },
+      ...buildEffectiveAvailabilityFilter(alertInstant),
+    });
+    expect(filter.expiresAt.$gte).toEqual(
+      new Date(alertInstant.getTime() + CLAIM_MINIMUM_REMAINING_MS)
     );
   });
 

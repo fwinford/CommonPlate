@@ -15,7 +15,10 @@ import {
 } from "./claimToken.js";
 import { day4Error, sendDay4Error } from "./day4Errors.js";
 import { isPublicActionsPaused } from "./publicActionsPause.js";
-import { CLAIM_MINIMUM_REMAINING_MS } from "./requestAvailability.js";
+import {
+  buildMinimumRemainingTimeFilter,
+  hasMinimumRemainingTime,
+} from "./requestAvailability.js";
 
 export const CLAIM_ROUTE_PATH = "/api/request/:id/claim";
 export const CLAIM_EXTENSION_ROUTE_PATH = "/api/request/:id/claim/extend";
@@ -79,10 +82,7 @@ async function explainClaimFailure(
       "This request is no longer available."
     );
   }
-  if (
-    document.expiresAt!.getTime() <
-    now.getTime() + CLAIM_MINIMUM_REMAINING_MS
-  ) {
+  if (!hasMinimumRemainingTime(document.expiresAt, now)) {
     return sendDay4Error(
       res,
       409,
@@ -128,9 +128,6 @@ export async function claimRequest(
   // This one captured instant drives the eligibility filter, all persisted
   // claim timestamps, failure classification, and the returned expiration.
   const now = new Date();
-  const minimumExpiration = new Date(
-    now.getTime() + CLAIM_MINIMUM_REMAINING_MS
-  );
   const maximumClaimExpiration = new Date(now.getTime() + CLAIM_DURATION_MS);
 
   try {
@@ -142,7 +139,7 @@ export async function claimRequest(
       {
         _id: id,
         status: { $ne: "placed" },
-        expiresAt: { $gt: now, $gte: minimumExpiration },
+        expiresAt: buildMinimumRemainingTimeFilter(now),
         $or: [
           { status: "open" },
           {

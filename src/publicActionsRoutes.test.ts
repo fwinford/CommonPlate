@@ -114,12 +114,18 @@ describe("public action routes are mounted behind the pause", () => {
     expect(digestStart).toBeGreaterThan(-1);
     expect(digestEnd).toBeGreaterThan(digestStart);
 
-    expect(
-      appSource.slice(listStart, listEnd)
-    ).toContain("buildEffectiveAvailabilityFilter(now)");
-    expect(
-      appSource.slice(digestStart, digestEnd)
-    ).toContain("buildEffectiveAvailabilityFilter(digestNow)");
+    const listSource = appSource.slice(listStart, listEnd);
+    const digestSource = appSource.slice(digestStart, digestEnd);
+
+    expect(listSource).toContain("buildEffectiveAvailabilityFilter(now)");
+    expect(digestSource).toContain(
+      "buildEffectiveAvailabilityFilter(digestNow)"
+    );
+    // Neither path may hand-roll an expiration bound: the five-minute minimum
+    // that gates claiming lives in the shared helper, and a local `expiresAt`
+    // clause here is exactly how the two would drift back apart.
+    expect(listSource).not.toMatch(/expiresAt:\s*\{/);
+    expect(digestSource).not.toMatch(/expiresAt:\s*\{/);
   });
 
   it("uses deleteAt for backup physical cleanup", () => {

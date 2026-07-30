@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { CLAIM_MINIMUM_REMAINING_MS } from "./requestAvailability.js";
 import { buildPublicRequestListResponse } from "./requestListResponse.js";
 
 const serverNow = new Date("2026-07-26T19:00:00.000Z");
+const exactlyClaimable = new Date(
+  serverNow.getTime() + CLAIM_MINIMUM_REMAINING_MS
+);
+const justUnderClaimable = new Date(exactlyClaimable.getTime() - 1);
 
 function requestDocument(overrides: Record<string, unknown> = {}) {
   return {
@@ -150,6 +155,59 @@ describe("buildPublicRequestListResponse", () => {
     );
 
     expect(response).toEqual({ requests: [] });
+  });
+
+  it("advertises an open request with exactly five minutes remaining", () => {
+    // The last advertised instant is also the last claimable instant: the list
+    // must not stop short of what POST /claim would still accept.
+    const response = buildPublicRequestListResponse(
+      [requestDocument({ expiresAt: exactlyClaimable })],
+      serverNow
+    );
+
+    expect(response.requests).toHaveLength(1);
+    expect(response.requests[0].status).toBe("open");
+  });
+
+  it("excludes a request with less than five full minutes remaining", () => {
+    const response = buildPublicRequestListResponse(
+      [requestDocument({ expiresAt: justUnderClaimable })],
+      serverNow
+    );
+
+    // Advertising it would promise help that claiming answers with
+    // REQUEST_INSUFFICIENT_TIME.
+    expect(response).toEqual({ requests: [] });
+  });
+
+  it("reopens an expired claim that still has five minutes left", () => {
+    const document = requestDocument({
+      status: "claimed",
+      expiresAt: exactlyClaimable,
+      claimExpiresAt: new Date("2026-07-26T18:45:00.000Z"),
+    });
+
+    const response = buildPublicRequestListResponse([document], serverNow);
+
+    expect(response.requests).toHaveLength(1);
+    expect(response.requests[0].status).toBe("open");
+    expect(document.status).toBe("claimed");
+  });
+
+  it("does not reopen an expired claim with too little time left", () => {
+    const document = requestDocument({
+      status: "claimed",
+      expiresAt: justUnderClaimable,
+      claimExpiresAt: new Date("2026-07-26T18:45:00.000Z"),
+    });
+
+    const response = buildPublicRequestListResponse([document], serverNow);
+
+    expect(response).toEqual({ requests: [] });
+    expect(document.status).toBe("claimed");
+    expect(document.claimExpiresAt).toEqual(
+      new Date("2026-07-26T18:45:00.000Z")
+    );
   });
 
   it("fails closed when an open document has no valid expiration", () => {
