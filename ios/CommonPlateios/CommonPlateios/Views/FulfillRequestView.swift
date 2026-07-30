@@ -6,120 +6,188 @@
 //
 import SwiftUI
 
-struct FulfillRequestView: View {
-    let request: LocalSimulatedRequest
-    let onFulfill: (LocalSimulatedRequest) -> Void
+/// Copy for a failed extension attempt. The reservation itself is never
+/// shortened by a failure, and none of these states offer an automatic retry —
+/// only one extension is ever granted, so a second attempt could only be
+/// refused or double-counted.
+enum ClaimExtensionPresentationError: Equatable {
+    /// `CLAIM_EXTENSION_INSUFFICIENT_TIME` — a full five minutes does not fit
+    /// before the request's own expiration. Partial extensions do not exist.
+    case insufficientTime
+    /// `CLAIM_EXTENSION_ALREADY_USED`.
+    case alreadyUsed
+    /// `PUBLIC_ACTIONS_PAUSED`.
+    case publicActionsPaused
+    /// `RATE_LIMITED`.
+    case rateLimited
+    /// The extension may or may not have been applied server-side, so the
+    /// earlier known deadline is kept.
+    case ambiguous
+    /// `INTERNAL_FAILURE`, transport loss before submission, or an unmapped code.
+    case couldNotExtend
 
-    @State private var helperEmail = ""
-    @State private var helperPhoneNumber = ""
-    @State private var orderConfirmation = ""
-    @State private var pickupTimeOrETA = ""
-    @State private var noteToRequester = ""
-    @State private var showSuccessMessage = false
-    @State private var hasTriedToSubmit = false
-
-    private var isHelperEmailValid: Bool {
-        let trimmedEmail = helperEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedEmail.contains("@") && trimmedEmail.contains(".")
+    var message: String {
+        switch self {
+        case .insufficientTime:
+            return "There isn’t enough time left on this request for five more minutes."
+        case .alreadyUsed:
+            return "This reservation has already been extended once."
+        case .publicActionsPaused:
+            return RequestDetailView.helperPauseNotice
+        case .rateLimited:
+            return "Too many attempts. Please wait a moment and try again."
+        case .ambiguous:
+            return "We couldn’t confirm the extra time. Work from the reservation time shown above."
+        case .couldNotExtend:
+            return "We couldn’t add more time. Work from the reservation time shown above."
+        }
     }
 
-    private var canSubmit: Bool {
-        isHelperEmailValid &&
-        !orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !pickupTimeOrETA.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// Returns `nil` for failures the store resolves by ending the flow
+    /// entirely (expired claim, invalid token, request gone) — those are
+    /// announced on Active Requests, not on a screen that is being dismissed.
+    static func map(_ error: RequestServiceError?) -> ClaimExtensionPresentationError? {
+        guard let error else {
+            return nil
+        }
+
+        switch error {
+        case .serverError(let code, _):
+            switch code {
+            case ClaimErrorCode.claimExtensionInsufficientTime:
+                return .insufficientTime
+            case ClaimErrorCode.claimExtensionAlreadyUsed:
+                return .alreadyUsed
+            case ClaimErrorCode.publicActionsPaused:
+                return .publicActionsPaused
+            case ClaimErrorCode.rateLimited:
+                return .rateLimited
+            case ClaimErrorCode.claimExpired,
+                 ClaimErrorCode.invalidClaimToken,
+                 ClaimErrorCode.requestNotClaimed,
+                 ClaimErrorCode.requestAlreadyPlaced,
+                 ClaimErrorCode.requestExpired,
+                 ClaimErrorCode.requestNotFound:
+                return nil
+            default:
+                return .couldNotExtend
+            }
+        case .ambiguousExtensionOutcome:
+            return .ambiguous
+        default:
+            return .couldNotExtend
+        }
+    }
+}
+
+/// The claimant-only flow, reachable only from a confirmed backend claim. It is
+/// the single place the pickup name is readable, and it never holds the raw
+/// claim token — extension goes through `RequestStore`, which owns the token.
+struct FulfillRequestView: View {
+    /// Locked one-time extension prompt copy.
+    static let extensionPromptTitle = "Still ordering?"
+
+    let request: FoodRequest
+    @ObservedObject var store: RequestStore
+
+    /// The claim this screen is showing. Nil once the store ends the flow —
+    /// which pops the screen — so the body never renders claimant-private data
+    /// without a live claim behind it.
+    private var claim: ActiveClaimPresentation? {
+        guard let activeClaim = store.activeClaim,
+              activeClaim.requestID == request.id else {
+            return nil
+        }
+        return activeClaim
     }
 
     var body: some View {
         Form {
-            Section("Before you submit") {
-                Text("Place the order on Grubhub using the pickup name below, then come back and enter the confirmation and pickup time.")
-
-                Text("Someone else may be working on this request too.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Order info") {
-                Text(request.canonicalRequest.foodDescription)
-
-                Text("\(request.canonicalRequest.diningSpot.name) · \(request.canonicalRequest.timingDescription)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                HStack {
-                    Text("Pickup name")
-                    Spacer()
-                    Text(request.pickupName)
-                        .fontWeight(.semibold)
-                }
-            }
-
-            Section("Your contact") {
-                TextField("Email", text: $helperEmail)
-                    .keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-
-                if !helperEmail.isEmpty && !isHelperEmailValid {
-                    Text("Enter a valid email address.")
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+            if let claim {
+                if store.isShowingClaimExtensionPrompt {
+                    extensionPromptSection
                 }
 
-                TextField("Phone number, optional", text: $helperPhoneNumber)
-                    .keyboardType(.phonePad)
-            }
+                Section("Reservation") {
+                    Text(Self.fulfillmentUnavailableNotice)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("fulfillment-unavailable-notice")
 
-            Section("Order details") {
-                TextField("Order confirmation or order number", text: $orderConfirmation)
-
-                TextField("Pickup time or ETA", text: $pickupTimeOrETA)
-
-                TextField("Optional note for them", text: $noteToRequester, axis: .vertical)
-                    .lineLimit(2, reservesSpace: true)
-            }
-
-            Section {
-                if hasTriedToSubmit && !canSubmit && !showSuccessMessage {
-                    Text("Enter your email, order confirmation, and pickup time to continue.")
+                    Text(Self.reservationNotice(claimExpiresAt: claim.claimExpiresAt))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("claim-reservation-notice")
                 }
 
-                Button("I placed the order") {
-                    hasTriedToSubmit = true
+                Section("Order info") {
+                    Text(request.foodDescription)
 
-                    guard canSubmit else {
-                        return
-                    }
-
-                    let fulfillmentDetails = LocalSimulationFulfillmentDetails(
-                        helperEmail: helperEmail.trimmingCharacters(in: .whitespacesAndNewlines),
-                        helperPhoneNumber: helperPhoneNumber.trimmingCharacters(in: .whitespacesAndNewlines),
-                        orderConfirmation: orderConfirmation.trimmingCharacters(in: .whitespacesAndNewlines),
-                        pickupTimeOrETA: pickupTimeOrETA.trimmingCharacters(in: .whitespacesAndNewlines),
-                        noteToRequester: noteToRequester.trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-
-                    var updatedRequest = request
-                    updatedRequest.canonicalRequest.status = .placed
-                    updatedRequest.fulfillmentDetails = fulfillmentDetails
-
-                    showSuccessMessage = true
-
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        onFulfill(updatedRequest)
-                    }
-                }
-                .disabled(showSuccessMessage)
-
-                if showSuccessMessage {
-                    Text("Order details shared.")
-                        .font(.subheadline)
+                    Text("\(request.diningSpot.name) · \(request.timingDescription)")
+                        .font(.footnote)
                         .foregroundStyle(.secondary)
+
+                    HStack {
+                        Text("Pickup name")
+                        Spacer()
+                        Text(claim.pickupName)
+                            .fontWeight(.semibold)
+                    }
+                    .accessibilityIdentifier("claim-pickup-name")
                 }
+
+                if let extensionError = ClaimExtensionPresentationError.map(store.claimExtensionError) {
+                    Section {
+                        Text(extensionError.message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("claim-extension-error")
+                    }
+                }
+
             }
         }
         .navigationTitle("Help with Request")
     }
+
+    private var extensionPromptSection: some View {
+        Section {
+            Text(Self.extensionPromptTitle)
+                .font(.headline)
+                .accessibilityIdentifier("claim-extension-prompt")
+
+            Button {
+                Task {
+                    await store.extendActiveClaim()
+                }
+            } label: {
+                if store.isExtendingClaim {
+                    HStack {
+                        ProgressView()
+                        Text("Adding time…")
+                    }
+                } else {
+                    Text("Give me 5 more minutes")
+                }
+            }
+            .disabled(store.isExtendingClaim)
+            .accessibilityIdentifier("claim-extension-accept")
+
+            Button("Not right now") {
+                store.dismissClaimExtensionPrompt()
+            }
+            .disabled(store.isExtendingClaim)
+            .accessibilityIdentifier("claim-extension-decline")
+        }
+    }
+
+    /// The authoritative reservation deadline, stated once. Deliberately not a
+    /// live countdown: the backend owns expiration, and a ticking client clock
+    /// would imply a precision iOS does not have.
+    static func reservationNotice(claimExpiresAt: Date) -> String {
+        let time = claimExpiresAt.formatted(date: .omitted, time: .shortened)
+        return "This request is reserved for you until \(time)."
+    }
+
+    static let fulfillmentUnavailableNotice =
+        "Order submission isn’t available yet. Please don’t place the order."
 }

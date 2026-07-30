@@ -13,12 +13,13 @@ import Foundation
 /// Product-safe, structured failure surface for the request domain.
 ///
 /// The integration spec (`docs/week-2-integration-spec.md`) locks the error
-/// *envelope* shape (`{ error: { code, message } }`) but does not enumerate
-/// concrete stable code strings for claim expiration, invalid token,
-/// already-claimed/placed, etc. — those are explicitly pending backend
-/// contract work (Day 5/6). Rather than guess likely names, this type maps
-/// only what is unambiguous today and otherwise preserves the backend's own
-/// code/message pair for later UI mapping once the real codes are locked.
+/// *envelope* shape (`{ error: { code, message, fields } }`) and, for the Day 4
+/// claim and extension routes, a set of stable codes. This type stays code-
+/// agnostic anyway: a decoded envelope is preserved verbatim as
+/// `.serverError(code:message:)`, and the deliberate mapping of those codes to
+/// product behavior lives one layer up, where the copy and recovery for each
+/// code belong. Endpoints outside the Day 4 routes still have endpoint-specific
+/// error shapes, which the same passthrough handles without guessing names.
 enum RequestServiceError: Error {
     /// Unambiguous at the HTTP level (404) regardless of which stable code
     /// string the backend eventually adopts.
@@ -35,6 +36,11 @@ enum RequestServiceError: Error {
     /// A claim POST may have succeeded server-side, but iOS did not receive
     /// and validate the one-time claim credentials.
     case ambiguousClaimOutcome(underlying: Error)
+    /// An extension POST may have been applied server-side, but iOS did not
+    /// receive and validate the new expiration. Because only one extension is
+    /// ever granted, the caller must neither retry nor advance its local
+    /// expiration on this outcome.
+    case ambiguousExtensionOutcome(underlying: Error)
     /// A fulfillment POST may have been applied server-side, but iOS did not
     /// receive and validate a usable success response.
     case ambiguousFulfillmentOutcome(underlying: Error)
@@ -54,6 +60,14 @@ struct ClaimOutcome {
     let pickupName: String
     let claimToken: String
     let claimExpiresAt: Date
+}
+
+/// Result of the one permitted claim extension. The backend returns no request
+/// object here, so there is nothing to validate against the path ID and nothing
+/// to apply to the public collection — only the authoritative claim deadline.
+struct ClaimExtensionOutcome {
+    let claimExpiresAt: Date
+    let claimExtendedAt: Date
 }
 
 /// Result of a successful fulfillment, mirroring the backend's fulfill response shape.
@@ -169,13 +183,49 @@ struct RequestService {
             try Self.validateResponseStatus(request.status, expected: .claimed)
             return ClaimOutcome(
                 request: request,
-                pickupName: response.pickupName,
-                claimToken: response.claimToken,
-                claimExpiresAt: response.claimExpiresAt
+                pickupName: response.claim.pickupName,
+                claimToken: response.claim.claimToken,
+                claimExpiresAt: response.claim.claimExpiresAt
             )
         } catch {
             throw RequestServiceError.ambiguousClaimOutcome(underlying: error)
         }
+    }
+
+    /// `POST /api/request/:id/claim/extend`
+    ///
+    /// Proves claim ownership by submitting the raw token the winning claim
+    /// returned. Only one extension is ever granted, so a failed or
+    /// unconfirmed attempt is never retried here — an outcome iOS cannot
+    /// validate is reported as `ambiguousExtensionOutcome` so the caller keeps
+    /// its current expiration rather than assuming five more minutes.
+    func extendClaim(id: String, claimToken: String) async throws -> ClaimExtensionOutcome {
+        try Task.checkCancellation()
+
+        let response: ClaimExtensionResponseDTO
+        do {
+            response = try await client.send(
+                path: "/api/request/\(id)/claim/extend",
+                method: .post,
+                body: ClaimExtensionPayload(claimToken: claimToken)
+            )
+        } catch is CancellationError {
+            throw RequestServiceError.ambiguousExtensionOutcome(underlying: CancellationError())
+        } catch let error as APIClientError {
+            switch error {
+            case .transport, .decoding:
+                throw RequestServiceError.ambiguousExtensionOutcome(underlying: error)
+            default:
+                throw Self.translate(error)
+            }
+        } catch {
+            throw Self.translate(error)
+        }
+
+        return ClaimExtensionOutcome(
+            claimExpiresAt: response.claim.claimExpiresAt,
+            claimExtendedAt: response.claim.claimExtendedAt
+        )
     }
 
     /// `POST /api/request/:id/fulfill`
@@ -282,13 +332,10 @@ struct RequestService {
     }
 
     /// Translates a client/transport failure into the product-safe error surface.
-    /// Does not guess at unlocked backend error-code strings (see
-    /// `RequestServiceError`'s doc comment) — a decoded error envelope is
-    /// passed through as `.serverError(code:message:)` verbatim, and only the
-    /// HTTP 404 status (unambiguous regardless of code string) maps to a
-    /// dedicated case. Exact lifecycle-code mapping (claim expiry, invalid
-    /// token, already-claimed/placed, ...) is deferred to the backend
-    /// contract implementation day.
+    /// A decoded error envelope is passed through as `.serverError(code:message:)`
+    /// verbatim, and only a non-envelope HTTP 404 (unambiguous regardless of code
+    /// string) maps to a dedicated case. Mapping stable codes to copy and
+    /// recovery is the presentation layer's job, not this one's.
     private static func translate(_ error: Error) -> RequestServiceError {
         guard let clientError = error as? APIClientError else {
             return .transport(underlying: error)

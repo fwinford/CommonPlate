@@ -8,6 +8,7 @@ import SwiftUI
 
 struct ActiveRequestsView: View {
     @ObservedObject var store: RequestStore
+    @State private var presentedClaimUnavailableNotice: ClaimUnavailableNotice?
 
     var body: some View {
         Group {
@@ -20,6 +21,34 @@ struct ActiveRequestsView: View {
             }
         }
         .navigationTitle("Active Requests")
+        // The claim conflict happened on a screen that has since been
+        // dismissed, so the notice is delivered here — on the refreshed list
+        // the helper was returned to.
+        .alert(item: $presentedClaimUnavailableNotice) { notice in
+            Alert(
+                title: Text(Self.claimUnavailableTitle(for: notice.reason)),
+                message: Self.claimUnavailableDetail(for: notice.reason).map(Text.init),
+                dismissButton: .default(Text("OK")) {
+                    store.acknowledgeClaimUnavailableNotice(id: notice.id)
+                }
+            )
+        }
+        // Armed only on appearance. This view stays in the navigation hierarchy
+        // while a detail screen is pushed, so observing the store's notice
+        // directly would try to present an alert from a covered list at the
+        // moment the detail is dismissing. If SwiftUI dropped that
+        // presentation, the mirrored notice would stay set and block every
+        // later expiration or unavailable notice for the rest of the session.
+        // The notice survives on the store until it is acknowledged by ID, so
+        // waiting until Active Requests is actually visible loses nothing.
+        .onAppear {
+            presentNextClaimUnavailableNoticeIfNeeded()
+        }
+        .onChange(of: presentedClaimUnavailableNotice?.id) { _, presentedID in
+            if presentedID == nil {
+                presentNextClaimUnavailableNoticeIfNeeded()
+            }
+        }
         // `.task` starts once per appearance and is not restarted by ordinary
         // body re-evaluation, so redraws cannot start a fetch loop; the
         // `isFetching` guard additionally covers an appearance that lands while
@@ -112,7 +141,7 @@ struct ActiveRequestsView: View {
             Section("Meals needing help") {
                 ForEach(store.requests) { request in
                     NavigationLink {
-                        RequestDetailView(request: request)
+                        RequestDetailView(request: request, store: store)
                     } label: {
                         RequestRowView(request: request)
                     }
@@ -136,6 +165,49 @@ struct ActiveRequestsView: View {
             .disabled(store.isFetching)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func presentNextClaimUnavailableNoticeIfNeeded() {
+        presentedClaimUnavailableNotice = Self.noticeToPresent(
+            presented: presentedClaimUnavailableNotice,
+            storeNotice: store.claimUnavailableNotice
+        )
+    }
+
+    /// Which notice the alert should be showing. An alert already on screen is
+    /// never swapped out from under the helper: a newer notice waits on the
+    /// store until the presented one is acknowledged by ID, at which point this
+    /// returns the queued notice instead of nil.
+    static func noticeToPresent(
+        presented: ClaimUnavailableNotice?,
+        storeNotice: ClaimUnavailableNotice?
+    ) -> ClaimUnavailableNotice? {
+        presented ?? storeNotice
+    }
+
+    /// Locked copy for the race conflict; a calm shared sentence for every
+    /// other confirmed-unavailable outcome. The store already refreshed the
+    /// list from backend truth before this is shown.
+    static func claimUnavailableTitle(for reason: ClaimUnavailableReason?) -> String {
+        switch reason {
+        case .alreadyClaimed:
+            return RequestDetailView.alreadyClaimedNotice
+        case .claimExpired:
+            return "Your reservation expired."
+        case .noLongerAvailable, nil:
+            return RequestDetailView.noLongerAvailableNotice
+        }
+    }
+
+    /// An expired reservation is the one case that needs a second sentence: the
+    /// helper must not place a real order against a request they no longer hold.
+    static func claimUnavailableDetail(for reason: ClaimUnavailableReason?) -> String? {
+        switch reason {
+        case .claimExpired:
+            return "Please don’t place an order for that request. Someone else may already be helping."
+        case .alreadyClaimed, .noLongerAvailable, nil:
+            return nil
+        }
     }
 
     private func fetchRequests() {

@@ -21,7 +21,7 @@ enum RequestTiming: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Canonical lifecycle status. Backend wire values `requested`/`claimed`/`placed`
+/// Canonical lifecycle status. Backend wire values `open`/`claimed`/`placed`
 /// map to `.open`/`.claimed`/`.placed` — see RequestDTOs.swift for the wire mapping.
 enum RequestStatus: String {
     case open = "Open"

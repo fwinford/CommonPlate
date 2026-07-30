@@ -11,15 +11,21 @@ import Foundation
 
 // MARK: - Wire status
 
-/// Backend-persisted status vocabulary. See `domainStatus` for the iOS lifecycle mapping.
+/// Backend-persisted status vocabulary (`open | claimed | placed`), per the
+/// accepted Day 4 contract in docs/week-2-integration-spec.md. The superseded
+/// `requested` value is not part of this contract: the backend writes new
+/// records as `open`, projects every listed request as `open`, and the TTL
+/// migration refuses to run while any `requested` record still exists. An
+/// unrecognized wire value fails to decode rather than mapping to a guessed
+/// lifecycle state. See `domainStatus` for the iOS lifecycle mapping.
 enum RequestStatusWire: String, Decodable {
-    case requested
+    case open
     case claimed
     case placed
 
     var domainStatus: RequestStatus {
         switch self {
-        case .requested: return .open
+        case .open: return .open
         case .claimed: return .claimed
         case .placed: return .placed
         }
@@ -83,13 +89,43 @@ struct CreateRequestPayload: Encodable {
 
 // MARK: - Claim
 
-/// Response for `POST /api/request/:id/claim`. Only a successful claim response
-/// may reveal pickup name, the raw claim token, and claim expiration.
-struct ClaimResponseDTO: Decodable {
-    let request: RequestResponseDTO
+/// Claimant-private half of a successful `POST /api/request/:id/claim`.
+/// Deliberately a separate type from `RequestResponseDTO`: these three fields
+/// exist only in the winning claimant's response and must never be added to the
+/// public request DTO, the list DTO, or `FoodRequest`.
+struct ClaimDetailsDTO: Decodable {
     let pickupName: String
     let claimToken: String
     let claimExpiresAt: Date
+}
+
+/// Response for `POST /api/request/:id/claim`:
+/// `{ request: {...}, claim: { pickupName, claimToken, claimExpiresAt } }`.
+/// The public projection and the private claim object stay separate all the way
+/// through the DTO layer.
+struct ClaimResponseDTO: Decodable {
+    let request: RequestResponseDTO
+    let claim: ClaimDetailsDTO
+}
+
+// MARK: - Claim extension
+
+/// Payload for `POST /api/request/:id/claim/extend`. The backend rejects any
+/// body with more than this one key, so no other field may be added here.
+struct ClaimExtensionPayload: Encodable {
+    let claimToken: String
+}
+
+/// Claim state after the one permitted extension. The response deliberately
+/// repeats neither the raw token, the pickup name, nor the request.
+struct ClaimExtensionDetailsDTO: Decodable {
+    let claimExpiresAt: Date
+    let claimExtendedAt: Date
+}
+
+/// Response for `POST /api/request/:id/claim/extend` → `{ claim: {...} }`.
+struct ClaimExtensionResponseDTO: Decodable {
+    let claim: ClaimExtensionDetailsDTO
 }
 
 // MARK: - Fulfillment

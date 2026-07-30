@@ -173,7 +173,7 @@ final class RequestFetchingTests: XCTestCase {
                 pickupWindowText: "Around 7:00 PM",
                 windowStart: "2026-07-20T19:00:00.000Z",
                 windowEnd: "2026-07-20T19:30:00.000Z",
-                status: "requested",
+                status: "open",
                 createdAt: "2026-07-20T18:30:00.123Z",
                 expiresAt: "2026-07-20T23:30:00.000Z"
             )
@@ -405,7 +405,7 @@ final class RequestFetchingTests: XCTestCase {
 
         let olderRefreshGate = RequestFetchingGate()
         RequestFetchingURLProtocol.enqueue(.response(
-            data: listResponse([requestObject(id: "meal-a", status: "requested")]),
+            data: listResponse([requestObject(id: "meal-a", status: "open")]),
             gate: olderRefreshGate
         ))
         let olderRefresh = Task {
@@ -539,7 +539,7 @@ final class RequestFetchingTests: XCTestCase {
         XCTAssertFalse(storeWithNewerSuccess.isRefreshingRequests)
     }
 
-    func testCreateDecodesWrappedCanonicalResponseAndMapsRequestedStatus() async throws {
+    func testCreateDecodesWrappedCanonicalResponseAndMapsOpenStatus() async throws {
         RequestFetchingURLProtocol.enqueue(.response(
             statusCode: 201,
             data: createResponse(requestObject: requestObject(
@@ -547,7 +547,7 @@ final class RequestFetchingTests: XCTestCase {
                 vendor: "Palladium",
                 food: "Chicken bowl",
                 pickupWindowText: "ASAP (within the next hour)",
-                status: "requested",
+                status: "open",
                 createdAt: "2026-07-28T16:00:00.123Z",
                 expiresAt: "2026-07-28T21:00:00.000Z"
             ))
@@ -890,13 +890,23 @@ final class RequestFetchingTests: XCTestCase {
         Data(#"{"requests":[\#(requestObjects.joined(separator: ","))]}"#.utf8)
     }
 
+    /// The claim expiration is expressed relative to now, as a real claim
+    /// response always is. A fixed past timestamp would make every claimed
+    /// fixture immediately expire and start the store's end-of-claim handling,
+    /// which is not what these collection-ownership tests are about.
     private func claimResponse(requestObject: String) -> Data {
-        Data("""
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let claimExpiresAt = formatter.string(from: Date().addingTimeInterval(15 * 60))
+
+        return Data("""
         {
           "request": \(requestObject),
-          "pickupName": "Taylor",
-          "claimToken": "claim-token",
-          "claimExpiresAt": "2026-07-20T19:15:00.000Z"
+          "claim": {
+            "pickupName": "Taylor",
+            "claimToken": "claim-token",
+            "claimExpiresAt": "\(claimExpiresAt)"
+          }
         }
         """.utf8)
     }
@@ -924,7 +934,7 @@ final class RequestFetchingTests: XCTestCase {
         pickupWindowText: String = "ASAP",
         windowStart: String? = nil,
         windowEnd: String? = nil,
-        status: String = "requested",
+        status: String = "open",
         createdAt: String = "2026-07-20T18:30:00.000Z",
         expiresAt: String = "2026-07-20T23:30:00.000Z"
     ) -> String {
