@@ -48,6 +48,36 @@ cp .env.example .env
 npm run dev
 ```
 
+### Local MongoDB must be a replica set
+
+Day 5 placement commits the request transition and its durable fulfillment
+record in one MongoDB transaction, and transactions are unavailable on a
+standalone `mongod`. The app checks this at startup and **exits rather than
+starting** against a standalone, so a plain `mongod` will not run CommonPlate.
+
+A single-member replica set is enough for local development. If a standalone
+`mongod` is already running on port 27017, stop it first — `rs.initiate()`
+against a node started without `--replSet` fails with *"This node was not
+started with replication enabled."*
+
+```bash
+# 1. Start mongod as a replica set member (use your own --dbpath).
+mongod --dbpath /usr/local/var/mongodb --replSet rs0 --bind_ip 127.0.0.1
+
+# 2. Initialize the set once per data directory, in a second terminal.
+mongosh --quiet --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "127.0.0.1:27017"}]})'
+```
+
+Then point `MONGO_URI` at the set — the `replicaSet` parameter is required, not
+optional:
+
+```env
+MONGO_URI=mongodb://127.0.0.1:27017/commonplate_development?replicaSet=rs0
+```
+
+`npm run test:mongo` is unaffected: it starts and initializes its own
+throwaway replica set on a free port and does not use `MONGO_URI`.
+
 Claim and claim-extension mutations fail closed unless
 `CLAIM_TOKEN_HMAC_SECRET` is configured. The raw 32-byte base64url claim token
 is returned only to the winning claimant; MongoDB stores only its

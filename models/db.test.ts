@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Request as MealRequest } from "./db.js";
+import { Fulfillment, Request as MealRequest } from "./db.js";
 
 describe("Request lifecycle and retention schema", () => {
   it("uses only open, claimed, and placed with open as the default", () => {
@@ -43,5 +43,32 @@ describe("Request lifecycle and retention schema", () => {
     };
 
     expect(digestPath.options.select).toBe(false);
+  });
+
+  it("models private placement and notification verification fields", () => {
+    expect(MealRequest.schema.path("placedAt")).toBeDefined();
+    expect(MealRequest.schema.path("fulfillerEmail")).toBeDefined();
+    expect(MealRequest.schema.path("contactMessage")).toBeDefined();
+    expect(MealRequest.schema.path("notificationAttemptedAt")).toBeDefined();
+    expect(
+      (MealRequest.schema.path("notificationStatus") as any).options.enum
+    ).toEqual(["pending", "sent", "failed"]);
+    expect(MealRequest.schema.path("helperPhone")).toBeUndefined();
+  });
+});
+
+describe("Fulfillment all-time ledger schema", () => {
+  it("enforces one durable fulfillment per request", () => {
+    expect(Fulfillment.schema.indexes()).toEqual(
+      expect.arrayContaining([
+        [
+          { requestId: 1 },
+          expect.objectContaining({
+            unique: true,
+            name: "fulfillment_request_unique",
+          }),
+        ],
+      ])
+    );
   });
 });

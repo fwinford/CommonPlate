@@ -58,16 +58,13 @@ describe("public action routes are mounted behind the pause", () => {
     expect(appSource).toContain("res.json({ paused: isPublicActionsPaused() })");
   });
 
-  it("keeps the legacy fulfillment refusal independent of the pause flag", () => {
-    const registration = appSource.indexOf("registerFulfillmentPause(app)");
-    const legacyRoute = appSource.indexOf(
-      'app.post("/api/request/:id/fulfill"'
+  it("registers only the claim-authorized fulfillment handler", () => {
+    expect(appSource).toMatch(
+      /app\.post\(\s*FULFILLMENT_ROUTE_PATH,\s*fulfillmentRateLimiter,\s*fulfillRequest\s*\)/
     );
-
-    expect(registration).toBeGreaterThan(-1);
-    expect(legacyRoute).toBeGreaterThan(registration);
-    expect(appSource).not.toMatch(
-      /if\s*\([^)]*isPublicActionsPaused[^)]*\)\s*\{?\s*registerFulfillmentPause/
+    expect(appSource).not.toContain("registerFulfillmentPause");
+    expect(appSource).not.toContain(
+      'app.post("/api/request/:id/fulfill"'
     );
   });
 

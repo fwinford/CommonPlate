@@ -80,6 +80,11 @@ export interface IRequest extends Document {
   orderNumber?: string;
   eta?: Date;
   etaText?: string;
+  placedAt?: Date;
+  fulfillerEmail?: string;
+  contactMessage?: string;
+  notificationStatus?: "pending" | "sent" | "failed";
+  notificationAttemptedAt?: Date;
   expiresAt?: Date;
   deleteAt?: Date;
   claimedAt?: Date;
@@ -106,6 +111,14 @@ const RequestSchema = new Schema<IRequest>({
   orderNumber: { type: String, trim: true },
   eta: { type: Date },
   etaText: { type: String, trim: true },
+  placedAt: { type: Date },
+  fulfillerEmail: { type: String, trim: true, lowercase: true },
+  contactMessage: { type: String, trim: true },
+  notificationStatus: {
+    type: String,
+    enum: ["pending", "sent", "failed"],
+  },
+  notificationAttemptedAt: { type: Date },
   expiresAt: { type: Date },
   deleteAt: {
     type: Date,
@@ -151,7 +164,7 @@ export interface IFulfillment extends Document {
 
 const FulfillmentSchema = new Schema<IFulfillment>(
   {
-    requestId: { type: Schema.Types.ObjectId, ref: "Request", required: true, index: true },
+    requestId: { type: Schema.Types.ObjectId, ref: "Request", required: true },
     orderNumber: { type: String, trim: true, required: true },
     eta: { type: Date },
     etaText: { type: String, trim: true },
@@ -159,6 +172,14 @@ const FulfillmentSchema = new Schema<IFulfillment>(
     placedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
+);
+
+// The durable fulfillment record is the all-time counting ledger. The Request
+// transition and this insert commit in one transaction, while this index is the
+// final database-level guard against counting one request more than once.
+FulfillmentSchema.index(
+  { requestId: 1 },
+  { unique: true, name: "fulfillment_request_unique" }
 );
 
 

@@ -114,6 +114,9 @@ export async function sendFulfillmentEmail(
 		subject,
 		html,
 		text,
-		...(replyTo ? { reply_to: replyTo } : {}),
+		// `replyTo` is the option name the Resend SDK reads; it maps it to the
+		// wire field `reply_to` itself. Passing `reply_to` here is silently
+		// dropped, which would send the requester notification with no Reply-To.
+		...(replyTo ? { replyTo } : {}),
 	});
 }

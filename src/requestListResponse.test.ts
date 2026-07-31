@@ -34,8 +34,10 @@ function requestDocument(overrides: Record<string, unknown> = {}) {
     orderNumber: "private-order-number",
     eta: new Date("2026-07-26T20:30:00.000Z"),
     etaText: "30 minutes",
+    placedAt: new Date("2026-07-26T20:15:00.000Z"),
     fulfillerEmail: "helper@example.edu",
     contactMessage: "private message",
+    notificationAttemptedAt: new Date("2026-07-26T20:16:00.000Z"),
     note: "private note",
     notificationStatus: "pending_retry",
     __v: 0,
@@ -255,8 +257,10 @@ describe("buildPublicRequestListResponse", () => {
     expect(serializedRequest).not.toHaveProperty("orderNumber");
     expect(serializedRequest).not.toHaveProperty("eta");
     expect(serializedRequest).not.toHaveProperty("etaText");
+    expect(serializedRequest).not.toHaveProperty("placedAt");
     expect(serializedRequest).not.toHaveProperty("fulfillerEmail");
     expect(serializedRequest).not.toHaveProperty("contactMessage");
+    expect(serializedRequest).not.toHaveProperty("notificationAttemptedAt");
     expect(serializedRequest).not.toHaveProperty("note");
     expect(serializedRequest).not.toHaveProperty("notificationStatus");
     expect(serializedRequest).not.toHaveProperty("_id");

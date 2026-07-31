@@ -136,19 +136,30 @@ describe("requester email separation", () => {
       "helper@example.edu"
     );
 
+    // Asserts the option name the Resend SDK actually reads. The SDK builds its
+    // request body from `replyTo` alone, so asserting the wire name `reply_to`
+    // here would pass while the sent email carried no Reply-To at all.
     const email = resendSend.mock.calls[0][0] as {
       to: string;
       html: string;
       text: string;
-      reply_to: string;
+      replyTo: string;
+      reply_to?: string;
     };
 
     expect(email.to).toBe(requesterEmail);
     expect(email.html).toContain(`Pickup name:</strong> ${pickupName}`);
     expect(email.html).toContain("Order number:</strong> ORDER123");
+    expect(email.html).toContain("Pickup window:</strong> 1:00 PM – 2:00 PM");
+    expect(email.html).toContain("ETA:</strong> 15 minutes");
+    expect(email.html).toContain("Your meal is ready");
     expect(email.text).toContain(`Pickup name: ${pickupName}`);
     expect(email.text).toContain("Order number: ORDER123");
-    expect(email.reply_to).toBe("helper@example.edu");
+    expect(email.text).toContain("Pickup window: 1:00 PM – 2:00 PM");
+    expect(email.text).toContain("ETA: 15 minutes");
+    expect(email.text).toContain("Your meal is ready");
+    expect(email.replyTo).toBe("helper@example.edu");
+    expect(email.reply_to).toBeUndefined();
   });
 
   it("keeps requester confirmation pickup information intact", () => {

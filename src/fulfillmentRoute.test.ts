@@ -1,93 +1,214 @@
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
-import express from "express";
-import { describe, expect, it, vi } from "vitest";
-import {
-  FULFILLMENT_UNAVAILABLE_MESSAGE,
-  FULFILLMENT_ROUTE_PATH,
-  registerFulfillmentPause,
-} from "./fulfillmentRoute.js";
+import type { Request, Response } from "express";
+import mongoose from "mongoose";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { generateClaimToken } from "./claimToken.js";
 
-async function exerciseRoutes(
-  path: string,
-  body?: Record<string, unknown>
-): Promise<{
-  response: globalThis.Response;
-  legacyFulfillment: ReturnType<typeof vi.fn>;
-  adminRoute: ReturnType<typeof vi.fn>;
-}> {
-  const testApp = express();
-  testApp.use(express.json());
+const sendFulfillmentEmail = vi.hoisted(() => vi.fn());
+vi.mock("./emailHelpers.js", () => ({ sendFulfillmentEmail }));
 
-  const legacyFulfillment = vi.fn((_req, res) =>
-    res.status(200).json({ legacy: true })
-  );
-  const adminRoute = vi.fn((_req, res) => res.sendStatus(204));
+import { fulfillRequest } from "./fulfillmentRoute.js";
 
-  registerFulfillmentPause(testApp);
-  testApp.post(FULFILLMENT_ROUTE_PATH, legacyFulfillment);
-  testApp.post("/admin/test-fulfillment", adminRoute);
+const requestId = "64b000000000000000000001";
 
-  const server = createServer(testApp);
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", resolve);
-  });
-
-  try {
-    const { port } = server.address() as AddressInfo;
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-    return { response, legacyFulfillment, adminRoute };
-  } finally {
-    if (server.listening) {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-    }
-  }
+function validBody() {
+  return {
+    claimToken: generateClaimToken(),
+    fulfillment: {
+      fulfillerEmail: "helper@example.edu",
+      orderNumber: "ORDER123",
+      eta: "15 minutes",
+      contactMessage: "Your meal is ready",
+    },
+  };
 }
 
-describe("POST /api/request/:id/fulfill pause", () => {
-  it.each([
-    {
-      name: "an invalid request id and no payload",
-      path: "/api/request/not-an-object-id/fulfill",
-      body: undefined,
-    },
-    {
-      name: "a valid request id and malformed payload",
-      path: "/api/request/64b000000000000000000001/fulfill",
-      body: { orderNumber: "" },
-    },
-    {
-      name: "a valid request id and complete legacy payload",
-      path: "/api/request/64b000000000000000000001/fulfill",
-      body: {
-        orderNumber: "ORDER123",
-        eta: "15 minutes",
-        fulfillerEmail: "helper@example.edu",
-        contactMessage: "Order placed",
-      },
-    },
-  ])("refuses $name before legacy side effects", async ({ path, body }) => {
-    const result = await exerciseRoutes(path, body);
+function routeContext(body: unknown, id = requestId) {
+  const req = { params: { id }, body } as unknown as Request;
+  const res = {} as Response;
+  const status = vi.fn().mockReturnValue(res);
+  const json = vi.fn().mockReturnValue(res);
+  res.status = status;
+  res.json = json;
+  return { req, res, status, json };
+}
 
-    expect(result.response.status).toBe(503);
-    await expect(result.response.json()).resolves.toEqual({
-      error: FULFILLMENT_UNAVAILABLE_MESSAGE,
-    });
-    expect(result.legacyFulfillment).not.toHaveBeenCalled();
-    expect(result.adminRoute).not.toHaveBeenCalled();
+function responseBody(context: ReturnType<typeof routeContext>) {
+  return context.json.mock.calls[0][0] as Record<string, any>;
+}
+
+beforeEach(() => {
+  vi.stubEnv(
+    "CLAIM_TOKEN_HMAC_SECRET",
+    "unit-test-claim-hmac-secret-material"
+  );
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  sendFulfillmentEmail.mockReset();
+});
+
+describe("POST /api/request/:id/fulfill validation", () => {
+  it("rejects an invalid request id before starting a transaction", async () => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext(validBody(), "not-an-object-id");
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe("INVALID_REQUEST_ID");
+    expect(startSession).not.toHaveBeenCalled();
   });
 
-  it("does not affect the unrelated admin test route", async () => {
-    const result = await exerciseRoutes("/admin/test-fulfillment");
+  it.each([
+    undefined,
+    {},
+    { fulfillment: validBody().fulfillment },
+    { claimToken: "not-a-canonical-token", fulfillment: validBody().fulfillment },
+  ])("rejects a missing or malformed claim token", async (body) => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext(body);
 
-    expect(result.response.status).toBe(204);
-    expect(result.adminRoute).toHaveBeenCalledOnce();
-    expect(result.legacyFulfillment).not.toHaveBeenCalled();
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe("INVALID_CLAIM_TOKEN");
+    expect(startSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "flat legacy payload",
+      mutate: () => ({
+        claimToken: generateClaimToken(),
+        fulfillerEmail: "helper@example.edu",
+        orderNumber: "ORDER123",
+        eta: "15 minutes",
+      }),
+    },
+    {
+      name: "invalid helper email",
+      mutate: () => ({
+        ...validBody(),
+        fulfillment: { ...validBody().fulfillment, fulfillerEmail: "invalid" },
+      }),
+    },
+    {
+      name: "unsafe order number",
+      mutate: () => ({
+        ...validBody(),
+        fulfillment: { ...validBody().fulfillment, orderNumber: "ORDER 123" },
+      }),
+    },
+    {
+      name: "blank ETA",
+      mutate: () => ({
+        ...validBody(),
+        fulfillment: { ...validBody().fulfillment, eta: "   " },
+      }),
+    },
+    {
+      name: "removed note field",
+      mutate: () => ({
+        ...validBody(),
+        fulfillment: { ...validBody().fulfillment, note: "legacy note" },
+      }),
+    },
+    {
+      name: "helper phone field",
+      mutate: () => ({
+        ...validBody(),
+        fulfillment: { ...validBody().fulfillment, helperPhone: "555-0100" },
+      }),
+    },
+    {
+      name: "client-owned placement timestamp",
+      mutate: () => ({
+        ...validBody(),
+        fulfillment: {
+          ...validBody().fulfillment,
+          placedAt: "2020-01-01T00:00:00.000Z",
+        },
+      }),
+    },
+    {
+      name: "unexpected top-level field",
+      mutate: () => ({ ...validBody(), unexpected: true }),
+    },
+  ])("rejects $name", async ({ mutate }) => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext(mutate());
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe(
+      "INVALID_FULFILLMENT_PAYLOAD"
+    );
+    expect(startSession).not.toHaveBeenCalled();
+  });
+
+  it("reports a standalone MongoDB deployment without downgrading writes", async () => {
+    const unavailable = Object.assign(
+      new Error(
+        "Transaction numbers are only allowed on a replica set member or mongos"
+      ),
+      { code: 20 }
+    );
+    const session = {
+      withTransaction: vi.fn().mockRejectedValue(unavailable),
+      endSession: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(mongoose, "startSession").mockResolvedValue(session as any);
+    const context = routeContext(validBody());
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(503);
+    expect(responseBody(context).error.code).toBe(
+      "TRANSACTIONS_UNAVAILABLE"
+    );
+    expect(session.endSession).toHaveBeenCalledOnce();
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
+  it("answers in the structured envelope when no session can be opened", async () => {
+    // The session is created inside the handler's try, so this failure must not
+    // escape as a rejected promise into the generic error handler, and the
+    // `finally` must not call endSession on a session that was never created.
+    vi.spyOn(mongoose, "startSession").mockRejectedValue(
+      new Error("no primary available")
+    );
+    const context = routeContext(validBody());
+
+    await expect(
+      fulfillRequest(context.req, context.res)
+    ).resolves.toBeDefined();
+
+    expect(context.status).toHaveBeenCalledWith(500);
+    expect(responseBody(context)).toEqual({
+      error: {
+        code: "INTERNAL_FAILURE",
+        message: "Unable to record this placement right now.",
+        fields: null,
+      },
+    });
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
+  it("answers in the structured envelope when the HMAC secret is unusable", async () => {
+    vi.stubEnv("CLAIM_TOKEN_HMAC_SECRET", "too-short");
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext(validBody());
+
+    await expect(
+      fulfillRequest(context.req, context.res)
+    ).resolves.toBeDefined();
+
+    expect(context.status).toHaveBeenCalledWith(500);
+    expect(responseBody(context).error.code).toBe("INTERNAL_FAILURE");
+    expect(startSession).not.toHaveBeenCalled();
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
   });
 });

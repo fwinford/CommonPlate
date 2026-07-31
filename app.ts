@@ -106,7 +106,11 @@ import mongoose from "mongoose";
 import "dotenv/config";
 import path from "path";
 import { fileURLToPath } from "url";
-import { Request as MealRequest, Fulfillment, Subscriber } from "./models/db.js";
+import {
+  Fulfillment,
+  Request as MealRequest,
+  Subscriber,
+} from "./models/db.js";
 import rateLimit from "express-rate-limit";
 import cron from "node-cron";
 import { Resend } from "resend";
@@ -116,7 +120,13 @@ import {
 } from "./src/requestListResponse.js";
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
 import { createRequest } from "./src/createRequestRoute.js";
-import { registerFulfillmentPause } from "./src/fulfillmentRoute.js";
+import {
+  FULFILLMENT_ROUTE_PATH,
+  fulfillRequest,
+  fulfillmentRateLimiter,
+} from "./src/fulfillmentRoute.js";
+import { assertMongoTransactionsSupported } from "./src/mongoTransactions.js";
+import { getStats } from "./src/statsRoute.js";
 import {
   CLAIM_EXTENSION_ROUTE_PATH,
   CLAIM_ROUTE_PATH,
@@ -134,15 +144,6 @@ import {
   isPublicActionsPaused,
   pausePublicAction,
 } from "./src/publicActionsPause.js";
-
-// small helpers
-function isValidId(id: any) {
-  try {
-    return mongoose.Types.ObjectId.isValid(String(id));
-  } catch (_) {
-    return false;
-  }
-}
 
 // --- Environment validation (fail fast with clear message) ---
 const { MONGO_URI, RESEND_API_KEY } = process.env;
@@ -333,14 +334,7 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
 app.get("/api/request/:id", getPublicRequestDetail);
 
 // api: get stats (total meals shared)
-app.get("/api/stats", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const totalShared = await Fulfillment.countDocuments();
-    res.json({ totalShared });
-  } catch (err) {
-    next(err);
-  }
-});
+app.get("/api/stats", getStats);
 
 // api: get count of active (confirmed, not bounced) subscribers
 app.get("/api/active-subscriber-count", async (req: Request, res: Response, next: NextFunction) => {
@@ -374,83 +368,13 @@ app.post(
   extendClaim
 );
 
-// Day 2 pause: this route terminates before the limiter and every legacy side
-// effect. Day 5 will remove this refusal and replace the unreachable handler
-// below with the claim-authorized atomic implementation.
-//
-// Intentionally NOT wired to PUBLIC_ACTIONS_PAUSED. That flag is a temporary
-// rollout control that local development sets to false; this refusal guards
-// the non-atomic legacy fulfillment path, which must stay unreachable even
-// then. Only Day 5's atomic replacement may lift it.
-registerFulfillmentPause(app);
-
-// Legacy fulfillment logic retained but unreachable while the Day 2 pause is
-// registered above.
-app.post("/api/request/:id/fulfill", limiter, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { id } = req.params;
-    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid request id' });
-    const { orderNumber, eta, note, fulfillerEmail, contactMessage } = req.body || {};
-
-    const sOrderNumber = typeof orderNumber === 'string' ? orderNumber.trim() : '';
-    const sFulfillerEmail = typeof fulfillerEmail === 'string' ? fulfillerEmail.trim() : '';
-    if (!sOrderNumber) {
-      return res.status(400).json({ error: 'Please enter the Grubhub order number.' });
-    }
-    // Enforce a donor email is provided so requester can reply
-    if (!sFulfillerEmail) {
-      return res.status(400).json({ error: 'Please provide your email so the requester can contact you.' });
-    }
-    // Accept short numeric or alphanumeric order numbers (some providers use short ids).
-    // Validate for 1-50 chars containing letters, numbers, dashes or underscores.
-    if (!/^[A-Za-z0-9_-]{1,50}$/.test(sOrderNumber)) {
-      return res.status(400).json({ error: "That doesn't look like a valid Grubhub order number. Please check and try again." });
-    }
-
-  const mealReq = await MealRequest.findById(id);
-    if (!mealReq) return res.status(404).json({ error: 'Request not found' });
-    if (mealReq.status === 'placed') return res.status(400).json({ error: 'Request already placed' });
-
-    // Always use the ETA as provided by the requester (free text or ISO string)
-    let etaText: string | undefined = undefined;
-    if (typeof eta === 'string' && eta.trim()) {
-      etaText = eta.trim();
-    } else if (eta) {
-      // fallback: stringify non-string values
-      etaText = String(eta);
-    }
-
-    // Send the fulfillment email via the centralized helper. If the email fails, do not create the Fulfillment or update the Request.
-    const suppliedMessage = contactMessage && String(contactMessage).trim() ? String(contactMessage).trim() : undefined;
-    try {
-      const { sendFulfillmentEmail } = await import("./src/emailHelpers.js");
-      await sendFulfillmentEmail(mealReq as any, sOrderNumber, etaText, suppliedMessage, sFulfillerEmail);
-    } catch (emailErr) {
-      console.error('[email] Fulfillment email send failed:', emailErr);
-      return res.status(502).json({ error: 'Failed to send fulfillment email; fulfillment not recorded' });
-    }
-
-    // Create the fulfillment and update the request only after email succeeded.
-    const fulfillment = await Fulfillment.create({
-      requestId: mealReq._id,
-      orderNumber: sOrderNumber,
-      etaText,
-      note: note ? String(note).trim() : undefined,
-    });
-
-    // update request
-    mealReq.status = 'placed';
-    mealReq.orderNumber = sOrderNumber;
-    if (etaText) (mealReq as any).etaText = etaText;
-    await mealReq.save();
-
-    // Contact message was sent (if provided) as part of the single fulfillment email above.
-
-    return res.json({ success: true, fulfillmentId: fulfillment._id });
-  } catch (err) {
-    next(err);
-  }
-});
+// A valid active claim is the only authorization for placement. This route is
+// intentionally not exposed through the disabled legacy web ordering UI.
+app.post(
+  FULFILLMENT_ROUTE_PATH,
+  fulfillmentRateLimiter,
+  fulfillRequest
+);
 
 
 // ---- node-cron: cleanup expired documents (backup to TTL) ----
@@ -477,6 +401,11 @@ app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
 
 // connect to db and start server
 await mongoose.connect(MONGO_URI);
+await assertMongoTransactionsSupported(mongoose.connection);
+// Do not accept placement traffic until the database has established the
+// one-request/one-ledger-record uniqueness guarantee. Existing duplicates make
+// this fail visibly at startup instead of weakening the contract.
+await Fulfillment.createIndexes();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   const PUBLIC_BASE = process.env.BASE_URL || `http://localhost:${PORT}`;

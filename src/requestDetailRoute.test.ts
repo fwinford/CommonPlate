@@ -30,10 +30,12 @@ function requestDocument(overrides: Record<string, unknown> = {}) {
     orderNumber: "private-order-number",
     eta: new Date("2026-07-26T20:30:00.000Z"),
     etaText: "30 minutes",
+    placedAt: new Date("2026-07-26T20:15:00.000Z"),
     fulfillerEmail: "helper@example.edu",
     contactMessage: "private message",
     note: "private note",
     notificationStatus: "pending_retry",
+    notificationAttemptedAt: new Date("2026-07-26T20:16:00.000Z"),
     __v: 0,
     ...overrides,
   };
@@ -114,11 +116,15 @@ describe("GET /api/request/:id", () => {
     expect(serializedResponse.request).not.toHaveProperty("orderNumber");
     expect(serializedResponse.request).not.toHaveProperty("eta");
     expect(serializedResponse.request).not.toHaveProperty("etaText");
+    expect(serializedResponse.request).not.toHaveProperty("placedAt");
     expect(serializedResponse.request).not.toHaveProperty("fulfillerEmail");
     expect(serializedResponse.request).not.toHaveProperty("contactMessage");
     expect(serializedResponse.request).not.toHaveProperty("note");
     expect(serializedResponse.request).not.toHaveProperty(
       "notificationStatus"
+    );
+    expect(serializedResponse.request).not.toHaveProperty(
+      "notificationAttemptedAt"
     );
     expect(serializedResponse.request).not.toHaveProperty("_id");
     expect(serializedResponse.request).not.toHaveProperty("__v");
