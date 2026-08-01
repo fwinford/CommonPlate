@@ -9,6 +9,7 @@ import SwiftUI
 struct ActiveRequestsView: View {
     @ObservedObject var store: RequestStore
     @State private var presentedClaimUnavailableNotice: ClaimUnavailableNotice?
+    @State private var isActiveRequestsVisible = false
 
     /// The public list minus a request this helper is actively holding. The
     /// backend already excludes actively claimed requests from `GET
@@ -40,9 +41,8 @@ struct ActiveRequestsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Active Requests")
-        // The claim conflict happened on a screen that has since been
-        // dismissed, so the notice is delivered here — on the refreshed list
-        // the helper was returned to.
+        // Claim-unavailable safety notices are delivered here, whether the list
+        // was already visible or has just been uncovered by a dismissed flow.
         .alert(item: $presentedClaimUnavailableNotice) { notice in
             Alert(
                 title: Text(Self.claimUnavailableTitle(for: notice.reason)),
@@ -52,15 +52,19 @@ struct ActiveRequestsView: View {
                 }
             )
         }
-        // Armed only on appearance. This view stays in the navigation hierarchy
-        // while a detail screen is pushed, so observing the store's notice
-        // directly would try to present an alert from a covered list at the
-        // moment the detail is dismissing. If SwiftUI dropped that
-        // presentation, the mirrored notice would stay set and block every
-        // later expiration or unavailable notice for the rest of the session.
-        // The notice survives on the store until it is acknowledged by ID, so
-        // waiting until Active Requests is actually visible loses nothing.
+        // A notice can arrive after this screen is already visible, such as when
+        // a preserved reservation expires while the helper is on the list. Keep
+        // observing the store, but arm presentation only while Active Requests
+        // is actually visible: this view remains in the navigation hierarchy
+        // under a pushed detail screen and must not present an alert from there.
         .onAppear {
+            isActiveRequestsVisible = true
+            presentNextClaimUnavailableNoticeIfNeeded()
+        }
+        .onDisappear {
+            isActiveRequestsVisible = false
+        }
+        .onChange(of: store.claimUnavailableNotice?.id) { _, _ in
             presentNextClaimUnavailableNoticeIfNeeded()
         }
         .onChange(of: presentedClaimUnavailableNotice?.id) { _, presentedID in
@@ -316,19 +320,24 @@ struct ActiveRequestsView: View {
     private func presentNextClaimUnavailableNoticeIfNeeded() {
         presentedClaimUnavailableNotice = Self.noticeToPresent(
             presented: presentedClaimUnavailableNotice,
-            storeNotice: store.claimUnavailableNotice
+            storeNotice: store.claimUnavailableNotice,
+            isViewVisible: isActiveRequestsVisible
         )
     }
 
     /// Which notice the alert should be showing. An alert already on screen is
     /// never swapped out from under the helper: a newer notice waits on the
     /// store until the presented one is acknowledged by ID, at which point this
-    /// returns the queued notice instead of nil.
+    /// returns the pending store notice instead of nil.
     static func noticeToPresent(
         presented: ClaimUnavailableNotice?,
-        storeNotice: ClaimUnavailableNotice?
+        storeNotice: ClaimUnavailableNotice?,
+        isViewVisible: Bool = true
     ) -> ClaimUnavailableNotice? {
-        presented ?? storeNotice
+        guard isViewVisible else {
+            return presented
+        }
+        return presented ?? storeNotice
     }
 
     /// Locked copy for the race conflict; a calm shared sentence for every

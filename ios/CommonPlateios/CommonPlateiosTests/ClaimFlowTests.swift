@@ -553,9 +553,37 @@ final class ClaimFlowTests: XCTestCase {
 
     // MARK: - Notice presentation
 
-    /// Active Requests arms the alert on appearance, not the moment the store
-    /// publishes. A notice raised while a detail screen is still up waits on
-    /// the store and is presented once the list is visible.
+    /// Store publication is observed even when Active Requests was already on
+    /// screen. This is the path used when a preserved reservation expires while
+    /// the helper is looking at the list rather than returning from a detail.
+    func testNoticePublishedWhileActiveRequestsIsVisibleIsPresentedImmediately() async throws {
+        let store = makeStore()
+        var presented: ClaimUnavailableNotice? = nil
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimExpiresAt: Date().addingTimeInterval(0.2)
+        )))
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        try await store.claim(requestID: requestID)
+        XCTAssertNil(store.claimUnavailableNotice)
+
+        await waitUntil { store.claimUnavailableNotice?.reason == .claimExpired }
+
+        let published = try XCTUnwrap(store.claimUnavailableNotice)
+        presented = ActiveRequestsView.noticeToPresent(
+            presented: nil,
+            storeNotice: store.claimUnavailableNotice,
+            isViewVisible: true
+        )
+
+        XCTAssertEqual(presented?.id, published.id)
+        XCTAssertEqual(presented?.reason, .claimExpired)
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    /// A notice raised while a detail screen covers Active Requests waits on the
+    /// store and is presented once the list is visible again.
     func testNoticeRaisedBehindADetailScreenIsPresentedOnceTheListAppears() async throws {
         let store = makeStore()
         ClaimFlowURLProtocol.enqueue(.response(
@@ -576,11 +604,18 @@ final class ClaimFlowTests: XCTestCase {
         // notice is not consumed — it survives on the store.
         var presented: ClaimUnavailableNotice? = nil
         XCTAssertNotNil(store.claimUnavailableNotice)
+        presented = ActiveRequestsView.noticeToPresent(
+            presented: presented,
+            storeNotice: store.claimUnavailableNotice,
+            isViewVisible: false
+        )
+        XCTAssertNil(presented)
 
         // The list becomes visible: `onAppear` arms the alert with notice A.
         presented = ActiveRequestsView.noticeToPresent(
             presented: presented,
-            storeNotice: store.claimUnavailableNotice
+            storeNotice: store.claimUnavailableNotice,
+            isViewVisible: true
         )
         XCTAssertEqual(presented?.id, noticeA.id)
 
