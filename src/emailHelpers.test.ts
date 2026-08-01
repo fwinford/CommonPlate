@@ -130,7 +130,7 @@ describe("requester email separation", () => {
 
     await sendFulfillmentEmail(
       request(),
-      "ORDER123",
+      "70154321",
       "15 minutes",
       "Your meal is ready",
       "helper@example.edu"
@@ -149,17 +149,60 @@ describe("requester email separation", () => {
 
     expect(email.to).toBe(requesterEmail);
     expect(email.html).toContain(`Pickup name:</strong> ${pickupName}`);
-    expect(email.html).toContain("Order number:</strong> ORDER123");
+    expect(email.html).toContain("Order number:</strong> 70154321");
     expect(email.html).toContain("Pickup window:</strong> 1:00 PM – 2:00 PM");
     expect(email.html).toContain("ETA:</strong> 15 minutes");
     expect(email.html).toContain("Your meal is ready");
     expect(email.text).toContain(`Pickup name: ${pickupName}`);
-    expect(email.text).toContain("Order number: ORDER123");
+    expect(email.text).toContain("Order number: 70154321");
     expect(email.text).toContain("Pickup window: 1:00 PM – 2:00 PM");
     expect(email.text).toContain("ETA: 15 minutes");
     expect(email.text).toContain("Your meal is ready");
     expect(email.replyTo).toBe("helper@example.edu");
     expect(email.reply_to).toBeUndefined();
+  });
+
+  // The helper types their address into the fulfillment form, so the one way
+  // this notification can go wrong without failing is by treating that address
+  // as the destination. The student is the recipient; the helper is only ever
+  // the Reply-To.
+  it("never lets the helper become the recipient of the fulfillment email", async () => {
+    resendSend.mockResolvedValue({});
+    const helperEmail = "helper@example.edu";
+
+    await sendFulfillmentEmail(
+      request(),
+      "70154321",
+      "ASAP",
+      undefined,
+      helperEmail
+    );
+
+    const email = resendSend.mock.calls[0][0] as {
+      to: string;
+      replyTo?: string;
+    };
+    expect(email.to).toBe(requesterEmail);
+    expect(email.to).not.toBe(helperEmail);
+    expect(email.replyTo).toBe(helperEmail);
+  });
+
+  // A request with no stored student address cannot be notified. Failing loudly
+  // keeps the route's post-commit catch honest — placement stays recorded and
+  // the response reports `failed` — instead of silently sending nowhere.
+  it("refuses to send when the request carries no student email", async () => {
+    resendSend.mockResolvedValue({});
+
+    await expect(
+      sendFulfillmentEmail(
+        request({ email: undefined }),
+        "70154321",
+        "ASAP",
+        undefined,
+        "helper@example.edu"
+      )
+    ).rejects.toThrow();
+    expect(resendSend).not.toHaveBeenCalled();
   });
 
   it("keeps requester confirmation pickup information intact", () => {

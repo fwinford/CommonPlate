@@ -94,6 +94,14 @@ enum FulfillmentConfirmationKind: Equatable {
 struct FulfillmentConfirmation: Identifiable, Equatable {
     let id: UUID
     let requestID: String
+    /// Public request identity, copied off the confirmed placed request so the
+    /// Active Requests card can still name the meal. Both the active claim and
+    /// the list row are gone by the time that card is the only surviving
+    /// surface, so the identity has to travel on the confirmation itself.
+    /// These are public projection fields only — no claimant-private value
+    /// (pickup name, token, deadline) may be carried here.
+    let vendor: String
+    let foodDescription: String
     let kind: FulfillmentConfirmationKind
 }
 
@@ -1237,6 +1245,8 @@ final class RequestStore: ObservableObject {
         fulfillmentConfirmation = FulfillmentConfirmation(
             id: UUID(),
             requestID: request.id,
+            vendor: request.diningSpot.name,
+            foodDescription: request.foodDescription,
             kind: kind
         )
         if let notificationStatus {

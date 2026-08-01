@@ -70,7 +70,7 @@ function fulfillmentBody(rawToken: string) {
     claimToken: rawToken,
     fulfillment: {
       fulfillerEmail: "Helper@Example.edu",
-      orderNumber: "ORDER123",
+      orderNumber: "70154321",
       eta: "15 minutes",
       contactMessage: "Your meal is ready",
     },
@@ -169,7 +169,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       PLACED_RETENTION_MS
     );
     expect(stored?.expiresAt).toEqual(originalExpiresAt);
-    expect(stored?.orderNumber).toBe("ORDER123");
+    expect(stored?.orderNumber).toBe("70154321");
     expect(stored?.etaText).toBe("15 minutes");
     expect(stored?.fulfillerEmail).toBe("helper@example.edu");
     expect(stored?.contactMessage).toBe("Your meal is ready");
@@ -182,7 +182,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
 
     const ledger = await Fulfillment.findOne({ requestId: request._id }).lean();
     expect(ledger).toMatchObject({
-      orderNumber: "ORDER123",
+      orderNumber: "70154321",
       etaText: "15 minutes",
     });
     expect(ledger?.placedAt).toEqual(stored?.placedAt);
@@ -191,7 +191,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(sendFulfillmentEmail).toHaveBeenCalledOnce();
     expect(sendFulfillmentEmail).toHaveBeenCalledWith(
       expect.objectContaining({ _id: request._id, status: "placed" }),
-      "ORDER123",
+      "70154321",
       "15 minutes",
       "Your meal is ready",
       "helper@example.edu"
@@ -209,6 +209,76 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     );
   });
 
+  // The order number is a digits-only *string*, and stays one through the
+  // transaction, the ledger, the response, and the student's email. A leading
+  // zero is the value that proves it: any numeric conversion anywhere along
+  // that path would drop it and leave the student a number that no longer
+  // matches the helper's Grubhub confirmation.
+  it("preserves a leading-zero order number as a string end to end", async () => {
+    const { request, rawToken } = await createClaimedRequest();
+    const context = routeContext(String(request._id), {
+      claimToken: rawToken,
+      fulfillment: {
+        fulfillerEmail: "Helper@Example.edu",
+        orderNumber: "00070154321",
+        eta: "ASAP",
+      },
+    });
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.statusCode).toBe(200);
+
+    const stored = await MealRequest.findById(request._id).lean();
+    expect(stored?.orderNumber).toBe("00070154321");
+    expect(typeof stored?.orderNumber).toBe("string");
+
+    const ledger = await Fulfillment.findOne({ requestId: request._id }).lean();
+    expect(ledger?.orderNumber).toBe("00070154321");
+    expect(typeof ledger?.orderNumber).toBe("string");
+
+    expect(sendFulfillmentEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: request._id }),
+      "00070154321",
+      "ASAP",
+      undefined,
+      "helper@example.edu"
+    );
+
+    // The response is still the same two-key shape; the order number is private
+    // and does not appear in the public projection at all.
+    expect(Object.keys(context.body).sort()).toEqual([
+      "notification",
+      "request",
+    ]);
+    expect(JSON.stringify(context.body)).not.toContain("00070154321");
+  });
+
+  it("refuses a non-numeric order number without touching the request", async () => {
+    const { request, rawToken } = await createClaimedRequest();
+    const context = routeContext(String(request._id), {
+      claimToken: rawToken,
+      fulfillment: {
+        fulfillerEmail: "Helper@Example.edu",
+        orderNumber: "7015-4321",
+        eta: "ASAP",
+      },
+    });
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.statusCode).toBe(400);
+    expect(context.body.error.code).toBe("INVALID_FULFILLMENT_PAYLOAD");
+
+    // Placement semantics are untouched: the claim survives and can still be
+    // used for a corrected submission.
+    const stored = await MealRequest.findById(request._id).lean();
+    expect(stored?.status).toBe("claimed");
+    expect(stored?.orderNumber).toBeUndefined();
+    expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(0);
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
   it("leaves no contact message anywhere when the helper omits one", async () => {
     // Seeded with a message so the omission has something stale to clear
     // rather than passing on an already-empty field.
@@ -219,7 +289,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       claimToken: rawToken,
       fulfillment: {
         fulfillerEmail: "Helper@Example.edu",
-        orderNumber: "ORDER123",
+        orderNumber: "70154321",
         eta: "15 minutes",
       },
     });
@@ -232,7 +302,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
 
     const stored = await MealRequest.findById(request._id).lean();
     expect(stored?.status).toBe("placed");
-    expect(stored?.orderNumber).toBe("ORDER123");
+    expect(stored?.orderNumber).toBe("70154321");
     expect(stored).not.toHaveProperty("contactMessage");
 
     const ledger = await Fulfillment.findOne({ requestId: request._id }).lean();
@@ -243,7 +313,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(sendFulfillmentEmail).toHaveBeenCalledOnce();
     expect(sendFulfillmentEmail).toHaveBeenCalledWith(
       expect.objectContaining({ _id: request._id }),
-      "ORDER123",
+      "70154321",
       "15 minutes",
       undefined,
       "helper@example.edu"
@@ -337,7 +407,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     try {
       await Fulfillment.create({
         requestId: existingRequestId,
-        orderNumber: "ORDER123",
+        orderNumber: "70154321",
         etaText: "10 minutes",
       });
       const { request, rawToken } = await createClaimedRequest();
@@ -367,10 +437,10 @@ describeMongo("transactional fulfillment against a real replica set", () => {
 
   it("enforces Fulfillment request uniqueness at the database", async () => {
     const requestId = new mongoose.Types.ObjectId();
-    await Fulfillment.create({ requestId, orderNumber: "FIRST" });
+    await Fulfillment.create({ requestId, orderNumber: "70150001" });
 
     await expect(
-      Fulfillment.create({ requestId, orderNumber: "SECOND" })
+      Fulfillment.create({ requestId, orderNumber: "70150002" })
     ).rejects.toMatchObject({ code: 11000 });
     expect(await Fulfillment.countDocuments({ requestId })).toBe(1);
   });
@@ -391,6 +461,37 @@ describeMongo("transactional fulfillment against a real replica set", () => {
 
     expect(json).toHaveBeenCalledWith({ totalShared: 1 });
     expect(next).not.toHaveBeenCalled();
+  });
+
+  // The post-commit notification is handed the *placed* document, which is what
+  // carries the student address the request was created with. The helper's
+  // address arrives only as the last argument — the Reply-To — so entering it on
+  // the fulfillment form can never redirect the notification to them.
+  it("notifies from the placed request and passes the helper address only as reply-to", async () => {
+    const { request, rawToken } = await createClaimedRequest();
+    const context = routeContext(
+      String(request._id),
+      fulfillmentBody(rawToken)
+    );
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.statusCode).toBe(200);
+    expect(sendFulfillmentEmail).toHaveBeenCalledTimes(1);
+    const [notified, orderNumber, eta, contactMessage, replyTo] =
+      sendFulfillmentEmail.mock.calls[0];
+
+    expect(String(notified._id)).toBe(String(request._id));
+    expect(notified.status).toBe("placed");
+    expect(notified.email).toBe("requester@example.edu");
+    expect(notified.pickupName).toBe("Requester Pickup");
+    expect(orderNumber).toBe("70154321");
+    expect(eta).toBe("15 minutes");
+    expect(contactMessage).toBe("Your meal is ready");
+    // Normalised by the payload schema, and never the recipient.
+    expect(replyTo).toBe("helper@example.edu");
+    expect(notified.email).not.toBe(replyTo);
+    expect(context.body.notification).toEqual({ status: "sent" });
   });
 
   it("attempts email after commit and keeps placement when provider submission fails", async () => {

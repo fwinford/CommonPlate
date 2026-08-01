@@ -24,7 +24,11 @@ export const FULFILLMENT_ROUTE_PATH = "/api/request/:id/fulfill";
 export const PLACED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const fulfillmentRateLimiter = createDay4MutationRateLimiter(10);
 
-const orderNumberFormat = /^[A-Za-z0-9_-]{1,50}$/;
+// A CommonPlate Grubhub order number contains digits only. Validated as a
+// string and stored as one — never coerced to a number — so a leading zero
+// survives and a long value is not reshaped by numeric conversion. The 50-digit
+// cap is a length bound on that string, not a magnitude bound.
+const orderNumberFormat = /^[0-9]{1,50}$/;
 const requiredText = z.string().trim().min(1);
 const fulfillmentRequestSchema = z
   .object({

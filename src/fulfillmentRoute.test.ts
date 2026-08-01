@@ -15,7 +15,7 @@ function validBody() {
     claimToken: generateClaimToken(),
     fulfillment: {
       fulfillerEmail: "helper@example.edu",
-      orderNumber: "ORDER123",
+      orderNumber: "70154321",
       eta: "15 minutes",
       contactMessage: "Your meal is ready",
     },
@@ -83,7 +83,7 @@ describe("POST /api/request/:id/fulfill validation", () => {
       mutate: () => ({
         claimToken: generateClaimToken(),
         fulfillerEmail: "helper@example.edu",
-        orderNumber: "ORDER123",
+        orderNumber: "70154321",
         eta: "15 minutes",
       }),
     },
@@ -98,7 +98,7 @@ describe("POST /api/request/:id/fulfill validation", () => {
       name: "unsafe order number",
       mutate: () => ({
         ...validBody(),
-        fulfillment: { ...validBody().fulfillment, orderNumber: "ORDER 123" },
+        fulfillment: { ...validBody().fulfillment, orderNumber: "7015 4321" },
       }),
     },
     {
@@ -139,6 +139,99 @@ describe("POST /api/request/:id/fulfill validation", () => {
   ])("rejects $name", async ({ mutate }) => {
     const startSession = vi.spyOn(mongoose, "startSession");
     const context = routeContext(mutate());
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe(
+      "INVALID_FULFILLMENT_PAYLOAD"
+    );
+    expect(startSession).not.toHaveBeenCalled();
+  });
+
+  // A CommonPlate Grubhub order number contains digits only. Every rejection
+  // below stops before a session is opened, so nothing about an already-paid
+  // real-world order is put at risk by a malformed value.
+  it.each([
+    ["one letter", "7015432A"],
+    ["leading letter", "A70154321"],
+    ["all letters", "ORDERNUMBER"],
+    ["interior space", "7015 4321"],
+    ["surrounding spaces only", "   "],
+    ["dash", "7015-4321"],
+    ["underscore", "7015_4321"],
+    ["decimal point", "7015.4321"],
+    ["plus sign", "+70154321"],
+    ["minus sign", "-70154321"],
+    ["punctuation", "70154321!"],
+    ["51 digits", "7".repeat(51)],
+    ["empty", ""],
+  ])("rejects a %s order number", async (_name, orderNumber) => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext({
+      ...validBody(),
+      fulfillment: { ...validBody().fulfillment, orderNumber },
+    });
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe(
+      "INVALID_FULFILLMENT_PAYLOAD"
+    );
+    // The envelope shape is unchanged by the tightened rule.
+    expect(responseBody(context).error.fields).toBeNull();
+    expect(startSession).not.toHaveBeenCalled();
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
+  // Accepted values are asserted through the schema rather than the route so no
+  // transaction is required: reaching `startSession` is itself the proof that
+  // validation let the value through.
+  it.each([
+    ["a single digit", "7"],
+    ["an ordinary order number", "70154321"],
+    ["a leading zero", "070154321"],
+    ["several leading zeroes", "00070154321"],
+    ["all zeroes", "0000000000"],
+    ["50 digits", "7".repeat(50)],
+    ["surrounding whitespace that trims away", "  70154321  "],
+  ])("accepts %s", async (_name, orderNumber) => {
+    const startSession = vi
+      .spyOn(mongoose, "startSession")
+      .mockRejectedValue(new Error("stop after validation"));
+    const context = routeContext({
+      ...validBody(),
+      fulfillment: { ...validBody().fulfillment, orderNumber },
+    });
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(startSession).toHaveBeenCalledOnce();
+    expect(responseBody(context).error?.code).not.toBe(
+      "INVALID_FULFILLMENT_PAYLOAD"
+    );
+  });
+
+  it("keeps the payload shape unchanged and the order number a string", async () => {
+    const body = validBody();
+    expect(Object.keys(body).sort()).toEqual(["claimToken", "fulfillment"]);
+    expect(Object.keys(body.fulfillment).sort()).toEqual([
+      "contactMessage",
+      "eta",
+      "fulfillerEmail",
+      "orderNumber",
+    ]);
+    expect(typeof body.fulfillment.orderNumber).toBe("string");
+
+    // A JSON number is refused outright: the field is a string field, and
+    // accepting a number would silently drop a leading zero and reshape a long
+    // value the moment it round-tripped.
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext({
+      ...body,
+      fulfillment: { ...body.fulfillment, orderNumber: 70154321 },
+    });
 
     await fulfillRequest(context.req, context.res);
 

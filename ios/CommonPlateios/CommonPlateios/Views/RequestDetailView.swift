@@ -50,17 +50,17 @@ enum ClaimPresentationError: Equatable {
         case .rateLimited:
             return "Too many attempts. Please wait a moment and try again."
         case .ambiguous:
-            return "We couldn’t confirm whether you started helping with this request. Check Active Requests before trying again."
+            return "We couldn’t tell whether your reservation went through. Go back to Active Requests—if you got it, it will appear at the top. Don’t place a Grubhub order until you see it."
         case .operationInProgress:
             return "You’re already starting to help with this request."
         case .otherClaimInProgress:
             return RequestDetailView.otherClaimInProgressTitle
-                + " " + RequestDetailView.otherClaimInProgressNotice
+                + ". " + RequestDetailView.otherClaimInProgressNotice
         case .existingActiveClaim:
             return "You’re already helping with another request. Finish that one or wait for its reservation to end."
         case .pendingPlacementAcknowledgement:
             return RequestDetailView.pendingPlacementTitle
-                + " " + RequestDetailView.pendingPlacementNotice
+                + ". " + RequestDetailView.pendingPlacementNotice
         case .couldNotStart:
             return "We couldn’t start helping with this request. Please try again in a moment."
         }
@@ -123,16 +123,7 @@ struct RequestDetailView: View {
 
     let request: FoodRequest
     @ObservedObject var store: RequestStore
-
-    @Environment(\.dismiss) private var dismiss
-
-    /// Whether the claimant flow is pushed from this screen. Entering is driven
-    /// only by confirmed store state (see `onChange` below), so nothing can open
-    /// the flow before the backend granted the claim. Leaving is ordinary
-    /// navigation: Back writes `false` here and touches no claim state, because
-    /// dismissing a screen is not a decision to give up a reservation the
-    /// backend still holds.
-    @State private var isPresentingClaimedFlow = false
+    @Binding var path: [AppRoute]
 
     /// The single rule for entering the claimant-only flow: a confirmed claim
     /// for *this* request exists in memory. There is no loading, optimistic, or
@@ -142,17 +133,6 @@ struct RequestDetailView: View {
         requestID: String
     ) -> Bool {
         activeClaim?.requestID == requestID
-    }
-
-    /// A confirmed placement clears claimant credentials immediately, but its
-    /// confirmation stays on the claimant screen until acknowledged. This
-    /// keeps the destination alive for that safe terminal presentation only.
-    static func keepsClaimedFlowPresented(
-        activeRequestID: String?,
-        confirmationRequestID: String?,
-        requestID: String
-    ) -> Bool {
-        activeRequestID == requestID || confirmationRequestID == requestID
     }
 
     static func shouldDismiss(
@@ -200,32 +180,27 @@ struct RequestDetailView: View {
             }
         }
         .navigationTitle("Request")
-        .navigationDestination(isPresented: $isPresentingClaimedFlow) {
-            FulfillRequestView(request: request, store: store) {
-                dismiss()
+        // Confirmed claim success is the only thing that opens the flow, and it
+        // opens it by pushing a route rather than by flipping a presentation
+        // flag this screen would then have to keep in sync with store state.
+        // Closing the flow belongs to the claimant screen itself: a manual Back
+        // leaves `activeClaim` untouched, so this does not fire and the
+        // reservation survives the navigation.
+        .onChange(of: store.activeClaim?.requestID) { _, _ in
+            if Self.opensClaimedFlow(activeClaim: store.activeClaim, requestID: request.id) {
+                path = AppRoute.appending(.fulfillment(request), to: path)
             }
         }
-        // Confirmed claim success is the only thing that opens the flow. The
-        // claim ending closes it; a manual Back leaves `activeClaim` untouched,
-        // so this does not fire and the reservation survives the navigation.
-        .onChange(of: store.activeClaim?.requestID) { _, activeRequestID in
-            if Self.keepsClaimedFlowPresented(
-                activeRequestID: activeRequestID,
-                confirmationRequestID: store.fulfillmentConfirmation?.requestID,
-                requestID: request.id
-            ) {
-                isPresentingClaimedFlow = true
-            } else if isPresentingClaimedFlow {
-                isPresentingClaimedFlow = false
-            }
-        }
-        // A stale detail screen must never outlive the backend's verdict.
+        // A stale detail screen must never outlive the backend's verdict. The
+        // whole helper flow is unwound, not just this level: the claimant screen
+        // this detail opened may still be above it, and the notice belongs on
+        // the list the helper lands on.
         .onChange(of: store.claimUnavailableNotice?.id) { _, noticeID in
             if let noticeID,
                let notice = store.claimUnavailableNotice,
                notice.id == noticeID,
                Self.shouldDismiss(for: notice, requestID: request.id) {
-                dismiss()
+                path = AppRoute.returningToActiveRequests(from: path)
             }
         }
     }
@@ -233,11 +208,7 @@ struct RequestDetailView: View {
     @ViewBuilder
     private var continueHelpingLink: some View {
         if let activeClaim = store.activeClaim {
-            NavigationLink {
-                FulfillRequestView(request: request, store: store) {
-                    dismiss()
-                }
-            } label: {
+            NavigationLink(value: AppRoute.fulfillment(request)) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Self.continueHelpingTitle)
                     Text(ActiveRequestsView.reservedUntilText(activeClaim.claimExpiresAt))
@@ -266,16 +237,12 @@ struct RequestDetailView: View {
         // Rather than leave the helper tapping an action that can only be
         // refused, send them to the reservation that is blocking this one.
         if inlineClaimError == .existingActiveClaim, let activeClaim = store.activeClaim {
-            NavigationLink {
-                // This claimant screen sits on top of a *different* request's
-                // detail, so its own `dismiss` would pop back onto that stale
-                // screen rather than to the list its button names. Dismissing
-                // this detail instead takes both levels off at once, matching
-                // the other two entry points.
-                FulfillRequestView(request: activeClaim.request, store: store) {
-                    dismiss()
-                }
-            } label: {
+            // The claimant screen this pushes sits on top of a *different*
+            // request's detail. Leaving it truncates the path back to Active
+            // Requests, so both levels come off at once and the helper is not
+            // returned to a stale detail for a request they never claimed —
+            // the same exit the other two entry points get.
+            NavigationLink(value: AppRoute.fulfillment(activeClaim.request)) {
                 Text(Self.goToActiveReservationTitle)
             }
             .accessibilityIdentifier("go-to-active-reservation")
@@ -301,7 +268,7 @@ struct RequestDetailView: View {
                 if store.isClaiming(requestID: request.id) {
                     HStack {
                         ProgressView()
-                        Text("Starting…")
+                        Text("Reserving…")
                     }
                 } else {
                     Text(Self.claimActionTitle)
@@ -326,7 +293,7 @@ struct RequestDetailView: View {
     /// action would leave a helper reserving a real student's meal, and blocking
     /// every other helper from it, without knowing they had done so.
     static let claimConsequenceNotice =
-        "Tapping this reserves the request for you for a few minutes, so no one else starts the same order."
+        "This holds the meal for you for a few minutes so no one else orders it. You place the Grubhub order, then save the order details here."
 
     /// Re-entry for a request this helper already reserved.
     static let continueHelpingTitle = "Continue helping with this request"
@@ -337,16 +304,16 @@ struct RequestDetailView: View {
     /// A claim already in flight for a different request. The action stays on
     /// screen: unlike a held reservation this clears itself in a moment, so the
     /// helper is asked to wait rather than sent somewhere else.
-    static let otherClaimInProgressTitle = "Please wait."
+    static let otherClaimInProgressTitle = "Please wait"
     static let otherClaimInProgressNotice =
-        "You’re already starting to help with another request. Wait for that request to finish before choosing this one."
+        "We’re still reserving another request. Try this one again in a moment."
 
     /// The acknowledgement gate. Week 2 holds one placement result at a time, so
     /// the previous one has to be read and dismissed — from the Active Requests
     /// item that carries it — before another request can be started.
-    static let pendingPlacementTitle = "Review your previous order."
+    static let pendingPlacementTitle = "Check your last order first"
     static let pendingPlacementNotice =
-        "Acknowledge the previous placement result before helping with another request."
+        "Go back to Active Requests and tap “Got it” on your last order. Then you can help with another request."
 
     /// The claim action is withheld only where offering it would be untruthful:
     /// a paused backend will refuse it, an unconfirmed claim may already have

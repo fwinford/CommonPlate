@@ -118,9 +118,7 @@ struct ActiveRequestsView: View {
     @ViewBuilder
     private var activeReservationItem: some View {
         if let claim = store.activeClaim {
-            NavigationLink {
-                FulfillRequestView(request: claim.request, store: store)
-            } label: {
+            NavigationLink(value: AppRoute.fulfillment(claim.request)) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Self.activeReservationTitle)
                         .font(.headline)
@@ -166,6 +164,20 @@ struct ActiveRequestsView: View {
                 Text(FulfillRequestView.confirmationTitle)
                     .font(.headline)
 
+                // Which meal this result belongs to. The request is out of the
+                // list and the claim is cleared by now, so the confirmation
+                // carries its own public identity — matching the reservation
+                // card above it, which a helper may have just been reading.
+                Text(confirmation.vendor)
+                    .font(.subheadline)
+                    .accessibilityIdentifier("placement-confirmation-vendor")
+
+                Text(confirmation.foodDescription)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .accessibilityIdentifier("placement-confirmation-food")
+
                 Text(FulfillRequestView.confirmationDetail(for: confirmation.kind))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -190,7 +202,7 @@ struct ActiveRequestsView: View {
     }
 
     /// Acknowledgement from the list itself. The claimant screen's button says
-    /// "Return to Active Requests" because it navigates; this one is already
+    /// "Back to Active Requests" because it navigates; this one is already
     /// there, so it only dismisses the message.
     static let confirmationAcknowledgeTitle = "Got it"
 
@@ -276,9 +288,7 @@ struct ActiveRequestsView: View {
 
             Section("Meals needing help") {
                 ForEach(availableRequests) { request in
-                    NavigationLink {
-                        RequestDetailView(request: request, store: store)
-                    } label: {
+                    NavigationLink(value: AppRoute.requestDetail(request)) {
                         RequestRowView(request: request)
                     }
                 }
@@ -328,12 +338,14 @@ struct ActiveRequestsView: View {
         switch reason {
         case .alreadyClaimed:
             return RequestDetailView.alreadyClaimedNotice
-        case .claimExpired, .fulfillmentClaimExpired:
+        case .claimExpired:
             return "Your reservation expired."
+        case .fulfillmentClaimExpired:
+            return "Your reservation ran out"
         case .reservationNoLongerValid:
-            return "Your reservation is no longer valid."
+            return "This meal is no longer reserved for you."
         case .fulfillmentAlreadyPlaced:
-            return "Order already recorded."
+            return "This order is already recorded"
         case .fulfillmentRequestNotFound:
             return "We couldn’t find this request."
         case .noLongerAvailable, nil:
@@ -348,13 +360,13 @@ struct ActiveRequestsView: View {
         case .claimExpired:
             return "Please don’t place an order for that request. Someone else may already be helping."
         case .fulfillmentClaimExpired:
-            return "If you already placed the external order, do not place it again. If you have not placed it, stop and return to Active Requests."
+            return "If you already completed the Grubhub order, don’t place it again. CommonPlate may not have saved the details, so the student may not have been emailed. If you had not ordered yet, do not start now."
         case .reservationNoLongerValid:
-            return "This request is no longer reserved for you. Do not submit again or place another order."
+            return "Someone else may have recorded it. Don’t place another Grubhub order."
         case .fulfillmentAlreadyPlaced:
-            return "The request has already been marked placed. Do not place another order."
+            return "Your order went through. There’s nothing else to do. Don’t place another Grubhub order."
         case .fulfillmentRequestNotFound:
-            return "The reservation can’t be used. Do not submit again or place another order."
+            return "It may already have been recorded or removed. Don’t place another Grubhub order."
         case .alreadyClaimed, .noLongerAvailable, nil:
             return nil
         }

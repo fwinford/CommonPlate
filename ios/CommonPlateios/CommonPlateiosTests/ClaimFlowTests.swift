@@ -152,6 +152,17 @@ final class ClaimFlowURLProtocol: URLProtocol {
 final class ClaimFlowTests: XCTestCase {
     private let requestID = "meal-a"
 
+    /// The one sentence that stops a second real-world order. It is reproduced
+    /// verbatim — never paraphrased — in every state where another Grubhub
+    /// order would cost a student money, so it is asserted from one constant.
+    static let safetySentence = "Don’t place another Grubhub order."
+
+    /// Re-submitting to CommonPlate is safe wherever the backend would answer a
+    /// repeat with REQUEST_ALREADY_PLACED. Where that retry is offered, the copy
+    /// must separate it from ordering again.
+    static let inAppRetryDisclaimer =
+        "Trying again here only updates CommonPlate. It does not place another Grubhub order."
+
     override func tearDown() {
         ClaimFlowURLProtocol.reset()
         super.tearDown()
@@ -1471,12 +1482,21 @@ final class ClaimFlowTests: XCTestCase {
     /// it — and viewing a request still claims nothing.
     func testClaimConsequenceIsExplainedBeforeTheTapAndViewingClaimsNothing() async throws {
         let notice = RequestDetailView.claimConsequenceNotice
-        XCTAssertTrue(notice.localizedCaseInsensitiveContains("reserves"))
+        XCTAssertEqual(
+            notice,
+            "This holds the meal for you for a few minutes so no one else orders it. You place the Grubhub order, then save the order details here."
+        )
+        // Both halves of the commitment: the hold, and who actually pays for
+        // and places the order.
+        XCTAssertTrue(notice.localizedCaseInsensitiveContains("holds the meal"))
         XCTAssertTrue(notice.localizedCaseInsensitiveContains("no one else"))
+        XCTAssertTrue(notice.localizedCaseInsensitiveContains("you place the grubhub order"))
         // Never promise a duration the backend caps at the request's own
-        // expiration, and never imply the order or the requester are involved.
+        // expiration, and never imply the tap itself notifies anyone.
         XCTAssertFalse(notice.contains("15"))
         XCTAssertFalse(notice.localizedCaseInsensitiveContains("notif"))
+        // Reserving is not ordering: nothing here may read as an order that
+        // already happened.
         XCTAssertFalse(notice.localizedCaseInsensitiveContains("placed"))
 
         // The notice ships with the action it explains.
@@ -1502,11 +1522,16 @@ final class ClaimFlowTests: XCTestCase {
         let steps = ContentView.howItWorksSteps
 
         XCTAssertFalse(steps.contains("3. They place the order and enter pickup details."))
-        XCTAssertTrue(steps[2].localizedCaseInsensitiveContains("external order"))
+        XCTAssertTrue(steps[2].localizedCaseInsensitiveContains("grubhub order"))
         XCTAssertTrue(steps[2].localizedCaseInsensitiveContains("then records"))
         XCTAssertTrue(steps[3].localizedCaseInsensitiveContains("attempts to email"))
         XCTAssertFalse(steps[3].localizedCaseInsensitiveContains("delivered"))
         XCTAssertFalse(steps[3].localizedCaseInsensitiveContains("read"))
+        // One vocabulary across every surface: no engineering or role nouns.
+        for step in steps {
+            XCTAssertFalse(step.localizedCaseInsensitiveContains("external order"), step)
+            XCTAssertFalse(step.localizedCaseInsensitiveContains("requester"), step)
+        }
     }
 
     func testExtensionPromptUsesReservationFocusedCopy() {
@@ -1836,7 +1861,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: "Meet by the entrance"
         )
@@ -1853,7 +1878,7 @@ final class ClaimFlowTests: XCTestCase {
             ["fulfillerEmail", "orderNumber", "eta", "contactMessage"]
         )
         XCTAssertEqual(fulfillment["fulfillerEmail"] as? String, "helper@example.edu")
-        XCTAssertEqual(fulfillment["orderNumber"] as? String, "ORDER123")
+        XCTAssertEqual(fulfillment["orderNumber"] as? String, "70154321")
         XCTAssertEqual(fulfillment["eta"] as? String, "15 minutes")
         XCTAssertEqual(fulfillment["contactMessage"] as? String, "Meet by the entrance")
         XCTAssertNil(fulfillment["note"])
@@ -1872,7 +1897,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -1902,16 +1927,16 @@ final class ClaimFlowTests: XCTestCase {
 
     func testRequiredFulfillmentFieldsAndActiveClaimGateSubmission() async throws {
         XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "", orderNumber: "ORDER123", eta: "15 minutes"
+            fulfillerEmail: "", orderNumber: "70154321", eta: "15 minutes"
         ))
         XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
             fulfillerEmail: "helper@example.edu", orderNumber: "  ", eta: "15 minutes"
         ))
         XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "helper@example.edu", orderNumber: "ORDER123", eta: "\n"
+            fulfillerEmail: "helper@example.edu", orderNumber: "70154321", eta: "\n"
         ))
         XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "helper@example.edu", orderNumber: "ORDER123", eta: "15 minutes"
+            fulfillerEmail: "helper@example.edu", orderNumber: "70154321", eta: "15 minutes"
         ))
 
         let store = makeStore()
@@ -1920,6 +1945,144 @@ final class ClaimFlowTests: XCTestCase {
         try await store.claim(requestID: requestID)
         XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
         XCTAssertFalse(store.canSubmitFulfillment(requestID: "different-request"))
+    }
+
+    /// Renaming the submit control changes what it says, not when it is
+    /// available: the same four gates decide, in the same order.
+    func testSubmitButtonIsRenamedButGatedIdentically() async throws {
+        XCTAssertEqual(FulfillRequestView.submitTitle, "I placed this order")
+
+        let store = makeStore()
+        // No claim.
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+
+        // Incomplete fields still disable it independently of store state.
+        for (email, number, eta) in [
+            ("", "70154321", "15 minutes"),
+            ("helper@example.edu", " ", "15 minutes"),
+            ("helper@example.edu", "70154321", "")
+        ] {
+            XCTAssertFalse(
+                FulfillRequestView.requiredFieldsArePresent(
+                    fulfillerEmail: email, orderNumber: number, eta: eta
+                ),
+                "Missing required field must keep “\(FulfillRequestView.submitTitle)” disabled"
+            )
+        }
+
+        // Wrong request, and a past deadline, still close it.
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: "different-request"))
+        XCTAssertFalse(store.canSubmitFulfillment(
+            requestID: requestID,
+            now: Date().addingTimeInterval(60 * 60)
+        ))
+    }
+
+    /// The settled unresolved state gained an exit. It has to be an exit and
+    /// nothing more: the reservation stays held and blocked, the ambiguity
+    /// stays unresolved, and no request leaves the device.
+    func testUnresolvedAmbiguityReturnActionOnlyNavigates() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
+
+        try? await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        let ambiguity = try XCTUnwrap(store.fulfillmentAmbiguity)
+        XCTAssertFalse(ambiguity.isCheckingStatus)
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityReturnAction(isCheckingStatus: false))
+        let pathsBefore = ClaimFlowURLProtocol.capturedPaths
+
+        var navigated = 0
+        FulfillRequestView.returnToActiveRequests(from: store) { navigated += 1 }
+
+        XCTAssertEqual(navigated, 1, "The action's only job is to navigate")
+        // Nothing resolved, nothing cleared, nothing unblocked, nothing sent.
+        XCTAssertEqual(store.fulfillmentAmbiguity?.id, ambiguity.id)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isCheckingStatus, false)
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsBefore)
+
+        // And a further submission attempt is still refused, unchanged.
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("Leaving must not reopen submission")
+        } catch RequestServiceError.unresolvedFulfillment {
+            // Expected: the block survives the navigation.
+        }
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsBefore)
+    }
+
+    /// The Active Requests card is the last surviving surface for a result, and
+    /// by then the claim and the list row are both gone — so the confirmation
+    /// has to carry the meal's public identity itself.
+    func testConfirmationCarriesVendorAndFoodThroughBothConfirmationPaths() async throws {
+        // Path 1: a decoded placement response.
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        let confirmed = try XCTUnwrap(store.fulfillmentConfirmation)
+        XCTAssertEqual(confirmed.vendor, "Crave NYU")
+        XCTAssertEqual(confirmed.foodDescription, "Rice bowl")
+        XCTAssertEqual(confirmed.kind, .notificationSent)
+        // Identity only: no claimant-private value may ride along.
+        XCTAssertFalse(confirmed.vendor.contains("Taylor"))
+        XCTAssertFalse(confirmed.foodDescription.contains("claim-token"))
+        // Acknowledgement is unchanged: by exact ID, clearing only this one.
+        store.acknowledgeFulfillmentConfirmation(id: UUID())
+        XCTAssertNotNil(store.fulfillmentConfirmation)
+        store.acknowledgeFulfillmentConfirmation(id: confirmed.id)
+        XCTAssertNil(store.fulfillmentConfirmation)
+
+        // Path 2: an ambiguous POST resolved by the single placed detail read.
+        ClaimFlowURLProtocol.reset()
+        let resolved = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await resolved.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
+        try await resolved.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        let fromDetail = try XCTUnwrap(resolved.fulfillmentConfirmation)
+        XCTAssertEqual(fromDetail.vendor, "Crave NYU")
+        XCTAssertEqual(fromDetail.foodDescription, "Rice bowl")
+        XCTAssertEqual(fromDetail.kind, .emailStatusUnknown)
+        XCTAssertEqual(ActiveRequestsView.confirmationAcknowledgeTitle, "Got it")
     }
 
     func testDuplicateFulfillmentTapIsBlockedAndNothingIsRemovedOptimistically() async throws {
@@ -1936,7 +2099,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -1950,7 +2113,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -1984,7 +2147,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2017,7 +2180,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2033,26 +2196,36 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(FulfillRequestView.confirmationTitle, "Order recorded")
         XCTAssertEqual(
             FulfillRequestView.confirmationDetail(for: .notificationSent),
-            "We emailed the requester the order details."
+            "We sent the order details to the student’s email. They’ll pick up the food themselves—you’re done. If they reply, it goes to the address you entered."
         )
-        XCTAssertFalse(
-            FulfillRequestView.confirmationDetail(for: .notificationSent)
-                .localizedCaseInsensitiveContains("delivered")
+        XCTAssertEqual(
+            FulfillRequestView.confirmationDetail(for: .notificationFailed),
+            "Your order is recorded, but we couldn’t email the student. They may not know their food is waiting. Don’t place another Grubhub order."
         )
-        XCTAssertTrue(
-            FulfillRequestView.confirmationDetail(for: .notificationFailed)
-                .localizedCaseInsensitiveContains("already marked placed")
+        XCTAssertEqual(
+            FulfillRequestView.confirmationDetail(for: .emailStatusUnknown),
+            "Your order is recorded. We couldn’t tell whether the student’s email went out, so they may not know their food is waiting. Don’t place another Grubhub order."
         )
-        XCTAssertTrue(
-            FulfillRequestView.confirmationDetail(for: .notificationFailed)
-                .localizedCaseInsensitiveContains("do not place another order")
-        )
-        XCTAssertTrue(RequestDetailView.keepsClaimedFlowPresented(
+
+        // Three outcomes, three distinct sentences. Sent must not promise
+        // delivery; both non-sent outcomes must say the student may not know.
+        let details = [
+            FulfillRequestView.confirmationDetail(for: .notificationSent),
+            FulfillRequestView.confirmationDetail(for: .notificationFailed),
+            FulfillRequestView.confirmationDetail(for: .emailStatusUnknown)
+        ]
+        XCTAssertEqual(Set(details).count, 3, "Email outcomes must stay distinguishable")
+        XCTAssertFalse(details[0].localizedCaseInsensitiveContains("delivered"))
+        for detail in details.dropFirst() {
+            XCTAssertTrue(detail.localizedCaseInsensitiveContains("may not know"), detail)
+            XCTAssertTrue(detail.contains(Self.safetySentence), detail)
+        }
+        XCTAssertTrue(FulfillRequestView.keepsClaimedFlowPresented(
             activeRequestID: nil,
             confirmationRequestID: requestID,
             requestID: requestID
         ))
-        XCTAssertFalse(RequestDetailView.keepsClaimedFlowPresented(
+        XCTAssertFalse(FulfillRequestView.keepsClaimedFlowPresented(
             activeRequestID: nil,
             confirmationRequestID: nil,
             requestID: requestID
@@ -2089,7 +2262,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil,
                 now: expiration.addingTimeInterval(1)
@@ -2131,7 +2304,7 @@ final class ClaimFlowTests: XCTestCase {
                 try await store.fulfill(
                     requestID: requestID,
                     fulfillerEmail: "helper@example.edu",
-                    orderNumber: "ORDER123",
+                    orderNumber: "70154321",
                     eta: "15 minutes",
                     contactMessage: nil
                 )
@@ -2162,7 +2335,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2180,16 +2353,17 @@ final class ClaimFlowTests: XCTestCase {
         // INTERNAL_FAILURE can accompany a placement that may in fact have
         // committed, so the copy must not assert that nothing was recorded, and
         // must separate re-sending these CommonPlate details from placing a
-        // second external order.
+        // second Grubhub order.
         XCTAssertEqual(FulfillmentPresentationError.map(store.fulfillError), .couldNotRecord)
         let message = FulfillmentPresentationError.couldNotRecord.message
         XCTAssertEqual(
             message,
-            "We couldn’t confirm whether CommonPlate recorded the order. You may try submitting these same order details again, but do not place another external order."
+            "CommonPlate may not have saved your order. Tap “I placed this order” again. Trying again here only updates CommonPlate. It does not place another Grubhub order."
         )
-        XCTAssertTrue(message.localizedCaseInsensitiveContains("couldn’t confirm whether"))
-        XCTAssertTrue(message.localizedCaseInsensitiveContains("same order details again"))
-        XCTAssertTrue(message.localizedCaseInsensitiveContains("do not place another external order"))
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("may not have saved"))
+        // The retry it offers is the in-app one, named by the button it means.
+        XCTAssertTrue(message.contains(FulfillRequestView.submitTitle))
+        XCTAssertTrue(message.contains(Self.inAppRetryDisclaimer))
         XCTAssertFalse(message.contains("We couldn’t record the order."))
 
         // Nonterminal means the helper may still record manually. Proving the
@@ -2200,7 +2374,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -2219,7 +2393,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2243,7 +2417,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2283,7 +2457,7 @@ final class ClaimFlowTests: XCTestCase {
                 try await store.fulfill(
                     requestID: requestID,
                     fulfillerEmail: "helper@example.edu",
-                    orderNumber: "ORDER123",
+                    orderNumber: "70154321",
                     eta: "15 minutes",
                     contactMessage: nil
                 )
@@ -2312,7 +2486,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2361,7 +2535,7 @@ final class ClaimFlowTests: XCTestCase {
             try? await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2384,7 +2558,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -2395,19 +2569,39 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(store.fulfillmentConfirmation?.kind, .emailStatusUnknown)
         XCTAssertEqual(
             FulfillRequestView.confirmationDetail(for: .emailStatusUnknown),
-            "We confirmed the request was placed, but we couldn’t confirm whether the requester email was sent. Do not place another order."
+            "Your order is recorded. We couldn’t tell whether the student’s email went out, so they may not know their food is waiting. Don’t place another Grubhub order."
         )
     }
 
     func testAmbiguousSafetyCopyNeverInvitesAnotherOrderOrSubmission() {
-        XCTAssertEqual(FulfillRequestView.ambiguousTitle, "We couldn’t confirm the result")
+        XCTAssertEqual(
+            FulfillRequestView.ambiguousTitle(isCheckingStatus: true),
+            "We’re checking your order"
+        )
+        XCTAssertEqual(
+            FulfillRequestView.ambiguousTitle(isCheckingStatus: false),
+            "We’re not sure your order was saved"
+        )
+        XCTAssertEqual(
+            FulfillRequestView.ambiguousCheckingDetail,
+            "Your order may already be saved. Don’t tap again or place another Grubhub order while we check."
+        )
+        XCTAssertEqual(
+            FulfillRequestView.ambiguousUnresolvedDetail,
+            "We lost the connection while saving and still can’t tell whether it went through. Don’t place another Grubhub order. The student may not have received an email. You can’t help with another request until this reservation expires."
+        )
+        // Neither ambiguous state may invite a second tap or a second order,
+        // and neither may offer the in-app retry the store is refusing.
         for detail in [
             FulfillRequestView.ambiguousCheckingDetail,
             FulfillRequestView.ambiguousUnresolvedDetail
         ] {
-            XCTAssertTrue(detail.contains("Do not submit again"))
-            XCTAssertTrue(detail.contains("place another order"))
+            XCTAssertTrue(detail.localizedCaseInsensitiveContains("grubhub order"), detail)
+            XCTAssertFalse(detail.contains(Self.inAppRetryDisclaimer), detail)
         }
+        XCTAssertTrue(
+            FulfillRequestView.ambiguousUnresolvedDetail.contains(Self.safetySentence)
+        )
         for reason in [
             ClaimUnavailableReason.fulfillmentClaimExpired,
             .reservationNoLongerValid,
@@ -2415,8 +2609,102 @@ final class ClaimFlowTests: XCTestCase {
             .fulfillmentRequestNotFound
         ] {
             let detail = ActiveRequestsView.claimUnavailableDetail(for: reason) ?? ""
-            XCTAssertTrue(detail.localizedCaseInsensitiveContains("do not"), "Unsafe copy for \(reason)")
-            XCTAssertTrue(detail.localizedCaseInsensitiveContains("order"), "Missing order warning for \(reason)")
+            XCTAssertTrue(
+                detail.localizedCaseInsensitiveContains("grubhub order"),
+                "Missing order warning for \(reason)"
+            )
+        }
+    }
+
+    /// One sentence, reproduced exactly, wherever a second real-world order
+    /// would cost a student money. Paraphrase is the failure this locks out.
+    func testEverySafetyStateUsesTheOneGrubhubOrderSentence() {
+        let mustCarryTheSentence: [String] = [
+            FulfillmentPresentationError.invalidDetails.message,
+            FulfillmentPresentationError.rateLimited.message,
+            FulfillmentPresentationError.temporarilyUnavailable.message,
+            FulfillRequestView.ambiguousUnresolvedDetail,
+            FulfillRequestView.confirmationDetail(for: .notificationFailed),
+            FulfillRequestView.confirmationDetail(for: .emailStatusUnknown),
+            ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentAlreadyPlaced) ?? "",
+            ActiveRequestsView.claimUnavailableDetail(for: .reservationNoLongerValid) ?? "",
+            ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentRequestNotFound) ?? ""
+        ]
+        for copy in mustCarryTheSentence {
+            XCTAssertTrue(
+                copy.contains(Self.safetySentence),
+                "Safety sentence missing or paraphrased: \(copy)"
+            )
+        }
+
+        // The two states that must warn without that exact sentence — one is
+        // mid-check, the other is the locked Day 4 pre-order expiration — still
+        // have to forbid a real order in their own words.
+        XCTAssertTrue(
+            FulfillRequestView.ambiguousCheckingDetail
+                .contains("Don’t tap again or place another Grubhub order while we check.")
+        )
+        let expiredAfterAttempt = ActiveRequestsView
+            .claimUnavailableDetail(for: .fulfillmentClaimExpired) ?? ""
+        XCTAssertTrue(expiredAfterAttempt.contains("don’t place it again"))
+        XCTAssertTrue(expiredAfterAttempt.contains("do not start now"))
+
+        // Retired vocabulary must not creep back into any of it.
+        let everySafetyString = mustCarryTheSentence + [
+            FulfillmentPresentationError.couldNotRecord.message,
+            FulfillRequestView.ambiguousCheckingDetail,
+            expiredAfterAttempt,
+            FulfillRequestView.completedOrderNotice,
+            FulfillRequestView.helperEmailNotice,
+            RequestDetailView.claimConsequenceNotice,
+            ClaimPresentationError.ambiguous.message,
+            ClaimPresentationError.pendingPlacementAcknowledgement.message,
+            ClaimPresentationError.otherClaimInProgress.message
+        ]
+        for copy in everySafetyString {
+            for retired in ["external order", "requester", "placement result", "marked placed"] {
+                XCTAssertFalse(
+                    copy.localizedCaseInsensitiveContains(retired),
+                    "Retired term “\(retired)” in: \(copy)"
+                )
+            }
+        }
+    }
+
+    /// A structured failure the helper can genuinely retry must say that the
+    /// retry is in-app. An ambiguous one, which the store refuses, must not.
+    func testRetryableFailuresSeparateInAppRetryFromAnotherGrubhubOrder() {
+        XCTAssertTrue(
+            FulfillmentPresentationError.couldNotRecord.message
+                .contains(Self.inAppRetryDisclaimer)
+        )
+        // The other structured failures point at the same button without
+        // implying the order itself needs repeating.
+        XCTAssertTrue(
+            FulfillmentPresentationError.rateLimited.message
+                .contains("then tap “I placed this order” again")
+        )
+        XCTAssertTrue(
+            FulfillmentPresentationError.temporarilyUnavailable.message
+                .contains("Stay on this screen and try again in a moment.")
+        )
+        // Field-blind by design now: the specific rule that failed is named on
+        // the field, so the fallback points at the highlights instead of
+        // guessing which field was wrong.
+        XCTAssertTrue(
+            FulfillmentPresentationError.invalidDetails.message
+                .contains("Check the highlighted fields and try again.")
+        )
+        for error in [
+            FulfillmentPresentationError.invalidDetails,
+            .rateLimited,
+            .temporarilyUnavailable,
+            .couldNotRecord
+        ] {
+            XCTAssertFalse(
+                error.message.localizedCaseInsensitiveContains("order again"),
+                "Retry copy must never read as ordering again: \(error.message)"
+            )
         }
     }
 
@@ -2433,7 +2721,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "old@example.edu",
-                orderNumber: "OLD123",
+                orderNumber: "70150001",
                 eta: "10 minutes",
                 contactMessage: nil
             )
@@ -2470,7 +2758,7 @@ final class ClaimFlowTests: XCTestCase {
             try? await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "old@example.edu",
-                orderNumber: "OLD123",
+                orderNumber: "70150001",
                 eta: "10 minutes",
                 contactMessage: nil
             )
@@ -2529,7 +2817,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2548,8 +2836,11 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(confirmation.kind, .notificationFailed)
         XCTAssertEqual(
             FulfillRequestView.confirmationDetail(for: confirmation.kind),
-            "We couldn’t send the requester email, but the request is already marked placed. Do not place another order."
+            "Your order is recorded, but we couldn’t email the student. They may not know their food is waiting. Don’t place another Grubhub order."
         )
+        // The card that carries it must still be able to name the meal.
+        XCTAssertEqual(confirmation.vendor, "Crave NYU")
+        XCTAssertEqual(confirmation.foodDescription, "Rice bowl")
 
         store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
         XCTAssertNil(store.fulfillmentConfirmation)
@@ -2567,7 +2858,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -2612,7 +2903,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: otherRequestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER456",
+            orderNumber: "70159876",
             eta: "20 minutes",
             contactMessage: nil
         )
@@ -2628,14 +2919,18 @@ final class ClaimFlowTests: XCTestCase {
             ClaimPresentationError.map(RequestServiceError.unacknowledgedPlacement),
             .pendingPlacementAcknowledgement
         )
-        XCTAssertEqual(RequestDetailView.pendingPlacementTitle, "Review your previous order.")
+        XCTAssertEqual(RequestDetailView.pendingPlacementTitle, "Check your last order first")
         XCTAssertEqual(
             RequestDetailView.pendingPlacementNotice,
-            "Acknowledge the previous placement result before helping with another request."
+            "Go back to Active Requests and tap “Got it” on your last order. Then you can help with another request."
         )
         let message = ClaimPresentationError.pendingPlacementAcknowledgement.message
         XCTAssertTrue(message.contains(RequestDetailView.pendingPlacementTitle))
         XCTAssertTrue(message.contains(RequestDetailView.pendingPlacementNotice))
+        // The gate names the exact control that clears it, on the screen that
+        // has it — otherwise the block has no visible remedy.
+        XCTAssertTrue(message.contains(ActiveRequestsView.confirmationAcknowledgeTitle))
+        XCTAssertTrue(message.contains("Active Requests"))
         XCTAssertFalse(RequestDetailView.showsClaimAction(for: .pendingPlacementAcknowledgement))
     }
 
@@ -2648,7 +2943,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -2674,7 +2969,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: otherRequestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER456",
+            orderNumber: "70159876",
             eta: "20 minutes",
             contactMessage: nil
         )
@@ -2702,7 +2997,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -2735,7 +3030,7 @@ final class ClaimFlowTests: XCTestCase {
         try? await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -2751,11 +3046,11 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(store.claimUnavailableNotice?.reason, .fulfillmentClaimExpired)
         XCTAssertEqual(
             ActiveRequestsView.claimUnavailableTitle(for: .fulfillmentClaimExpired),
-            "Your reservation expired."
+            "Your reservation ran out"
         )
         XCTAssertEqual(
             ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentClaimExpired),
-            "If you already placed the external order, do not place it again. If you have not placed it, stop and return to Active Requests."
+            "If you already completed the Grubhub order, don’t place it again. CommonPlate may not have saved the details, so the student may not have been emailed. If you had not ordered yet, do not start now."
         )
         // The warning has to outlive the state it was derived from.
         XCTAssertNil(store.activeClaim)
@@ -2781,7 +3076,7 @@ final class ClaimFlowTests: XCTestCase {
             try? await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "helper@example.edu",
-                orderNumber: "ORDER123",
+                orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
             )
@@ -2800,8 +3095,18 @@ final class ClaimFlowTests: XCTestCase {
         let settled = FulfillRequestView.ambiguousDetail(isCheckingStatus: false)
         XCTAssertEqual(settled, FulfillRequestView.ambiguousUnresolvedDetail)
         XCTAssertFalse(settled.contains("while we check"))
-        XCTAssertTrue(settled.contains("We still couldn’t confirm whether the order was recorded"))
-        XCTAssertTrue(settled.contains("remain blocked until it expires"))
+        XCTAssertTrue(settled.contains("still can’t tell whether it went through"))
+        XCTAssertTrue(settled.contains("until this reservation expires"))
+        // The state stops claiming a check is running, in its title too.
+        XCTAssertEqual(
+            FulfillRequestView.ambiguousTitle(isCheckingStatus: false),
+            FulfillRequestView.ambiguousUnresolvedTitle
+        )
+        // It names an exit, so it has to offer one — and only the settled state
+        // does, because the checking state is about to answer itself.
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityReturnAction(isCheckingStatus: false))
+        XCTAssertFalse(FulfillRequestView.showsAmbiguityReturnAction(isCheckingStatus: true))
+        XCTAssertEqual(FulfillRequestView.returnTitle, "Back to Active Requests")
 
         // Settling performs no further work of any kind.
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, [
@@ -2833,7 +3138,7 @@ final class ClaimFlowTests: XCTestCase {
             try? await store.fulfill(
                 requestID: requestID,
                 fulfillerEmail: "old@example.edu",
-                orderNumber: "OLD123",
+                orderNumber: "70150001",
                 eta: "10 minutes",
                 contactMessage: nil
             )
@@ -2980,10 +3285,16 @@ final class ClaimFlowTests: XCTestCase {
             "The refusal must reach the screen the helper tapped"
         )
         XCTAssertEqual(ClaimPresentationError.map(recorded), .otherClaimInProgress)
-        XCTAssertEqual(RequestDetailView.otherClaimInProgressTitle, "Please wait.")
+        XCTAssertEqual(RequestDetailView.otherClaimInProgressTitle, "Please wait")
         XCTAssertEqual(
             RequestDetailView.otherClaimInProgressNotice,
-            "You’re already starting to help with another request. Wait for that request to finish before choosing this one."
+            "We’re still reserving another request. Try this one again in a moment."
+        )
+        // A moment's wait, not "go finish that whole order first" — which is
+        // what the existing-reservation refusal means.
+        XCTAssertFalse(
+            RequestDetailView.otherClaimInProgressNotice
+                .localizedCaseInsensitiveContains("finish")
         )
         let message = ClaimPresentationError.otherClaimInProgress.message
         XCTAssertTrue(message.contains(RequestDetailView.otherClaimInProgressTitle))
@@ -3065,7 +3376,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -3135,7 +3446,7 @@ final class ClaimFlowTests: XCTestCase {
         try? await store.fulfill(
             requestID: requestID,
             fulfillerEmail: "helper@example.edu",
-            orderNumber: "ORDER123",
+            orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
         )
@@ -3152,7 +3463,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(store.claimUnavailableNotice?.reason, .fulfillmentClaimExpired)
         XCTAssertEqual(
             ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentClaimExpired),
-            "If you already placed the external order, do not place it again. If you have not placed it, stop and return to Active Requests."
+            "If you already completed the Grubhub order, don’t place it again. CommonPlate may not have saved the details, so the student may not have been emailed. If you had not ordered yet, do not start now."
         )
         // The warning has to outlive the claimant state it was derived from.
         XCTAssertNil(store.activeClaim)
@@ -3206,6 +3517,699 @@ final class ClaimFlowTests: XCTestCase {
             from: Data(#"{"status":"\#(value)"}"#.utf8)
         )
         return decoded.status.domainStatus
+    }
+
+    // MARK: - Leaving a confirmed placement
+
+    /// The walkthrough path: Active Requests → request detail → claim →
+    /// claimant screen. "Back to Active Requests" has to land on the list, not
+    /// on an emptied reservation screen sitting above two dead destinations.
+    func testConfirmedPlacementReturnsToActiveRequestsFromTheDetailEntryPath() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        let claimed = try XCTUnwrap(store.activeClaim?.request)
+
+        // The stack this entry path actually builds.
+        var path: [AppRoute] = [.activeRequests]
+        path = AppRoute.appending(.requestDetail(claimed), to: path)
+        path = AppRoute.appending(.fulfillment(claimed), to: path)
+        XCTAssertEqual(path, [.activeRequests, .requestDetail(claimed), .fulfillment(claimed)])
+
+        ClaimFlowURLProtocol.enqueue(
+            .response(data: fulfillmentResponse(notificationStatus: "sent"))
+        )
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.asap.etaValue,
+            contactMessage: nil
+        )
+
+        // Placement clears the claim immediately; the unacknowledged
+        // confirmation is the only thing keeping the screen alive.
+        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
+        XCTAssertNil(store.activeClaim)
+        XCTAssertTrue(FulfillRequestView.keepsClaimedFlowPresented(
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: confirmation.requestID,
+            requestID: requestID
+        ))
+
+        // "Back to Active Requests".
+        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
+        path = AppRoute.returningToActiveRequests(from: path)
+
+        XCTAssertEqual(path, [.activeRequests])
+        XCTAssertFalse(AppRoute.containsHelperDestination(in: path, requestID: requestID))
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.activeClaim)
+        XCTAssertFalse(store.requests.contains { $0.id == requestID })
+        // With neither a claim nor a confirmation the claimant screen renders
+        // nothing at all — the blank "Your reservation" screen. It must be off
+        // the stack, not merely emptied.
+        XCTAssertFalse(FulfillRequestView.hasPresentableContent(
+            hasClaim: store.activeClaim != nil,
+            hasConfirmation: store.fulfillmentConfirmation != nil
+        ))
+    }
+
+    /// The second supported entry: reopening the reservation from the pinned
+    /// item, with no request detail underneath. Same landing.
+    func testConfirmedPlacementReturnsToActiveRequestsFromThePinnedEntryPath() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        let claimed = try XCTUnwrap(store.activeClaim?.request)
+
+        var path: [AppRoute] = AppRoute.appending(
+            .fulfillment(claimed),
+            to: [.activeRequests]
+        )
+        XCTAssertEqual(path, [.activeRequests, .fulfillment(claimed)])
+
+        ClaimFlowURLProtocol.enqueue(
+            .response(data: fulfillmentResponse(notificationStatus: "failed"))
+        )
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
+            contactMessage: nil
+        )
+
+        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
+        XCTAssertEqual(confirmation.kind, .notificationFailed)
+
+        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
+        path = AppRoute.returningToActiveRequests(from: path)
+
+        XCTAssertEqual(path, [.activeRequests])
+        XCTAssertFalse(AppRoute.containsHelperDestination(in: path, requestID: requestID))
+        XCTAssertNil(store.fulfillmentConfirmation)
+    }
+
+    /// Whatever the helper flow stacked up, leaving it leaves nothing behind
+    /// that Back could reach — including the detail for a *different* request
+    /// that the blocked-claim shortcut pushes a reservation on top of.
+    func testReturningNeverLeavesAHelperDestinationBackCouldReach() {
+        let placed = foodRequest(id: requestID)
+        let other = foodRequest(id: "meal-b")
+
+        let stacks: [[AppRoute]] = [
+            [.activeRequests, .requestDetail(placed), .fulfillment(placed)],
+            [.activeRequests, .fulfillment(placed)],
+            [.activeRequests, .requestDetail(other), .fulfillment(placed)]
+        ]
+
+        for stack in stacks {
+            let returned = AppRoute.returningToActiveRequests(from: stack)
+            XCTAssertEqual(returned, [.activeRequests], "\(stack)")
+            XCTAssertEqual(returned.last, .activeRequests)
+            XCTAssertFalse(
+                AppRoute.containsHelperDestination(in: returned, requestID: requestID)
+            )
+            XCTAssertFalse(
+                AppRoute.containsHelperDestination(in: returned, requestID: "meal-b")
+            )
+        }
+    }
+
+    /// Only a confirmed claim or an unacknowledged confirmation for *this*
+    /// request keeps the claimant screen. When neither holds, the detail
+    /// underneath is just as stale, so the whole flow unwinds rather than one
+    /// level — otherwise the backend's verdict lands on a screen for a request
+    /// the helper no longer holds.
+    func testClaimEndingUnwindsTheDetailUnderneathToo() {
+        let request = foodRequest(id: requestID)
+        let path: [AppRoute] = [
+            .activeRequests, .requestDetail(request), .fulfillment(request)
+        ]
+
+        XCTAssertFalse(FulfillRequestView.keepsClaimedFlowPresented(
+            activeRequestID: nil, confirmationRequestID: nil, requestID: requestID
+        ))
+        XCTAssertFalse(FulfillRequestView.keepsClaimedFlowPresented(
+            activeRequestID: "meal-b", confirmationRequestID: nil, requestID: requestID
+        ))
+        XCTAssertTrue(FulfillRequestView.keepsClaimedFlowPresented(
+            activeRequestID: requestID, confirmationRequestID: nil, requestID: requestID
+        ))
+        XCTAssertEqual(AppRoute.returningToActiveRequests(from: path), [.activeRequests])
+    }
+
+    /// Entering is driven by republishable store state, so the push has to be
+    /// idempotent: one claim must never stack two identical destinations.
+    func testConfirmedClaimPushesTheClaimantRouteOnlyOnce() {
+        let request = foodRequest(id: requestID)
+        let base: [AppRoute] = [.activeRequests, .requestDetail(request)]
+
+        let opened = AppRoute.appending(.fulfillment(request), to: base)
+        XCTAssertEqual(
+            opened,
+            [.activeRequests, .requestDetail(request), .fulfillment(request)]
+        )
+        XCTAssertEqual(AppRoute.appending(.fulfillment(request), to: opened), opened)
+    }
+
+    /// The action names a destination, so it always produces one.
+    func testReturnFallsBackToActiveRequestsWhenItIsNotOnThePath() {
+        XCTAssertEqual(AppRoute.returningToActiveRequests(from: []), [.activeRequests])
+        XCTAssertEqual(
+            AppRoute.returningToActiveRequests(from: [.requestFood]),
+            [.activeRequests]
+        )
+    }
+
+    func testEmptiedReservationScreenHasNothingToRender() {
+        XCTAssertTrue(
+            FulfillRequestView.hasPresentableContent(hasClaim: true, hasConfirmation: false)
+        )
+        XCTAssertTrue(
+            FulfillRequestView.hasPresentableContent(hasClaim: false, hasConfirmation: true)
+        )
+        XCTAssertFalse(
+            FulfillRequestView.hasPresentableContent(hasClaim: false, hasConfirmation: false)
+        )
+        XCTAssertEqual(FulfillRequestView.navigationTitle, "Your reservation")
+    }
+
+    // MARK: - When will it be ready?
+
+    func testReadyTimeChoicesEncodeIntoTheUnchangedEtaField() {
+        XCTAssertEqual(
+            FulfillmentReadyTime.allCases.map(\.label),
+            ["ASAP", "15 minutes", "30 minutes", "45 minutes", "60 minutes"]
+        )
+
+        for option in FulfillmentReadyTime.allCases {
+            // What the helper picked is what the student is told: the visible
+            // choice and the encoded `eta` string are the same text.
+            XCTAssertEqual(option.etaValue, option.label)
+            XCTAssertEqual(FulfillmentReadyTime.option(forETA: option.etaValue), option)
+            // Every choice satisfies the unchanged required-field rule, so the
+            // control can never leave submission gated on an empty ETA.
+            XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: option.etaValue
+            ))
+        }
+
+        XCTAssertEqual(FulfillRequestView.readyTimeQuestion, "When will it be ready?")
+    }
+
+    func testReadyTimeDefaultsToASAPUnlessDraftStateHoldsAnotherValidChoice() {
+        XCTAssertEqual(FulfillmentReadyTime.initialSelection(draftETA: nil), .asap)
+        XCTAssertEqual(FulfillmentReadyTime.initialSelection(draftETA: ""), .asap)
+        XCTAssertEqual(FulfillmentReadyTime.initialSelection(draftETA: "   "), .asap)
+        XCTAssertEqual(
+            FulfillmentReadyTime.initialSelection(draftETA: "30 minutes"),
+            .thirtyMinutes
+        )
+        XCTAssertEqual(
+            FulfillmentReadyTime.initialSelection(draftETA: " 45 MINUTES "),
+            .fortyFiveMinutes
+        )
+        // Free text that predates this control is not one of the choices, so it
+        // is not silently rewritten into one.
+        XCTAssertNil(FulfillmentReadyTime.option(forETA: "20 minutes"))
+        XCTAssertEqual(FulfillmentReadyTime.initialSelection(draftETA: "in a bit"), .asap)
+    }
+
+    /// The control is presentation only. The request body is byte-for-byte the
+    /// already-accepted shape, with the selection carried in `eta`.
+    func testPickedReadyTimeStillSendsTheExactAcceptedPayload() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "raw-token")))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(
+            .response(data: fulfillmentResponse(notificationStatus: "sent"))
+        )
+
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.asap.etaValue,
+            contactMessage: nil
+        )
+
+        let sent = try XCTUnwrap(
+            ClaimFlowURLProtocol.capturedRequests.first { $0.path.hasSuffix("/fulfill") }
+        )
+        let body = try XCTUnwrap(sent.bodyObject)
+        XCTAssertEqual(Set(body.keys), ["claimToken", "fulfillment"])
+        let fulfillment = try XCTUnwrap(body["fulfillment"] as? [String: Any])
+        XCTAssertEqual(Set(fulfillment.keys), ["fulfillerEmail", "orderNumber", "eta"])
+        XCTAssertEqual(fulfillment["eta"] as? String, "ASAP")
+        // The control's own vocabulary never reaches the wire.
+        XCTAssertNil(fulfillment["readyTime"])
+        XCTAssertNil(fulfillment["etaText"])
+        XCTAssertNil(fulfillment["etaMinutes"])
+    }
+
+    // MARK: - Reservation form comprehension
+
+    func testReservationFormReadsAsTwoStepsWithoutTheRetiredHeadingOrFreeTextETA() {
+        XCTAssertEqual(
+            FulfillRequestView.completedOrderNotice,
+            "Place the Grubhub order first. Then save the details here."
+        )
+        XCTAssertEqual(
+            FulfillRequestView.helperEmailNotice,
+            "The student will see this email and can reply."
+        )
+        XCTAssertEqual(
+            FulfillRequestView.orderNumberNotice,
+            "From your Grubhub confirmation."
+        )
+        XCTAssertEqual(FulfillRequestView.readyTimeQuestion, "When will it be ready?")
+        XCTAssertEqual(FulfillRequestView.submitTitle, "I placed this order")
+
+        let visibleFormCopy = [
+            FulfillRequestView.completedOrderNotice,
+            FulfillRequestView.helperEmailNotice,
+            FulfillRequestView.orderNumberNotice,
+            FulfillRequestView.readyTimeQuestion
+        ]
+        for copy in visibleFormCopy {
+            XCTAssertFalse(copy.contains("After you’ve ordered"), copy)
+            XCTAssertFalse(copy.localizedCaseInsensitiveContains("Ready in"), copy)
+            for retired in ["external order", "requester"] {
+                XCTAssertFalse(copy.localizedCaseInsensitiveContains(retired), copy)
+            }
+        }
+    }
+
+    /// One direct instruction beside the revealed name — not a tutorial — and
+    /// the name still goes nowhere but the claimant screen.
+    func testPickupNameInstructionNamesTheRevealedNameOnce() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(pickupName: "Taylor")))
+        try await store.claim(requestID: requestID)
+
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.pickupName, "Taylor")
+
+        let instruction = FulfillRequestView.pickupNameInstruction(
+            pickupName: claim.pickupName
+        )
+        XCTAssertEqual(instruction, "Use “Taylor” as the pickup name in Grubhub.")
+        XCTAssertEqual(instruction.filter { $0 == "." }.count, 1)
+
+        ClaimFlowURLProtocol.enqueue(
+            .response(data: fulfillmentResponse(notificationStatus: "sent"))
+        )
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.asap.etaValue,
+            contactMessage: nil
+        )
+
+        // The confirmation outlives the claim and carries public identity only.
+        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
+        XCTAssertNil(store.activeClaim)
+        XCTAssertFalse(confirmation.vendor.contains("Taylor"))
+        XCTAssertFalse(confirmation.foodDescription.contains("Taylor"))
+    }
+
+    // MARK: - Field-specific local validation
+
+    func testEmailFailuresAreNamedOnTheEmailField() {
+        XCTAssertEqual(
+            FulfillmentFormValidator.emailError(""),
+            "Enter your email address."
+        )
+        XCTAssertEqual(
+            FulfillmentFormValidator.emailError("   "),
+            "Enter your email address."
+        )
+        // Faith's entry: a plausible-looking address the backend refuses.
+        for invalid in [
+            "helper.example.edu",
+            "helper@",
+            "@example.edu",
+            "helper@example",
+            "helper @example.edu",
+            "helper@exam ple.edu"
+        ] {
+            XCTAssertEqual(
+                FulfillmentFormValidator.emailError(invalid),
+                "Enter a valid email address, like name@example.com.",
+                invalid
+            )
+        }
+        for valid in [
+            "helper@example.edu",
+            "  helper@example.edu  ",
+            "first.last+tag@nyu.edu"
+        ] {
+            XCTAssertNil(FulfillmentFormValidator.emailError(valid), valid)
+        }
+    }
+
+    func testEmptyOrderNumberIsNamedOnItsOwnField() {
+        XCTAssertEqual(
+            FulfillmentFormValidator.orderNumberError(""),
+            "Enter the Grubhub order number."
+        )
+        XCTAssertEqual(
+            FulfillmentFormValidator.orderNumberError("  "),
+            "Enter the Grubhub order number."
+        )
+        XCTAssertEqual(
+            FulfillmentFormValidator.orderNumberError("\n\t"),
+            "Enter the Grubhub order number."
+        )
+    }
+
+    func testDigitsOnlyOrderNumbersAreAccepted() {
+        for valid in ["1", "70154321", "  70154321  ", String(repeating: "7", count: 50)] {
+            XCTAssertNil(FulfillmentFormValidator.orderNumberError(valid), valid)
+        }
+    }
+
+    /// The reason this stays a string end to end. A numeric type would drop the
+    /// zeroes and the value would no longer match the helper's confirmation.
+    func testLeadingZeroOrderNumbersSurviveValidationExactly() {
+        for withZeroes in ["0", "007", "00070154321", "0000000000"] {
+            XCTAssertNil(FulfillmentFormValidator.orderNumberError(withZeroes), withZeroes)
+        }
+        XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "00070154321",
+            eta: FulfillmentReadyTime.asap.etaValue
+        ))
+    }
+
+    func testAnythingOtherThanDigitsIsRejectedWithUseNumbersOnly() {
+        let nonNumeric = [
+            "7015432A",       // one letter
+            "A70154321",
+            "7015 4321",      // space
+            " 70 154 321 ",   // interior spaces survive trimming
+            "7015-4321",      // dash
+            "7015_4321",      // underscore
+            "7015.4321",      // decimal point
+            "+70154321",      // sign
+            "-70154321",
+            "70154321!",      // punctuation
+            "ORDER123"        // the old contract's shape
+        ]
+        for invalid in nonNumeric {
+            XCTAssertEqual(
+                FulfillmentFormValidator.orderNumberError(invalid),
+                "Use numbers only.",
+                invalid
+            )
+        }
+    }
+
+    func testFiftyDigitsAreAcceptedAndFiftyOneAreNot() {
+        XCTAssertNil(
+            FulfillmentFormValidator.orderNumberError(String(repeating: "7", count: 50))
+        )
+        XCTAssertEqual(
+            FulfillmentFormValidator.orderNumberError(String(repeating: "7", count: 51)),
+            "Use 50 digits or fewer."
+        )
+    }
+
+    /// Precedence: shortening has to happen first, so a value that breaks both
+    /// rules is told it is too long rather than sent round the loop twice.
+    func testLengthErrorTakesPrecedenceOverTheNumericError() {
+        let tooLongAndNotNumeric = String(repeating: "7", count: 50) + "A"
+        XCTAssertEqual(tooLongAndNotNumeric.count, 51)
+        XCTAssertEqual(
+            FulfillmentFormValidator.orderNumberError(tooLongAndNotNumeric),
+            "Use 50 digits or fewer."
+        )
+
+        let letterFirst = "A" + String(repeating: "7", count: 50)
+        XCTAssertEqual(
+            FulfillmentFormValidator.orderNumberError(letterFirst),
+            "Use 50 digits or fewer."
+        )
+
+        // At exactly 50 the length rule is satisfied, so the numeric rule is the
+        // one that answers.
+        XCTAssertEqual(
+            FulfillmentFormValidator.orderNumberError(
+                String(repeating: "7", count: 49) + "A"
+            ),
+            "Use numbers only."
+        )
+    }
+
+    /// Every rule here is the backend's own, so a payload iOS accepts is one the
+    /// backend's schema accepts too — which is what keeps the generic fallback
+    /// genuinely reserved for rejections that carry no field attribution.
+    func testLocalRulesMirrorTheBackendSchemaRatherThanInventingNewOnes() {
+        // `orderNumber: /^[0-9]{1,50}$/`
+        XCTAssertEqual(FulfillmentFormValidator.orderNumberMaximumLength, 50)
+        XCTAssertNil(
+            FulfillmentFormValidator.orderNumberError(String(repeating: "0", count: 50))
+        )
+        XCTAssertNotNil(
+            FulfillmentFormValidator.orderNumberError(String(repeating: "0", count: 51))
+        )
+        // Ready time is a fixed-choice picker, so it has no local failure mode
+        // and therefore no message of its own.
+        XCTAssertEqual(FulfillmentFormField.allCases, [.fulfillerEmail, .orderNumber])
+    }
+
+    /// Both fields report at once, in screen order, so the first invalid one is
+    /// also the one focused.
+    func testValidationReportsEveryInvalidFieldInScreenOrder() {
+        let errors = FulfillmentFormValidator.validate(
+            fulfillerEmail: "not-an-email",
+            orderNumber: "7015 4321"
+        )
+        XCTAssertEqual(errors.map(\.field), [.fulfillerEmail, .orderNumber])
+        XCTAssertEqual(errors.first?.field, .fulfillerEmail)
+        XCTAssertEqual(
+            errors.map(\.message),
+            [
+                "Enter a valid email address, like name@example.com.",
+                "Use numbers only."
+            ]
+        )
+
+        XCTAssertEqual(
+            FulfillmentFormValidator.validate(
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "7015 4321"
+            ).map(\.field),
+            [.orderNumber]
+        )
+        XCTAssertTrue(
+            FulfillmentFormValidator.validate(
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321"
+            ).isEmpty
+        )
+    }
+
+    /// The point of validating locally: a formatting mistake never reaches the
+    /// network, so nothing about a real Grubhub order is put at risk by it.
+    func testLocallyInvalidDetailsSendNoFulfillmentPost() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+
+        let email = "helper.example.edu"
+        let orderNumber = "70154321"
+        let errors = FulfillmentFormValidator.validate(
+            fulfillerEmail: email,
+            orderNumber: orderNumber
+        )
+        XCTAssertFalse(errors.isEmpty)
+
+        // The submit path returns on a non-empty result before building a
+        // request, so the only captured call is still the claim.
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths,
+            ["/api/request/\(requestID)/claim"]
+        )
+        XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
+
+        // Nothing about the reservation is disturbed by the rejection: the
+        // claim is intact and a corrected submission is still permitted.
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertNil(store.fulfillError)
+        XCTAssertNil(store.fulfillmentConfirmation)
+    }
+
+    /// A rejected submit reports, it does not reset. Correcting only the field
+    /// that was named leaves every other entry — including the ready time — as
+    /// the helper left it, and clears the message.
+    func testCorrectingTheNamedFieldPreservesEveryOtherEntry() {
+        let orderNumber = "70154321"
+        let readyTime = FulfillmentReadyTime.thirtyMinutes
+
+        let rejected = FulfillmentFormValidator.validate(
+            fulfillerEmail: "helper.example.edu",
+            orderNumber: orderNumber
+        )
+        XCTAssertEqual(rejected.map(\.field), [.fulfillerEmail])
+
+        let corrected = FulfillmentFormValidator.validate(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: orderNumber
+        )
+        XCTAssertTrue(corrected.isEmpty)
+        XCTAssertEqual(readyTime.etaValue, "30 minutes")
+        XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: orderNumber,
+            eta: readyTime.etaValue
+        ))
+    }
+
+    /// The generic message is the fallback, never the first answer, and the
+    /// sentence that made a formatting mistake look like a system failure is
+    /// gone from the flow entirely.
+    func testGenericFallbackIsReservedAndTheOldBlanketSentenceIsRetired() {
+        XCTAssertEqual(
+            FulfillmentPresentationError.invalidDetails.message,
+            "We couldn’t save these details. Check the highlighted fields and try again. Don’t place another Grubhub order."
+        )
+        // The locked safety sentence still applies to this state.
+        XCTAssertTrue(
+            FulfillmentPresentationError.invalidDetails.message.contains(Self.safetySentence)
+        )
+
+        let everyFulfillmentFlowString = [
+            FulfillmentPresentationError.invalidDetails.message,
+            FulfillmentPresentationError.rateLimited.message,
+            FulfillmentPresentationError.temporarilyUnavailable.message,
+            FulfillmentPresentationError.couldNotRecord.message,
+            FulfillmentFormValidator.emptyEmailMessage,
+            FulfillmentFormValidator.invalidEmailMessage,
+            FulfillmentFormValidator.emptyOrderNumberMessage,
+            FulfillmentFormValidator.nonNumericOrderNumberMessage,
+            FulfillmentFormValidator.longOrderNumberMessage,
+            FulfillRequestView.completedOrderNotice,
+            FulfillRequestView.helperEmailNotice,
+            FulfillRequestView.orderNumberNotice,
+            FulfillRequestView.readyTimeQuestion,
+            FulfillRequestView.submitTitle,
+            FulfillRequestView.ambiguousCheckingDetail,
+            FulfillRequestView.ambiguousUnresolvedDetail,
+            FulfillRequestView.confirmationDetail(for: .notificationSent),
+            FulfillRequestView.confirmationDetail(for: .notificationFailed),
+            FulfillRequestView.confirmationDetail(for: .emailStatusUnknown)
+        ]
+        for copy in everyFulfillmentFlowString {
+            XCTAssertFalse(
+                copy.localizedCaseInsensitiveContains("Something here wasn’t accepted"),
+                copy
+            )
+        }
+
+        // Each field message names its own field's rule rather than deferring.
+        for message in [
+            FulfillmentFormValidator.emptyEmailMessage,
+            FulfillmentFormValidator.invalidEmailMessage,
+            FulfillmentFormValidator.emptyOrderNumberMessage,
+            FulfillmentFormValidator.nonNumericOrderNumberMessage,
+            FulfillmentFormValidator.longOrderNumberMessage
+        ] {
+            XCTAssertFalse(
+                message.localizedCaseInsensitiveContains("highlighted fields"),
+                message
+            )
+        }
+    }
+
+    /// The contract is digits-only, but the wire type is still a string. A
+    /// leading-zero value proves both halves at once: it survives to the JSON
+    /// unchanged, and it is quoted rather than emitted as a number.
+    func testOrderNumberIsSentAsAStringWithLeadingZeroesIntact() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "raw-token")))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(
+            .response(data: fulfillmentResponse(notificationStatus: "sent"))
+        )
+
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "00070154321",
+            eta: FulfillmentReadyTime.asap.etaValue,
+            contactMessage: nil
+        )
+
+        let sent = try XCTUnwrap(
+            ClaimFlowURLProtocol.capturedRequests.first { $0.path.hasSuffix("/fulfill") }
+        )
+        let body = try XCTUnwrap(sent.bodyObject)
+        let fulfillment = try XCTUnwrap(body["fulfillment"] as? [String: Any])
+
+        // Decoded as a String, not an NSNumber, and byte-identical to the entry.
+        XCTAssertEqual(fulfillment["orderNumber"] as? String, "00070154321")
+        XCTAssertNil(fulfillment["orderNumber"] as? Int)
+        XCTAssertNil(fulfillment["orderNumber"] as? Double)
+
+        // And quoted on the wire, so no consumer can re-read it as a number.
+        let rawJSON = try XCTUnwrap(String(data: try XCTUnwrap(sent.body), encoding: .utf8))
+        XCTAssertTrue(rawJSON.contains("\"orderNumber\":\"00070154321\""), rawJSON)
+
+        // The structure itself is untouched by the format change.
+        XCTAssertEqual(Set(body.keys), ["claimToken", "fulfillment"])
+        XCTAssertEqual(Set(fulfillment.keys), ["fulfillerEmail", "orderNumber", "eta"])
+    }
+
+    /// A non-numeric order number is refused locally, so a helper who has
+    /// already paid for a real Grubhub order never spends a round trip on it.
+    func testNonNumericOrderNumberSendsNoFulfillmentPost() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+
+        for rejected in ["7015-4321", "ORDER123", String(repeating: "7", count: 51)] {
+            XCTAssertFalse(
+                FulfillmentFormValidator.validate(
+                    fulfillerEmail: "helper@example.edu",
+                    orderNumber: rejected
+                ).isEmpty,
+                rejected
+            )
+        }
+
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths,
+            ["/api/request/\(requestID)/claim"]
+        )
+        XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
+
+        // The reservation is untouched, so the corrected value can still be sent.
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertNil(store.fulfillError)
+    }
+
+    /// A public request value for navigation-path assertions. Route identity is
+    /// what is under test, so the rest only has to be stable.
+    private func foodRequest(id: String) -> FoodRequest {
+        FoodRequest(
+            id: id,
+            diningSpot: DiningSpot(name: "Crave NYU", address: nil),
+            foodDescription: "Rice bowl",
+            pickupWindowText: "ASAP",
+            windowStart: nil,
+            windowEnd: nil,
+            createdAt: Date(timeIntervalSince1970: 0),
+            expiresAt: Date(timeIntervalSince1970: 3_600),
+            status: .open
+        )
     }
 
     private func makeStore() -> RequestStore {

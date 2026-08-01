@@ -35,7 +35,11 @@ enum RequestStatus: String {
 /// (pickup name, email, phone) is intentionally not modeled here — the public
 /// wire shape never carries it, and a successful claim's pickup name belongs to
 /// `RequestStore`'s active-claim state, not this model.
-struct FoodRequest: Identifiable {
+/// `Hashable` so a request can be a navigation *value*: the helper flow's
+/// destinations live in an app-owned path array rather than in view-local
+/// presentation flags, which is what makes leaving a completed flow a single
+/// deterministic truncation instead of a chain of `dismiss()` calls.
+struct FoodRequest: Identifiable, Hashable {
     let id: String
     let diningSpot: DiningSpot
     let foodDescription: String
