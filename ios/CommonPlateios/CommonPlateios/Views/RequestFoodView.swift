@@ -10,6 +10,7 @@ enum RequestFoodFormError: Error, Equatable {
     case missingDiningSpot
     case missingFood
     case missingPickupName
+    case missingEmail
     case invalidEmail
     case invalidScheduledTime
 
@@ -21,6 +22,8 @@ enum RequestFoodFormError: Error, Equatable {
             return "Tell us what food you need."
         case .missingPickupName:
             return "Enter the name to use for the order."
+        case .missingEmail:
+            return "Enter your email address."
         case .invalidEmail:
             return "Enter a valid email address."
         case .invalidScheduledTime:
@@ -85,6 +88,15 @@ enum RequestCreatePresentationError: Equatable {
     }
 }
 
+/// The one form-level error rendered beside the request submission action.
+/// Field validation never enters this state; those errors remain owned by
+/// their adjacent field rows.
+struct RequestSubmissionSectionPresentation: Equatable {
+    let error: RequestCreatePresentationError
+    let message: String
+    let showsReturnHomeAction: Bool
+}
+
 /// What the requester screen shows. Availability is resolved before any field
 /// exists, so `.form` — the only state with editable private fields and a
 /// submit control — is reachable only from a confirmed `.available` answer.
@@ -147,62 +159,26 @@ struct RequestFoodView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: RequestStore
 
-    @State private var selectedDiningSpot: DiningSpot?
-    @State private var foodRequest = ""
-    @State private var pickupName = ""
-    @State private var email = ""
-    @State private var timing: RequestTiming = .asap
-    @State private var preferredPickupTime = Date()
-    @State private var formError: RequestFoodFormError?
+    @State private var draft = RequestFoodFormDraft()
+    @State private var validationPresentation = RequestFoodValidationPresentation()
     @State private var submissionError: RequestCreatePresentationError?
     @State private var didCreateRequest = false
     /// The timing of the request the backend confirmed, captured at submission
     /// so the success screen states that request's real expiration rather than
     /// whatever the picker happens to show afterwards.
     @State private var confirmedTiming: RequestTiming = .asap
+    @FocusState private var focusedField: RequestFoodFormField?
 
     private var calendar: Calendar {
         Calendar.current
     }
 
-    private var endOfToday: Date {
-        Self.endOfDay(containing: Date(), calendar: calendar) ?? Date()
-    }
-
-    private var latestScheduledStart: Date {
-        Self.latestScheduledStart(on: Date(), calendar: calendar) ?? endOfToday
-    }
-
-    private var scheduledStartRange: ClosedRange<Date> {
-        let now = Date()
-        return min(now, latestScheduledStart)...latestScheduledStart
-    }
-
-    private var isEmailValid: Bool {
-        Self.isValidEmail(email)
-    }
-
-    private var isScheduledWindowValid: Bool {
-        guard timing == .later else {
-            return true
-        }
-        return Self.isValidScheduledWindow(
-            startingAt: preferredPickupTime,
-            now: Date(),
-            calendar: calendar
+    private var isSubmissionEnabled: Bool {
+        Self.isSubmissionEnabled(
+            draft: draft,
+            submissionError: submissionError,
+            isCreating: store.isCreating
         )
-    }
-
-    private var isScheduledTimingAvailable: Bool {
-        Self.isScheduledTimingAvailable(now: Date(), calendar: calendar)
-    }
-
-    private var timingOptions: [RequestTiming] {
-        Self.availableTimingOptions(now: Date(), calendar: calendar)
-    }
-
-    private var canAttemptSubmission: Bool {
-        Self.allowsSubmission(after: submissionError)
     }
 
     let diningSpots = [
@@ -314,34 +290,21 @@ struct RequestFoodView: View {
     }
 
     private var requestForm: some View {
-        Form {
-            if let formError {
-                Section {
-                    Text(formError.message)
-                        .foregroundStyle(.red)
-                        .accessibilityIdentifier("request-form-error")
-                }
-            } else if let submissionError {
-                Section {
-                    Text(submissionError.message)
-                        .foregroundStyle(.red)
-                        .accessibilityIdentifier("request-submission-error")
+        let now = Date()
+        let latestScheduledStart = Self.latestScheduledStart(on: now, calendar: calendar)
+            ?? Self.endOfDay(containing: now, calendar: calendar)
+            ?? now
+        let scheduledStartRange = min(now, latestScheduledStart)...latestScheduledStart
+        let isScheduledTimingAvailable = Self.isScheduledTimingAvailable(
+            now: now,
+            calendar: calendar
+        )
+        let timingOptions = Self.availableTimingOptions(now: now, calendar: calendar)
+        let errors = validationErrors(now: now)
 
-                    // The ambiguous outcome disables submission permanently and
-                    // offers no retry, so without a way out the student is left
-                    // on a form they cannot use. Leaving is the only action;
-                    // the entered values stay untouched until they choose it.
-                    if Self.showsReturnHomeAction(for: submissionError) {
-                        Button("Back to Home") {
-                            dismiss()
-                        }
-                        .accessibilityIdentifier("request-ambiguous-dismiss")
-                    }
-                }
-            }
-
+        return Form {
             Section("Food request") {
-                Picker("NYU dining spot", selection: $selectedDiningSpot) {
+                Picker("NYU dining spot", selection: $draft.selectedDiningSpot) {
                     Text("Select a spot").tag(nil as DiningSpot?)
 
                     ForEach(diningSpots) { spot in
@@ -349,34 +312,56 @@ struct RequestFoodView: View {
                     }
                 }
 
-                if let address = selectedDiningSpot?.address {
+                fieldErrorText(
+                    .diningSpot,
+                    errors: errors,
+                    identifier: "request-dining-spot-error"
+                )
+
+                if let address = draft.selectedDiningSpot?.address {
                     Text(address)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
 
-                TextField("What do you want?", text: $foodRequest, axis: .vertical)
+                TextField("What do you want?", text: $draft.foodRequest, axis: .vertical)
                     .lineLimit(3, reservesSpace: true)
+                    .focused($focusedField, equals: .foodDescription)
+                    .accessibilityHint(Text(fieldError(.foodDescription, errors: errors) ?? ""))
+
+                fieldErrorText(
+                    .foodDescription,
+                    errors: errors,
+                    identifier: "request-food-error"
+                )
             }
 
             Section("Pickup") {
-                TextField("Name to use for the order", text: $pickupName)
+                TextField("Name to use for the order", text: $draft.pickupName)
+                    .focused($focusedField, equals: .pickupName)
+                    .accessibilityHint(Text(fieldError(.pickupName, errors: errors) ?? ""))
+
+                fieldErrorText(
+                    .pickupName,
+                    errors: errors,
+                    identifier: "request-pickup-name-error"
+                )
 
                 // Only the timings a full 30-minute window can still fit into
                 // are offered, so "Later" cannot be selected when it is
                 // impossible.
-                Picker("When do you need it?", selection: $timing) {
+                Picker("When do you need it?", selection: $draft.timing) {
                     ForEach(timingOptions) { option in
                         Text(option.rawValue).tag(option)
                     }
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: timing) { _, newTiming in
+                .onChange(of: draft.timing) { _, newTiming in
                     guard newTiming == .later else {
                         return
                     }
-                    preferredPickupTime = min(
-                        max(preferredPickupTime, Date()),
+                    draft.preferredPickupTime = min(
+                        max(draft.preferredPickupTime, now),
                         latestScheduledStart
                     )
                 }
@@ -388,47 +373,55 @@ struct RequestFoodView: View {
                         .accessibilityIdentifier("scheduled-unavailable-notice")
                 }
 
-                if timing == .later && isScheduledTimingAvailable {
+                if draft.timing == .later && isScheduledTimingAvailable {
                     DatePicker(
                         "Around what time?",
-                        selection: $preferredPickupTime,
+                        selection: $draft.preferredPickupTime,
                         in: scheduledStartRange,
                         displayedComponents: [.hourAndMinute]
                     )
+                }
 
+                // This one location is deliberately outside the available-only
+                // DatePicker branch. If time passes while "Later" is selected,
+                // a submitted scheduling error stays visible beside the timing
+                // controls rather than disappearing with the picker.
+                fieldErrorText(
+                    .pickupSchedule,
+                    errors: errors,
+                    identifier: "request-pickup-schedule-error"
+                )
+
+                if draft.timing == .later && isScheduledTimingAvailable {
                     Text(Self.scheduledWindowNotice)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("scheduled-window-notice")
-
-                    if !isScheduledWindowValid {
-                        Text(RequestFoodFormError.invalidScheduledTime.message)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
                 }
 
                 Text("The student placing the order will use this name and approximate time.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
-                Text(Self.formExpirationNotice(for: timing))
+                Text(Self.formExpirationNotice(for: draft.timing))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("request-form-expiration")
             }
 
             Section("Contact") {
-                TextField("Email, required", text: $email)
+                TextField("Email, required", text: $draft.email)
                     .keyboardType(.emailAddress)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .requesterEmail)
+                    .accessibilityHint(Text(fieldError(.requesterEmail, errors: errors) ?? ""))
 
-                if !email.isEmpty && !isEmailValid {
-                    Text(RequestFoodFormError.invalidEmail.message)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
+                fieldErrorText(
+                    .requesterEmail,
+                    errors: errors,
+                    identifier: "request-email-error"
+                )
 
                 Text(Self.emailPurposeNotice)
                     .font(.footnote)
@@ -436,6 +429,23 @@ struct RequestFoodView: View {
             }
 
             Section {
+                if let presentation = Self.submissionSectionPresentation(for: submissionError) {
+                    Text(presentation.message)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("request-submission-error")
+
+                    // The ambiguous outcome disables submission permanently and
+                    // offers no retry, so without a way out the student is left
+                    // on a form they cannot use. Leaving is the only action;
+                    // the entered values stay untouched until they choose it.
+                    if presentation.showsReturnHomeAction {
+                        Button("Back to Home") {
+                            dismiss()
+                        }
+                        .accessibilityIdentifier("request-ambiguous-dismiss")
+                    }
+                }
+
                 Button {
                     Task {
                         await submit()
@@ -450,42 +460,132 @@ struct RequestFoodView: View {
                         Text("Submit Request")
                     }
                 }
-                .disabled(!canAttemptSubmission || store.isCreating)
+                .disabled(!isSubmissionEnabled)
             }
+        }
+        .onChange(of: focusedField) { previousField, currentField in
+            let transitionNow = Date()
+            validationPresentation.handleFocusTransition(
+                from: previousField,
+                to: currentField,
+                errors: validationErrors(now: transitionNow)
+            )
         }
     }
 
     @MainActor
     private func submit() async {
-        formError = nil
         submissionError = nil
 
-        let payload: CreateRequestPayload
+        let now = Date()
+        let submittedDraft = draft
         do {
-            payload = try Self.makePayload(
-                selectedDiningSpot: selectedDiningSpot,
-                foodRequest: foodRequest,
-                pickupName: pickupName,
-                email: email,
-                timing: timing,
-                preferredPickupTime: preferredPickupTime,
-                now: Date(),
-                calendar: calendar
-            )
-        } catch let validationError as RequestFoodFormError {
-            formError = validationError
-            return
-        } catch {
-            submissionError = .creationFailed
-            return
-        }
-
-        do {
-            try await store.createRequest(payload)
-            confirmedTiming = timing
-            didCreateRequest = true
+            let result = try await Self.orchestrateSubmission(
+                draft: submittedDraft,
+                now: now,
+                calendar: calendar,
+                presentation: validationPresentation
+            ) { payload in
+                try await store.createRequest(payload)
+            }
+            validationPresentation = result.presentation
+            if result.didSubmit {
+                confirmedTiming = submittedDraft.timing
+                didCreateRequest = true
+            } else {
+                focusedField = result.firstInvalidTextField
+            }
         } catch {
             submissionError = RequestCreatePresentationError.map(error)
+        }
+    }
+
+    /// The production submit seam. It owns the entire local decision before
+    /// the injected closure can reach `RequestStore`: validate all fields,
+    /// reveal every current error, choose the first invalid text field, and
+    /// build the same normalized payload the view has always sent.
+    static func orchestrateSubmission(
+        draft: RequestFoodFormDraft,
+        now: Date,
+        calendar: Calendar,
+        presentation: RequestFoodValidationPresentation,
+        submission: (CreateRequestPayload) async throws -> Void
+    ) async throws -> RequestFoodSubmissionResult {
+        let scheduledWindowIsValid = isValidScheduledWindow(
+            startingAt: draft.preferredPickupTime,
+            now: now,
+            calendar: calendar
+        )
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: scheduledWindowIsValid
+        )
+        var updatedPresentation = presentation
+        updatedPresentation.presentAll(errors)
+
+        guard errors.isEmpty else {
+            return RequestFoodSubmissionResult(
+                presentation: updatedPresentation,
+                firstInvalidTextField: errors.first { $0.field.isTextField }?.field,
+                didSubmit: false
+            )
+        }
+
+        let payload = try makePayload(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            preferredPickupTime: draft.preferredPickupTime,
+            now: now,
+            calendar: calendar
+        )
+        try await submission(payload)
+        return RequestFoodSubmissionResult(
+            presentation: updatedPresentation,
+            firstInvalidTextField: nil,
+            didSubmit: true
+        )
+    }
+
+    private func validationErrors(now: Date) -> [RequestFoodFieldError] {
+        RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: Self.isValidScheduledWindow(
+                startingAt: draft.preferredPickupTime,
+                now: now,
+                calendar: calendar
+            )
+        )
+    }
+
+    private func fieldError(
+        _ field: RequestFoodFormField,
+        errors: [RequestFoodFieldError]
+    ) -> String? {
+        validationPresentation.visibleError(for: field, from: errors)?.message
+    }
+
+    @ViewBuilder
+    private func fieldErrorText(
+        _ field: RequestFoodFormField,
+        errors: [RequestFoodFieldError],
+        identifier: String
+    ) -> some View {
+        if let message = fieldError(field, errors: errors) {
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(identifier)
         }
     }
 
@@ -520,12 +620,38 @@ struct RequestFoodView: View {
         error == .ambiguous
     }
 
+    static func submissionSectionPresentation(
+        for error: RequestCreatePresentationError?
+    ) -> RequestSubmissionSectionPresentation? {
+        guard let error else { return nil }
+        return RequestSubmissionSectionPresentation(
+            error: error,
+            message: error.message,
+            showsReturnHomeAction: showsReturnHomeAction(for: error)
+        )
+    }
+
     /// Submission stays disabled after an ambiguous outcome, so a request that
     /// may already exist cannot be posted a second time.
     static func allowsSubmission(
         after error: RequestCreatePresentationError?
     ) -> Bool {
         error != .ambiguous
+    }
+
+    /// The request button communicates only whether every required control has
+    /// a value and whether the existing lifecycle permits another attempt.
+    /// Format and scheduling validity deliberately remain Submit-time checks so
+    /// a completed but malformed value can reveal its adjacent error.
+    static func isSubmissionEnabled(
+        draft: RequestFoodFormDraft,
+        submissionError: RequestCreatePresentationError?,
+        isCreating: Bool
+    ) -> Bool {
+        guard !isCreating, allowsSubmission(after: submissionError) else {
+            return false
+        }
+        return RequestFoodFormValidator.hasRequiredInput(draft)
     }
 
     /// Scheduling is possible only while a full 30-minute window still fits
@@ -556,29 +682,30 @@ struct RequestFoodView: View {
         now: Date,
         calendar: Calendar
     ) throws -> CreateRequestPayload {
+        let scheduledWindowIsValid = isValidScheduledWindow(
+            startingAt: preferredPickupTime,
+            now: now,
+            calendar: calendar
+        )
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: selectedDiningSpot,
+            foodRequest: foodRequest,
+            pickupName: pickupName,
+            email: email,
+            timing: timing,
+            isScheduledWindowValid: scheduledWindowIsValid
+        )
+        if let firstError = errors.first {
+            throw firstError.error
+        }
         guard let selectedDiningSpot else {
             throw RequestFoodFormError.missingDiningSpot
         }
 
         let trimmedVendor = selectedDiningSpot.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedVendor.isEmpty else {
-            throw RequestFoodFormError.missingDiningSpot
-        }
-
         let trimmedFood = foodRequest.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedFood.isEmpty else {
-            throw RequestFoodFormError.missingFood
-        }
-
         let trimmedPickupName = pickupName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPickupName.isEmpty else {
-            throw RequestFoodFormError.missingPickupName
-        }
-
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidEmail(trimmedEmail) else {
-            throw RequestFoodFormError.invalidEmail
-        }
 
         switch timing {
         case .asap:
@@ -592,12 +719,7 @@ struct RequestFoodView: View {
                 windowEnd: nil
             )
         case .later:
-            guard isValidScheduledWindow(
-                startingAt: preferredPickupTime,
-                now: now,
-                calendar: calendar
-            ),
-            let windowEnd = calendar.date(
+            guard let windowEnd = calendar.date(
                 byAdding: .minute,
                 value: 30,
                 to: preferredPickupTime
@@ -643,12 +765,6 @@ struct RequestFoodView: View {
     }
 
     static func isValidEmail(_ value: String) -> Bool {
-        let trimmedEmail = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let atIndex = trimmedEmail.firstIndex(of: "@"),
-              atIndex != trimmedEmail.startIndex,
-              atIndex != trimmedEmail.index(before: trimmedEmail.endIndex) else {
-            return false
-        }
-        return trimmedEmail[trimmedEmail.index(after: atIndex)...].contains(".")
+        RequestFoodFormValidator.isValidEmail(value)
     }
 }

@@ -1252,6 +1252,15 @@ final class ClaimFlowTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertNotNil(store.activeClaim)
         XCTAssertTrue(store.isExtendingClaim)
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: FulfillmentFormDraft(
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: FulfillmentReadyTime.asap.etaValue,
+                readyTime: .asap
+            ),
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
         XCTAssertNil(store.claimUnavailableNotice)
 
         extensionGate.open()
@@ -2142,63 +2151,118 @@ final class ClaimFlowTests: XCTestCase {
 
         XCTAssertNil(store.activeClaim)
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: FulfillmentFormDraft(
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: FulfillmentReadyTime.asap.etaValue,
+                readyTime: .asap
+            ),
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
         XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
     }
 
-    func testRequiredFulfillmentFieldsAndActiveClaimGateSubmission() async throws {
-        XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "", orderNumber: "70154321", eta: "15 minutes"
-        ))
-        XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "helper@example.edu", orderNumber: "  ", eta: "15 minutes"
-        ))
-        XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "helper@example.edu", orderNumber: "70154321", eta: "\n"
-        ))
-        XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "helper@example.edu", orderNumber: "70154321", eta: "15 minutes"
+    func testEmptyRequiredFulfillmentFieldsDisableSubmission() {
+        let empty = FulfillmentFormDraft()
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: empty,
+            isOperationallyAvailable: true
         ))
 
-        let store = makeStore()
-        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
-        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
-        try await store.claim(requestID: requestID)
-        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
-        XCTAssertFalse(store.canSubmitFulfillment(requestID: "different-request"))
+        let complete = FulfillmentFormDraft(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.asap.etaValue,
+            readyTime: .asap,
+            contactMessage: ""
+        )
+        var missingEmail = complete
+        missingEmail.fulfillerEmail = " \n"
+        var missingOrderNumber = complete
+        missingOrderNumber.orderNumber = "  "
+        var missingETA = complete
+        missingETA.eta = "\n"
+
+        for draft in [missingEmail, missingOrderNumber, missingETA] {
+            XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+                draft: draft,
+                isOperationallyAvailable: true
+            ))
+        }
     }
 
-    /// Renaming the submit control changes what it says, not when it is
-    /// available: the same four gates decide, in the same order.
-    func testSubmitButtonIsRenamedButGatedIdentically() async throws {
+    func testCompleteFulfillmentEnablesSubmissionWithoutAContactMessage() {
+        let complete = FulfillmentFormDraft(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
+            readyTime: .fifteenMinutes,
+            contactMessage: ""
+        )
+
+        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(
+            draft: complete,
+            isOperationallyAvailable: true
+        ))
+    }
+
+    func testMalformedButNonemptyFulfillmentValuesDoNotDisableSubmission() {
+        let malformed = FulfillmentFormDraft(
+            fulfillerEmail: "helper.example.edu",
+            orderNumber: "ORDER-123",
+            eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
+            readyTime: .thirtyMinutes,
+            contactMessage: ""
+        )
+
+        XCTAssertFalse(FulfillmentFormValidator.validate(
+            fulfillerEmail: malformed.fulfillerEmail,
+            orderNumber: malformed.orderNumber
+        ).isEmpty)
+        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(
+            draft: malformed,
+            isOperationallyAvailable: true
+        ))
+    }
+
+    func testSubmitButtonRetainsStoreOwnedClaimAndExpirationGates() async throws {
         XCTAssertEqual(FulfillRequestView.submitTitle, "I placed this order")
+
+        let complete = FulfillmentFormDraft(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.asap.etaValue,
+            readyTime: .asap,
+            contactMessage: ""
+        )
 
         let store = makeStore()
         // No claim.
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: complete,
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
 
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
-        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
-
-        // Incomplete fields still disable it independently of store state.
-        for (email, number, eta) in [
-            ("", "70154321", "15 minutes"),
-            ("helper@example.edu", " ", "15 minutes"),
-            ("helper@example.edu", "70154321", "")
-        ] {
-            XCTAssertFalse(
-                FulfillRequestView.requiredFieldsArePresent(
-                    fulfillerEmail: email, orderNumber: number, eta: eta
-                ),
-                "Missing required field must keep “\(FulfillRequestView.submitTitle)” disabled"
-            )
-        }
+        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(
+            draft: complete,
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
 
         // Wrong request, and a past deadline, still close it.
-        XCTAssertFalse(store.canSubmitFulfillment(requestID: "different-request"))
-        XCTAssertFalse(store.canSubmitFulfillment(
-            requestID: requestID,
-            now: Date().addingTimeInterval(60 * 60)
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: complete,
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: "different-request")
+        ))
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: complete,
+            isOperationallyAvailable: store.canSubmitFulfillment(
+                requestID: requestID,
+                now: Date().addingTimeInterval(60 * 60)
+            )
         ))
     }
 
@@ -2327,6 +2391,16 @@ final class ClaimFlowTests: XCTestCase {
         await waitUntil { gate.isWaiting }
 
         XCTAssertTrue(store.isFulfilling)
+        let completeDraft = FulfillmentFormDraft(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
+            readyTime: .fifteenMinutes
+        )
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: completeDraft,
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
         XCTAssertNotNil(store.activeClaim)
         XCTAssertEqual(store.requests.map(\.id), [requestID])
         do {
@@ -2348,6 +2422,11 @@ final class ClaimFlowTests: XCTestCase {
         gate.open()
         try await first.value
         XCTAssertNil(store.activeClaim)
+        XCTAssertNotNil(store.fulfillmentConfirmation)
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: completeDraft,
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
         XCTAssertTrue(store.requests.isEmpty)
     }
 
@@ -2627,6 +2706,15 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertNotNil(store.activeClaim)
         XCTAssertNotNil(store.fulfillmentAmbiguity)
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: FulfillmentFormDraft(
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
+                readyTime: .fifteenMinutes
+            ),
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, [
             "/api/request/\(requestID)/claim",
             "/api/request/\(requestID)/fulfill",
@@ -4739,13 +4827,7 @@ final class ClaimFlowTests: XCTestCase {
             // choice and the encoded `eta` string are the same text.
             XCTAssertEqual(option.etaValue, option.label)
             XCTAssertEqual(FulfillmentReadyTime.option(forETA: option.etaValue), option)
-            // Every choice satisfies the unchanged required-field rule, so the
-            // control can never leave submission gated on an empty ETA.
-            XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
-                fulfillerEmail: "helper@example.edu",
-                orderNumber: "70154321",
-                eta: option.etaValue
-            ))
+            XCTAssertFalse(option.etaValue.isEmpty)
         }
 
         XCTAssertEqual(FulfillRequestView.readyTimeQuestion, "When will it be ready?")
@@ -4870,6 +4952,142 @@ final class ClaimFlowTests: XCTestCase {
 
     // MARK: - Field-specific local validation
 
+    func testInitialInvalidFulfillmentKeystrokesRemainQuiet() {
+        let errors = FulfillmentFormValidator.validate(
+            fulfillerEmail: "h",
+            orderNumber: "ORDER"
+        )
+        let presentation = FulfillmentValidationPresentation()
+
+        XCTAssertEqual(errors.map(\.field), [.fulfillerEmail, .orderNumber])
+        XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
+    }
+
+    func testProductionFulfillmentFocusTransitionRevealsOnlyExitedInvalidField() {
+        let errors = FulfillmentFormValidator.validate(
+            fulfillerEmail: "invalid",
+            orderNumber: "ORDER"
+        )
+        var presentation = FulfillmentValidationPresentation()
+
+        presentation.handleFocusTransition(
+            from: .orderNumber,
+            to: .fulfillerEmail,
+            errors: errors
+        )
+
+        XCTAssertEqual(
+            presentation.visibleErrors(from: errors).map(\.field),
+            [.orderNumber]
+        )
+    }
+
+    func testFulfillmentSubmitRevealsEveryErrorWithoutInvokingSubmission() async throws {
+        let draft = FulfillmentFormDraft(
+            fulfillerEmail: "",
+            orderNumber: "",
+            eta: FulfillmentReadyTime.asap.etaValue,
+            readyTime: .asap,
+            contactMessage: "Keep the receipt"
+        )
+        var submissionCount = 0
+
+        let result = try await FulfillRequestView.orchestrateSubmission(
+            draft: draft,
+            presentation: FulfillmentValidationPresentation()
+        ) { _ in
+            submissionCount += 1
+        }
+        let errors = FulfillmentFormValidator.validate(
+            fulfillerEmail: draft.fulfillerEmail,
+            orderNumber: draft.orderNumber
+        )
+        let visible = result.presentation.visibleErrors(from: errors)
+
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertFalse(result.didSubmit)
+        XCTAssertEqual(visible.map(\.field), [.fulfillerEmail, .orderNumber])
+        XCTAssertEqual(result.firstInvalidTextField, .fulfillerEmail)
+    }
+
+    func testPresentedFulfillmentErrorUpdatesLiveWithoutActivatingSibling() {
+        let initial = FulfillmentFormValidator.validate(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER"
+        )
+        var presentation = FulfillmentValidationPresentation()
+        presentation.presentAll(initial)
+        XCTAssertEqual(presentation.presentedFields, [.orderNumber])
+
+        let corrected = FulfillmentFormValidator.validate(
+            fulfillerEmail: "h",
+            orderNumber: "70154321"
+        )
+        XCTAssertTrue(
+            presentation.visibleErrors(from: corrected).isEmpty,
+            "The corrected order error clears live; email never errored, so its first keystroke stays quiet"
+        )
+
+        let invalidAgain = FulfillmentFormValidator.validate(
+            fulfillerEmail: "h",
+            orderNumber: "ORDER"
+        )
+        XCTAssertEqual(
+            presentation.visibleErrors(from: invalidAgain).map(\.field),
+            [.orderNumber]
+        )
+
+        let emptied = FulfillmentFormValidator.validate(
+            fulfillerEmail: "h",
+            orderNumber: ""
+        )
+        XCTAssertEqual(
+            presentation.visibleErrors(from: emptied).first?.message,
+            FulfillmentFormValidator.emptyOrderNumberMessage
+        )
+    }
+
+    func testValidFulfillmentSubmitInvokesSubmissionOnceWithNormalizedValues() async throws {
+        let draft = FulfillmentFormDraft(
+            fulfillerEmail: "  helper@example.edu  ",
+            orderNumber: "  00070154321  ",
+            eta: "  30 minutes  ",
+            readyTime: .thirtyMinutes,
+            contactMessage: "  Text me at pickup  "
+        )
+        var submissions: [FulfillmentSubmissionValues] = []
+
+        let result = try await FulfillRequestView.orchestrateSubmission(
+            draft: draft,
+            presentation: FulfillmentValidationPresentation()
+        ) { values in
+            submissions.append(values)
+        }
+
+        XCTAssertTrue(result.didSubmit)
+        XCTAssertEqual(submissions.count, 1)
+        XCTAssertEqual(submissions.first?.fulfillerEmail, "helper@example.edu")
+        XCTAssertEqual(submissions.first?.orderNumber, "00070154321")
+        XCTAssertEqual(submissions.first?.eta, "30 minutes")
+        XCTAssertEqual(submissions.first?.contactMessage, "Text me at pickup")
+    }
+
+    func testProgrammaticFulfillmentFocusChangesCannotSubmitOrRevealSiblings() {
+        let errors = FulfillmentFormValidator.validate(
+            fulfillerEmail: "invalid",
+            orderNumber: "ORDER"
+        )
+        var presentation = FulfillmentValidationPresentation()
+        let submissionCount = 0
+
+        presentation.handleFocusTransition(from: nil, to: .fulfillerEmail, errors: errors)
+        XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
+
+        presentation.handleFocusTransition(from: .fulfillerEmail, to: nil, errors: errors)
+        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.fulfillerEmail])
+        XCTAssertEqual(submissionCount, 0)
+    }
+
     func testEmailFailuresAreNamedOnTheEmailField() {
         XCTAssertEqual(
             FulfillmentFormValidator.emailError(""),
@@ -4930,11 +5148,7 @@ final class ClaimFlowTests: XCTestCase {
         for withZeroes in ["0", "007", "00070154321", "0000000000"] {
             XCTAssertNil(FulfillmentFormValidator.orderNumberError(withZeroes), withZeroes)
         }
-        XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "helper@example.edu",
-            orderNumber: "00070154321",
-            eta: FulfillmentReadyTime.asap.etaValue
-        ))
+        XCTAssertNil(FulfillmentFormValidator.orderNumberError("00070154321"))
     }
 
     func testAnythingOtherThanDigitsIsRejectedWithUseNumbersOnly() {
@@ -5052,16 +5266,51 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
 
-        let email = "helper.example.edu"
-        let orderNumber = "70154321"
-        let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: email,
-            orderNumber: orderNumber
+        let draft = FulfillmentFormDraft(
+            fulfillerEmail: "helper.example.edu",
+            orderNumber: "ORDER-123",
+            eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
+            readyTime: .thirtyMinutes,
+            contactMessage: "Keep the receipt"
         )
-        XCTAssertFalse(errors.isEmpty)
+        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(
+            draft: draft,
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
+        let result = try await FulfillRequestView.orchestrateSubmission(
+            draft: draft,
+            presentation: FulfillmentValidationPresentation()
+        ) { values in
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: values.fulfillerEmail,
+                orderNumber: values.orderNumber,
+                eta: values.eta,
+                contactMessage: values.contactMessage
+            )
+        }
+        XCTAssertFalse(result.didSubmit)
+        XCTAssertEqual(result.firstInvalidTextField, .fulfillerEmail)
+        let errors = FulfillmentFormValidator.validate(
+            fulfillerEmail: draft.fulfillerEmail,
+            orderNumber: draft.orderNumber
+        )
+        XCTAssertEqual(
+            result.presentation.visibleErrors(from: errors),
+            [
+                FulfillmentFieldError(
+                    field: .fulfillerEmail,
+                    message: FulfillmentFormValidator.invalidEmailMessage
+                ),
+                FulfillmentFieldError(
+                    field: .orderNumber,
+                    message: FulfillmentFormValidator.nonNumericOrderNumberMessage
+                )
+            ]
+        )
 
-        // The submit path returns on a non-empty result before building a
-        // request, so the only captured call is still the claim.
+        // The exact production orchestration seam returned before its injected
+        // store closure, so the only captured call is still the claim.
         XCTAssertEqual(
             ClaimFlowURLProtocol.capturedPaths,
             ["/api/request/\(requestID)/claim"]
@@ -5076,30 +5325,56 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertNil(store.fulfillmentConfirmation)
     }
 
-    /// A rejected submit reports, it does not reset. Correcting only the field
-    /// that was named leaves every other entry — including the ready time — as
-    /// the helper left it, and clears the message.
-    func testCorrectingTheNamedFieldPreservesEveryOtherEntry() {
-        let orderNumber = "70154321"
-        let readyTime = FulfillmentReadyTime.thirtyMinutes
-
-        let rejected = FulfillmentFormValidator.validate(
-            fulfillerEmail: "helper.example.edu",
-            orderNumber: orderNumber
-        )
-        XCTAssertEqual(rejected.map(\.field), [.fulfillerEmail])
-
-        let corrected = FulfillmentFormValidator.validate(
-            fulfillerEmail: "helper@example.edu",
-            orderNumber: orderNumber
-        )
-        XCTAssertTrue(corrected.isEmpty)
-        XCTAssertEqual(readyTime.etaValue, "30 minutes")
-        XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
-            fulfillerEmail: "helper@example.edu",
-            orderNumber: orderNumber,
-            eta: readyTime.etaValue
+    /// A backend rejection reports through the store without resetting any
+    /// actual form draft, picker choice, message, or active claim.
+    func testFulfillmentBackendFailurePreservesActualDraftAndClaim() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: errorResponse(code: ClaimErrorCode.internalFailure, message: "Could not persist")
         ))
+
+        let draft = FulfillmentFormDraft(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "00070154321",
+            eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
+            readyTime: .thirtyMinutes,
+            contactMessage: "Text me at pickup"
+        )
+        let originalDraft = draft
+
+        do {
+            _ = try await FulfillRequestView.orchestrateSubmission(
+                draft: draft,
+                presentation: FulfillmentValidationPresentation()
+            ) { values in
+                try await store.fulfill(
+                    requestID: requestID,
+                    fulfillerEmail: values.fulfillerEmail,
+                    orderNumber: values.orderNumber,
+                    eta: values.eta,
+                    contactMessage: values.contactMessage
+                )
+            }
+            XCTFail("The backend rejection must escape the production seam")
+        } catch RequestServiceError.serverError(let code, _) {
+            XCTAssertEqual(code, ClaimErrorCode.internalFailure)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(draft, originalDraft)
+        XCTAssertEqual(draft.readyTime, .thirtyMinutes)
+        XCTAssertEqual(draft.eta, "30 minutes")
+        XCTAssertEqual(draft.contactMessage, "Text me at pickup")
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertEqual(FulfillmentPresentationError.map(store.fulfillError), .couldNotRecord)
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            1
+        )
     }
 
     /// The generic message is the fallback, never the first answer, and the

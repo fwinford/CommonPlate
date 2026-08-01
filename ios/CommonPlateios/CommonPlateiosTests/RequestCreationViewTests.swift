@@ -2,7 +2,493 @@ import Foundation
 import XCTest
 @testable import CommonPlateios
 
+@MainActor
 final class RequestCreationViewTests: XCTestCase {
+    // MARK: - Validation timing and presentation
+
+    func testAllEmptyRequestDraftDisablesSubmission() {
+        XCTAssertFalse(RequestFoodView.isSubmissionEnabled(
+            draft: RequestFoodFormDraft(),
+            submissionError: nil,
+            isCreating: false
+        ))
+    }
+
+    func testEachMissingRequiredRequestValueDisablesSubmission() throws {
+        let complete = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
+        )
+
+        var missingDiningSpot = complete
+        missingDiningSpot.selectedDiningSpot = nil
+        var missingFood = complete
+        missingFood.foodRequest = "  "
+        var missingPickupName = complete
+        missingPickupName.pickupName = "\n"
+        var missingEmail = complete
+        missingEmail.email = ""
+
+        for draft in [missingDiningSpot, missingFood, missingPickupName, missingEmail] {
+            XCTAssertFalse(RequestFoodView.isSubmissionEnabled(
+                draft: draft,
+                submissionError: nil,
+                isCreating: false
+            ))
+        }
+    }
+
+    func testCompletedRequestDraftEnablesSubmissionForBothTimingSelections() throws {
+        var draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .asap,
+            preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
+        )
+
+        XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
+            draft: draft,
+            submissionError: nil,
+            isCreating: false
+        ))
+
+        draft.timing = .later
+        XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
+            draft: draft,
+            submissionError: nil,
+            isCreating: false
+        ))
+    }
+
+    func testMalformedNonemptyEmailDoesNotDisableRequestSubmission() {
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@",
+            timing: .asap,
+            preferredPickupTime: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
+            draft: draft,
+            submissionError: nil,
+            isCreating: false
+        ))
+    }
+
+    func testMalformedCompletedRequestRevealsEmailErrorAndInvokesNoSubmission() async throws {
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@",
+            timing: .asap,
+            preferredPickupTime: Date(timeIntervalSince1970: 0)
+        )
+        var submissionCount = 0
+
+        XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
+            draft: draft,
+            submissionError: nil,
+            isCreating: false
+        ))
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: Date(timeIntervalSince1970: 1_000),
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { _ in
+            submissionCount += 1
+        }
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: true
+        )
+
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertFalse(result.didSubmit)
+        XCTAssertEqual(result.firstInvalidTextField, .requesterEmail)
+        XCTAssertEqual(
+            result.presentation.visibleError(for: .requesterEmail, from: errors)?.error,
+            .invalidEmail
+        )
+    }
+
+    func testInFlightAndExistingLifecycleBlockDisableRequestSubmission() {
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .asap,
+            preferredPickupTime: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertFalse(RequestFoodView.isSubmissionEnabled(
+            draft: draft,
+            submissionError: nil,
+            isCreating: true
+        ))
+        XCTAssertFalse(RequestFoodView.isSubmissionEnabled(
+            draft: draft,
+            submissionError: .ambiguous,
+            isCreating: false
+        ))
+    }
+
+    func testMalformedEmailRemainsQuietDuringInitialTyping() {
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "t",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+        let presentation = RequestFoodValidationPresentation()
+
+        XCTAssertEqual(errors.map(\.error), [.invalidEmail])
+        XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
+    }
+
+    func testEmptyAndMalformedEmailHaveDistinctCopy() {
+        let empty = RequestFoodFormValidator.validate(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "  ",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+        let malformed = RequestFoodFormValidator.validate(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+
+        XCTAssertEqual(empty.last?.message, "Enter your email address.")
+        XCTAssertEqual(malformed.last?.message, "Enter a valid email address.")
+    }
+
+    func testProductionFocusTransitionRevealsOnlyTheExitedInvalidRequestField() {
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "",
+            email: "invalid",
+            timing: .later,
+            isScheduledWindowValid: false
+        )
+        var presentation = RequestFoodValidationPresentation()
+
+        presentation.handleFocusTransition(
+            from: .requesterEmail,
+            to: .pickupName,
+            errors: errors
+        )
+
+        XCTAssertEqual(
+            presentation.visibleErrors(from: errors).map(\.field),
+            [.requesterEmail]
+        )
+    }
+
+    func testRequestSubmitRejectsEveryErrorWithoutInvokingSubmission() async throws {
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "",
+            email: "",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T15:00:00.000Z")
+        )
+        let now = try date("2026-07-28T16:00:00.000Z")
+        var submissionCount = 0
+
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: now,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { _ in
+            submissionCount += 1
+        }
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: false
+        )
+        let visible = result.presentation.visibleErrors(from: errors)
+
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertFalse(result.didSubmit)
+        XCTAssertEqual(
+            visible.map(\.field),
+            [.diningSpot, .foodDescription, .pickupName, .pickupSchedule, .requesterEmail]
+        )
+        XCTAssertEqual(result.firstInvalidTextField, .foodDescription)
+    }
+
+    func testPresentedRequestErrorUpdatesLiveWhileNeverPresentedFieldsStayQuiet() {
+        let initial = RequestFoodFormValidator.validate(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "Taylor",
+            email: "invalid",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+        var presentation = RequestFoodValidationPresentation()
+        presentation.handleFocusTransition(
+            from: .requesterEmail,
+            to: nil,
+            errors: initial
+        )
+
+        let corrected = RequestFoodFormValidator.validate(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+        XCTAssertTrue(presentation.visibleErrors(from: corrected).isEmpty)
+
+        let invalidAgain = RequestFoodFormValidator.validate(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "Taylor",
+            email: "taylor@",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+        XCTAssertEqual(
+            presentation.visibleErrors(from: invalidAgain).map(\.field),
+            [.requesterEmail],
+            "Dining spot and food never presented errors, so they must stay quiet"
+        )
+
+        let emptied = RequestFoodFormValidator.validate(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "Taylor",
+            email: "",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+        XCTAssertEqual(
+            presentation.visibleError(for: .requesterEmail, from: emptied)?.message,
+            "Enter your email address."
+        )
+    }
+
+    func testPresentedDiningPickerErrorClearsAndReappearsWithSelection() {
+        var draft = RequestFoodFormDraft(
+            selectedDiningSpot: nil,
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .asap,
+            preferredPickupTime: Date(timeIntervalSince1970: 0)
+        )
+        let initialErrors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: true
+        )
+        var presentation = RequestFoodValidationPresentation()
+        presentation.presentAll(initialErrors)
+        XCTAssertNotNil(presentation.visibleError(for: .diningSpot, from: initialErrors))
+
+        draft.selectedDiningSpot = DiningSpot(name: "Palladium", address: nil)
+        let correctedErrors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: true
+        )
+        XCTAssertNil(presentation.visibleError(for: .diningSpot, from: correctedErrors))
+
+        draft.selectedDiningSpot = nil
+        XCTAssertNotNil(presentation.visibleError(for: .diningSpot, from: initialErrors))
+    }
+
+    func testValidRequestSubmitInvokesSubmissionOnceWithNormalizedPayload() async throws {
+        let now = try date("2026-07-28T16:00:00.000Z")
+        let preferredTime = try date("2026-07-28T17:00:00.000Z")
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "  Palladium  ", address: nil),
+            foodRequest: "  Chicken bowl \n",
+            pickupName: "  Taylor  ",
+            email: "  taylor@nyu.edu  ",
+            timing: .later,
+            preferredPickupTime: preferredTime
+        )
+        var payloads: [CreateRequestPayload] = []
+
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: now,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { payload in
+            payloads.append(payload)
+        }
+
+        XCTAssertTrue(result.didSubmit)
+        XCTAssertEqual(payloads.count, 1)
+        XCTAssertEqual(payloads.first?.vendor, "Palladium")
+        XCTAssertEqual(payloads.first?.food, "Chicken bowl")
+        XCTAssertEqual(payloads.first?.pickupName, "Taylor")
+        XCTAssertEqual(payloads.first?.email, "taylor@nyu.edu")
+        XCTAssertEqual(payloads.first?.timing.rawValue, "scheduled")
+        XCTAssertEqual(payloads.first?.windowStart, preferredTime)
+        XCTAssertEqual(payloads.first?.windowEnd, try date("2026-07-28T17:30:00.000Z"))
+    }
+
+    func testRequestBackendFailurePreservesActualDraftAndTimingSelection() async throws {
+        enum SimulatedBackendFailure: Error { case rejected }
+
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
+        )
+        let originalDraft = draft
+        var submissionCount = 0
+
+        do {
+            _ = try await RequestFoodView.orchestrateSubmission(
+                draft: draft,
+                now: try date("2026-07-28T16:00:00.000Z"),
+                calendar: utcCalendar,
+                presentation: RequestFoodValidationPresentation()
+            ) { _ in
+                submissionCount += 1
+                throw SimulatedBackendFailure.rejected
+            }
+            XCTFail("The simulated backend failure must escape the production seam")
+        } catch {
+            XCTAssertTrue(error is SimulatedBackendFailure)
+        }
+        _ = RequestCreatePresentationError.map(
+            RequestServiceError.serverError(code: "INVALID_REQUEST", message: "backend detail")
+        )
+
+        XCTAssertEqual(submissionCount, 1)
+        XCTAssertEqual(draft, originalDraft)
+        XCTAssertEqual(draft.timing, .later)
+        XCTAssertEqual(draft.preferredPickupTime, originalDraft.preferredPickupTime)
+    }
+
+    func testPresentedSchedulingErrorRemainsRenderableWhenSchedulingBecomesUnavailable() async throws {
+        let availableNow = try date("2026-07-28T22:00:00.000Z")
+        let unavailableNow = try date("2026-07-28T23:45:00.000Z")
+        var draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
+        )
+        XCTAssertTrue(RequestFoodView.isScheduledTimingAvailable(
+            now: availableNow,
+            calendar: utcCalendar
+        ))
+        XCTAssertFalse(RequestFoodView.isScheduledTimingAvailable(
+            now: unavailableNow,
+            calendar: utcCalendar
+        ))
+
+        var submissionCount = 0
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: unavailableNow,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { _ in
+            submissionCount += 1
+        }
+        let unavailableErrors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: false
+        )
+
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertEqual(
+            result.presentation.visibleError(for: .pickupSchedule, from: unavailableErrors)?.error,
+            .invalidScheduledTime
+        )
+
+        draft.timing = .asap
+        let asapErrors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: false
+        )
+        XCTAssertNil(result.presentation.visibleError(for: .pickupSchedule, from: asapErrors))
+
+        draft.timing = .later
+        XCTAssertEqual(
+            result.presentation.visibleError(for: .pickupSchedule, from: unavailableErrors)?.error,
+            .invalidScheduledTime
+        )
+    }
+
+    func testProgrammaticRequestFocusChangesCannotSubmitOrRevealSiblings() {
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "",
+            email: "invalid",
+            timing: .asap,
+            isScheduledWindowValid: true
+        )
+        var presentation = RequestFoodValidationPresentation()
+        let submissionCount = 0
+
+        presentation.handleFocusTransition(from: nil, to: .requesterEmail, errors: errors)
+        XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
+
+        presentation.handleFocusTransition(from: .requesterEmail, to: nil, errors: errors)
+        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.requesterEmail])
+        XCTAssertEqual(submissionCount, 0)
+    }
+
     func testASAPPayloadTrimsValuesAndOmitsWindowFields() throws {
         let payload = try RequestFoodView.makePayload(
             selectedDiningSpot: DiningSpot(name: "  Palladium  ", address: nil),
@@ -125,6 +611,95 @@ final class RequestCreationViewTests: XCTestCase {
             ),
             .ambiguous
         )
+    }
+
+    func testStructuredBackendFailureUsesSubmitSectionPresentation() {
+        let error = RequestCreatePresentationError.map(
+            RequestServiceError.serverError(
+                code: "REQUEST_CREATION_FAILED",
+                message: "backend detail"
+            )
+        )
+        let presentation = RequestFoodView.submissionSectionPresentation(for: error)
+
+        XCTAssertEqual(presentation?.error, .creationFailed)
+        XCTAssertEqual(
+            presentation?.message,
+            "We couldn’t post your request. Please try again in a moment."
+        )
+        XCTAssertFalse(presentation?.showsReturnHomeAction ?? true)
+    }
+
+    func testAmbiguousCreationUsesTheSameSubmitSectionPresentation() {
+        let error = RequestCreatePresentationError.map(
+            RequestServiceError.ambiguousCreateOutcome(
+                underlying: URLError(.timedOut)
+            )
+        )
+        let presentation = RequestFoodView.submissionSectionPresentation(for: error)
+
+        XCTAssertEqual(presentation?.error, .ambiguous)
+        XCTAssertEqual(
+            presentation?.message,
+            "We couldn’t confirm whether your request was posted. Check Active Requests before submitting again."
+        )
+        XCTAssertTrue(presentation?.showsReturnHomeAction ?? false)
+    }
+
+    func testSubmitSectionFailurePresentationPreservesDraftAndPickupSelection() async throws {
+        enum SimulatedBackendFailure: Error { case rejected }
+
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
+        )
+        let originalDraft = draft
+
+        do {
+            _ = try await RequestFoodView.orchestrateSubmission(
+                draft: draft,
+                now: try date("2026-07-28T16:00:00.000Z"),
+                calendar: utcCalendar,
+                presentation: RequestFoodValidationPresentation()
+            ) { _ in
+                throw SimulatedBackendFailure.rejected
+            }
+            XCTFail("The simulated backend failure must escape the production seam")
+        } catch {
+            XCTAssertTrue(error is SimulatedBackendFailure)
+        }
+
+        let sectionPresentation = RequestFoodView.submissionSectionPresentation(
+            for: .creationFailed
+        )
+        XCTAssertNotNil(sectionPresentation)
+        XCTAssertEqual(draft, originalDraft)
+        XCTAssertEqual(draft.selectedDiningSpot, originalDraft.selectedDiningSpot)
+        XCTAssertEqual(draft.timing, .later)
+        XCTAssertEqual(draft.preferredPickupTime, originalDraft.preferredPickupTime)
+    }
+
+    func testLocalFieldErrorsDoNotEnterSubmitSectionPresentation() {
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: nil,
+            foodRequest: "",
+            pickupName: "",
+            email: "invalid",
+            timing: .later,
+            isScheduledWindowValid: false
+        )
+        var validationPresentation = RequestFoodValidationPresentation()
+        validationPresentation.presentAll(errors)
+
+        XCTAssertEqual(
+            validationPresentation.visibleErrors(from: errors).map(\.field),
+            [.diningSpot, .foodDescription, .pickupName, .pickupSchedule, .requesterEmail]
+        )
+        XCTAssertNil(RequestFoodView.submissionSectionPresentation(for: nil))
     }
 
     /// The web form asserts this same sentence against

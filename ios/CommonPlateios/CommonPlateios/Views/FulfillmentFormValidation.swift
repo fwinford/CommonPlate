@@ -5,6 +5,30 @@
 
 import Foundation
 
+/// The helper form's editable values. It remains private to the fulfillment
+/// screen's workflow and is never shared with request creation or the store.
+struct FulfillmentFormDraft: Equatable {
+    var fulfillerEmail: String
+    var orderNumber: String
+    var eta: String
+    var readyTime: FulfillmentReadyTime
+    var contactMessage: String
+
+    init(
+        fulfillerEmail: String = "",
+        orderNumber: String = "",
+        eta: String = "",
+        readyTime: FulfillmentReadyTime = .asap,
+        contactMessage: String = ""
+    ) {
+        self.fulfillerEmail = fulfillerEmail
+        self.orderNumber = orderNumber
+        self.eta = eta
+        self.readyTime = readyTime
+        self.contactMessage = contactMessage
+    }
+}
+
 /// The reservation form's locally-checkable fields, listed in the order they
 /// appear on screen — which is also the order the first invalid one is focused
 /// in after a rejected submit.
@@ -24,6 +48,53 @@ struct FulfillmentFieldError: Equatable, Identifiable {
     let message: String
 
     var id: FulfillmentFormField { field }
+}
+
+/// Independent presentation history for the fulfillment form. Only fields
+/// whose own error has been shown are allowed to revalidate live; a rejected
+/// sibling field never makes an untouched field noisy during initial typing.
+struct FulfillmentValidationPresentation: Equatable {
+    private(set) var presentedFields: Set<FulfillmentFormField> = []
+
+    mutating func presentInvalidField(
+        _ field: FulfillmentFormField,
+        from errors: [FulfillmentFieldError]
+    ) {
+        guard errors.contains(where: { $0.field == field }) else { return }
+        presentedFields.insert(field)
+    }
+
+    mutating func presentAll(_ errors: [FulfillmentFieldError]) {
+        presentedFields.formUnion(errors.map(\.field))
+    }
+
+    /// The exact focus transition used by `FulfillRequestView`. It has no
+    /// submission dependency and cannot touch store-owned lifecycle state.
+    mutating func handleFocusTransition(
+        from previousField: FulfillmentFormField?,
+        to currentField: FulfillmentFormField?,
+        errors: [FulfillmentFieldError]
+    ) {
+        guard previousField != currentField, let previousField else { return }
+        presentInvalidField(previousField, from: errors)
+    }
+
+    func visibleErrors(from errors: [FulfillmentFieldError]) -> [FulfillmentFieldError] {
+        errors.filter { presentedFields.contains($0.field) }
+    }
+}
+
+struct FulfillmentSubmissionValues: Equatable {
+    let fulfillerEmail: String
+    let orderNumber: String
+    let eta: String
+    let contactMessage: String?
+}
+
+struct FulfillmentSubmissionResult: Equatable {
+    let presentation: FulfillmentValidationPresentation
+    let firstInvalidTextField: FulfillmentFormField?
+    let didSubmit: Bool
 }
 
 /// Client-side mirrors of the backend's own accepted rules for

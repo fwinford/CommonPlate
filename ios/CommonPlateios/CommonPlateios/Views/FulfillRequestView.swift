@@ -213,23 +213,13 @@ struct FulfillRequestView: View {
     @ObservedObject var store: RequestStore
     @Binding var path: [AppRoute]
 
-    @State private var fulfillerEmail = ""
-    @State private var orderNumber = ""
-    /// The encoded backend `eta` string. Written only from `readyTime`, so the
+    /// The encoded backend `eta` string is written only from `readyTime`, so the
     /// value the helper picked and the value the student reads are the same text.
-    @State private var eta = ""
-    @State private var readyTime: FulfillmentReadyTime = .asap
-    @State private var contactMessage = ""
+    @State private var draft = FulfillmentFormDraft()
 
-    /// Local validation failures, one per field, shown against the field they
-    /// name. Empty until a submit is actually attempted: a form the helper is
-    /// still filling in must not accuse them of anything.
-    @State private var fieldErrors: [FulfillmentFieldError] = []
-    /// Once a submit has been rejected locally, the fields re-check themselves as
-    /// they are edited — so a corrected field clears its message, and a field
-    /// emptied afterwards says so instead of falling silent behind the disabled
-    /// button.
-    @State private var hasAttemptedSubmit = false
+    /// A field revalidates live only after its own error has appeared. This is
+    /// intentionally view-local and independent from request creation.
+    @State private var validationPresentation = FulfillmentValidationPresentation()
     @FocusState private var focusedField: FulfillmentFormField?
 
     /// The claim this screen is showing. Nil once the store ends the flow —
@@ -394,17 +384,15 @@ struct FulfillRequestView: View {
         // who already chose "30 minutes" and came back does not silently get
         // ASAP; only an empty or unrecognised draft falls back to the default.
         .onAppear {
-            readyTime = FulfillmentReadyTime.initialSelection(draftETA: eta)
-            eta = readyTime.etaValue
+            draft.readyTime = FulfillmentReadyTime.initialSelection(draftETA: draft.eta)
+            draft.eta = draft.readyTime.etaValue
         }
-        // Live only after a submit was rejected. Before that a half-typed
-        // address is not a mistake yet; after it, the helper is fixing
-        // something specific and deserves to see it clear as they type.
-        .onChange(of: fulfillerEmail) { _, _ in
-            revalidateAfterRejectedSubmit()
-        }
-        .onChange(of: orderNumber) { _, _ in
-            revalidateAfterRejectedSubmit()
+        .onChange(of: focusedField) { previousField, currentField in
+            validationPresentation.handleFocusTransition(
+                from: previousField,
+                to: currentField,
+                errors: currentFieldErrors
+            )
         }
         // The claim ending — expiration, or a backend verdict that the
         // reservation is no longer ours — closes this screen from either entry
@@ -484,7 +472,7 @@ struct FulfillRequestView: View {
     /// a form that was reading as too long.
     private var fulfillmentForm: some View {
         Section {
-            TextField("Your email", text: $fulfillerEmail)
+            TextField("Your email", text: $draft.fulfillerEmail)
                 .textContentType(.emailAddress)
                 .keyboardType(.emailAddress)
                 .textInputAutocapitalization(.never)
@@ -505,7 +493,7 @@ struct FulfillRequestView: View {
             // and is explained by the field's own message, rather than being
             // silently rewritten into something the helper never entered.
             // Leading zeroes are text here and survive to the wire intact.
-            TextField("Order number", text: $orderNumber)
+            TextField("Order number", text: $draft.orderNumber)
                 .keyboardType(.numberPad)
                 .autocorrectionDisabled()
                 .focused($focusedField, equals: .orderNumber)
@@ -522,18 +510,22 @@ struct FulfillRequestView: View {
             // text — a helper could not tell "Ready in  15 minutes" was theirs
             // to change — and left them inventing a phrasing for an order that
             // might be ready immediately or in an hour.
-            Picker(Self.readyTimeQuestion, selection: $readyTime) {
+            Picker(Self.readyTimeQuestion, selection: $draft.readyTime) {
                 ForEach(FulfillmentReadyTime.allCases) { option in
                     Text(option.label).tag(option)
                 }
             }
             .pickerStyle(.menu)
             .accessibilityIdentifier("fulfillment-eta")
-            .onChange(of: readyTime) { _, selection in
-                eta = selection.etaValue
+            .onChange(of: draft.readyTime) { _, selection in
+                draft.eta = selection.etaValue
             }
 
-            TextField("Message to the student (optional)", text: $contactMessage, axis: .vertical)
+            TextField(
+                "Message to the student (optional)",
+                text: $draft.contactMessage,
+                axis: .vertical
+            )
                 .lineLimit(2...5)
                 .accessibilityIdentifier("fulfillment-contact-message")
 
@@ -554,18 +546,18 @@ struct FulfillRequestView: View {
         }
     }
 
-    private func revalidateAfterRejectedSubmit() {
-        guard hasAttemptedSubmit else {
-            return
-        }
-        fieldErrors = FulfillmentFormValidator.validate(
-            fulfillerEmail: fulfillerEmail,
-            orderNumber: orderNumber
+    private var currentFieldErrors: [FulfillmentFieldError] {
+        FulfillmentFormValidator.validate(
+            fulfillerEmail: draft.fulfillerEmail,
+            orderNumber: draft.orderNumber
         )
     }
 
     private func fieldError(_ field: FulfillmentFormField) -> String? {
-        fieldErrors.first { $0.field == field }?.message
+        validationPresentation
+            .visibleErrors(from: currentFieldErrors)
+            .first { $0.field == field }?
+            .message
     }
 
     /// The message sits immediately below the field it names, in the same red
@@ -601,53 +593,89 @@ struct FulfillRequestView: View {
     }
 
     private var isSubmissionEnabled: Bool {
-        Self.requiredFieldsArePresent(
-            fulfillerEmail: fulfillerEmail,
-            orderNumber: orderNumber,
-            eta: eta
-        ) && store.canSubmitFulfillment(requestID: request.id)
+        Self.isSubmissionEnabled(
+            draft: draft,
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: request.id)
+        )
     }
 
-    static func requiredFieldsArePresent(
-        fulfillerEmail: String,
-        orderNumber: String,
-        eta: String
+    static func isSubmissionEnabled(
+        draft: FulfillmentFormDraft,
+        isOperationallyAvailable: Bool
     ) -> Bool {
-        !fulfillerEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !orderNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !eta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard isOperationallyAvailable else { return false }
+
+        return !draft.fulfillerEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !draft.orderNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !draft.eta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func submitFulfillment() {
-        let email = fulfillerEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        let number = orderNumber.trimmingCharacters(in: .whitespacesAndNewlines)
-        let etaText = eta.trimmingCharacters(in: .whitespacesAndNewlines)
-        let message = contactMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        let submittedDraft = draft
+        let currentPresentation = validationPresentation
+        Task {
+            do {
+                let result = try await Self.orchestrateSubmission(
+                    draft: submittedDraft,
+                    presentation: currentPresentation
+                ) { values in
+                    try await store.fulfill(
+                        requestID: request.id,
+                        fulfillerEmail: values.fulfillerEmail,
+                        orderNumber: values.orderNumber,
+                        eta: values.eta,
+                        contactMessage: values.contactMessage
+                    )
+                }
+                validationPresentation = result.presentation
+                if !result.didSubmit {
+                    focusedField = result.firstInvalidTextField
+                }
+            } catch {
+                // RequestStore owns and publishes backend/lifecycle failures.
+                // The draft remains untouched for correction or retry.
+            }
+        }
+    }
 
-        // Local validation happens before anything is built or sent, and a
-        // rejection writes to nothing but the error state: every field the
-        // helper filled in — including the chosen ready time — survives it
-        // untouched, so a formatting mistake never costs them their entry.
-        hasAttemptedSubmit = true
+    /// The production submit seam. Form validation and normalization complete
+    /// before the injected closure can reach `RequestStore`; lifecycle and
+    /// duplicate protection remain entirely store-owned.
+    static func orchestrateSubmission(
+        draft: FulfillmentFormDraft,
+        presentation: FulfillmentValidationPresentation,
+        submission: (FulfillmentSubmissionValues) async throws -> Void
+    ) async throws -> FulfillmentSubmissionResult {
+        let email = draft.fulfillerEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let number = draft.orderNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        let eta = draft.eta.trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = draft.contactMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         let errors = FulfillmentFormValidator.validate(
             fulfillerEmail: email,
             orderNumber: number
         )
-        fieldErrors = errors
-        guard errors.isEmpty else {
-            focusedField = errors.first?.field
-            return
-        }
+        var updatedPresentation = presentation
+        updatedPresentation.presentAll(errors)
 
-        Task {
-            try? await store.fulfill(
-                requestID: request.id,
-                fulfillerEmail: email,
-                orderNumber: number,
-                eta: etaText,
-                contactMessage: message.isEmpty ? nil : message
+        guard errors.isEmpty else {
+            return FulfillmentSubmissionResult(
+                presentation: updatedPresentation,
+                firstInvalidTextField: errors.first?.field,
+                didSubmit: false
             )
         }
+
+        try await submission(FulfillmentSubmissionValues(
+            fulfillerEmail: email,
+            orderNumber: number,
+            eta: eta,
+            contactMessage: message.isEmpty ? nil : message
+        ))
+        return FulfillmentSubmissionResult(
+            presentation: updatedPresentation,
+            firstInvalidTextField: nil,
+            didSubmit: true
+        )
     }
 
     private var extensionPromptSection: some View {
