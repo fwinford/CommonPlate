@@ -34,10 +34,7 @@ struct ActiveRequestsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Pinned above every list state, including loading and empty: a
-            // reservation the helper is holding must stay reachable even when
-            // the public list has nothing in it.
-            activeReservationItem
+            pinnedHeader
 
             listContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -85,6 +82,21 @@ struct ActiveRequestsView: View {
             }
             await store.fetchRequests()
         }
+    }
+
+    /// Everything that stays above the list regardless of its state.
+    @ViewBuilder
+    private var pinnedHeader: some View {
+        // A confirmed placement whose claimant screen is already gone has
+        // nowhere else to land: the claim is cleared and the request is removed
+        // from the list, so without this the helper never learns the order was
+        // recorded and the confirmation can never be acknowledged.
+        placementConfirmationItem
+
+        // Pinned above every list state, including loading and empty: a
+        // reservation the helper is holding must stay reachable even when the
+        // public list has nothing in it.
+        activeReservationItem
     }
 
     @ViewBuilder
@@ -138,6 +150,49 @@ struct ActiveRequestsView: View {
             .accessibilityIdentifier("active-reservation-item")
         }
     }
+
+    /// The confirmed placement the helper has not acknowledged yet, carrying the
+    /// same message the claimant screen would have shown.
+    ///
+    /// Rendered as inline content rather than an alert or a sheet. This screen
+    /// already owns one modal — the claim-unavailable alert — and the claimant
+    /// screen shows this same confirmation in its own success section, so the
+    /// two surfaces can never contend for one presentation: whichever screen the
+    /// helper is actually on renders it, and the covered one is just layout.
+    @ViewBuilder
+    private var placementConfirmationItem: some View {
+        if let confirmation = store.fulfillmentConfirmation {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(FulfillRequestView.confirmationTitle)
+                    .font(.headline)
+
+                Text(FulfillRequestView.confirmationDetail(for: confirmation.kind))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(Self.confirmationAcknowledgeTitle) {
+                    store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("placement-confirmation-acknowledge")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.secondary.opacity(0.12))
+            )
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .accessibilityIdentifier("placement-confirmation-item")
+        }
+    }
+
+    /// Acknowledgement from the list itself. The claimant screen's button says
+    /// "Return to Active Requests" because it navigates; this one is already
+    /// there, so it only dismisses the message.
+    static let confirmationAcknowledgeTitle = "Got it"
 
     static let activeReservationTitle = "You’re helping with a request"
 
@@ -273,8 +328,14 @@ struct ActiveRequestsView: View {
         switch reason {
         case .alreadyClaimed:
             return RequestDetailView.alreadyClaimedNotice
-        case .claimExpired:
+        case .claimExpired, .fulfillmentClaimExpired:
             return "Your reservation expired."
+        case .reservationNoLongerValid:
+            return "Your reservation is no longer valid."
+        case .fulfillmentAlreadyPlaced:
+            return "Order already recorded."
+        case .fulfillmentRequestNotFound:
+            return "We couldn’t find this request."
         case .noLongerAvailable, nil:
             return RequestDetailView.noLongerAvailableNotice
         }
@@ -286,6 +347,14 @@ struct ActiveRequestsView: View {
         switch reason {
         case .claimExpired:
             return "Please don’t place an order for that request. Someone else may already be helping."
+        case .fulfillmentClaimExpired:
+            return "If you already placed the external order, do not place it again. If you have not placed it, stop and return to Active Requests."
+        case .reservationNoLongerValid:
+            return "This request is no longer reserved for you. Do not submit again or place another order."
+        case .fulfillmentAlreadyPlaced:
+            return "The request has already been marked placed. Do not place another order."
+        case .fulfillmentRequestNotFound:
+            return "The reservation can’t be used. Do not submit again or place another order."
         case .alreadyClaimed, .noLongerAvailable, nil:
             return nil
         }

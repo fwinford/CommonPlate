@@ -130,17 +130,13 @@ struct ClaimExtensionResponseDTO: Decodable {
 
 // MARK: - Fulfillment
 
-/// Fields currently accepted by `POST /api/request/:id/fulfill` (app.ts: `orderNumber`,
-/// `eta`, `note`, `fulfillerEmail`, `contactMessage`). `note` and `contactMessage` are
-/// kept distinct and both optional: whether they remain separate or are consolidated
-/// is an open Day 5 question, not decided here. `eta` matches the currently accepted
-/// wire key; do not rename to `etaText` (that is a persisted `Request` field, not the
-/// request-body key) unless the endpoint's accepted contract changes.
+/// Strict nested fields accepted by `POST /api/request/:id/fulfill`.
+/// `eta` is the request-body key; `etaText` is backend persistence vocabulary
+/// and must not be sent by iOS. `contactMessage` is the only optional field.
 struct FulfillmentPayload: Encodable {
     let fulfillerEmail: String
     let orderNumber: String
     let eta: String
-    let note: String?
     let contactMessage: String?
 }
 
@@ -152,7 +148,6 @@ struct FulfillRequestPayload: Encodable {
 
 enum NotificationDeliveryStatus: String, Decodable {
     case sent
-    case pendingRetry = "pending_retry"
     case failed
 }
 

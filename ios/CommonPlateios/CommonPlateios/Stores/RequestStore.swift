@@ -67,6 +67,36 @@ private struct ClaimExtensionAttempt: Equatable {
     let originalExpiration: Date
 }
 
+private struct FulfillmentAttempt: Equatable {
+    let id: UUID
+    let claimID: UUID
+    let requestID: String
+}
+
+private struct FulfillmentAmbiguityContext: Equatable {
+    let id: UUID
+    let claimID: UUID
+    let requestID: String
+}
+
+struct FulfillmentAmbiguityPresentation: Identifiable, Equatable {
+    let id: UUID
+    let requestID: String
+    fileprivate(set) var isCheckingStatus: Bool
+}
+
+enum FulfillmentConfirmationKind: Equatable {
+    case notificationSent
+    case notificationFailed
+    case emailStatusUnknown
+}
+
+struct FulfillmentConfirmation: Identifiable, Equatable {
+    let id: UUID
+    let requestID: String
+    let kind: FulfillmentConfirmationKind
+}
+
 /// Backend-confirmed reasons a helper cannot start (or continue) helping with a
 /// request. Each carries the same recovery — leave the stale screen and return
 /// to a refreshed Active Requests list — because in every case the backend has
@@ -82,6 +112,17 @@ enum ClaimUnavailableReason: Equatable {
     case noLongerAvailable
     /// The reservation ran out while the helper was in the fulfillment flow.
     case claimExpired
+    /// Fulfillment-specific expiration warning. The helper may already have
+    /// placed the external order, so the copy must forbid a second one.
+    case fulfillmentClaimExpired
+    /// The backend confirmed the token is wrong or the request is no longer
+    /// actively claimed by this helper.
+    case reservationNoLongerValid
+    /// The backend confirmed placement was already recorded.
+    case fulfillmentAlreadyPlaced
+    /// The request could not be found. This is terminal for the local claim but
+    /// must not imply that another external order is safe.
+    case fulfillmentRequestNotFound
 }
 
 struct ClaimErrorEvent: Identifiable {
@@ -190,6 +231,8 @@ final class RequestStore: ObservableObject {
     @Published private(set) var isFulfilling = false
     @Published private(set) var fulfillError: RequestServiceError?
     @Published private(set) var confirmedFulfillmentOutcome: FulfillOutcome?
+    @Published private(set) var fulfillmentAmbiguity: FulfillmentAmbiguityPresentation?
+    @Published private(set) var fulfillmentConfirmation: FulfillmentConfirmation?
 
     /// Non-secret presentation for the helper's active claim, if any. The
     /// matching raw token is held separately in private store-only state.
@@ -202,6 +245,15 @@ final class RequestStore: ObservableObject {
     private var activeClaimAuthorization: ActiveClaimAuthorization?
     private var activeClaimAttempt: ClaimAttempt?
     private var activeClaimExtensionAttempt: ClaimExtensionAttempt?
+    private var activeFulfillmentAttempt: FulfillmentAttempt?
+    private var fulfillmentAmbiguityContext: FulfillmentAmbiguityContext?
+
+    /// The claim identity a placement submission has been attempted under. The
+    /// claimant screen permits that submission only after the external order is
+    /// already placed, so this records that the helper may be holding a real
+    /// order — which changes what an expiration is allowed to tell them. It
+    /// outlives the attempt itself and is cleared with the claim.
+    private var fulfillmentSubmissionClaimID: UUID?
 
     /// One local timer per active claim, scheduled from the backend's
     /// `claimExpiresAt`. It replaces polling entirely: nothing is re-fetched to
@@ -359,13 +411,50 @@ final class RequestStore: ObservableObject {
     /// reservation they actually hold instead of being told they are already
     /// starting to help with the request in front of them.
     func claim(requestID: String) async throws {
+        // Week 2 holds exactly one confirmation. Letting a second placement
+        // confirm before this one is acknowledged would overwrite a real
+        // sent / failed / unknown-email result with no way to get it back, so
+        // acknowledgement gates the next claim rather than the confirmation
+        // being silently replaced. Recorded as a claim error before any attempt
+        // exists — no POST is built — so the detail screen can explain the
+        // refusal instead of the tap appearing to do nothing.
+        if let confirmation = fulfillmentConfirmation {
+            recordPreflightClaimRefusal(
+                .unacknowledgedPlacement,
+                requestID: requestID,
+                operationID: confirmation.id
+            )
+            throw RequestServiceError.unacknowledgedPlacement
+        }
         if let activeClaim {
-            throw activeClaim.requestID == requestID
-                ? RequestServiceError.operationInProgress
-                : RequestServiceError.existingActiveClaim
+            let refusal: RequestServiceError = activeClaim.requestID == requestID
+                ? .operationInProgress
+                : .existingActiveClaim
+            // Recorded, not just thrown: the caller discards the error, so
+            // without an event the tap looks like it did nothing and the
+            // accepted copy for this refusal never reaches the helper.
+            recordPreflightClaimRefusal(
+                refusal,
+                requestID: requestID,
+                operationID: activeClaimAuthorization?.claimID
+            )
+            throw refusal
         }
         guard !isClaiming else {
-            throw RequestServiceError.operationInProgress
+            // Only the same request can honestly be described as "already
+            // starting". An attempt in flight for a *different* request blocks
+            // this one just as firmly, but for a different reason and only for
+            // a moment, so it gets its own refusal rather than borrowing copy
+            // that would misdescribe the request in front of the helper.
+            let refusal: RequestServiceError = activeClaimAttempt?.requestID == requestID
+                ? .operationInProgress
+                : .otherClaimInProgress
+            recordPreflightClaimRefusal(
+                refusal,
+                requestID: requestID,
+                operationID: activeClaimAttempt?.id
+            )
+            throw refusal
         }
         let attempt = ClaimAttempt(id: UUID(), requestID: requestID)
         activeClaimAttempt = attempt
@@ -377,6 +466,14 @@ final class RequestStore: ObservableObject {
             if activeClaimAttempt == attempt {
                 activeClaimAttempt = nil
                 isClaiming = false
+                // This attempt was the blocker. Any "wait for that request"
+                // refusal it caused on another screen is now stale — and this
+                // runs after the catch, so a real rejection recorded for *this*
+                // request is left alone by the case match.
+                clearPreflightClaimRefusal { error in
+                    if case .otherClaimInProgress = error { return true }
+                    return false
+                }
             }
         }
         do {
@@ -437,6 +534,8 @@ final class RequestStore: ObservableObject {
     func extendActiveClaim() async {
         guard !isExtendingClaim,
               activeClaimExtensionAttempt == nil,
+              fulfillmentAmbiguityContext == nil,
+              activeFulfillmentAttempt == nil,
               let claim = activeClaim,
               claim.isExtensionAvailable,
               let authorization = activeClaimAuthorization,
@@ -515,8 +614,36 @@ final class RequestStore: ObservableObject {
     /// tests exercise it — and Day 5 fulfillment clears the same state through
     /// `clearActiveClaim` after confirmed placement.
     func leaveActiveClaimFlow() {
+        // An unresolved POST may already have recorded the external order. Its
+        // raw token and claimant context are intentionally retained until
+        // placement is positively resolved or the claim expires.
+        guard fulfillmentAmbiguityContext == nil else {
+            return
+        }
         clearActiveClaim()
         refreshRequestsAfterClaimConflict()
+    }
+
+    /// Re-checks the backend-provided deadline when the app becomes active.
+    /// The captured claim identity is passed through the same expiration seam
+    /// as the timer, so this check cannot clear a replacement claim.
+    func revalidateActiveClaimExpiration(now: Date = Date()) {
+        guard let claim = activeClaim,
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID,
+              activeClaimExtensionAttempt == nil else {
+            return
+        }
+
+        if claim.claimExpiresAt <= now {
+            markActiveClaimExpired(
+                claimID: authorization.claimID,
+                requestID: authorization.requestID,
+                expiration: claim.claimExpiresAt
+            )
+        } else {
+            startClaimLifecycleTimer()
+        }
     }
 
     /// Clears the notice once the helper has seen it on Active Requests.
@@ -538,25 +665,59 @@ final class RequestStore: ObservableObject {
         activeClaim = presentation
         activeClaimAuthorization = authorization
         claimExtensionError = nil
+        fulfillError = nil
+        fulfillmentAmbiguity = nil
+        fulfillmentAmbiguityContext = nil
+        fulfillmentSubmissionClaimID = nil
+        // `fulfillmentConfirmation` and its outcome are deliberately untouched.
+        // A confirmed placement the helper has not acknowledged yet is terminal
+        // information about a real order; starting to help with something else
+        // is not a reason to drop it, and Active Requests keeps it reachable.
         isShowingClaimExtensionPrompt = false
         hasResolvedClaimExtensionPrompt = false
+        // The attempt that was "already starting" has finished starting.
+        clearPreflightClaimRefusal { error in
+            if case .operationInProgress = error { return true }
+            return false
+        }
         startClaimLifecycleTimer()
     }
 
     private func clearActiveClaim() {
+        let clearedClaimID = activeClaimAuthorization?.claimID
         claimLifecycleTask?.cancel()
         claimLifecycleTask = nil
         invalidateActiveExtensionAttempt()
+        invalidateActiveFulfillmentAttempt()
         activeClaim = nil
         activeClaimAuthorization = nil
         isShowingClaimExtensionPrompt = false
         hasResolvedClaimExtensionPrompt = false
         claimExtensionError = nil
+        if fulfillmentAmbiguityContext?.claimID == clearedClaimID {
+            fulfillmentAmbiguityContext = nil
+            fulfillmentAmbiguity = nil
+        }
+        if fulfillmentSubmissionClaimID == clearedClaimID {
+            fulfillmentSubmissionClaimID = nil
+        }
+        // The reservation that was blocking other requests is gone, so a
+        // refusal that only described it must not keep telling the helper they
+        // are already helping with something else.
+        clearPreflightClaimRefusal { error in
+            if case .existingActiveClaim = error { return true }
+            return false
+        }
     }
 
     private func invalidateActiveExtensionAttempt() {
         activeClaimExtensionAttempt = nil
         isExtendingClaim = false
+    }
+
+    private func invalidateActiveFulfillmentAttempt() {
+        activeFulfillmentAttempt = nil
+        isFulfilling = false
     }
 
     private func extensionAttemptIsCurrent(_ attempt: ClaimExtensionAttempt) -> Bool {
@@ -580,15 +741,9 @@ final class RequestStore: ObservableObject {
     /// local UI steps — it never decides whether a claim is valid, which stays
     /// the backend's answer on the next mutation.
     ///
-    /// Day 5 requirement: this timer is the only thing that ends a claim
-    /// locally, and it is not revalidated when the app returns to the
-    /// foreground. If the sleep resumes late, the reservation deadline stays on
-    /// screen past its expiry. Today that is only a wrong sentence, because the
-    /// claimant screen cannot submit an order. Before real ordering ships,
-    /// re-check `activeClaim.claimExpiresAt` against wall-clock time on
-    /// `scenePhase == .active` — expiring immediately if it has passed and
-    /// rescheduling otherwise — so no order can be placed against a lapsed
-    /// reservation.
+    /// Foreground activation also re-checks this backend-provided deadline.
+    /// Timer callbacks and foreground checks both carry the private claim
+    /// identity, so neither can clear a replacement claim.
     private func startClaimLifecycleTimer() {
         claimLifecycleTask?.cancel()
         guard let claim = activeClaim,
@@ -644,6 +799,8 @@ final class RequestStore: ObservableObject {
               claim.claimExpiresAt == expiration,
               claim.isExtensionAvailable,
               activeClaimExtensionAttempt == nil,
+              fulfillmentAmbiguityContext == nil,
+              activeFulfillmentAttempt == nil,
               !hasResolvedClaimExtensionPrompt else {
             return
         }
@@ -661,6 +818,16 @@ final class RequestStore: ObservableObject {
         isShowingClaimExtensionPrompt = true
     }
 
+    /// Whether the helper may already be holding a completed external order for
+    /// this claim identity. Resolved from store state rather than passed in by
+    /// the caller: the timer, the foreground check, and the post-attempt resume
+    /// all reach the same expiration for the same reason, and a Boolean argument
+    /// meant one of them could silently answer differently by omitting it.
+    private func mayHavePlacedExternalOrder(claimID: UUID) -> Bool {
+        fulfillmentSubmissionClaimID == claimID
+            || fulfillmentAmbiguityContext?.claimID == claimID
+    }
+
     private func markActiveClaimExpired(
         claimID: UUID,
         requestID: String,
@@ -673,9 +840,22 @@ final class RequestStore: ObservableObject {
               activeClaimExtensionAttempt == nil else {
             return
         }
+        // A POST whose outcome has not returned must retain claimant state.
+        // Once its outcome is known to be ambiguous, the accepted contract
+        // preserves that state only until positive resolution or expiration.
+        if let activeFulfillmentAttempt,
+           fulfillmentAmbiguityContext?.id != activeFulfillmentAttempt.id {
+            return
+        }
+        // Resolved before the teardown: `clearActiveClaim` drops the submission
+        // and ambiguity records this answer is derived from, and the notice has
+        // to outlive both of them.
+        let reason: ClaimUnavailableReason = mayHavePlacedExternalOrder(claimID: claimID)
+            ? .fulfillmentClaimExpired
+            : .claimExpired
         clearActiveClaim()
         reportClaimUnavailable(
-            .claimExpired,
+            reason,
             requestID: requestID,
             operationID: claimID,
             backendCode: ClaimErrorCode.claimExpired
@@ -705,8 +885,25 @@ final class RequestStore: ObservableObject {
         }
 
         switch code {
-        case ClaimErrorCode.claimExpired,
-             ClaimErrorCode.invalidClaimToken,
+        case ClaimErrorCode.claimExpired:
+            // The backend confirming expiry is the same event the timer and the
+            // foreground check announce, so it answers the same question: if a
+            // placement was already submitted under this claim, the helper may
+            // be holding a real order and must be told not to place a second
+            // one. Resolved before `clearActiveClaim` drops the state it reads.
+            guard extensionAttemptIsCurrent(attempt) else { return }
+            let reason: ClaimUnavailableReason =
+                mayHavePlacedExternalOrder(claimID: attempt.claimID)
+                    ? .fulfillmentClaimExpired
+                    : .claimExpired
+            clearActiveClaim()
+            reportClaimUnavailable(
+                reason,
+                requestID: attempt.requestID,
+                operationID: attempt.claimID,
+                backendCode: code
+            )
+        case ClaimErrorCode.invalidClaimToken,
              ClaimErrorCode.requestNotClaimed:
             // The reservation is no longer ours; treat it exactly like running
             // out of time rather than leaving a dead claim on screen.
@@ -788,6 +985,43 @@ final class RequestStore: ObservableObject {
         }
     }
 
+    /// Publishes a refusal decided before any attempt exists, so no claim POST
+    /// is built and nothing about the held claim is touched.
+    ///
+    /// These guards used to throw straight out of `claim(requestID:)`, but the
+    /// only caller discards the error, so the accepted copy for each refusal was
+    /// unreachable. Routing them through the same request-scoped event the
+    /// backend-rejection path uses means `claimError(for:)` answers for the
+    /// request the helper actually tapped and for no other screen.
+    ///
+    /// `operationID` is the identity of whatever is doing the blocking — the
+    /// held claim, the in-flight attempt, or the unacknowledged confirmation —
+    /// so repeated taps report the same blocker rather than inventing one.
+    private func recordPreflightClaimRefusal(
+        _ error: RequestServiceError,
+        requestID: String,
+        operationID: UUID?
+    ) {
+        claimErrorEvent = ClaimErrorEvent(
+            id: UUID(),
+            requestID: requestID,
+            claimAttemptID: operationID ?? UUID(),
+            backendCode: nil,
+            error: error
+        )
+    }
+
+    /// Drops a pre-flight refusal whose blocker has gone away. Matched by case
+    /// so a real backend rejection is never swallowed by unrelated cleanup.
+    private func clearPreflightClaimRefusal(
+        where matches: (RequestServiceError) -> Bool
+    ) {
+        guard let event = claimErrorEvent, matches(event.error) else {
+            return
+        }
+        claimErrorEvent = nil
+    }
+
     func claimError(for requestID: String) -> RequestServiceError? {
         guard claimErrorEvent?.requestID == requestID else {
             return nil
@@ -843,24 +1077,61 @@ final class RequestStore: ObservableObject {
         fulfillerEmail: String,
         orderNumber: String,
         eta: String,
-        note: String?,
-        contactMessage: String?
+        contactMessage: String?,
+        now: Date = Date()
     ) async throws {
         guard !isFulfilling else {
             throw RequestServiceError.operationInProgress
         }
-        confirmedFulfillmentOutcome = nil
-        guard let activeClaim,
-              activeClaim.requestID == requestID,
+        guard activeClaimExtensionAttempt == nil else {
+            throw RequestServiceError.operationInProgress
+        }
+        guard fulfillmentAmbiguityContext == nil else {
+            throw RequestServiceError.unresolvedFulfillment
+        }
+        guard let claim = activeClaim,
+              claim.requestID == requestID,
               let authorization = activeClaimAuthorization,
-              authorization.requestID == requestID else {
+              authorization.requestID == requestID,
+              !authorization.claimToken.isEmpty else {
             fulfillError = .noActiveClaim
             throw RequestServiceError.noActiveClaim
         }
 
+        guard claim.claimExpiresAt > now else {
+            let error = RequestServiceError.claimExpired
+            fulfillError = error
+            // Submission is offered only after the external order is placed, so
+            // reaching this line means the helper may be holding a real order
+            // even though no POST was sent. Recorded before the expiration is
+            // announced so it gets the fulfillment-specific warning.
+            fulfillmentSubmissionClaimID = authorization.claimID
+            markActiveClaimExpired(
+                claimID: authorization.claimID,
+                requestID: requestID,
+                expiration: claim.claimExpiresAt
+            )
+            throw error
+        }
+
+        let attempt = FulfillmentAttempt(
+            id: UUID(),
+            claimID: authorization.claimID,
+            requestID: requestID
+        )
+        activeFulfillmentAttempt = attempt
+        fulfillmentSubmissionClaimID = attempt.claimID
         isFulfilling = true
         fulfillError = nil
-        defer { isFulfilling = false }
+        claimLifecycleTask?.cancel()
+        claimLifecycleTask = nil
+        defer {
+            if activeFulfillmentAttempt == attempt {
+                activeFulfillmentAttempt = nil
+                isFulfilling = false
+                resumeClaimLifecycleAfterFulfillmentAttempt(attempt)
+            }
+        }
         do {
             let outcome = try await service.fulfillRequest(
                 id: requestID,
@@ -868,22 +1139,220 @@ final class RequestStore: ObservableObject {
                 fulfillerEmail: fulfillerEmail,
                 orderNumber: orderNumber,
                 eta: eta,
-                note: note,
                 contactMessage: contactMessage
             )
-            advanceCollectionRevision()
-            applyConfirmed(outcome.request)
-            confirmedFulfillmentOutcome = outcome
-            if self.activeClaimAuthorization?.claimID == authorization.claimID {
-                clearActiveClaim()
-            }
+            guard fulfillmentAttemptIsCurrent(attempt) else { return }
+            applyConfirmedFulfillment(
+                request: outcome.request,
+                notificationStatus: outcome.notificationStatus,
+                attempt: attempt
+            )
         } catch is CancellationError {
+            guard fulfillmentAttemptIsCurrent(attempt) else { return }
             throw CancellationError()
         } catch {
+            guard fulfillmentAttemptIsCurrent(attempt) else { return }
             let serviceError = Self.asServiceError(error)
             fulfillError = serviceError
+            if case .ambiguousFulfillmentOutcome = serviceError {
+                await revalidateAmbiguousFulfillment(attempt: attempt)
+                if fulfillmentConfirmation?.requestID == requestID {
+                    return
+                }
+            } else {
+                applyConfirmedFulfillmentConflict(serviceError, attempt: attempt)
+            }
             throw serviceError
         }
+    }
+
+    /// Whether store-owned claim state permits a fulfillment submission. Form
+    /// fields are validated by the view; this checks the same-request claim,
+    /// private raw token, backend deadline, duplicate guard, and ambiguity lock.
+    ///
+    /// The confirmation check is request-scoped on purpose. A confirmed
+    /// placement blocks resubmitting *that* request, but an outstanding
+    /// confirmation the helper has not acknowledged yet says nothing about a
+    /// different reservation and must not disable it.
+    func canSubmitFulfillment(requestID: String, now: Date = Date()) -> Bool {
+        guard !isFulfilling,
+              activeClaimExtensionAttempt == nil,
+              fulfillmentAmbiguityContext == nil,
+              fulfillmentConfirmation?.requestID != requestID,
+              let claim = activeClaim,
+              claim.requestID == requestID,
+              claim.claimExpiresAt > now,
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == requestID,
+              !authorization.claimToken.isEmpty else {
+            return false
+        }
+        return true
+    }
+
+    /// Clears one confirmation, matched by exact ID so a queued newer result is
+    /// never dropped by an acknowledgement meant for an older one. Callable from
+    /// the claimant screen's success section and from the Active Requests item
+    /// that keeps the same confirmation reachable after that screen is gone.
+    func acknowledgeFulfillmentConfirmation(id: UUID) {
+        guard fulfillmentConfirmation?.id == id else { return }
+        fulfillmentConfirmation = nil
+        confirmedFulfillmentOutcome = nil
+        // The refusal this confirmation caused is now obsolete. Left in place it
+        // would keep explaining a block that no longer exists on whichever
+        // detail screen recorded it.
+        clearPreflightClaimRefusal { error in
+            if case .unacknowledgedPlacement = error { return true }
+            return false
+        }
+    }
+
+    private func fulfillmentAttemptIsCurrent(_ attempt: FulfillmentAttempt) -> Bool {
+        activeFulfillmentAttempt == attempt
+            && activeClaimAuthorization?.claimID == attempt.claimID
+            && activeClaimAuthorization?.requestID == attempt.requestID
+            && activeClaim?.requestID == attempt.requestID
+    }
+
+    private func applyConfirmedFulfillment(
+        request: FoodRequest,
+        notificationStatus: NotificationDeliveryStatus?,
+        attempt: FulfillmentAttempt
+    ) {
+        guard fulfillmentAttemptIsCurrent(attempt), request.status == .placed else { return }
+
+        fulfillError = nil
+        advanceCollectionRevision()
+        requests.removeAll { $0.id == request.id }
+
+        let kind: FulfillmentConfirmationKind
+        switch notificationStatus {
+        case .sent:
+            kind = .notificationSent
+        case .failed:
+            kind = .notificationFailed
+        case nil:
+            kind = .emailStatusUnknown
+        }
+        fulfillmentConfirmation = FulfillmentConfirmation(
+            id: UUID(),
+            requestID: request.id,
+            kind: kind
+        )
+        if let notificationStatus {
+            confirmedFulfillmentOutcome = FulfillOutcome(
+                request: request,
+                notificationStatus: notificationStatus
+            )
+        } else {
+            confirmedFulfillmentOutcome = nil
+        }
+        fulfillmentAmbiguityContext = nil
+        fulfillmentAmbiguity = nil
+        clearActiveClaim()
+    }
+
+    /// Performs exactly one read-only status check after an ambiguous POST.
+    /// Only `placed` resolves it; every other result leaves the submission
+    /// blocked with the claimant token and context preserved.
+    private func revalidateAmbiguousFulfillment(attempt: FulfillmentAttempt) async {
+        guard fulfillmentAttemptIsCurrent(attempt) else { return }
+
+        let context = FulfillmentAmbiguityContext(
+            id: attempt.id,
+            claimID: attempt.claimID,
+            requestID: attempt.requestID
+        )
+        fulfillmentAmbiguityContext = context
+        fulfillmentAmbiguity = FulfillmentAmbiguityPresentation(
+            id: context.id,
+            requestID: context.requestID,
+            isCheckingStatus: true
+        )
+        // The one-shot read may be slow. Expiration still has to retire this
+        // unresolved claim, so restore its identity-scoped deadline timer now
+        // rather than waiting for the read to finish.
+        startClaimLifecycleTimer()
+        // The one-shot placement result now owns the safety state. An extension
+        // POST cannot help resolve it and could clear context on a predictable
+        // no-longer-claimed response.
+        isShowingClaimExtensionPrompt = false
+        hasResolvedClaimExtensionPrompt = true
+
+        do {
+            let request = try await service.fetchRequest(id: context.requestID)
+            guard fulfillmentAmbiguityContext == context,
+                  fulfillmentAttemptIsCurrent(attempt) else { return }
+            if request.status == .placed {
+                applyConfirmedFulfillment(
+                    request: request,
+                    notificationStatus: nil,
+                    attempt: attempt
+                )
+                return
+            }
+        } catch {
+            // 404, decoding, and transport failures are all inconclusive. The
+            // raw token and claimant context remain held in private memory.
+        }
+
+        guard fulfillmentAmbiguityContext == context,
+              fulfillmentAttemptIsCurrent(attempt) else { return }
+        fulfillmentAmbiguity?.isCheckingStatus = false
+    }
+
+    private func resumeClaimLifecycleAfterFulfillmentAttempt(_ attempt: FulfillmentAttempt) {
+        guard activeFulfillmentAttempt == nil,
+              let claim = activeClaim,
+              let authorization = activeClaimAuthorization,
+              authorization.claimID == attempt.claimID,
+              authorization.requestID == attempt.requestID,
+              claim.requestID == attempt.requestID else {
+            return
+        }
+
+        if claim.claimExpiresAt <= Date() {
+            markActiveClaimExpired(
+                claimID: attempt.claimID,
+                requestID: attempt.requestID,
+                expiration: claim.claimExpiresAt
+            )
+        } else {
+            startClaimLifecycleTimer()
+        }
+    }
+
+    private func applyConfirmedFulfillmentConflict(
+        _ error: RequestServiceError,
+        attempt: FulfillmentAttempt
+    ) {
+        guard fulfillmentAttemptIsCurrent(attempt),
+              case .serverError(let code, _) = error else { return }
+
+        let reason: ClaimUnavailableReason
+        switch code {
+        case ClaimErrorCode.claimExpired:
+            reason = .fulfillmentClaimExpired
+        case ClaimErrorCode.invalidClaimToken,
+             ClaimErrorCode.requestNotClaimed:
+            reason = .reservationNoLongerValid
+        case ClaimErrorCode.requestAlreadyPlaced:
+            reason = .fulfillmentAlreadyPlaced
+            advanceCollectionRevision()
+            requests.removeAll { $0.id == attempt.requestID }
+        case ClaimErrorCode.requestNotFound:
+            reason = .fulfillmentRequestNotFound
+        default:
+            return
+        }
+
+        clearActiveClaim()
+        reportClaimUnavailable(
+            reason,
+            requestID: attempt.requestID,
+            operationID: attempt.id,
+            backendCode: code
+        )
     }
 
     /// Marks a backend-confirmed canonical collection change. Fetches capture

@@ -47,9 +47,26 @@ enum RequestServiceError: Error {
     /// Client-side precondition failure, not a backend response: no local
     /// active claim exists for the request being fulfilled.
     case noActiveClaim
+    /// Client-side precondition failure: the backend-provided claim deadline
+    /// has passed, so iOS refused to start a fulfillment POST.
+    case claimExpired
+    /// A prior fulfillment POST is unresolved. The raw token and claimant
+    /// context stay in memory, but another POST is forbidden.
+    case unresolvedFulfillment
     /// Store-level precondition failure: an operation of the same kind is
     /// already running, so no second service call was started.
     case operationInProgress
+    /// Store-level precondition failure: a claim for a *different* request is
+    /// mid-flight. Kept distinct from `operationInProgress` because that case
+    /// describes the request in front of the helper as already starting, which
+    /// would be untrue here — nothing has been started for this one, and the
+    /// wait is short rather than a commitment made elsewhere.
+    case otherClaimInProgress
+    /// Store-level precondition failure: a confirmed placement result is still
+    /// waiting to be acknowledged. Week 2 holds one confirmation at a time, so
+    /// starting another claim would eventually overwrite and lose a real sent /
+    /// failed / unknown-email outcome. Acknowledgement is the gate.
+    case unacknowledgedPlacement
     /// Store-level precondition failure: a confirmed claim on a *different*
     /// request is already held, so this one cannot be claimed. Kept distinct
     /// from `operationInProgress` because the helper's situation and next step
@@ -98,6 +115,24 @@ struct RequestService {
                 method: .get
             )
             return try response.requests.map(Self.mapPublicRequest)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
+    /// Privacy-safe `GET /api/request/:id`. This read reports persisted status
+    /// only; it never authorizes fulfillment and is used once after an
+    /// ambiguous fulfillment POST to see whether placement can be confirmed.
+    func fetchRequest(id: String) async throws -> FoodRequest {
+        do {
+            let response: RequestDetailResponseDTO = try await client.send(
+                path: "/api/request/\(id)",
+                method: .get
+            )
+            try Self.validateResponseRequestID(response.request.id, expected: id)
+            return try Self.mapPublicRequest(response.request)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -187,6 +222,13 @@ struct RequestService {
             try Self.validateResponseRequestID(response.request.id, expected: id)
             let request = try Self.mapPublicRequest(response.request)
             try Self.validateResponseStatus(request.status, expected: .claimed)
+            guard !response.claim.claimToken.isEmpty else {
+                throw APIClientError.decoding(
+                    DecodingError.dataCorrupted(
+                        .init(codingPath: [], debugDescription: "Claim response did not include usable authorization")
+                    )
+                )
+            }
             return ClaimOutcome(
                 request: request,
                 pickupName: response.claim.pickupName,
@@ -241,7 +283,6 @@ struct RequestService {
         fulfillerEmail: String,
         orderNumber: String,
         eta: String,
-        note: String?,
         contactMessage: String?
     ) async throws -> FulfillOutcome {
         let payload = FulfillRequestPayload(
@@ -250,7 +291,6 @@ struct RequestService {
                 fulfillerEmail: fulfillerEmail,
                 orderNumber: orderNumber,
                 eta: eta,
-                note: note,
                 contactMessage: contactMessage
             )
         )
@@ -267,7 +307,7 @@ struct RequestService {
             throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: CancellationError())
         } catch let error as APIClientError {
             switch error {
-            case .transport, .decoding:
+            case .transport, .decoding, .unexpectedStatus:
                 throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
             default:
                 throw Self.translate(error)

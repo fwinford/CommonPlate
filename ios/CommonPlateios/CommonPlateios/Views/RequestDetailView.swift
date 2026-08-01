@@ -25,8 +25,14 @@ enum ClaimPresentationError: Equatable {
     case ambiguous
     /// A claim on *this* request is already in flight for this helper.
     case operationInProgress
+    /// A claim on a *different* request is in flight. Nothing has been started
+    /// for this one and nothing is held yet — it is a short wait, not a
+    /// commitment made elsewhere.
+    case otherClaimInProgress
     /// A confirmed reservation on a different request is already held.
     case existingActiveClaim
+    /// A confirmed placement result is still waiting to be acknowledged.
+    case pendingPlacementAcknowledgement
     /// `INTERNAL_FAILURE`, transport loss before submission, or an unmapped code.
     case couldNotStart
 
@@ -47,8 +53,14 @@ enum ClaimPresentationError: Equatable {
             return "We couldn’t confirm whether you started helping with this request. Check Active Requests before trying again."
         case .operationInProgress:
             return "You’re already starting to help with this request."
+        case .otherClaimInProgress:
+            return RequestDetailView.otherClaimInProgressTitle
+                + " " + RequestDetailView.otherClaimInProgressNotice
         case .existingActiveClaim:
             return "You’re already helping with another request. Finish that one or wait for its reservation to end."
+        case .pendingPlacementAcknowledgement:
+            return RequestDetailView.pendingPlacementTitle
+                + " " + RequestDetailView.pendingPlacementNotice
         case .couldNotStart:
             return "We couldn’t start helping with this request. Please try again in a moment."
         }
@@ -84,8 +96,12 @@ enum ClaimPresentationError: Equatable {
             return .ambiguous
         case .operationInProgress:
             return .operationInProgress
+        case .otherClaimInProgress:
+            return .otherClaimInProgress
         case .existingActiveClaim:
             return .existingActiveClaim
+        case .unacknowledgedPlacement:
+            return .pendingPlacementAcknowledgement
         default:
             return .couldNotStart
         }
@@ -126,6 +142,17 @@ struct RequestDetailView: View {
         requestID: String
     ) -> Bool {
         activeClaim?.requestID == requestID
+    }
+
+    /// A confirmed placement clears claimant credentials immediately, but its
+    /// confirmation stays on the claimant screen until acknowledged. This
+    /// keeps the destination alive for that safe terminal presentation only.
+    static func keepsClaimedFlowPresented(
+        activeRequestID: String?,
+        confirmationRequestID: String?,
+        requestID: String
+    ) -> Bool {
+        activeRequestID == requestID || confirmationRequestID == requestID
     }
 
     static func shouldDismiss(
@@ -174,13 +201,19 @@ struct RequestDetailView: View {
         }
         .navigationTitle("Request")
         .navigationDestination(isPresented: $isPresentingClaimedFlow) {
-            FulfillRequestView(request: request, store: store)
+            FulfillRequestView(request: request, store: store) {
+                dismiss()
+            }
         }
         // Confirmed claim success is the only thing that opens the flow. The
         // claim ending closes it; a manual Back leaves `activeClaim` untouched,
         // so this does not fire and the reservation survives the navigation.
         .onChange(of: store.activeClaim?.requestID) { _, activeRequestID in
-            if activeRequestID == request.id {
+            if Self.keepsClaimedFlowPresented(
+                activeRequestID: activeRequestID,
+                confirmationRequestID: store.fulfillmentConfirmation?.requestID,
+                requestID: request.id
+            ) {
                 isPresentingClaimedFlow = true
             } else if isPresentingClaimedFlow {
                 isPresentingClaimedFlow = false
@@ -201,7 +234,9 @@ struct RequestDetailView: View {
     private var continueHelpingLink: some View {
         if let activeClaim = store.activeClaim {
             NavigationLink {
-                FulfillRequestView(request: request, store: store)
+                FulfillRequestView(request: request, store: store) {
+                    dismiss()
+                }
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Self.continueHelpingTitle)
@@ -232,7 +267,14 @@ struct RequestDetailView: View {
         // refused, send them to the reservation that is blocking this one.
         if inlineClaimError == .existingActiveClaim, let activeClaim = store.activeClaim {
             NavigationLink {
-                FulfillRequestView(request: activeClaim.request, store: store)
+                // This claimant screen sits on top of a *different* request's
+                // detail, so its own `dismiss` would pop back onto that stale
+                // screen rather than to the list its button names. Dismissing
+                // this detail instead takes both levels off at once, matching
+                // the other two entry points.
+                FulfillRequestView(request: activeClaim.request, store: store) {
+                    dismiss()
+                }
             } label: {
                 Text(Self.goToActiveReservationTitle)
             }
@@ -292,15 +334,32 @@ struct RequestDetailView: View {
     /// Re-entry for the *other* request whose reservation is blocking this one.
     static let goToActiveReservationTitle = "Go to the request you’re helping with"
 
+    /// A claim already in flight for a different request. The action stays on
+    /// screen: unlike a held reservation this clears itself in a moment, so the
+    /// helper is asked to wait rather than sent somewhere else.
+    static let otherClaimInProgressTitle = "Please wait."
+    static let otherClaimInProgressNotice =
+        "You’re already starting to help with another request. Wait for that request to finish before choosing this one."
+
+    /// The acknowledgement gate. Week 2 holds one placement result at a time, so
+    /// the previous one has to be read and dismissed — from the Active Requests
+    /// item that carries it — before another request can be started.
+    static let pendingPlacementTitle = "Review your previous order."
+    static let pendingPlacementNotice =
+        "Acknowledge the previous placement result before helping with another request."
+
     /// The claim action is withheld only where offering it would be untruthful:
     /// a paused backend will refuse it, an unconfirmed claim may already have
-    /// succeeded so a second attempt could double-book the helper, and an
-    /// existing reservation elsewhere makes this claim impossible until that one
-    /// ends.
+    /// succeeded so a second attempt could double-book the helper, an existing
+    /// reservation elsewhere makes this claim impossible until that one ends,
+    /// and an unacknowledged placement result blocks every new claim until it
+    /// is read. In each case the store refuses before building a request, so
+    /// leaving the button would be a control that can only fail.
     static func showsClaimAction(for error: ClaimPresentationError?) -> Bool {
         error != .publicActionsPaused
             && error != .ambiguous
             && error != .existingActiveClaim
+            && error != .pendingPlacementAcknowledgement
     }
 
     private func startClaim() {

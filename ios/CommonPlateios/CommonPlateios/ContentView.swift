@@ -1,20 +1,18 @@
 import SwiftUI
 
 struct ContentView: View {
-    /// What the app can actually do today. Step 3 previously told helpers they
-    /// place the order and enter pickup details — the one instruction the
-    /// claimant screen exists to contradict ("Please don't place the order").
-    /// A student who reads onboarding and trusts it over mid-flow copy would
-    /// place a real order CommonPlate cannot record or notify anyone about, so
-    /// this describes ordering as pending until Day 5 fulfillment ships.
+    /// What the connected claim-to-placement flow does. Placement records an
+    /// external order the helper has already completed; notification is a
+    /// separate email attempt and is never described as delivery or reading.
     static let howItWorksSteps = [
         "1. A student posts a food request from an NYU dining spot.",
         "2. Another student with extra meal swipes chooses a request to help with.",
-        "3. Ordering is coming soon. For now, you can reserve a request while we finish this step.",
-        "4. When ordering is ready, the helper will share pickup details and the student uses them to collect their food."
+        "3. The helper places the external order, then records the order number and ETA.",
+        "4. CommonPlate attempts to email the requester the pickup details."
     ]
 
     @StateObject private var requestStore: RequestStore
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let client = APIClient(configuration: .localSimulator)
@@ -81,6 +79,11 @@ struct ContentView: View {
 
             .padding(.top, 12)
             .padding()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                requestStore.revalidateActiveClaimExpiration()
+            }
         }
     }
 }

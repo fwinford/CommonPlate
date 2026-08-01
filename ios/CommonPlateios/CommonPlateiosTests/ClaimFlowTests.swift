@@ -522,13 +522,14 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertNil(store.claimError(for: requestB))
         XCTAssertTrue(RequestDetailView.showsClaimAction(for: nil))
 
-        // A duplicate attempt is still refused by the store, with copy that
-        // explains itself rather than a silently dead control.
+        // A concurrent attempt is still refused by the store, with copy that
+        // explains itself rather than a silently dead control. B is not the
+        // request that is already starting, so it gets its own sentence.
         do {
             try await store.claim(requestID: requestB)
             XCTFail("The store mutex must still refuse a concurrent claim")
         } catch {
-            XCTAssertEqual(ClaimPresentationError.map(error), .operationInProgress)
+            XCTAssertEqual(ClaimPresentationError.map(error), .otherClaimInProgress)
         }
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 1)
 
@@ -1497,22 +1498,15 @@ final class ClaimFlowTests: XCTestCase {
         )
     }
 
-    /// Onboarding must not instruct a helper to do the one thing the claimant
-    /// screen exists to forbid.
-    func testHomeScreenNoLongerTellsHelpersToPlaceAnOrder() {
+    func testHomeScreenDescribesTheConnectedPlacementAndEmailAttemptTruthfully() {
         let steps = ContentView.howItWorksSteps
 
         XCTAssertFalse(steps.contains("3. They place the order and enter pickup details."))
-        XCTAssertTrue(steps[2].contains("Ordering is coming soon"))
-        XCTAssertTrue(steps[2].localizedCaseInsensitiveContains("reserve"))
-
-        // Any step that mentions ordering must mark it as not yet available.
-        for step in steps where step.localizedCaseInsensitiveContains("order") {
-            XCTAssertTrue(
-                step.contains("Ordering is coming soon") || step.contains("When ordering is ready"),
-                "Ordering must be described as unavailable: \(step)"
-            )
-        }
+        XCTAssertTrue(steps[2].localizedCaseInsensitiveContains("external order"))
+        XCTAssertTrue(steps[2].localizedCaseInsensitiveContains("then records"))
+        XCTAssertTrue(steps[3].localizedCaseInsensitiveContains("attempts to email"))
+        XCTAssertFalse(steps[3].localizedCaseInsensitiveContains("delivered"))
+        XCTAssertFalse(steps[3].localizedCaseInsensitiveContains("read"))
     }
 
     func testExtensionPromptUsesReservationFocusedCopy() {
@@ -1831,6 +1825,1376 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, ["/api/request/\(requestID)/claim"])
     }
 
+    // MARK: - Day 5 fulfillment
+
+    func testFulfillmentEncodesTheExactAcceptedPayloadWithoutNoteOrPhone() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "raw-active-token")))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
+
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: "Meet by the entrance"
+        )
+
+        let request = try XCTUnwrap(
+            ClaimFlowURLProtocol.capturedRequests.first { $0.path.hasSuffix("/fulfill") }
+        )
+        let body = try XCTUnwrap(request.bodyObject)
+        XCTAssertEqual(Set(body.keys), ["claimToken", "fulfillment"])
+        XCTAssertEqual(body["claimToken"] as? String, "raw-active-token")
+        let fulfillment = try XCTUnwrap(body["fulfillment"] as? [String: Any])
+        XCTAssertEqual(
+            Set(fulfillment.keys),
+            ["fulfillerEmail", "orderNumber", "eta", "contactMessage"]
+        )
+        XCTAssertEqual(fulfillment["fulfillerEmail"] as? String, "helper@example.edu")
+        XCTAssertEqual(fulfillment["orderNumber"] as? String, "ORDER123")
+        XCTAssertEqual(fulfillment["eta"] as? String, "15 minutes")
+        XCTAssertEqual(fulfillment["contactMessage"] as? String, "Meet by the entrance")
+        XCTAssertNil(fulfillment["note"])
+        XCTAssertNil(fulfillment["helperPhone"])
+        XCTAssertNil(fulfillment["helperPhoneNumber"])
+        XCTAssertNil(body["status"])
+        XCTAssertNil(body["placedAt"])
+    }
+
+    func testOmittedContactMessageIsTheOnlyOptionalFulfillmentField() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "raw-token")))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
+
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        let request = try XCTUnwrap(ClaimFlowURLProtocol.capturedRequests.last)
+        let fulfillment = try XCTUnwrap(request.bodyObject?["fulfillment"] as? [String: Any])
+        XCTAssertEqual(Set(fulfillment.keys), ["fulfillerEmail", "orderNumber", "eta"])
+    }
+
+    func testEmptyClaimTokenNeverCreatesSubmittableClaimState() async {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "")))
+
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("An unusable raw token must not activate fulfillment")
+        } catch RequestServiceError.ambiguousClaimOutcome {
+            // A malformed success cannot safely expose a claimant flow.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
+    }
+
+    func testRequiredFulfillmentFieldsAndActiveClaimGateSubmission() async throws {
+        XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
+            fulfillerEmail: "", orderNumber: "ORDER123", eta: "15 minutes"
+        ))
+        XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
+            fulfillerEmail: "helper@example.edu", orderNumber: "  ", eta: "15 minutes"
+        ))
+        XCTAssertFalse(FulfillRequestView.requiredFieldsArePresent(
+            fulfillerEmail: "helper@example.edu", orderNumber: "ORDER123", eta: "\n"
+        ))
+        XCTAssertTrue(FulfillRequestView.requiredFieldsArePresent(
+            fulfillerEmail: "helper@example.edu", orderNumber: "ORDER123", eta: "15 minutes"
+        ))
+
+        let store = makeStore()
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: "different-request"))
+    }
+
+    func testDuplicateFulfillmentTapIsBlockedAndNothingIsRemovedOptimistically() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        let gate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: fulfillmentResponse(notificationStatus: "sent"),
+            gate: gate
+        ))
+
+        let first = Task {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+        }
+        await waitUntil { gate.isWaiting }
+
+        XCTAssertTrue(store.isFulfilling)
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertEqual(store.requests.map(\.id), [requestID])
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("A duplicate fulfillment must be refused")
+        } catch RequestServiceError.operationInProgress {
+            // Refused before a second POST.
+        } catch {
+            XCTFail("Unexpected duplicate error: \(error)")
+        }
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+
+        gate.open()
+        try await first.value
+        XCTAssertNil(store.activeClaim)
+        XCTAssertTrue(store.requests.isEmpty)
+    }
+
+    func testClaimDeadlinePassingDuringFulfillmentDoesNotClearBeforeTerminalResponse() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimExpiresAt: Date().addingTimeInterval(0.2)
+        )))
+        try await store.claim(requestID: requestID)
+        let gate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: fulfillmentResponse(notificationStatus: "sent"),
+            gate: gate
+        ))
+
+        let fulfillment = Task {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+        }
+        await waitUntil { gate.isWaiting }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertTrue(store.isFulfilling)
+        XCTAssertNil(store.claimUnavailableNotice)
+
+        gate.open()
+        try await fulfillment.value
+        XCTAssertNil(store.activeClaim)
+        XCTAssertEqual(store.fulfillmentConfirmation?.kind, .notificationSent)
+        XCTAssertTrue(store.requests.isEmpty)
+    }
+
+    func testSentAndFailedNotificationBothConfirmPlacementAndRemoveOnlyAfterResponse() async throws {
+        for (status, kind) in [
+            ("sent", FulfillmentConfirmationKind.notificationSent),
+            ("failed", FulfillmentConfirmationKind.notificationFailed)
+        ] {
+            ClaimFlowURLProtocol.reset()
+            let store = makeStore()
+            ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+            try await store.claim(requestID: requestID)
+            ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: status)))
+
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+
+            XCTAssertEqual(store.fulfillmentConfirmation?.kind, kind)
+            XCTAssertEqual(store.confirmedFulfillmentOutcome?.request.status, .placed)
+            XCTAssertNil(store.activeClaim)
+            XCTAssertTrue(store.requests.isEmpty)
+        }
+    }
+
+    func testConfirmedPlacementCopySeparatesEmailOutcomes() {
+        XCTAssertEqual(FulfillRequestView.confirmationTitle, "Order recorded")
+        XCTAssertEqual(
+            FulfillRequestView.confirmationDetail(for: .notificationSent),
+            "We emailed the requester the order details."
+        )
+        XCTAssertFalse(
+            FulfillRequestView.confirmationDetail(for: .notificationSent)
+                .localizedCaseInsensitiveContains("delivered")
+        )
+        XCTAssertTrue(
+            FulfillRequestView.confirmationDetail(for: .notificationFailed)
+                .localizedCaseInsensitiveContains("already marked placed")
+        )
+        XCTAssertTrue(
+            FulfillRequestView.confirmationDetail(for: .notificationFailed)
+                .localizedCaseInsensitiveContains("do not place another order")
+        )
+        XCTAssertTrue(RequestDetailView.keepsClaimedFlowPresented(
+            activeRequestID: nil,
+            confirmationRequestID: requestID,
+            requestID: requestID
+        ))
+        XCTAssertFalse(RequestDetailView.keepsClaimedFlowPresented(
+            activeRequestID: nil,
+            confirmationRequestID: nil,
+            requestID: requestID
+        ))
+    }
+
+    func testExpiredClaimIsBlockedBeforeFulfillmentAndForegroundReturnClearsIt() async throws {
+        let store = makeStore()
+        let expiration = Date().addingTimeInterval(10 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimExpiresAt: expiration)))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        XCTAssertFalse(store.canSubmitFulfillment(
+            requestID: requestID,
+            now: expiration.addingTimeInterval(1)
+        ))
+        store.revalidateActiveClaimExpiration(now: expiration.addingTimeInterval(1))
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertEqual(store.claimUnavailableNotice?.reason, .claimExpired)
+        XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+    }
+
+    func testExpiredClaimAtSubmissionSendsNoPostAndUsesFulfillmentSafetyWarning() async throws {
+        let store = makeStore()
+        let expiration = Date().addingTimeInterval(10 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimExpiresAt: expiration)))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil,
+                now: expiration.addingTimeInterval(1)
+            )
+            XCTFail("An expired claim must be blocked before the POST")
+        } catch RequestServiceError.claimExpired {
+            // Local precondition failure.
+        } catch {
+            XCTFail("Unexpected expiration error: \(error)")
+        }
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertEqual(store.claimUnavailableNotice?.reason, .fulfillmentClaimExpired)
+        XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+    }
+
+    func testConfirmedFulfillmentConflictsClearOnlyTheMatchingClaimAndRefresh() async throws {
+        let cases: [(String, Int, ClaimUnavailableReason)] = [
+            (ClaimErrorCode.claimExpired, 409, .fulfillmentClaimExpired),
+            (ClaimErrorCode.invalidClaimToken, 403, .reservationNoLongerValid),
+            (ClaimErrorCode.requestNotClaimed, 409, .reservationNoLongerValid),
+            (ClaimErrorCode.requestAlreadyPlaced, 409, .fulfillmentAlreadyPlaced),
+            (ClaimErrorCode.requestNotFound, 404, .fulfillmentRequestNotFound)
+        ]
+
+        for (code, status, reason) in cases {
+            ClaimFlowURLProtocol.reset()
+            let store = makeStore()
+            ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+            try await store.claim(requestID: requestID)
+            ClaimFlowURLProtocol.enqueue(.response(
+                statusCode: status,
+                data: errorResponse(code: code, message: "Confirmed conflict")
+            ))
+            ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+            do {
+                try await store.fulfill(
+                    requestID: requestID,
+                    fulfillerEmail: "helper@example.edu",
+                    orderNumber: "ORDER123",
+                    eta: "15 minutes",
+                    contactMessage: nil
+                )
+                XCTFail("\(code) should be a confirmed rejection")
+            } catch RequestServiceError.serverError(let returnedCode, _) {
+                XCTAssertEqual(returnedCode, code)
+            } catch {
+                XCTFail("Unexpected \(code) error: \(error)")
+            }
+
+            XCTAssertNil(store.activeClaim, code)
+            XCTAssertEqual(store.claimUnavailableNotice?.reason, reason, code)
+            await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+            await waitUntil { !store.isFetching }
+        }
+    }
+
+    func testNonterminalStructuredFulfillmentFailureKeepsClaimAndAllowsNoAutomaticRetry() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: errorResponse(code: ClaimErrorCode.internalFailure, message: "Could not persist")
+        ))
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("A structured failure must not be success")
+        } catch RequestServiceError.serverError(let code, _) {
+            XCTAssertEqual(code, ClaimErrorCode.internalFailure)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+
+        // INTERNAL_FAILURE can accompany a placement that may in fact have
+        // committed, so the copy must not assert that nothing was recorded, and
+        // must separate re-sending these CommonPlate details from placing a
+        // second external order.
+        XCTAssertEqual(FulfillmentPresentationError.map(store.fulfillError), .couldNotRecord)
+        let message = FulfillmentPresentationError.couldNotRecord.message
+        XCTAssertEqual(
+            message,
+            "We couldn’t confirm whether CommonPlate recorded the order. You may try submitting these same order details again, but do not place another external order."
+        )
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("couldn’t confirm whether"))
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("same order details again"))
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("do not place another external order"))
+        XCTAssertFalse(message.contains("We couldn’t record the order."))
+
+        // Nonterminal means the helper may still record manually. Proving the
+        // resubmission actually goes through also proves nothing retried it
+        // automatically in the meantime: this is the second fulfill POST.
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 2)
+        XCTAssertEqual(store.fulfillmentConfirmation?.kind, .notificationSent)
+    }
+
+    func testAmbiguousTransportPerformsOneReadAndBlocksEveryFurtherPost() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("Claimed detail remains inconclusive")
+        } catch RequestServiceError.ambiguousFulfillmentOutcome {
+            // Expected after the one read-only check.
+        } catch {
+            XCTFail("Unexpected ambiguity error: \(error)")
+        }
+
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertNotNil(store.fulfillmentAmbiguity)
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, [
+            "/api/request/\(requestID)/claim",
+            "/api/request/\(requestID)/fulfill",
+            "/api/request/\(requestID)"
+        ])
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("An unresolved POST must block another submission")
+        } catch RequestServiceError.unresolvedFulfillment {
+            // No second POST or GET.
+        } catch {
+            XCTFail("Unexpected blocked-state error: \(error)")
+        }
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count, 1)
+
+        let pathsBeforeExtension = ClaimFlowURLProtocol.capturedPaths
+        await store.extendActiveClaim()
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsBeforeExtension)
+    }
+
+    func testMismatchedOrNonPlacedFulfillmentSuccessIsAmbiguousNotConfirmed() async throws {
+        for response in [
+            fulfillmentResponse(
+                notificationStatus: "sent",
+                responseRequestID: "different-request"
+            ),
+            fulfillmentResponse(
+                notificationStatus: "sent",
+                responseStatus: "claimed"
+            )
+        ] {
+            ClaimFlowURLProtocol.reset()
+            let store = makeStore()
+            ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+            try await store.claim(requestID: requestID)
+            ClaimFlowURLProtocol.enqueue(.response(data: response))
+            ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
+
+            do {
+                try await store.fulfill(
+                    requestID: requestID,
+                    fulfillerEmail: "helper@example.edu",
+                    orderNumber: "ORDER123",
+                    eta: "15 minutes",
+                    contactMessage: nil
+                )
+                XCTFail("An untrusted success response must remain ambiguous")
+            } catch RequestServiceError.ambiguousFulfillmentOutcome {
+                // The one detail read did not positively confirm placement.
+            } catch {
+                XCTFail("Unexpected validation error: \(error)")
+            }
+
+            XCTAssertNotNil(store.activeClaim)
+            XCTAssertNotNil(store.fulfillmentAmbiguity)
+            XCTAssertNil(store.fulfillmentConfirmation)
+            XCTAssertEqual(store.requests.first?.status, .claimed)
+        }
+    }
+
+    func testUnstructuredServerResponseIsAmbiguousButStructuredServerErrorIsNot() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(statusCode: 500, data: Data("oops".utf8)))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "open")))
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("An unstructured POST response cannot be trusted")
+        } catch RequestServiceError.ambiguousFulfillmentOutcome {
+            // Expected; the earlier structured-error test pins the opposite.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertNotNil(store.fulfillmentAmbiguity)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+    }
+
+    func testOpenClaimed404AndFailedAmbiguityReadsRemainInconclusive() async throws {
+        enum ReadResult {
+            case status(String)
+            case notFound
+            case decodingFailure
+            case failure
+        }
+        let results: [ReadResult] = [
+            .status("open"), .status("claimed"), .notFound, .decodingFailure, .failure
+        ]
+
+        for result in results {
+            ClaimFlowURLProtocol.reset()
+            let store = makeStore()
+            ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+            try await store.claim(requestID: requestID)
+            ClaimFlowURLProtocol.enqueue(.failure(.timedOut))
+            switch result {
+            case .status(let status):
+                ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: status)))
+            case .notFound:
+                ClaimFlowURLProtocol.enqueue(.response(
+                    statusCode: 404,
+                    data: errorResponse(code: ClaimErrorCode.requestNotFound, message: "Missing")
+                ))
+            case .decodingFailure:
+                ClaimFlowURLProtocol.enqueue(.response(data: Data(#"{"request":{}}"#.utf8)))
+            case .failure:
+                ClaimFlowURLProtocol.enqueue(.failure(.notConnectedToInternet))
+            }
+
+            try? await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+
+            XCTAssertNotNil(store.activeClaim)
+            XCTAssertNotNil(store.fulfillmentAmbiguity)
+            XCTAssertNil(store.fulfillmentConfirmation)
+            XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+            XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count, 1)
+        }
+    }
+
+    func testPlacedDetailResolvesAmbiguityWithEmailUnknownConfirmation() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
+
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertTrue(store.requests.isEmpty)
+        XCTAssertEqual(store.fulfillmentConfirmation?.kind, .emailStatusUnknown)
+        XCTAssertEqual(
+            FulfillRequestView.confirmationDetail(for: .emailStatusUnknown),
+            "We confirmed the request was placed, but we couldn’t confirm whether the requester email was sent. Do not place another order."
+        )
+    }
+
+    func testAmbiguousSafetyCopyNeverInvitesAnotherOrderOrSubmission() {
+        XCTAssertEqual(FulfillRequestView.ambiguousTitle, "We couldn’t confirm the result")
+        for detail in [
+            FulfillRequestView.ambiguousCheckingDetail,
+            FulfillRequestView.ambiguousUnresolvedDetail
+        ] {
+            XCTAssertTrue(detail.contains("Do not submit again"))
+            XCTAssertTrue(detail.contains("place another order"))
+        }
+        for reason in [
+            ClaimUnavailableReason.fulfillmentClaimExpired,
+            .reservationNoLongerValid,
+            .fulfillmentAlreadyPlaced,
+            .fulfillmentRequestNotFound
+        ] {
+            let detail = ActiveRequestsView.claimUnavailableDetail(for: reason) ?? ""
+            XCTAssertTrue(detail.localizedCaseInsensitiveContains("do not"), "Unsafe copy for \(reason)")
+            XCTAssertTrue(detail.localizedCaseInsensitiveContains("order"), "Missing order warning for \(reason)")
+        }
+    }
+
+    func testStaleFulfillmentResponseCannotMutateAReplacementClaim() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "old-token")))
+        try await store.claim(requestID: requestID)
+        let oldGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: fulfillmentResponse(notificationStatus: "sent"),
+            gate: oldGate
+        ))
+        let oldFulfillment = Task {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "old@example.edu",
+                orderNumber: "OLD123",
+                eta: "10 minutes",
+                contactMessage: nil
+            )
+        }
+        await waitUntil { oldGate.isWaiting }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        store.leaveActiveClaimFlow()
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "new-token")))
+        try await store.claim(requestID: requestID)
+
+        oldGate.open()
+        try await oldFulfillment.value
+
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+    }
+
+    func testStaleAmbiguityReadCannotMutateAReplacementClaim() async throws {
+        let store = makeStore()
+        let oldExpiration = Date().addingTimeInterval(10 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimToken: "old-token",
+            claimExpiresAt: oldExpiration
+        )))
+        try await store.claim(requestID: requestID)
+        let readGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed"), gate: readGate))
+        let oldFulfillment = Task {
+            try? await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "old@example.edu",
+                orderNumber: "OLD123",
+                eta: "10 minutes",
+                contactMessage: nil
+            )
+        }
+        await waitUntil { readGate.isWaiting }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        store.revalidateActiveClaimExpiration(now: oldExpiration.addingTimeInterval(1))
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "new-token")))
+        try await store.claim(requestID: requestID)
+
+        readGate.open()
+        await oldFulfillment.value
+
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+    }
+
+    func testBackNavigationGuaranteeStillPreservesPreSubmissionClaim() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "still-private")))
+        try await store.claim(requestID: requestID)
+        let paths = ClaimFlowURLProtocol.capturedPaths
+
+        XCTAssertTrue(RequestDetailView.opensClaimedFlow(
+            activeClaim: store.activeClaim,
+            requestID: requestID
+        ))
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, paths)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+    }
+
+    // MARK: - Day 5 confirmation reachability
+
+    /// The claim is cleared and the request is removed the moment placement is
+    /// confirmed, so once the claimant screen is gone neither the pinned
+    /// reservation nor the list can carry the result. The confirmation itself
+    /// has to survive that, or the helper never learns the order was recorded
+    /// and can never acknowledge it.
+    func testConfirmedPlacementArrivingAfterThePresentingViewIsGoneStaysReachable() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        let gate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: fulfillmentResponse(notificationStatus: "failed"),
+            gate: gate
+        ))
+
+        let submission = Task {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+        }
+        await waitUntil { gate.isWaiting }
+        gate.open()
+        try await submission.value
+
+        // Every claimant-screen anchor is gone: this is exactly the state a
+        // helper who navigated Back mid-POST lands in.
+        XCTAssertNil(store.activeClaim)
+        XCTAssertTrue(store.requests.isEmpty)
+
+        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
+        XCTAssertEqual(confirmation.requestID, requestID)
+        XCTAssertEqual(confirmation.kind, .notificationFailed)
+        XCTAssertEqual(
+            FulfillRequestView.confirmationDetail(for: confirmation.kind),
+            "We couldn’t send the requester email, but the request is already marked placed. Do not place another order."
+        )
+
+        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
+        XCTAssertNil(store.fulfillmentConfirmation)
+    }
+
+    /// Week 2 holds one confirmation. The only thing that can protect an
+    /// unacknowledged result from being overwritten is refusing to start the
+    /// claim that would eventually replace it.
+    func testUnacknowledgedConfirmationBlocksAnotherClaimUntilAcknowledged() async throws {
+        let otherRequestID = "meal-b"
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "failed")))
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+        let original = try XCTUnwrap(store.fulfillmentConfirmation)
+        XCTAssertEqual(original.requestID, requestID)
+        XCTAssertEqual(original.kind, .notificationFailed)
+        let pathsAfterPlacement = ClaimFlowURLProtocol.capturedPaths
+
+        // Deliberately not acknowledged.
+        do {
+            try await store.claim(requestID: otherRequestID)
+            XCTFail("An unacknowledged placement result must gate the next claim")
+        } catch RequestServiceError.unacknowledgedPlacement {
+            // Refused before any request was built.
+        } catch {
+            XCTFail("Unexpected gate error: \(error)")
+        }
+
+        // No second claim POST, so no second placement can overwrite the first.
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsAfterPlacement)
+        let held = try XCTUnwrap(store.fulfillmentConfirmation)
+        XCTAssertEqual(held.id, original.id)
+        XCTAssertEqual(held.requestID, requestID)
+        XCTAssertEqual(held.kind, .notificationFailed)
+        let recorded = try XCTUnwrap(store.claimError(for: otherRequestID))
+        XCTAssertEqual(ClaimPresentationError.map(recorded), .pendingPlacementAcknowledgement)
+
+        store.acknowledgeFulfillmentConfirmation(id: original.id)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.claimError(for: otherRequestID), "The obsolete refusal must clear too")
+
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: claimResponse(responseRequestID: otherRequestID)
+        ))
+        try await store.claim(requestID: otherRequestID)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: otherRequestID))
+
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(
+            notificationStatus: "sent",
+            responseRequestID: otherRequestID
+        )))
+        try await store.fulfill(
+            requestID: otherRequestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER456",
+            eta: "20 minutes",
+            contactMessage: nil
+        )
+        XCTAssertEqual(store.fulfillmentConfirmation?.requestID, otherRequestID)
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") },
+            ["/api/request/\(requestID)/fulfill", "/api/request/\(otherRequestID)/fulfill"]
+        )
+    }
+
+    func testPendingAcknowledgementIsExplainedAndWithdrawsTheClaimAction() async throws {
+        XCTAssertEqual(
+            ClaimPresentationError.map(RequestServiceError.unacknowledgedPlacement),
+            .pendingPlacementAcknowledgement
+        )
+        XCTAssertEqual(RequestDetailView.pendingPlacementTitle, "Review your previous order.")
+        XCTAssertEqual(
+            RequestDetailView.pendingPlacementNotice,
+            "Acknowledge the previous placement result before helping with another request."
+        )
+        let message = ClaimPresentationError.pendingPlacementAcknowledgement.message
+        XCTAssertTrue(message.contains(RequestDetailView.pendingPlacementTitle))
+        XCTAssertTrue(message.contains(RequestDetailView.pendingPlacementNotice))
+        XCTAssertFalse(RequestDetailView.showsClaimAction(for: .pendingPlacementAcknowledgement))
+    }
+
+    func testAcknowledgementClearsOnlyThatConfirmationAndUnblocksTheNextClaim() async throws {
+        let otherRequestID = "meal-b"
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
+        store.acknowledgeFulfillmentConfirmation(id: UUID())
+        XCTAssertNotNil(store.fulfillmentConfirmation, "A mismatched ID must not clear it")
+
+        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.confirmedFulfillmentOutcome)
+
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: claimResponse(responseRequestID: otherRequestID)
+        ))
+        try await store.claim(requestID: otherRequestID)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: otherRequestID))
+
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(
+            notificationStatus: "sent",
+            responseRequestID: otherRequestID
+        )))
+        try await store.fulfill(
+            requestID: otherRequestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER456",
+            eta: "20 minutes",
+            contactMessage: nil
+        )
+        XCTAssertEqual(store.fulfillmentConfirmation?.requestID, otherRequestID)
+    }
+
+    /// A fetch that started before the placement carries a pre-placement
+    /// snapshot. `collectionRevision` must discard it rather than let it put the
+    /// placed request back on the list behind the confirmation.
+    func testPlacedRequestIsNotReinsertedByAFetchStartedBeforeConfirmation() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        XCTAssertEqual(store.requests.map(\.id), [requestID])
+
+        let staleFetchGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: listResponse([requestObject(id: requestID, status: "open")]),
+            gate: staleFetchGate
+        ))
+        let staleFetch = Task { await store.fetchRequests() }
+        await waitUntil { staleFetchGate.isWaiting }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+        XCTAssertTrue(store.requests.isEmpty)
+
+        staleFetchGate.open()
+        await staleFetch.value
+
+        XCTAssertTrue(store.requests.isEmpty, "A pre-placement snapshot must not reinsert it")
+        XCTAssertEqual(store.fulfillmentConfirmation?.requestID, requestID)
+    }
+
+    // MARK: - Day 5 expiration and ambiguity presentation
+
+    /// Drives the real lifecycle timer rather than the foreground seam: the
+    /// warning must not depend on which path happens to notice the deadline.
+    func testLifecycleTimerExpiryDuringUnresolvedAmbiguityUsesTheFulfillmentWarning() async throws {
+        let store = makeStore()
+        // Long enough that the stubbed POST and the one read finish well inside
+        // it, so the post-attempt resume cannot pre-empt the timer and quietly
+        // turn this into a test of the other path.
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimExpiresAt: Date().addingTimeInterval(2)
+        )))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        try? await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        // The post-attempt resume must not have expired it yet, or this would be
+        // testing that path instead of the timer.
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertNotNil(store.fulfillmentAmbiguity)
+        XCTAssertNil(store.claimUnavailableNotice)
+
+        await waitUntil(timeoutIterations: 800) { store.claimUnavailableNotice != nil }
+
+        XCTAssertEqual(store.claimUnavailableNotice?.reason, .fulfillmentClaimExpired)
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableTitle(for: .fulfillmentClaimExpired),
+            "Your reservation expired."
+        )
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentClaimExpired),
+            "If you already placed the external order, do not place it again. If you have not placed it, stop and return to Active Requests."
+        )
+        // The warning has to outlive the state it was derived from.
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertNotNil(store.claimUnavailableNotice)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    func testAmbiguityDistinguishesActiveCheckingFromSettledUncertainty() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        let readGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: detailResponse(status: "claimed"),
+            gate: readGate
+        ))
+
+        let submission = Task {
+            try? await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "ORDER123",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+        }
+        await waitUntil { readGate.isWaiting }
+
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isCheckingStatus, true)
+        let checking = FulfillRequestView.ambiguousDetail(isCheckingStatus: true)
+        XCTAssertEqual(checking, FulfillRequestView.ambiguousCheckingDetail)
+        XCTAssertTrue(checking.contains("while we check"))
+
+        readGate.open()
+        await submission.value
+
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isCheckingStatus, false)
+        let settled = FulfillRequestView.ambiguousDetail(isCheckingStatus: false)
+        XCTAssertEqual(settled, FulfillRequestView.ambiguousUnresolvedDetail)
+        XCTAssertFalse(settled.contains("while we check"))
+        XCTAssertTrue(settled.contains("We still couldn’t confirm whether the order was recorded"))
+        XCTAssertTrue(settled.contains("remain blocked until it expires"))
+
+        // Settling performs no further work of any kind.
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, [
+            "/api/request/\(requestID)/claim",
+            "/api/request/\(requestID)/fulfill",
+            "/api/request/\(requestID)"
+        ])
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+    }
+
+    /// The replacement reuses the same request ID, so only the per-claim
+    /// identity separates it from the attempt whose response is still arriving.
+    func testTerminalResponseFromAnOldAttemptCannotClearAReplacementClaim() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "old-token")))
+        try await store.claim(requestID: requestID)
+
+        let conflictGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorResponse(
+                code: ClaimErrorCode.requestAlreadyPlaced,
+                message: "Already placed"
+            ),
+            gate: conflictGate
+        ))
+        let oldAttempt = Task {
+            try? await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "old@example.edu",
+                orderNumber: "OLD123",
+                eta: "10 minutes",
+                contactMessage: nil
+            )
+        }
+        await waitUntil { conflictGate.isWaiting }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        store.leaveActiveClaimFlow()
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "new-token")))
+        try await store.claim(requestID: requestID)
+        let replacementExpiration = store.activeClaim?.claimExpiresAt
+
+        conflictGate.open()
+        await oldAttempt.value
+
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertEqual(store.activeClaim?.claimExpiresAt, replacementExpiration)
+        XCTAssertNil(store.claimUnavailableNotice, "An old conflict must not end the replacement")
+        XCTAssertNil(store.fulfillError)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertEqual(store.requests.first?.status, .claimed)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+    }
+
+    // MARK: - Pre-flight claim refusals
+
+    /// The refusal is decided before any attempt exists, and `startClaim()`
+    /// discards the thrown error, so only a published event can carry the
+    /// accepted copy to the screen.
+    func testClaimingWhileHoldingAnotherReservationPublishesTheRefusal() async throws {
+        let requestB = "meal-b"
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "token-for-a")))
+        try await store.claim(requestID: requestID)
+        let pathsAfterFirstClaim = ClaimFlowURLProtocol.capturedPaths
+
+        do {
+            try await store.claim(requestID: requestB)
+            XCTFail("A second claim must not start while one is held")
+        } catch RequestServiceError.existingActiveClaim {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected refusal: \(error)")
+        }
+
+        let recorded = try XCTUnwrap(
+            store.claimError(for: requestB),
+            "The refusal must reach the screen the helper tapped"
+        )
+        XCTAssertEqual(ClaimPresentationError.map(recorded), .existingActiveClaim)
+        XCTAssertEqual(
+            ClaimPresentationError.existingActiveClaim.message,
+            "You’re already helping with another request. Finish that one or wait for its reservation to end."
+        )
+        XCTAssertFalse(RequestDetailView.showsClaimAction(for: .existingActiveClaim))
+
+        // Request-scoped: unrelated details stay clean.
+        XCTAssertNil(store.claimError(for: requestID))
+        XCTAssertNil(store.claimError(for: "meal-c"))
+
+        // No POST for B, and A is untouched and still re-enterable.
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsAfterFirstClaim)
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.requestID, requestID)
+        XCTAssertEqual(claim.pickupName, "Taylor")
+        XCTAssertTrue(RequestDetailView.opensClaimedFlow(
+            activeClaim: store.activeClaim,
+            requestID: requestID
+        ))
+
+        // The blocker going away retires the refusal it produced.
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        store.leaveActiveClaimFlow()
+        XCTAssertNil(store.claimError(for: requestB))
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    func testDuplicateTapWhileAClaimIsInFlightPublishesOperationInProgress() async throws {
+        let store = makeStore()
+        let claimGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(), gate: claimGate))
+
+        let firstClaim = Task { try await store.claim(requestID: requestID) }
+        await waitUntil { claimGate.isWaiting }
+        XCTAssertTrue(store.isClaiming(requestID: requestID))
+
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("A duplicate tap must not start a second claim")
+        } catch RequestServiceError.operationInProgress {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected duplicate error: \(error)")
+        }
+
+        let recorded = try XCTUnwrap(store.claimError(for: requestID))
+        XCTAssertEqual(ClaimPresentationError.map(recorded), .operationInProgress)
+        XCTAssertEqual(
+            ClaimPresentationError.operationInProgress.message,
+            "You’re already starting to help with this request."
+        )
+        XCTAssertNil(store.claimError(for: "meal-b"), "The refusal is request-scoped")
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/claim") }.count,
+            1,
+            "Exactly one claim POST"
+        )
+
+        claimGate.open()
+        try await firstClaim.value
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertNil(
+            store.claimError(for: requestID),
+            "The attempt finished starting, so the refusal is retired"
+        )
+    }
+
+    /// The other request is not "already starting", so borrowing the
+    /// same-request sentence would misdescribe the screen the helper is on.
+    func testInFlightClaimOnAnotherRequestPublishesItsOwnHonestRefusal() async throws {
+        let requestB = "meal-b"
+        let store = makeStore()
+        let claimGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(), gate: claimGate))
+
+        let claimA = Task { try await store.claim(requestID: requestID) }
+        await waitUntil { claimGate.isWaiting }
+
+        do {
+            try await store.claim(requestID: requestB)
+            XCTFail("A concurrent claim must be refused")
+        } catch RequestServiceError.otherClaimInProgress {
+            // Expected: distinct from the same-request duplicate.
+        } catch {
+            XCTFail("Unexpected concurrent-claim error: \(error)")
+        }
+
+        let recorded = try XCTUnwrap(
+            store.claimError(for: requestB),
+            "The refusal must reach the screen the helper tapped"
+        )
+        XCTAssertEqual(ClaimPresentationError.map(recorded), .otherClaimInProgress)
+        XCTAssertEqual(RequestDetailView.otherClaimInProgressTitle, "Please wait.")
+        XCTAssertEqual(
+            RequestDetailView.otherClaimInProgressNotice,
+            "You’re already starting to help with another request. Wait for that request to finish before choosing this one."
+        )
+        let message = ClaimPresentationError.otherClaimInProgress.message
+        XCTAssertTrue(message.contains(RequestDetailView.otherClaimInProgressTitle))
+        XCTAssertTrue(message.contains(RequestDetailView.otherClaimInProgressNotice))
+        XCTAssertFalse(
+            message.contains("this request."),
+            "It must not claim that *this* request is already starting"
+        )
+        XCTAssertNotEqual(message, ClaimPresentationError.operationInProgress.message)
+        // A short wait, not a commitment elsewhere: the action stays offered.
+        XCTAssertTrue(RequestDetailView.showsClaimAction(for: .otherClaimInProgress))
+
+        // Scoped to B only, and A's attempt is untouched.
+        XCTAssertNil(store.claimError(for: requestID))
+        XCTAssertNil(store.claimError(for: "meal-c"))
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/claim") }.count,
+            1,
+            "Exactly one claim POST"
+        )
+        XCTAssertTrue(store.isClaiming(requestID: requestID))
+        XCTAssertFalse(store.isClaiming(requestID: requestB))
+
+        claimGate.open()
+        try await claimA.value
+
+        // A completed normally and the refusal it caused is retired.
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertEqual(store.activeClaim?.pickupName, "Taylor")
+        XCTAssertNil(
+            store.claimError(for: requestB),
+            "The blocker resolved, so the wait notice must go"
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/claim") }.count,
+            1
+        )
+    }
+
+    /// Same request, same moment: this one really is already starting, and its
+    /// existing sentence must not have been swapped for the new one.
+    func testSameRequestDuplicateTapStillUsesTheOperationInProgressCopy() async throws {
+        let store = makeStore()
+        let claimGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(), gate: claimGate))
+
+        let claimA = Task { try await store.claim(requestID: requestID) }
+        await waitUntil { claimGate.isWaiting }
+
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("A duplicate tap must be refused")
+        } catch RequestServiceError.operationInProgress {
+            // Expected: unchanged from Day 4.
+        } catch {
+            XCTFail("Unexpected duplicate error: \(error)")
+        }
+
+        let recorded = try XCTUnwrap(store.claimError(for: requestID))
+        XCTAssertEqual(ClaimPresentationError.map(recorded), .operationInProgress)
+        XCTAssertEqual(
+            ClaimPresentationError.operationInProgress.message,
+            "You’re already starting to help with this request."
+        )
+
+        claimGate.open()
+        try await claimA.value
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+    }
+
+    /// The gate added for unacknowledged placements shares the same event
+    /// mechanism, so it has to keep working once the other refusals use it too.
+    func testPreflightRefusalsCoexistWithTheUnacknowledgedPlacementGate() async throws {
+        let requestB = "meal-b"
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
+        try await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
+        let pathsAfterPlacement = ClaimFlowURLProtocol.capturedPaths
+
+        // No active claim any more, so the gate — not `existingActiveClaim` —
+        // is what refuses, and it reports its own copy.
+        do {
+            try await store.claim(requestID: requestB)
+            XCTFail("The acknowledgement gate must still refuse")
+        } catch RequestServiceError.unacknowledgedPlacement {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected gate error: \(error)")
+        }
+        let gated = try XCTUnwrap(store.claimError(for: requestB))
+        XCTAssertEqual(ClaimPresentationError.map(gated), .pendingPlacementAcknowledgement)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsAfterPlacement)
+
+        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
+        XCTAssertNil(store.claimError(for: requestB))
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(responseRequestID: requestB)))
+        try await store.claim(requestID: requestB)
+        XCTAssertEqual(store.activeClaim?.requestID, requestB)
+        XCTAssertNil(store.claimError(for: requestB))
+    }
+
+    // MARK: - Day 5 extension expiry
+
+    func testExtensionExpiryWithoutAFulfillmentAttemptKeepsTheDay4Warning() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorResponse(code: ClaimErrorCode.claimExpired, message: "Claim expired")
+        ))
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        await store.extendActiveClaim()
+
+        XCTAssertEqual(store.claimUnavailableNotice?.reason, .claimExpired)
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableDetail(for: .claimExpired),
+            "Please don’t place an order for that request. Someone else may already be helping."
+        )
+        XCTAssertNil(store.activeClaim)
+        XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    /// A nonterminal fulfillment failure leaves the claim alive and the helper
+    /// holding a real external order. If the backend then expires the claim on
+    /// the extension call, that is the same situation the timer announces and
+    /// must not be described as though nothing had been ordered.
+    func testExtensionExpiryAfterAFulfillmentAttemptUsesTheFulfillmentWarning() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: errorResponse(code: ClaimErrorCode.internalFailure, message: "Could not persist")
+        ))
+        try? await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "ORDER123",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+        XCTAssertNotNil(store.activeClaim, "A nonterminal failure keeps the reservation")
+
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorResponse(code: ClaimErrorCode.claimExpired, message: "Claim expired")
+        ))
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        await store.extendActiveClaim()
+
+        XCTAssertEqual(store.claimUnavailableNotice?.reason, .fulfillmentClaimExpired)
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentClaimExpired),
+            "If you already placed the external order, do not place it again. If you have not placed it, stop and return to Active Requests."
+        )
+        // The warning has to outlive the claimant state it was derived from.
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNotNil(store.claimUnavailableNotice)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    func testStaleExtensionFailureCannotMutateAReplacementClaim() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "old-token")))
+        try await store.claim(requestID: requestID)
+
+        let extensionGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorResponse(code: ClaimErrorCode.claimExpired, message: "Claim expired"),
+            gate: extensionGate
+        ))
+        let staleExtension = Task { await store.extendActiveClaim() }
+        await waitUntil { extensionGate.isWaiting }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        store.leaveActiveClaimFlow()
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "new-token")))
+        try await store.claim(requestID: requestID)
+        let replacementExpiration = store.activeClaim?.claimExpiresAt
+
+        extensionGate.open()
+        await staleExtension.value
+
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertEqual(store.activeClaim?.claimExpiresAt, replacementExpiration)
+        XCTAssertNil(store.claimUnavailableNotice, "An old expiry must not end the replacement")
+        XCTAssertNil(store.claimExtensionError)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+    }
+
     // MARK: - Helpers
 
     private func decodeStatus(_ value: String) throws -> RequestStatus {
@@ -1904,6 +3268,35 @@ final class ClaimFlowTests: XCTestCase {
             "claimExpiresAt": "\(iso8601String(claimExpiresAt))",
             "claimExtendedAt": "\(iso8601String(claimExtendedAt))"
           }
+        }
+        """.utf8)
+    }
+
+    private func fulfillmentResponse(
+        notificationStatus: String,
+        responseRequestID: String? = nil,
+        responseStatus: String = "placed"
+    ) -> Data {
+        Data("""
+        {
+          "request": \(requestObject(
+            id: responseRequestID ?? requestID,
+            status: responseStatus,
+            expiresAt: iso8601String(Date().addingTimeInterval(5 * 60 * 60))
+          )),
+          "notification": { "status": "\(notificationStatus)" }
+        }
+        """.utf8)
+    }
+
+    private func detailResponse(status: String, responseRequestID: String? = nil) -> Data {
+        Data("""
+        {
+          "request": \(requestObject(
+            id: responseRequestID ?? requestID,
+            status: status,
+            expiresAt: iso8601String(Date().addingTimeInterval(5 * 60 * 60))
+          ))
         }
         """.utf8)
     }
