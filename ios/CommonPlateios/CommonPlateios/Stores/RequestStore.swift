@@ -67,22 +67,42 @@ private struct ClaimExtensionAttempt: Equatable {
     let originalExpiration: Date
 }
 
+/// The exact values submitted on the original fulfillment POST. They stay in
+/// private store memory only while that submission is unresolved, so a manual
+/// recovery can repeat the same CommonPlate write without asking a recreated
+/// view to reconstruct or retain claimant-entered details.
+private struct FulfillmentSubmissionSnapshot: Equatable {
+    let fulfillerEmail: String
+    let orderNumber: String
+    let eta: String
+    let contactMessage: String?
+}
+
 private struct FulfillmentAttempt: Equatable {
     let id: UUID
     let claimID: UUID
     let requestID: String
+    let submission: FulfillmentSubmissionSnapshot
+    /// Non-nil only for the single manual repeat. This ties its independent
+    /// operation identity back to the original ambiguity it is allowed to
+    /// resolve, so a stale recovery response cannot act on another context.
+    let originatingAmbiguityID: UUID?
 }
 
 private struct FulfillmentAmbiguityContext: Equatable {
     let id: UUID
     let claimID: UUID
     let requestID: String
+    let submission: FulfillmentSubmissionSnapshot
+    var hasConsumedRecovery: Bool
 }
 
 struct FulfillmentAmbiguityPresentation: Identifiable, Equatable {
     let id: UUID
     let requestID: String
     fileprivate(set) var isCheckingStatus: Bool
+    fileprivate(set) var isRecoveryAvailable: Bool
+    fileprivate(set) var isRecovering: Bool
 }
 
 enum FulfillmentConfirmationKind: Equatable {
@@ -860,9 +880,18 @@ final class RequestStore: ObservableObject {
         // A POST whose outcome has not returned must retain claimant state.
         // Once its outcome is known to be ambiguous, the accepted contract
         // preserves that state only until positive resolution or expiration.
-        if let activeFulfillmentAttempt,
-           fulfillmentAmbiguityContext?.id != activeFulfillmentAttempt.id {
-            return
+        if let activeFulfillmentAttempt {
+            let expectedAmbiguityID = activeFulfillmentAttempt.originatingAmbiguityID
+                ?? activeFulfillmentAttempt.id
+            // The POST itself may already be committing and must reach a
+            // terminal response before claimant state is cleared. Expiration
+            // may act only once an ambiguous POST has handed ownership to its
+            // read-only status check, which is safe to abandon at the deadline.
+            guard fulfillmentAmbiguityContext?.id == expectedAmbiguityID,
+                  fulfillmentAmbiguity?.id == expectedAmbiguityID,
+                  fulfillmentAmbiguity?.isCheckingStatus == true else {
+                return
+            }
         }
         // Resolved before the teardown: `clearActiveClaim` drops the submission
         // and ambiguity records this answer is derived from, and the notice has
@@ -1138,11 +1167,89 @@ final class RequestStore: ObservableObject {
             throw error
         }
 
+        let submission = FulfillmentSubmissionSnapshot(
+            fulfillerEmail: fulfillerEmail,
+            orderNumber: orderNumber,
+            eta: eta,
+            contactMessage: contactMessage
+        )
         let attempt = FulfillmentAttempt(
             id: UUID(),
             claimID: authorization.claimID,
-            requestID: requestID
+            requestID: requestID,
+            submission: submission,
+            originatingAmbiguityID: nil
         )
+        try await performFulfillment(attempt: attempt, claimToken: authorization.claimToken)
+    }
+
+    /// Performs the one explicit CommonPlate-only repeat after the original
+    /// POST and its read-only status check both remained unresolved. The caller
+    /// supplies identities only; the raw token and exact original payload stay
+    /// private to the matching store context.
+    func resubmitAmbiguousFulfillment(
+        ambiguityID: UUID,
+        requestID: String,
+        now: Date = Date()
+    ) async throws {
+        guard !isFulfilling, activeFulfillmentAttempt == nil else {
+            throw RequestServiceError.operationInProgress
+        }
+        guard activeClaimExtensionAttempt == nil else {
+            throw RequestServiceError.operationInProgress
+        }
+        guard var context = fulfillmentAmbiguityContext,
+              context.id == ambiguityID,
+              context.requestID == requestID,
+              !context.hasConsumedRecovery,
+              let ambiguity = fulfillmentAmbiguity,
+              ambiguity.id == ambiguityID,
+              ambiguity.requestID == requestID,
+              !ambiguity.isCheckingStatus,
+              ambiguity.isRecoveryAvailable,
+              let claim = activeClaim,
+              claim.requestID == requestID,
+              let authorization = activeClaimAuthorization,
+              authorization.claimID == context.claimID,
+              authorization.requestID == requestID,
+              !authorization.claimToken.isEmpty else {
+            throw RequestServiceError.unresolvedFulfillment
+        }
+
+        // Consumed on the main actor before the first suspension point. A
+        // duplicate tap, recreated view, or navigation re-entry sees the same
+        // context with no remaining POST opportunity.
+        context.hasConsumedRecovery = true
+        fulfillmentAmbiguityContext = context
+        fulfillmentAmbiguity?.isRecoveryAvailable = false
+
+        guard claim.claimExpiresAt > now else {
+            let error = RequestServiceError.claimExpired
+            fulfillError = error
+            fulfillmentSubmissionClaimID = authorization.claimID
+            markActiveClaimExpired(
+                claimID: authorization.claimID,
+                requestID: requestID,
+                expiration: claim.claimExpiresAt
+            )
+            throw error
+        }
+
+        fulfillmentAmbiguity?.isRecovering = true
+        let attempt = FulfillmentAttempt(
+            id: UUID(),
+            claimID: authorization.claimID,
+            requestID: requestID,
+            submission: context.submission,
+            originatingAmbiguityID: context.id
+        )
+        try await performFulfillment(attempt: attempt, claimToken: authorization.claimToken)
+    }
+
+    private func performFulfillment(
+        attempt: FulfillmentAttempt,
+        claimToken: String
+    ) async throws {
         activeFulfillmentAttempt = attempt
         fulfillmentSubmissionClaimID = attempt.claimID
         isFulfilling = true
@@ -1158,12 +1265,12 @@ final class RequestStore: ObservableObject {
         }
         do {
             let outcome = try await service.fulfillRequest(
-                id: requestID,
-                claimToken: authorization.claimToken,
-                fulfillerEmail: fulfillerEmail,
-                orderNumber: orderNumber,
-                eta: eta,
-                contactMessage: contactMessage
+                id: attempt.requestID,
+                claimToken: claimToken,
+                fulfillerEmail: attempt.submission.fulfillerEmail,
+                orderNumber: attempt.submission.orderNumber,
+                eta: attempt.submission.eta,
+                contactMessage: attempt.submission.contactMessage
             )
             guard fulfillmentAttemptIsCurrent(attempt) else { return }
             applyConfirmedFulfillment(
@@ -1173,18 +1280,25 @@ final class RequestStore: ObservableObject {
             )
         } catch is CancellationError {
             guard fulfillmentAttemptIsCurrent(attempt) else { return }
+            if attempt.originatingAmbiguityID != nil {
+                settleRecoveryAsPermanentlyBlocked(attempt: attempt)
+            }
             throw CancellationError()
         } catch {
             guard fulfillmentAttemptIsCurrent(attempt) else { return }
             let serviceError = Self.asServiceError(error)
             fulfillError = serviceError
-            if case .ambiguousFulfillmentOutcome = serviceError {
+            if Self.warrantsPlacementStatusCheck(serviceError, attempt: attempt) {
                 await revalidateAmbiguousFulfillment(attempt: attempt)
-                if fulfillmentConfirmation?.requestID == requestID {
+                if fulfillmentConfirmation?.requestID == attempt.requestID {
                     return
                 }
             } else {
                 applyConfirmedFulfillmentConflict(serviceError, attempt: attempt)
+                if fulfillmentAttemptIsCurrent(attempt),
+                   attempt.originatingAmbiguityID != nil {
+                    settleRecoveryAsPermanentlyBlocked(attempt: attempt)
+                }
             }
             throw serviceError
         }
@@ -1232,10 +1346,18 @@ final class RequestStore: ObservableObject {
     }
 
     private func fulfillmentAttemptIsCurrent(_ attempt: FulfillmentAttempt) -> Bool {
-        activeFulfillmentAttempt == attempt
-            && activeClaimAuthorization?.claimID == attempt.claimID
-            && activeClaimAuthorization?.requestID == attempt.requestID
-            && activeClaim?.requestID == attempt.requestID
+        guard activeFulfillmentAttempt == attempt,
+              activeClaimAuthorization?.claimID == attempt.claimID,
+              activeClaimAuthorization?.requestID == attempt.requestID,
+              activeClaim?.requestID == attempt.requestID else {
+            return false
+        }
+        guard let originatingAmbiguityID = attempt.originatingAmbiguityID else {
+            return true
+        }
+        return fulfillmentAmbiguityContext?.id == originatingAmbiguityID
+            && fulfillmentAmbiguityContext?.claimID == attempt.claimID
+            && fulfillmentAmbiguityContext?.requestID == attempt.requestID
     }
 
     private func applyConfirmedFulfillment(
@@ -1284,16 +1406,33 @@ final class RequestStore: ObservableObject {
     private func revalidateAmbiguousFulfillment(attempt: FulfillmentAttempt) async {
         guard fulfillmentAttemptIsCurrent(attempt) else { return }
 
-        let context = FulfillmentAmbiguityContext(
-            id: attempt.id,
-            claimID: attempt.claimID,
-            requestID: attempt.requestID
-        )
-        fulfillmentAmbiguityContext = context
+        let context: FulfillmentAmbiguityContext
+        if let originatingAmbiguityID = attempt.originatingAmbiguityID {
+            guard let existingContext = fulfillmentAmbiguityContext,
+                  existingContext.id == originatingAmbiguityID,
+                  existingContext.claimID == attempt.claimID,
+                  existingContext.requestID == attempt.requestID,
+                  existingContext.submission == attempt.submission,
+                  existingContext.hasConsumedRecovery else {
+                return
+            }
+            context = existingContext
+        } else {
+            context = FulfillmentAmbiguityContext(
+                id: attempt.id,
+                claimID: attempt.claimID,
+                requestID: attempt.requestID,
+                submission: attempt.submission,
+                hasConsumedRecovery: false
+            )
+            fulfillmentAmbiguityContext = context
+        }
         fulfillmentAmbiguity = FulfillmentAmbiguityPresentation(
             id: context.id,
             requestID: context.requestID,
-            isCheckingStatus: true
+            isCheckingStatus: true,
+            isRecoveryAvailable: false,
+            isRecovering: false
         )
         // The one-shot read may be slow. Expiration still has to retire this
         // unresolved claim, so restore its identity-scoped deadline timer now
@@ -1325,6 +1464,56 @@ final class RequestStore: ObservableObject {
         guard fulfillmentAmbiguityContext == context,
               fulfillmentAttemptIsCurrent(attempt) else { return }
         fulfillmentAmbiguity?.isCheckingStatus = false
+        fulfillmentAmbiguity?.isRecoveryAvailable = !context.hasConsumedRecovery
+    }
+
+    /// Whether this failure leaves placement genuinely unknown, and therefore
+    /// earns the one privacy-safe read-only check. Two cases qualify.
+    ///
+    /// An unreadable response is the accepted Day 5 ambiguity: the POST may
+    /// have committed and iOS cannot tell.
+    ///
+    /// `INTERNAL_FAILURE` on the one permitted repeat is the second. The
+    /// accepted contract records that this code can accompany a placement that
+    /// in fact committed, so the repeat's failure is not proof that nothing was
+    /// written and a read may still find `placed`. It qualifies only for the
+    /// repeat: on a first submission the form is still on screen and offers the
+    /// helper the same safe resubmission, which is the accepted Day 5 handling.
+    ///
+    /// `RATE_LIMITED`, `TRANSACTIONS_UNAVAILABLE`, and
+    /// `INVALID_FULFILLMENT_PAYLOAD` are answered before any transaction can
+    /// commit, so a read after them could only re-report the *original*
+    /// ambiguity the first check already ran against — none is performed.
+    ///
+    /// Neither case re-opens the recovery: the opportunity is consumed before
+    /// the POST is sent, and everything that follows is read-only.
+    private static func warrantsPlacementStatusCheck(
+        _ error: RequestServiceError,
+        attempt: FulfillmentAttempt
+    ) -> Bool {
+        if case .ambiguousFulfillmentOutcome = error {
+            return true
+        }
+        guard attempt.originatingAmbiguityID != nil,
+              case .serverError(let code, _) = error else {
+            return false
+        }
+        return code == ClaimErrorCode.internalFailure
+    }
+
+    private func settleRecoveryAsPermanentlyBlocked(attempt: FulfillmentAttempt) {
+        guard let originatingAmbiguityID = attempt.originatingAmbiguityID,
+              let context = fulfillmentAmbiguityContext,
+              context.id == originatingAmbiguityID,
+              context.claimID == attempt.claimID,
+              context.requestID == attempt.requestID,
+              context.hasConsumedRecovery,
+              fulfillmentAmbiguity?.id == originatingAmbiguityID else {
+            return
+        }
+        fulfillmentAmbiguity?.isCheckingStatus = false
+        fulfillmentAmbiguity?.isRecoveryAvailable = false
+        fulfillmentAmbiguity?.isRecovering = false
     }
 
     private func resumeClaimLifecycleAfterFulfillmentAttempt(_ attempt: FulfillmentAttempt) {

@@ -2793,14 +2793,14 @@ final class ClaimFlowTests: XCTestCase {
         )
     }
 
-    func testAmbiguousSafetyCopyNeverInvitesAnotherOrderOrSubmission() {
+    func testAmbiguousSafetyAndManualRecoveryCopyAreExact() {
         XCTAssertEqual(
             FulfillRequestView.ambiguousTitle(isCheckingStatus: true),
             "We’re checking your order"
         )
         XCTAssertEqual(
             FulfillRequestView.ambiguousTitle(isCheckingStatus: false),
-            "We’re not sure your order was saved"
+            "CommonPlate still can’t confirm the order details."
         )
         XCTAssertEqual(
             FulfillRequestView.ambiguousCheckingDetail,
@@ -2808,16 +2808,76 @@ final class ClaimFlowTests: XCTestCase {
         )
         XCTAssertEqual(
             FulfillRequestView.ambiguousUnresolvedDetail,
-            "We lost the connection while saving and still can’t tell whether it went through. Don’t place another Grubhub order. The student may not have received an email. You can’t help with another request until this reservation expires."
+            "The original save or the one-time retry may have worked. Don’t place another Grubhub order. You can’t try saving again from this screen."
         )
-        // Neither ambiguous state may invite a second tap or a second order,
-        // and neither may offer the in-app retry the store is refusing.
-        for detail in [
-            FulfillRequestView.ambiguousCheckingDetail,
+        XCTAssertEqual(
+            FulfillRequestView.ambiguityRecoveryContext,
+            "CommonPlate still can’t confirm whether the first save worked, so these order details may already be recorded."
+        )
+        XCTAssertEqual(
+            FulfillRequestView.ambiguityRecoveryTitle,
+            "Try saving to CommonPlate once more?"
+        )
+        XCTAssertEqual(
+            FulfillRequestView.ambiguityRecoveryDetail,
+            "This sends the same order details to CommonPlate one more time. It will not place another Grubhub order or charge you again. Don’t place another Grubhub order."
+        )
+        XCTAssertEqual(
+            FulfillRequestView.ambiguityRecoveryActionTitle,
+            "Send details to CommonPlate once more"
+        )
+        XCTAssertEqual(FulfillRequestView.returnTitle, "Back to Active Requests")
+        XCTAssertFalse(FulfillRequestView.showsAmbiguityRecoveryAction(
+            isCheckingStatus: true,
+            isRecoveryAvailable: true
+        ))
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityRecoveryAction(
+            isCheckingStatus: false,
+            isRecoveryAvailable: true
+        ))
+        XCTAssertFalse(FulfillRequestView.showsAmbiguityRecoveryAction(
+            isCheckingStatus: false,
+            isRecoveryAvailable: false
+        ))
+
+        // The context sentence travels with the decision: present while the
+        // offer stands and while the one permitted repeat runs, gone once the
+        // state is terminal and the question is no longer being asked.
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityRecoveryCopy(
+            isRecoveryAvailable: true,
+            isRecovering: false
+        ))
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityRecoveryCopy(
+            isRecoveryAvailable: false,
+            isRecovering: true
+        ))
+        XCTAssertFalse(FulfillRequestView.showsAmbiguityRecoveryCopy(
+            isRecoveryAvailable: false,
+            isRecovering: false
+        ))
+
+        // The terminal state is reached by transport loss and by explicit
+        // server refusal alike, so it may not name a cause it cannot know.
+        for copy in [
+            FulfillRequestView.ambiguousUnresolvedTitle,
             FulfillRequestView.ambiguousUnresolvedDetail
         ] {
+            XCTAssertFalse(copy.localizedCaseInsensitiveContains("lost the connection"), copy)
+            XCTAssertFalse(copy.localizedCaseInsensitiveContains("connection"), copy)
+        }
+        // It must still leave both writes open rather than asserting failure.
+        XCTAssertTrue(
+            FulfillRequestView.ambiguousUnresolvedDetail
+                .contains("The original save or the one-time retry may have worked.")
+        )
+
+        // Every ambiguous state continues to forbid a second real-world order.
+        for detail in [
+            FulfillRequestView.ambiguousCheckingDetail,
+            FulfillRequestView.ambiguousUnresolvedDetail,
+            FulfillRequestView.ambiguityRecoveryDetail
+        ] {
             XCTAssertTrue(detail.localizedCaseInsensitiveContains("grubhub order"), detail)
-            XCTAssertFalse(detail.contains(Self.inAppRetryDisclaimer), detail)
         }
         XCTAssertTrue(
             FulfillRequestView.ambiguousUnresolvedDetail.contains(Self.safetySentence)
@@ -2844,6 +2904,7 @@ final class ClaimFlowTests: XCTestCase {
             FulfillmentPresentationError.rateLimited.message,
             FulfillmentPresentationError.temporarilyUnavailable.message,
             FulfillRequestView.ambiguousUnresolvedDetail,
+            FulfillRequestView.ambiguityRecoveryDetail,
             FulfillRequestView.confirmationDetail(for: .notificationFailed),
             FulfillRequestView.confirmationDetail(for: .emailStatusUnknown),
             ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentAlreadyPlaced) ?? "",
@@ -3304,6 +3365,11 @@ final class ClaimFlowTests: XCTestCase {
         await waitUntil { readGate.isWaiting }
 
         XCTAssertEqual(store.fulfillmentAmbiguity?.isCheckingStatus, true)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecoveryAvailable, false)
+        XCTAssertFalse(FulfillRequestView.showsAmbiguityRecoveryAction(
+            isCheckingStatus: true,
+            isRecoveryAvailable: true
+        ))
         let checking = FulfillRequestView.ambiguousDetail(isCheckingStatus: true)
         XCTAssertEqual(checking, FulfillRequestView.ambiguousCheckingDetail)
         XCTAssertTrue(checking.contains("while we check"))
@@ -3312,16 +3378,17 @@ final class ClaimFlowTests: XCTestCase {
         await submission.value
 
         XCTAssertEqual(store.fulfillmentAmbiguity?.isCheckingStatus, false)
-        let settled = FulfillRequestView.ambiguousDetail(isCheckingStatus: false)
-        XCTAssertEqual(settled, FulfillRequestView.ambiguousUnresolvedDetail)
-        XCTAssertFalse(settled.contains("while we check"))
-        XCTAssertTrue(settled.contains("still can’t tell whether it went through"))
-        XCTAssertTrue(settled.contains("until this reservation expires"))
-        // The state stops claiming a check is running, in its title too.
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecoveryAvailable, true)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecovering, false)
+        XCTAssertEqual(FulfillRequestView.ambiguityRecoveryTitle, "Try saving to CommonPlate once more?")
         XCTAssertEqual(
-            FulfillRequestView.ambiguousTitle(isCheckingStatus: false),
-            FulfillRequestView.ambiguousUnresolvedTitle
+            FulfillRequestView.ambiguityRecoveryDetail,
+            "This sends the same order details to CommonPlate one more time. It will not place another Grubhub order or charge you again. Don’t place another Grubhub order."
         )
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityRecoveryAction(
+            isCheckingStatus: false,
+            isRecoveryAvailable: true
+        ))
         // It names an exit, so it has to offer one — and only the settled state
         // does, because the checking state is about to answer itself.
         XCTAssertTrue(FulfillRequestView.showsAmbiguityReturnAction(isCheckingStatus: false))
@@ -3336,6 +3403,680 @@ final class ClaimFlowTests: XCTestCase {
         ])
         XCTAssertNotNil(store.activeClaim)
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+    }
+
+    func testManualRecoveryResendsThePrivateSnapshotExactlyOnceAndSurvivesReentry() async throws {
+        let store = makeStore()
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(
+            store: store,
+            claimToken: "private-recovery-token",
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "00070154321",
+            eta: "30 minutes",
+            contactMessage: "Meet by the pickup shelf"
+        )
+        let originalRequest = try XCTUnwrap(
+            ClaimFlowURLProtocol.capturedRequests.first { $0.path.hasSuffix("/fulfill") }
+        )
+
+        // A stale view callback cannot consume the live context.
+        do {
+            try await store.resubmitAmbiguousFulfillment(
+                ambiguityID: UUID(),
+                requestID: requestID
+            )
+            XCTFail("A mismatched ambiguity must not recover")
+        } catch RequestServiceError.unresolvedFulfillment {
+            // Expected.
+        }
+        XCTAssertEqual(store.fulfillmentAmbiguity?.id, ambiguity.id)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecoveryAvailable, true)
+
+        // Simulate leaving and recreating the screen. The view passes no form
+        // values back, so the later wire body can only come from store state.
+        var navigations = 0
+        FulfillRequestView.returnToActiveRequests(from: store) { navigations += 1 }
+        XCTAssertEqual(navigations, 1)
+
+        let recoveryGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: fulfillmentResponse(notificationStatus: "sent"),
+            gate: recoveryGate
+        ))
+        let recovery = Task {
+            try await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID
+            )
+        }
+        await waitUntil { recoveryGate.isWaiting }
+
+        // Consumed before the network response. Repeated taps cannot enqueue a
+        // third POST even while the one permitted recovery is suspended.
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecoveryAvailable, false)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecovering, true)
+        for _ in 0..<2 {
+            do {
+                try await store.resubmitAmbiguousFulfillment(
+                    ambiguityID: ambiguity.id,
+                    requestID: requestID
+                )
+                XCTFail("A duplicate recovery tap must be refused")
+            } catch RequestServiceError.operationInProgress {
+                // Expected while the consumed attempt is running.
+            }
+        }
+
+        let fulfillmentRequests = ClaimFlowURLProtocol.capturedRequests.filter {
+            $0.path.hasSuffix("/fulfill")
+        }
+        XCTAssertEqual(fulfillmentRequests.count, 2)
+        let recoveryRequest = try XCTUnwrap(fulfillmentRequests.last)
+        XCTAssertEqual(
+            try canonicalJSON(originalRequest.bodyObject),
+            try canonicalJSON(recoveryRequest.bodyObject)
+        )
+        let recoveryBody = try XCTUnwrap(recoveryRequest.bodyObject)
+        XCTAssertEqual(recoveryBody["claimToken"] as? String, "private-recovery-token")
+
+        recoveryGate.open()
+        try await recovery.value
+
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertNil(store.activeClaim)
+        XCTAssertEqual(store.fulfillmentConfirmation?.kind, .notificationSent)
+
+        // The originating identity is gone. Re-entry with its old callback is
+        // harmless and cannot produce a third POST.
+        try? await store.resubmitAmbiguousFulfillment(
+            ambiguityID: ambiguity.id,
+            requestID: requestID
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            2
+        )
+    }
+
+    func testLocallyExpiredManualRecoverySendsNoMutationAndUsesSafetyUnwind() async throws {
+        let store = makeStore()
+        let expiration = Date().addingTimeInterval(10 * 60)
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(
+            store: store,
+            claimExpiresAt: expiration
+        )
+        let postsBeforeRecovery = ClaimFlowURLProtocol.capturedPaths.filter {
+            $0.hasSuffix("/fulfill")
+        }.count
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        do {
+            try await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID,
+                now: expiration.addingTimeInterval(1)
+            )
+            XCTFail("A locally expired claim must not be resubmitted")
+        } catch RequestServiceError.claimExpired {
+            // Expected.
+        }
+
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            postsBeforeRecovery
+        )
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertEqual(store.claimUnavailableNotice(for: requestID)?.reason, .fulfillmentClaimExpired)
+        let warning = ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentClaimExpired) ?? ""
+        XCTAssertTrue(warning.contains("don’t place it again"))
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    func testRecoveryPostCrossingTheDeadlineWaitsForItsTerminalResponse() async throws {
+        let store = makeStore()
+        let expiration = Date().addingTimeInterval(0.4)
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(
+            store: store,
+            claimExpiresAt: expiration
+        )
+        let recoveryGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: fulfillmentResponse(notificationStatus: "sent"),
+            gate: recoveryGate
+        ))
+        let recovery = Task {
+            try await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID
+            )
+        }
+        await waitUntil { recoveryGate.isWaiting }
+
+        store.revalidateActiveClaimExpiration(now: expiration.addingTimeInterval(1))
+        XCTAssertNotNil(store.activeClaim, "An in-flight POST may already be committing")
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecovering, true)
+        XCTAssertNil(store.claimUnavailableNotice(for: requestID))
+
+        recoveryGate.open()
+        try await recovery.value
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertEqual(store.fulfillmentConfirmation?.kind, .notificationSent)
+    }
+
+    func testAlreadyPlacedManualRecoveryResolvesWithoutClaimingEmailDelivery() async throws {
+        let store = makeStore()
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(store: store)
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorResponse(
+                code: ClaimErrorCode.requestAlreadyPlaced,
+                message: "This request has already been placed."
+            )
+        ))
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+        do {
+            try await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID
+            )
+            XCTFail("The repeat reports the backend's already-placed verdict")
+        } catch RequestServiceError.serverError(let code, _) {
+            XCTAssertEqual(code, ClaimErrorCode.requestAlreadyPlaced)
+        }
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertNil(store.fulfillmentConfirmation, "A 409 carries no email result")
+        XCTAssertEqual(store.claimUnavailableNotice(for: requestID)?.reason, .fulfillmentAlreadyPlaced)
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableTitle(for: .fulfillmentAlreadyPlaced),
+            "This order is already recorded in CommonPlate."
+        )
+        // The 409 proves placement and nothing else. The original response was
+        // never readable, so its notification result is unknown here and the
+        // copy has to say so rather than declaring the helper finished.
+        XCTAssertEqual(
+            ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentAlreadyPlaced),
+            "Don’t place another Grubhub order. We couldn’t confirm whether the student’s email was sent, so they may not know the order is ready."
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            2
+        )
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+    }
+
+    func testManualRecoveryAuthorizationFailuresUseExistingSafetyUnwind() async throws {
+        let cases: [(code: String, statusCode: Int, reason: ClaimUnavailableReason)] = [
+            (ClaimErrorCode.claimExpired, 409, .fulfillmentClaimExpired),
+            (ClaimErrorCode.requestNotClaimed, 409, .reservationNoLongerValid),
+            (ClaimErrorCode.invalidClaimToken, 403, .reservationNoLongerValid),
+            (ClaimErrorCode.requestNotFound, 404, .fulfillmentRequestNotFound)
+        ]
+
+        for entry in cases {
+            ClaimFlowURLProtocol.reset()
+            let store = makeStore()
+            let ambiguity = try await makeSettledFulfillmentAmbiguity(store: store)
+            ClaimFlowURLProtocol.enqueue(.response(
+                statusCode: entry.statusCode,
+                data: errorResponse(code: entry.code, message: "Terminal recovery result")
+            ))
+            ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+
+            try? await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID
+            )
+
+            XCTAssertNil(store.activeClaim, entry.code)
+            XCTAssertNil(store.fulfillmentAmbiguity, entry.code)
+            XCTAssertEqual(store.claimUnavailableNotice(for: requestID)?.reason, entry.reason, entry.code)
+            let warning = ActiveRequestsView.claimUnavailableDetail(for: entry.reason) ?? ""
+            XCTAssertTrue(
+                warning.localizedCaseInsensitiveContains("grubhub order")
+                    || warning.contains("don’t place it again"),
+                entry.code
+            )
+            XCTAssertEqual(
+                ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+                2,
+                entry.code
+            )
+            await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+            await waitUntil { !store.isFetching }
+        }
+    }
+
+    func testSecondAmbiguousResultChecksOnceThenPermanentlyBlocksRecovery() async throws {
+        let store = makeStore()
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(store: store)
+        ClaimFlowURLProtocol.enqueue(.failure(.timedOut))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
+
+        try? await store.resubmitAmbiguousFulfillment(
+            ambiguityID: ambiguity.id,
+            requestID: requestID
+        )
+
+        XCTAssertEqual(store.fulfillmentAmbiguity?.id, ambiguity.id)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isCheckingStatus, false)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecoveryAvailable, false)
+        XCTAssertEqual(store.fulfillmentAmbiguity?.isRecovering, false)
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            2
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count,
+            2
+        )
+
+        try? await store.resubmitAmbiguousFulfillment(
+            ambiguityID: ambiguity.id,
+            requestID: requestID
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            2
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count,
+            2
+        )
+    }
+
+    /// Three backend answers that are neither ambiguous nor a claim verdict.
+    /// All are decided before a transaction can commit, so they prove the
+    /// recovery POST never reached placement and a further read could only
+    /// re-report the original ambiguity — none of them earns one. The accepted
+    /// rule still spends the one permitted attempt on them: the opportunity is
+    /// consumed on the main actor before the request is sent, and nothing
+    /// restores it. What must hold is that the resulting state stays honest —
+    /// the original write is still unresolved, no further POST is reachable
+    /// from any surface, and the copy does not blame a connection the server
+    /// plainly answered. `INTERNAL_FAILURE` is excluded deliberately; it can
+    /// accompany a committed placement and is covered separately.
+    func testNonTerminalRecoveryRefusalsConsumeTheRecoveryAndStayHonest() async throws {
+        let cases: [(code: String, statusCode: Int)] = [
+            (ClaimErrorCode.rateLimited, 429),
+            ("TRANSACTIONS_UNAVAILABLE", 503),
+            ("INVALID_FULFILLMENT_PAYLOAD", 400)
+        ]
+
+        for entry in cases {
+            ClaimFlowURLProtocol.reset()
+            let store = makeStore()
+            let ambiguity = try await makeSettledFulfillmentAmbiguity(store: store)
+            let readsBeforeRecovery = ClaimFlowURLProtocol.capturedPaths.filter {
+                $0 == "/api/request/\(requestID)"
+            }.count
+            ClaimFlowURLProtocol.enqueue(.response(
+                statusCode: entry.statusCode,
+                data: errorResponse(code: entry.code, message: "Refused without placing")
+            ))
+
+            do {
+                try await store.resubmitAmbiguousFulfillment(
+                    ambiguityID: ambiguity.id,
+                    requestID: requestID
+                )
+                XCTFail("The refusal must surface, not resolve: \(entry.code)")
+            } catch RequestServiceError.serverError(let code, _) {
+                XCTAssertEqual(code, entry.code)
+            }
+
+            // None of these is a claim verdict, so the reservation survives and
+            // the unresolved context keeps holding the token.
+            XCTAssertNotNil(store.activeClaim, entry.code)
+            let blocked = try XCTUnwrap(store.fulfillmentAmbiguity, entry.code)
+            XCTAssertEqual(blocked.id, ambiguity.id, entry.code)
+            XCTAssertFalse(blocked.isCheckingStatus, entry.code)
+            XCTAssertFalse(blocked.isRecoveryAvailable, entry.code)
+            XCTAssertFalse(blocked.isRecovering, entry.code)
+
+            // A decoded server verdict is not an ambiguous outcome, so it buys
+            // no extra read-only check — the one after the original POST was
+            // the only one this flow performs.
+            XCTAssertEqual(
+                ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count,
+                readsBeforeRecovery,
+                entry.code
+            )
+
+            // Terminal presentation: no POST action, an honest exit, and no
+            // route back to the form.
+            XCTAssertFalse(
+                FulfillRequestView.showsAmbiguityRecoveryAction(
+                    isCheckingStatus: blocked.isCheckingStatus,
+                    isRecoveryAvailable: blocked.isRecoveryAvailable
+                ),
+                entry.code
+            )
+            XCTAssertFalse(
+                FulfillRequestView.showsAmbiguityRecoveryCopy(
+                    isRecoveryAvailable: blocked.isRecoveryAvailable,
+                    isRecovering: blocked.isRecovering
+                ),
+                entry.code
+            )
+            XCTAssertTrue(
+                FulfillRequestView.showsAmbiguityReturnAction(
+                    isCheckingStatus: blocked.isCheckingStatus
+                ),
+                entry.code
+            )
+            XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID), entry.code)
+
+            // Neither surface can produce a third POST.
+            do {
+                try await store.resubmitAmbiguousFulfillment(
+                    ambiguityID: ambiguity.id,
+                    requestID: requestID
+                )
+                XCTFail("A consumed recovery must not resend: \(entry.code)")
+            } catch RequestServiceError.unresolvedFulfillment {
+                // Expected.
+            }
+            do {
+                try await store.fulfill(
+                    requestID: requestID,
+                    fulfillerEmail: "helper@example.edu",
+                    orderNumber: "70154321",
+                    eta: "15 minutes",
+                    contactMessage: nil
+                )
+                XCTFail("The form stays locked while unresolved: \(entry.code)")
+            } catch RequestServiceError.unresolvedFulfillment {
+                // Expected.
+            }
+            XCTAssertEqual(
+                ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+                2,
+                entry.code
+            )
+
+            // The wording the helper is left with must be true of a refusal.
+            let settled = FulfillRequestView.ambiguousDetail(isCheckingStatus: false)
+            XCTAssertEqual(settled, FulfillRequestView.ambiguousUnresolvedDetail, entry.code)
+            XCTAssertFalse(settled.localizedCaseInsensitiveContains("connection"), entry.code)
+            XCTAssertTrue(settled.contains(Self.safetySentence), entry.code)
+        }
+    }
+
+    /// `INTERNAL_FAILURE` is the one decoded verdict that does not answer the
+    /// question. The accepted contract records that it can accompany a
+    /// placement that in fact committed, so the repeat earns the same single
+    /// privacy-safe read an unreadable response gets — and a `placed` read
+    /// resolves the whole flow without the helper being told anything about the
+    /// student's email, which nobody here has read.
+    func testRecoveryInternalFailureChecksOnceMoreAndResolvesConfirmedPlacement() async throws {
+        let store = makeStore()
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(store: store)
+        let readsBeforeRecovery = ClaimFlowURLProtocol.capturedPaths.filter {
+            $0 == "/api/request/\(requestID)"
+        }.count
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: errorResponse(
+                code: ClaimErrorCode.internalFailure,
+                message: "Unknown transaction result"
+            )
+        ))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
+
+        // Resolved, so it returns rather than reporting the 500.
+        try await store.resubmitAmbiguousFulfillment(
+            ambiguityID: ambiguity.id,
+            requestID: requestID
+        )
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertTrue(store.requests.isEmpty)
+        // A read proves persistence only. No notification status was ever
+        // decoded, so the confirmation must be the unknown-email one.
+        XCTAssertEqual(store.fulfillmentConfirmation?.kind, .emailStatusUnknown)
+        XCTAssertNil(store.confirmedFulfillmentOutcome)
+        let detail = FulfillRequestView.confirmationDetail(for: .emailStatusUnknown)
+        XCTAssertTrue(detail.localizedCaseInsensitiveContains("may not know"))
+        XCTAssertTrue(detail.contains(Self.safetySentence))
+
+        // Exactly two POSTs, and exactly one read beyond the original check.
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            2
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count,
+            readsBeforeRecovery + 1
+        )
+
+        do {
+            try await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID
+            )
+            XCTFail("A resolved flow has no recovery left")
+        } catch RequestServiceError.unresolvedFulfillment {
+            // Expected.
+        }
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            2
+        )
+    }
+
+    /// The same extra read, when it answers nothing. `claimed` and a transport
+    /// failure are both inconclusive — never proof that placement failed — so
+    /// the flow lands in the permanently blocked state with the recovery still
+    /// spent and no third POST available from any surface.
+    func testRecoveryInternalFailureThatStaysUnknownEndsPermanentlyBlocked() async throws {
+        let inconclusiveReads: [(name: String, stub: ClaimFlowURLProtocol.Stub)] = [
+            ("claimed", .response(data: detailResponse(status: "claimed"))),
+            ("transport", .failure(.networkConnectionLost))
+        ]
+
+        for entry in inconclusiveReads {
+            ClaimFlowURLProtocol.reset()
+            let store = makeStore()
+            let ambiguity = try await makeSettledFulfillmentAmbiguity(store: store)
+            let readsBeforeRecovery = ClaimFlowURLProtocol.capturedPaths.filter {
+                $0 == "/api/request/\(requestID)"
+            }.count
+            ClaimFlowURLProtocol.enqueue(.response(
+                statusCode: 500,
+                data: errorResponse(
+                    code: ClaimErrorCode.internalFailure,
+                    message: "Unknown transaction result"
+                )
+            ))
+            ClaimFlowURLProtocol.enqueue(entry.stub)
+
+            do {
+                try await store.resubmitAmbiguousFulfillment(
+                    ambiguityID: ambiguity.id,
+                    requestID: requestID
+                )
+                XCTFail("An unresolved repeat reports its verdict: \(entry.name)")
+            } catch RequestServiceError.serverError(let code, _) {
+                XCTAssertEqual(code, ClaimErrorCode.internalFailure, entry.name)
+            }
+
+            let blocked = try XCTUnwrap(store.fulfillmentAmbiguity, entry.name)
+            XCTAssertEqual(blocked.id, ambiguity.id, entry.name)
+            XCTAssertFalse(blocked.isCheckingStatus, entry.name)
+            XCTAssertFalse(blocked.isRecoveryAvailable, entry.name)
+            XCTAssertFalse(blocked.isRecovering, entry.name)
+            XCTAssertNotNil(store.activeClaim, entry.name)
+            XCTAssertNil(store.fulfillmentConfirmation, entry.name)
+            XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID), entry.name)
+            XCTAssertFalse(
+                FulfillRequestView.showsAmbiguityRecoveryAction(
+                    isCheckingStatus: blocked.isCheckingStatus,
+                    isRecoveryAvailable: blocked.isRecoveryAvailable
+                ),
+                entry.name
+            )
+
+            // One read for the original ambiguity, one after the repeat. No
+            // polling, and no third POST from either surface.
+            XCTAssertEqual(
+                ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count,
+                readsBeforeRecovery + 1,
+                entry.name
+            )
+            do {
+                try await store.resubmitAmbiguousFulfillment(
+                    ambiguityID: ambiguity.id,
+                    requestID: requestID
+                )
+                XCTFail("A consumed recovery must not resend: \(entry.name)")
+            } catch RequestServiceError.unresolvedFulfillment {
+                // Expected.
+            }
+            do {
+                try await store.fulfill(
+                    requestID: requestID,
+                    fulfillerEmail: "helper@example.edu",
+                    orderNumber: "70154321",
+                    eta: "15 minutes",
+                    contactMessage: nil
+                )
+                XCTFail("The form stays locked while unresolved: \(entry.name)")
+            } catch RequestServiceError.unresolvedFulfillment {
+                // Expected.
+            }
+            XCTAssertEqual(
+                ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+                2,
+                entry.name
+            )
+        }
+    }
+
+    /// The decision point has to state the situation, not just the action. The
+    /// locked question and detail describe what the button does; the sentence
+    /// above them is the only place that says the first save may already have
+    /// landed, and it has to survive the whole decision — including while the
+    /// one permitted repeat is in flight.
+    func testRecoveryDecisionStatesTheOrderMayAlreadyBeRecorded() async throws {
+        let store = makeStore()
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(store: store)
+
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityRecoveryCopy(
+            isRecoveryAvailable: ambiguity.isRecoveryAvailable,
+            isRecovering: ambiguity.isRecovering
+        ))
+        XCTAssertTrue(
+            FulfillRequestView.ambiguityRecoveryContext
+                .localizedCaseInsensitiveContains("may already be recorded")
+        )
+
+        let recoveryGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: fulfillmentResponse(notificationStatus: "sent"),
+            gate: recoveryGate
+        ))
+        let recovery = Task {
+            try await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID
+            )
+        }
+        await waitUntil { recoveryGate.isWaiting }
+
+        let running = try XCTUnwrap(store.fulfillmentAmbiguity)
+        XCTAssertTrue(FulfillRequestView.showsAmbiguityRecoveryCopy(
+            isRecoveryAvailable: running.isRecoveryAvailable,
+            isRecovering: running.isRecovering
+        ))
+
+        recoveryGate.open()
+        try await recovery.value
+
+        // Nothing in the unresolved half of this flow may tell the helper the
+        // student was told. Only a decoded notification status may do that, and
+        // these states never have one.
+        let neverClaimsDelivery = [
+            FulfillRequestView.ambiguityRecoveryContext,
+            FulfillRequestView.ambiguityRecoveryDetail,
+            FulfillRequestView.ambiguousCheckingDetail,
+            FulfillRequestView.ambiguousUnresolvedDetail,
+            ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentAlreadyPlaced) ?? "",
+            ActiveRequestsView.claimUnavailableDetail(for: .fulfillmentRequestNotFound) ?? "",
+            ActiveRequestsView.claimUnavailableDetail(for: .reservationNoLongerValid) ?? ""
+        ]
+        for copy in neverClaimsDelivery {
+            for assertion in [
+                "we sent",
+                "we emailed",
+                "we’ve emailed",
+                "has been emailed",
+                "was emailed",
+                "the student knows",
+                "nothing else to do"
+            ] {
+                XCTAssertFalse(
+                    copy.localizedCaseInsensitiveContains(assertion),
+                    "“\(assertion)” claims more than this state knows: \(copy)"
+                )
+            }
+        }
+
+        // The already-placed verdict proves persistence only, so it has to name
+        // the notification gap the same way the unknown-email confirmation does.
+        let alreadyPlaced = ActiveRequestsView
+            .claimUnavailableDetail(for: .fulfillmentAlreadyPlaced) ?? ""
+        XCTAssertTrue(alreadyPlaced.localizedCaseInsensitiveContains("may not know"))
+        XCTAssertTrue(alreadyPlaced.contains(Self.safetySentence))
+    }
+
+    func testStaleRecoveryStatusCheckCannotMutateAReplacementClaim() async throws {
+        let store = makeStore()
+        let oldExpiration = Date().addingTimeInterval(10 * 60)
+        let ambiguity = try await makeSettledFulfillmentAmbiguity(
+            store: store,
+            claimToken: "old-recovery-token",
+            claimExpiresAt: oldExpiration
+        )
+        let readGate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(
+            data: detailResponse(status: "placed"),
+            gate: readGate
+        ))
+        let oldRecovery = Task {
+            try? await store.resubmitAmbiguousFulfillment(
+                ambiguityID: ambiguity.id,
+                requestID: requestID
+            )
+        }
+        await waitUntil { readGate.isWaiting }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        store.revalidateActiveClaimExpiration(now: oldExpiration.addingTimeInterval(1))
+        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
+        await waitUntil { !store.isFetching }
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimToken: "replacement-token")))
+        try await store.claim(requestID: requestID)
+        let replacementExpiration = store.activeClaim?.claimExpiresAt
+
+        readGate.open()
+        await oldRecovery.value
+
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertEqual(store.activeClaim?.claimExpiresAt, replacementExpiration)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
     }
 
     /// The replacement reuses the same request ID, so only the per-claim
@@ -3751,6 +4492,50 @@ final class ClaimFlowTests: XCTestCase {
         await waitUntil { self.requestListFetchCount == refreshesBeforeClaim + 1 }
         await waitUntil { !store.isFetching }
         return try XCTUnwrap(store.claimUnavailableNotice(for: requestID))
+    }
+
+    private func makeSettledFulfillmentAmbiguity(
+        store: RequestStore,
+        claimToken: String = "claim-token",
+        claimExpiresAt: Date = Date().addingTimeInterval(15 * 60),
+        fulfillerEmail: String = "helper@example.edu",
+        orderNumber: String = "70154321",
+        eta: String = "15 minutes",
+        contactMessage: String? = nil
+    ) async throws -> FulfillmentAmbiguityPresentation {
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimToken: claimToken,
+            claimExpiresAt: claimExpiresAt
+        )))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: fulfillerEmail,
+                orderNumber: orderNumber,
+                eta: eta,
+                contactMessage: contactMessage
+            )
+            XCTFail("The original submission should remain ambiguous")
+        } catch RequestServiceError.ambiguousFulfillmentOutcome {
+            // Expected after the one inconclusive status check.
+        }
+
+        let ambiguity = try XCTUnwrap(store.fulfillmentAmbiguity)
+        XCTAssertFalse(ambiguity.isCheckingStatus)
+        XCTAssertTrue(ambiguity.isRecoveryAvailable)
+        XCTAssertFalse(ambiguity.isRecovering)
+        return ambiguity
+    }
+
+    private func canonicalJSON(_ object: [String: Any]?) throws -> Data {
+        try JSONSerialization.data(
+            withJSONObject: XCTUnwrap(object),
+            options: [.sortedKeys]
+        )
     }
 
     private func decodeStatus(_ value: String) throws -> RequestStatus {

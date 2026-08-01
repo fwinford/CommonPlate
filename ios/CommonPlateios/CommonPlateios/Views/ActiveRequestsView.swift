@@ -355,7 +355,7 @@ struct ActiveRequestsView: View {
         case .reservationNoLongerValid:
             return "This meal is no longer reserved for you."
         case .fulfillmentAlreadyPlaced:
-            return "This order is already recorded"
+            return "This order is already recorded in CommonPlate."
         case .fulfillmentRequestNotFound:
             return "We couldn’t find this request."
         case .noLongerAvailable, nil:
@@ -374,7 +374,15 @@ struct ActiveRequestsView: View {
         case .reservationNoLongerValid:
             return "Someone else may have recorded it. Don’t place another Grubhub order."
         case .fulfillmentAlreadyPlaced:
-            return "Your order went through. There’s nothing else to do. Don’t place another Grubhub order."
+            // Reached both by a race on a first submission and — since the
+            // one-use manual repeat exists — by the repeat that the backend
+            // answers with REQUEST_ALREADY_PLACED. In that second case the
+            // original response was never readable, so its notification result
+            // is unknown here. Placement is the only thing this verdict proves;
+            // claiming the student was told would overstate it, and a helper
+            // who knows the email may not have gone out can reach them another
+            // way. Same register as the emailStatusUnknown confirmation.
+            return "Don’t place another Grubhub order. We couldn’t confirm whether the student’s email was sent, so they may not know the order is ready."
         case .fulfillmentRequestNotFound:
             return "It may already have been recorded or removed. Don’t place another Grubhub order."
         case .alreadyClaimed, .noLongerAvailable, nil:

@@ -302,10 +302,27 @@ struct FulfillRequestView: View {
                 }
 
                 if let ambiguity = matchingAmbiguity {
+                    let isShowingRecovery = Self.showsAmbiguityRecoveryCopy(
+                        isRecoveryAvailable: ambiguity.isRecoveryAvailable,
+                        isRecovering: ambiguity.isRecovering
+                    )
                     Section {
-                        Text(Self.ambiguousTitle(isCheckingStatus: ambiguity.isCheckingStatus))
+                        // Before the question, not after it: the helper needs
+                        // the state they are in before they read what the
+                        // action does about it.
+                        if isShowingRecovery {
+                            Text(Self.ambiguityRecoveryContext)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("fulfillment-ambiguity-recovery-context")
+                        }
+                        Text(isShowingRecovery
+                             ? Self.ambiguityRecoveryTitle
+                             : Self.ambiguousTitle(isCheckingStatus: ambiguity.isCheckingStatus))
                             .font(.headline)
-                        Text(Self.ambiguousDetail(isCheckingStatus: ambiguity.isCheckingStatus))
+                        Text(isShowingRecovery
+                             ? Self.ambiguityRecoveryDetail
+                             : Self.ambiguousDetail(isCheckingStatus: ambiguity.isCheckingStatus))
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("fulfillment-ambiguous-detail")
                         if ambiguity.isCheckingStatus {
@@ -315,6 +332,30 @@ struct FulfillRequestView: View {
                             }
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        }
+                        if ambiguity.isRecovering {
+                            HStack {
+                                ProgressView()
+                                Text("Saving…")
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                        if Self.showsAmbiguityRecoveryAction(
+                            isCheckingStatus: ambiguity.isCheckingStatus,
+                            isRecoveryAvailable: ambiguity.isRecoveryAvailable
+                        ) {
+                            Button(Self.ambiguityRecoveryActionTitle) {
+                                let ambiguityID = ambiguity.id
+                                Task {
+                                    try? await store.resubmitAmbiguousFulfillment(
+                                        ambiguityID: ambiguityID,
+                                        requestID: request.id
+                                    )
+                                }
+                            }
+                            .disabled(store.isFulfilling)
+                            .accessibilityIdentifier("fulfillment-ambiguity-recovery")
                         }
                         // Navigation only. It uses the same exit the
                         // confirmation section uses, minus the store call —
@@ -676,13 +717,33 @@ struct FulfillRequestView: View {
     static let ambiguousCheckingDetail =
         "Your order may already be saved. Don’t tap again or place another Grubhub order while we check."
 
-    /// After that one read came back inconclusive (`open`, `claimed`, `404`, a
-    /// decoding failure, or a transport failure). Nothing further is attempted —
-    /// no second POST, no second GET, no polling — so the copy must stop
-    /// implying a check is still running and say what the helper is left with.
-    static let ambiguousUnresolvedTitle = "We’re not sure your order was saved"
+    /// After every permitted recovery action has been exhausted. At this point
+    /// there is no further POST, GET, or polling, so the copy must stop implying
+    /// a check is still running and say what the helper is left with.
+    ///
+    /// Deliberately generic about *why*. This state is reached from transport
+    /// loss, an undecodable response, and an explicit server refusal
+    /// (`RATE_LIMITED`, `TRANSACTIONS_UNAVAILABLE`, `INTERNAL_FAILURE`,
+    /// `INVALID_FULFILLMENT_PAYLOAD`) alike, so naming a lost connection would
+    /// be false in the refusal cases. Either write may still have landed — the
+    /// original one especially — which is exactly why no second real order is
+    /// safe.
+    static let ambiguousUnresolvedTitle = "CommonPlate still can’t confirm the order details."
     static let ambiguousUnresolvedDetail =
-        "We lost the connection while saving and still can’t tell whether it went through. Don’t place another Grubhub order. The student may not have received an email. You can’t help with another request until this reservation expires."
+        "The original save or the one-time retry may have worked. Don’t place another Grubhub order. You can’t try saving again from this screen."
+
+    /// Shown immediately above the locked recovery question. The checking-state
+    /// sentence that carried this fact ("Your order may already be saved") is
+    /// replaced the moment the recovery is offered, so without this the helper
+    /// decides whether to resend without being told what state they are in. The
+    /// locked strings say what the action does; this says what it is answering.
+    static let ambiguityRecoveryContext =
+        "CommonPlate still can’t confirm whether the first save worked, so these order details may already be recorded."
+
+    static let ambiguityRecoveryTitle = "Try saving to CommonPlate once more?"
+    static let ambiguityRecoveryDetail =
+        "This sends the same order details to CommonPlate one more time. It will not place another Grubhub order or charge you again. Don’t place another Grubhub order."
+    static let ambiguityRecoveryActionTitle = "Send details to CommonPlate once more"
 
     static func ambiguousTitle(isCheckingStatus: Bool) -> String {
         isCheckingStatus ? ambiguousCheckingTitle : ambiguousUnresolvedTitle
@@ -690,6 +751,25 @@ struct FulfillRequestView: View {
 
     static func ambiguousDetail(isCheckingStatus: Bool) -> String {
         isCheckingStatus ? ambiguousCheckingDetail : ambiguousUnresolvedDetail
+    }
+
+    static func showsAmbiguityRecoveryAction(
+        isCheckingStatus: Bool,
+        isRecoveryAvailable: Bool
+    ) -> Bool {
+        !isCheckingStatus && isRecoveryAvailable
+    }
+
+    /// Whether the section is presenting the recovery decision — the offer
+    /// itself, or the permitted repeat already running. Both states must carry
+    /// the context sentence and the locked question, because the helper who is
+    /// watching their one attempt run is owed the same framing as the helper
+    /// deciding to start it.
+    static func showsAmbiguityRecoveryCopy(
+        isRecoveryAvailable: Bool,
+        isRecovering: Bool
+    ) -> Bool {
+        isRecoveryAvailable || isRecovering
     }
 
     /// The settled state names an exit, so it has to offer one. Withheld while
