@@ -142,10 +142,17 @@ struct RequestDetailView: View {
         notice?.requestID == requestID
     }
 
+    /// A request detail follows its own newest queued terminal event, not the
+    /// FIFO head Active Requests presents. The head may belong to an unrelated
+    /// request whose notice was produced earlier and is still unacknowledged.
+    private var matchingClaimUnavailableNotice: ClaimUnavailableNotice? {
+        store.claimUnavailableNotice(for: request.id)
+    }
+
     /// Suppressed once the helper is being sent back to Active Requests: the
     /// notice belongs on the list they land on, not on the screen leaving view.
     private var inlineClaimError: ClaimPresentationError? {
-        guard store.claimUnavailableNotice?.requestID != request.id,
+        guard matchingClaimUnavailableNotice == nil,
               let claimError = store.claimError(for: request.id) else {
             return nil
         }
@@ -195,9 +202,9 @@ struct RequestDetailView: View {
         // whole helper flow is unwound, not just this level: the claimant screen
         // this detail opened may still be above it, and the notice belongs on
         // the list the helper lands on.
-        .onChange(of: store.claimUnavailableNotice?.id) { _, noticeID in
+        .onChange(of: matchingClaimUnavailableNotice?.id) { _, noticeID in
             if let noticeID,
-               let notice = store.claimUnavailableNotice,
+               let notice = matchingClaimUnavailableNotice,
                notice.id == noticeID,
                Self.shouldDismiss(for: notice, requestID: request.id) {
                 path = AppRoute.returningToActiveRequests(from: path)

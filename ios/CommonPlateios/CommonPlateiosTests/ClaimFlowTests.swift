@@ -632,8 +632,9 @@ final class ClaimFlowTests: XCTestCase {
         }
         await waitUntil { !store.isFetching }
 
-        let noticeB = try XCTUnwrap(store.claimUnavailableNotice)
+        let noticeB = try XCTUnwrap(store.claimUnavailableNotice(for: requestB))
         XCTAssertNotEqual(noticeB.id, noticeA.id)
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.id), [noticeA.id, noticeB.id])
         presented = ActiveRequestsView.noticeToPresent(
             presented: presented,
             storeNotice: store.claimUnavailableNotice
@@ -661,33 +662,217 @@ final class ClaimFlowTests: XCTestCase {
         )
     }
 
-    /// A failed refresh must not swallow the safety notice the helper still
-    /// needs to see.
-    func testFailedRefreshDoesNotEraseThePendingNotice() async throws {
+    func testTwoNoticesProducedBeforePresentationRemainFIFOAndPresentInOrder() async throws {
         let store = makeStore()
-        ClaimFlowURLProtocol.enqueue(.response(
+        let requestB = "meal-b"
+
+        let noticeA = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: requestID,
+            code: ClaimErrorCode.requestAlreadyClaimed,
             statusCode: 409,
-            data: errorResponse(
-                code: "REQUEST_ALREADY_CLAIMED",
-                message: "Someone else just started helping with this request."
-            )
-        ))
-        // The refresh the conflict triggers fails.
-        ClaimFlowURLProtocol.enqueue(.failure(.notConnectedToInternet))
-        try? await store.claim(requestID: requestID)
-
-        let notice = try XCTUnwrap(store.claimUnavailableNotice)
-        await waitUntil { ClaimFlowURLProtocol.capturedPaths.contains("/api/requests") }
-        await waitUntil { !store.isFetching }
-
-        XCTAssertEqual(store.claimUnavailableNotice?.id, notice.id)
-        XCTAssertEqual(
-            ActiveRequestsView.noticeToPresent(
-                presented: nil,
-                storeNotice: store.claimUnavailableNotice
-            )?.id,
-            notice.id
+            refreshStub: .response(data: listResponse([]))
         )
+
+        var presented: ClaimUnavailableNotice? = ActiveRequestsView.noticeToPresent(
+            presented: nil,
+            storeNotice: store.claimUnavailableNotice,
+            isViewVisible: false
+        )
+        XCTAssertNil(presented)
+
+        let noticeB = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: requestB,
+            code: ClaimErrorCode.requestExpired,
+            statusCode: 410,
+            refreshStub: .response(data: listResponse([]))
+        )
+
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.id), [noticeA.id, noticeB.id])
+        XCTAssertEqual(store.claimUnavailableNotice?.id, noticeA.id)
+
+        // The list first presents A even though B was appended before the list
+        // became visible.
+        presented = ActiveRequestsView.noticeToPresent(
+            presented: presented,
+            storeNotice: store.claimUnavailableNotice,
+            isViewVisible: true
+        )
+        XCTAssertEqual(presented?.id, noticeA.id)
+
+        // Neither an unknown acknowledgement nor a later stale acknowledgement
+        // may disturb B.
+        let unknownID = UUID()
+        store.acknowledgeClaimUnavailableNotice(id: unknownID)
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.id), [noticeA.id, noticeB.id])
+
+        store.acknowledgeClaimUnavailableNotice(id: noticeA.id)
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.id), [noticeB.id])
+        XCTAssertEqual(store.claimUnavailableNotice?.id, noticeB.id)
+
+        store.acknowledgeClaimUnavailableNotice(id: noticeA.id)
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.id), [noticeB.id])
+
+        presented = nil
+        presented = ActiveRequestsView.noticeToPresent(
+            presented: presented,
+            storeNotice: store.claimUnavailableNotice
+        )
+        XCTAssertEqual(presented?.id, noticeB.id)
+    }
+
+    func testThreeDistinctNoticesArePreservedWithoutOverwrite() async throws {
+        let store = makeStore()
+        let cases: [(requestID: String, code: String, statusCode: Int)] = [
+            (requestID, ClaimErrorCode.requestAlreadyClaimed, 409),
+            ("meal-b", ClaimErrorCode.requestExpired, 410),
+            ("meal-c", ClaimErrorCode.requestInsufficientTime, 409)
+        ]
+        var expected: [ClaimUnavailableNotice] = []
+
+        for entry in cases {
+            expected.append(try await publishClaimUnavailableNotice(
+                store: store,
+                requestID: entry.requestID,
+                code: entry.code,
+                statusCode: entry.statusCode,
+                refreshStub: .response(data: listResponse([]))
+            ))
+        }
+
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.id), expected.map(\.id))
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.requestID), cases.map(\.requestID))
+        XCTAssertEqual(Set(store.claimUnavailableNotices.map(\.id)).count, 3)
+        XCTAssertEqual(store.claimUnavailableNotice?.id, expected.first?.id)
+    }
+
+    func testExpirationForRequestAThenUnavailableRequestBPreservesBoth() async throws {
+        let store = makeStore()
+        let expiration = Date().addingTimeInterval(10 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimExpiresAt: expiration
+        )))
+        try await store.claim(requestID: requestID)
+
+        let refreshesBeforeExpiration = requestListFetchCount
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        store.revalidateActiveClaimExpiration(now: expiration.addingTimeInterval(1))
+        await waitUntil { self.requestListFetchCount == refreshesBeforeExpiration + 1 }
+        await waitUntil { !store.isFetching }
+        let expirationNotice = try XCTUnwrap(store.claimUnavailableNotice(for: requestID))
+        XCTAssertEqual(expirationNotice.reason, .claimExpired)
+
+        let requestB = "meal-b"
+        let conflictNotice = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: requestB,
+            code: ClaimErrorCode.requestAlreadyClaimed,
+            statusCode: 409,
+            refreshStub: .response(data: listResponse([]))
+        )
+
+        XCTAssertEqual(
+            store.claimUnavailableNotices.map(\.id),
+            [expirationNotice.id, conflictNotice.id]
+        )
+        XCTAssertEqual(store.claimUnavailableNotice?.reason, .claimExpired)
+        XCTAssertEqual(store.claimUnavailableNotice(for: requestB)?.reason, .alreadyClaimed)
+    }
+
+    func testRequestDetailFindsOnlyItsMatchingNoticeBehindAnEarlierQueueHead() async throws {
+        let store = makeStore()
+        let noticeA = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: requestID,
+            code: ClaimErrorCode.requestAlreadyClaimed,
+            statusCode: 409,
+            refreshStub: .response(data: listResponse([]))
+        )
+        let requestB = "meal-b"
+        let noticeB = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: requestB,
+            code: ClaimErrorCode.requestExpired,
+            statusCode: 410,
+            refreshStub: .response(data: listResponse([]))
+        )
+
+        XCTAssertEqual(store.claimUnavailableNotice?.id, noticeA.id)
+        XCTAssertFalse(RequestDetailView.shouldDismiss(
+            for: store.claimUnavailableNotice,
+            requestID: requestB
+        ))
+
+        let matchingB = store.claimUnavailableNotice(for: requestB)
+        XCTAssertEqual(matchingB?.id, noticeB.id)
+        XCTAssertTrue(RequestDetailView.shouldDismiss(for: matchingB, requestID: requestB))
+        XCTAssertEqual(store.claimUnavailableNotice(for: "meal-c"), nil)
+    }
+
+    func testFulfillmentClaimExpiredCannotBeLostBehindLaterOrdinaryClaimNotice() async throws {
+        let store = makeStore()
+        let expiration = Date().addingTimeInterval(10 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
+            claimExpiresAt: expiration
+        )))
+        try await store.claim(requestID: requestID)
+
+        let refreshesBeforeExpiration = requestListFetchCount
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
+        try? await store.fulfill(
+            requestID: requestID,
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "70154321",
+            eta: "15 minutes",
+            contactMessage: nil,
+            now: expiration.addingTimeInterval(1)
+        )
+        await waitUntil { self.requestListFetchCount == refreshesBeforeExpiration + 1 }
+        await waitUntil { !store.isFetching }
+        let fulfillmentExpiration = try XCTUnwrap(
+            store.claimUnavailableNotice(for: requestID)
+        )
+        XCTAssertEqual(fulfillmentExpiration.reason, .fulfillmentClaimExpired)
+
+        let requestB = "meal-b"
+        let ordinaryNotice = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: requestB,
+            code: ClaimErrorCode.requestExpired,
+            statusCode: 410,
+            refreshStub: .response(data: listResponse([]))
+        )
+
+        XCTAssertEqual(
+            store.claimUnavailableNotices.map(\.id),
+            [fulfillmentExpiration.id, ordinaryNotice.id]
+        )
+        XCTAssertEqual(store.claimUnavailableNotice?.reason, .fulfillmentClaimExpired)
+        XCTAssertEqual(store.claimUnavailableNotice(for: requestB)?.reason, .noLongerAvailable)
+    }
+
+    /// Failed refreshes must not swallow or reorder any queued safety notice.
+    func testFailedRefreshDoesNotDiscardOrReorderQueuedNotices() async throws {
+        let store = makeStore()
+        let noticeA = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: requestID,
+            code: ClaimErrorCode.requestAlreadyClaimed,
+            statusCode: 409,
+            refreshStub: .failure(.notConnectedToInternet)
+        )
+        let noticeB = try await publishClaimUnavailableNotice(
+            store: store,
+            requestID: "meal-b",
+            code: ClaimErrorCode.requestExpired,
+            statusCode: 410,
+            refreshStub: .failure(.timedOut)
+        )
+
+        XCTAssertEqual(store.claimUnavailableNotices.map(\.id), [noticeA.id, noticeB.id])
+        XCTAssertEqual(store.claimUnavailableNotice?.id, noticeA.id)
+        XCTAssertNotNil(store.initialFetchError)
     }
 
     // MARK: - Token stays in memory
@@ -980,7 +1165,7 @@ final class ClaimFlowTests: XCTestCase {
         ))
         ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
         try? await store.claim(requestID: requestB)
-        let noticeB = try? XCTUnwrap(store.claimUnavailableNotice)
+        let noticeB = try? XCTUnwrap(store.claimUnavailableNotice(for: requestB))
         await waitUntil {
             ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/requests" }.count == 2
         }
@@ -3542,6 +3727,31 @@ final class ClaimFlowTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private var requestListFetchCount: Int {
+        ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/requests" }.count
+    }
+
+    private func publishClaimUnavailableNotice(
+        store: RequestStore,
+        requestID: String,
+        code: String,
+        statusCode: Int,
+        refreshStub: ClaimFlowURLProtocol.Stub
+    ) async throws -> ClaimUnavailableNotice {
+        let refreshesBeforeClaim = requestListFetchCount
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: statusCode,
+            data: errorResponse(code: code, message: "Confirmed unavailable")
+        ))
+        ClaimFlowURLProtocol.enqueue(refreshStub)
+
+        try? await store.claim(requestID: requestID)
+
+        await waitUntil { self.requestListFetchCount == refreshesBeforeClaim + 1 }
+        await waitUntil { !store.isFetching }
+        return try XCTUnwrap(store.claimUnavailableNotice(for: requestID))
+    }
 
     private func decodeStatus(_ value: String) throws -> RequestStatus {
         struct Wrapper: Decodable {

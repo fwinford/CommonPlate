@@ -41,8 +41,9 @@ struct ActiveRequestsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Active Requests")
-        // Claim-unavailable safety notices are delivered here, whether the list
-        // was already visible or has just been uncovered by a dismissed flow.
+        // Claim-unavailable safety notices are delivered here in store-owned
+        // FIFO order, whether the list was already visible or has just been
+        // uncovered by a dismissed flow.
         .alert(item: $presentedClaimUnavailableNotice) { notice in
             Alert(
                 title: Text(Self.claimUnavailableTitle(for: notice.reason)),
@@ -326,9 +327,9 @@ struct ActiveRequestsView: View {
     }
 
     /// Which notice the alert should be showing. An alert already on screen is
-    /// never swapped out from under the helper: a newer notice waits on the
-    /// store until the presented one is acknowledged by ID, at which point this
-    /// returns the pending store notice instead of nil.
+    /// never swapped out from under the helper: newer notices wait in the store
+    /// queue until the presented one is acknowledged by ID, at which point this
+    /// returns the next queue head instead of nil.
     static func noticeToPresent(
         presented: ClaimUnavailableNotice?,
         storeNotice: ClaimUnavailableNotice?,

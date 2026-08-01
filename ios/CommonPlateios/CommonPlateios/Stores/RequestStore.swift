@@ -221,10 +221,18 @@ final class RequestStore: ObservableObject {
     @Published private(set) var isClaiming = false
     @Published private(set) var claimErrorEvent: ClaimErrorEvent?
 
-    /// Set when the backend confirms the helper cannot have this request. The
-    /// detail flow watches it to leave, and Active Requests watches it to show
-    /// the notice — so the message survives the screen that caused it.
-    @Published private(set) var claimUnavailableNotice: ClaimUnavailableNotice?
+    /// Every backend-confirmed reason the helper cannot have a request, in the
+    /// order it was produced. Active Requests presents the oldest element while
+    /// request-scoped flows locate their own matching element, so neither a
+    /// covered list nor an unrelated earlier notice can drop a safety message.
+    @Published private(set) var claimUnavailableNotices: [ClaimUnavailableNotice] = []
+
+    /// The oldest notice still waiting for acknowledgement. This preserves the
+    /// existing Active Requests presentation boundary while the queue itself
+    /// remains store-owned.
+    var claimUnavailableNotice: ClaimUnavailableNotice? {
+        claimUnavailableNotices.first
+    }
 
     @Published private(set) var isExtendingClaim = false
     @Published private(set) var claimExtensionError: RequestServiceError?
@@ -654,12 +662,13 @@ final class RequestStore: ObservableObject {
         }
     }
 
-    /// Clears the notice once the helper has seen it on Active Requests.
+    /// Removes only the exactly acknowledged notice. A stale or unknown
+    /// acknowledgement cannot clear or reorder any other queued notice.
     func acknowledgeClaimUnavailableNotice(id: UUID) {
-        guard claimUnavailableNotice?.id == id else {
+        guard let index = claimUnavailableNotices.firstIndex(where: { $0.id == id }) else {
             return
         }
-        claimUnavailableNotice = nil
+        claimUnavailableNotices.remove(at: index)
     }
 
     // MARK: - Active-claim lifecycle
@@ -1037,6 +1046,13 @@ final class RequestStore: ObservableObject {
         return claimErrorEvent?.error
     }
 
+    /// The newest queued terminal event for this request. Detail recovery must
+    /// not assume the FIFO head belongs to the screen currently visible: an
+    /// older notice for another request may still be waiting to be presented.
+    func claimUnavailableNotice(for requestID: String) -> ClaimUnavailableNotice? {
+        claimUnavailableNotices.last { $0.requestID == requestID }
+    }
+
     func isClaiming(requestID: String) -> Bool {
         isClaiming && activeClaimAttempt?.requestID == requestID
     }
@@ -1058,13 +1074,13 @@ final class RequestStore: ObservableObject {
         operationID: UUID,
         backendCode: String?
     ) {
-        claimUnavailableNotice = ClaimUnavailableNotice(
+        claimUnavailableNotices.append(ClaimUnavailableNotice(
             id: UUID(),
             requestID: requestID,
             operationID: operationID,
             backendCode: backendCode,
             reason: reason
-        )
+        ))
         refreshRequestsAfterClaimConflict()
     }
 
