@@ -132,8 +132,8 @@ describeMongo("request TTL index migration against real MongoDB", () => {
       RequestTtlMigrationError
     );
 
-    // The documented remedy: clear the disposable rows, then write new-format
-    // records with the deployed Day 4 code.
+    // The documented remedy: clear the disposable rows, then write a
+    // current-format record.
     await MealRequest.collection.deleteMany({});
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
     await MealRequest.create({

@@ -41,6 +41,11 @@ enum RequestFoodFormError: Error, Equatable {
 enum RequestCreatePresentationError: Equatable {
     case invalidRequest
     case requestLimitReached
+    /// `RATE_LIMITED`. Distinct from `requestLimitReached`: that one is the
+    /// daily allowance and reopens tomorrow, this one is a short per-IP
+    /// throttle that clears in about a minute. Both are refused ahead of the
+    /// write, so neither is ambiguous.
+    case rateLimited
     case publicActionsPaused
     case creationFailed
     case ambiguous
@@ -52,6 +57,10 @@ enum RequestCreatePresentationError: Equatable {
             return "Check the information you entered and try again."
         case .requestLimitReached:
             return "The daily request limit has been reached. Please try again tomorrow."
+        case .rateLimited:
+            // Same sentence the helper sees for a throttled claim, since the
+            // situation and the next step are identical.
+            return "Too many attempts. Please wait a moment and try again."
         case .publicActionsPaused:
             // One source for the locked sentence, so the notice shown before
             // data entry and this submit-time backstop cannot drift apart.
@@ -77,6 +86,8 @@ enum RequestCreatePresentationError: Equatable {
                 return .invalidRequest
             case "REQUEST_LIMIT_REACHED":
                 return .requestLimitReached
+            case "RATE_LIMITED":
+                return .rateLimited
             case "PUBLIC_ACTIONS_PAUSED":
                 return .publicActionsPaused
             case "REQUEST_CREATION_FAILED":
@@ -107,10 +118,15 @@ struct RequestSubmissionSectionPresentation: Equatable {
 /// exists, so `.form` — the only state with editable private fields and a
 /// submit control — is reachable only from a confirmed `.available` answer.
 enum RequestFormPresentation: Equatable {
+    /// An earlier create may already have posted a request, so creation is
+    /// blocked for the rest of this process. This outranks every availability
+    /// state: whether posting happens to be open, paused, or unknown is a
+    /// smaller fact than "your request may already exist", and none of those
+    /// answers would change what this student can do next.
+    case blockedByUnresolvedCreateAmbiguity
     /// A probe is running. No fields, no submit. Reached only while a check is
     /// genuinely in flight, so this state always has an answer coming.
     case checkingAvailability
-    /// Posting is confirmed available: the Day 3 form renders normally.
     case form
     /// Posting is paused, or availability could not be established. `retryable`
     /// is false for a paused backend, where retrying changes nothing.
@@ -122,8 +138,7 @@ enum RequestFormPresentation: Equatable {
 /// Requester-facing request form. Temporary input and presentation state stay
 /// here; confirmed canonical collection state is owned by `RequestStore`.
 struct RequestFoodView: View {
-    /// Locked product copy. Shared verbatim with the web request form
-    /// (`REQUEST_POSTING_PAUSED_MESSAGE`) and asserted on both sides.
+    /// Shared verbatim with the web request form.
     static let pauseNotice = "Posting a meal request is temporarily unavailable."
 
     /// Shown when the pause probe itself failed. Deliberately not the locked
@@ -132,13 +147,8 @@ struct RequestFoodView: View {
     static let availabilityUnknownNotice =
         "We couldn’t check whether posting is available right now. Please try again in a moment."
 
-    /// Why a required email is collected, shown at the point of collection.
-    /// Shared verbatim with the web form's email hint
-    /// (`public/new-request.html`) and asserted on both sides. It states the
-    /// purpose and the privacy guarantee the API actually enforces — public
-    /// list/detail and claim responses never carry requester email — without
-    /// promising that any particular message is sent or delivered, because
-    /// persistence now succeeds independently of email delivery.
+    /// Explains why email is collected: public endpoints never return it, and
+    /// request creation does not guarantee email delivery.
     static let emailPurposeNotice =
         "We use your email to coordinate updates about your request. Helpers never see it."
 
@@ -199,10 +209,19 @@ struct RequestFoodView: View {
         Calendar.current
     }
 
+    /// The store-owned create ambiguity outlives this view and takes precedence
+    /// over local submission errors.
+    private var effectiveSubmissionError: RequestCreatePresentationError? {
+        Self.effectiveSubmissionError(
+            hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity,
+            submissionError: submissionError
+        )
+    }
+
     private var isSubmissionEnabled: Bool {
         Self.isSubmissionEnabled(
             draft: draft,
-            submissionError: submissionError,
+            submissionError: effectiveSubmissionError,
             isCreating: store.isCreating
         )
     }
@@ -224,11 +243,14 @@ struct RequestFoodView: View {
     var body: some View {
         Group {
             switch Self.presentation(
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity,
                 availability: store.requestCreationAvailability,
                 isCheckingAvailability: store.isCheckingRequestCreationAvailability,
                 hasAttemptedAvailabilityCheck: store.hasAttemptedRequestCreationAvailabilityCheck,
                 didCreateRequest: didCreateRequest
             ) {
+            case .blockedByUnresolvedCreateAmbiguity:
+                blockedByAmbiguityView
             case .success:
                 successView
             case .checkingAvailability:
@@ -242,28 +264,59 @@ struct RequestFoodView: View {
         .navigationTitle("Request Food")
         // Runs before anything is rendered, and the pre-probe state is
         // `.unknown`, so the form cannot flash while the answer is pending.
+        // Skipped entirely while blocked: the answer could not change this
+        // screen, so asking for it would be a request made for nothing.
         .task {
+            guard Self.shouldProbeAvailability(
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+            ) else {
+                return
+            }
             await store.refreshRequestCreationAvailability()
         }
     }
 
-    /// Fail-closed presentation rule. Only a confirmed `.available` reaches
-    /// `.form`; every other availability state withholds the fields entirely
-    /// rather than merely disabling submission.
-    ///
-    /// `.unknown` is the state that needs the two flags. It is where a probe
-    /// begins, and also where a cancelled one ends, so on its own it cannot say
-    /// whether an answer is still coming. A running check keeps the spinner; a
-    /// finished attempt that produced no usable answer becomes the same
-    /// retryable state a failed probe produces, because that is what it is —
-    /// CommonPlate could not find out. The two are still distinct in the store:
-    /// cancellation never claims the backend refused anything.
+    /// The blocked screen. It deliberately renders no fields and no submit
+    /// control — there is nothing here to correct and nothing to resend — and
+    /// it takes its copy and its single action from the same
+    /// `submissionSectionPresentation` seam the in-form error row uses, so the
+    /// two can never drift into saying different things about one situation.
+    private var blockedByAmbiguityView: some View {
+        VStack(spacing: 16) {
+            if let presentation = Self.submissionSectionPresentation(for: .ambiguous) {
+                Text(presentation.message)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("request-submission-error")
+
+                if presentation.showsReturnHomeAction {
+                    Button("Back to Home") {
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("request-ambiguous-dismiss")
+                }
+            }
+        }
+        .padding()
+    }
+
+    /// Only confirmed availability reveals the form. An `.unknown` result after
+    /// a completed probe becomes retryable once no check is running.
     static func presentation(
+        hasUnresolvedCreateAmbiguity: Bool,
         availability: RequestCreationAvailability,
         isCheckingAvailability: Bool,
         hasAttemptedAvailabilityCheck: Bool,
         didCreateRequest: Bool
     ) -> RequestFormPresentation {
+        // First, ahead of everything. A paused or unresolved availability answer
+        // is true but beside the point once a create may already have posted:
+        // showing it would replace the one warning that matters with a smaller
+        // one, and the student would leave thinking nothing had happened.
+        if hasUnresolvedCreateAmbiguity {
+            return .blockedByUnresolvedCreateAmbiguity
+        }
+
         if didCreateRequest {
             return .success
         }
@@ -490,7 +543,7 @@ struct RequestFoodView: View {
                 // never replaced or accompanied by the pointer.
                 if Self.showsLocalRejectionPointer(
                     isPresenting: showsLocalRejectionPointer,
-                    submissionError: submissionError
+                    submissionError: effectiveSubmissionError
                 ) {
                     Text(Self.localRejectionPointerNotice)
                         .font(.footnote)
@@ -498,7 +551,7 @@ struct RequestFoodView: View {
                         .accessibilityIdentifier("request-submission-pointer")
                 }
 
-                if let presentation = Self.submissionSectionPresentation(for: submissionError) {
+                if let presentation = Self.submissionSectionPresentation(for: effectiveSubmissionError) {
                     Text(presentation.message)
                         .foregroundStyle(.red)
                         .accessibilityIdentifier("request-submission-error")
@@ -577,10 +630,8 @@ struct RequestFoodView: View {
         }
     }
 
-    /// The production submit seam. It owns the entire local decision before
-    /// the injected closure can reach `RequestStore`: validate all fields,
-    /// reveal every current error, choose the first invalid text field, and
-    /// build the same normalized payload the view has always sent.
+    /// Validates and normalizes the draft before invoking submit; `RequestStore`
+    /// retains lifecycle and duplicate-operation authority.
     static func orchestrateSubmission(
         draft: RequestFoodFormDraft,
         now: Date,
@@ -689,8 +740,6 @@ struct RequestFoodView: View {
         }
     }
 
-    /// Pre-submission expiration copy. It replaces a vague "a few hours"
-    /// sentence that matched neither backend rule.
     static func formExpirationNotice(for timing: RequestTiming) -> String {
         switch timing {
         case .asap:
@@ -754,6 +803,26 @@ struct RequestFoodView: View {
         after error: RequestCreatePresentationError?
     ) -> Bool {
         error != .ambiguous
+    }
+
+    /// Whether entering the screen should start an availability probe.
+    ///
+    /// A blocked screen has no use for the answer: `presentation` returns the
+    /// blocked state regardless of what comes back, so probing would spend a
+    /// request to change nothing. Skipping it also keeps the store's
+    /// availability flags at whatever they already were, rather than churning
+    /// them behind a screen that never reads them.
+    static func shouldProbeAvailability(
+        hasUnresolvedCreateAmbiguity: Bool
+    ) -> Bool {
+        !hasUnresolvedCreateAmbiguity
+    }
+
+    static func effectiveSubmissionError(
+        hasUnresolvedCreateAmbiguity: Bool,
+        submissionError: RequestCreatePresentationError?
+    ) -> RequestCreatePresentationError? {
+        hasUnresolvedCreateAmbiguity ? .ambiguous : submissionError
     }
 
     /// The request button communicates only whether every required control has

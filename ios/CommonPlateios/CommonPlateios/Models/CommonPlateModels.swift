@@ -78,9 +78,8 @@ struct FoodRequest: Identifiable, Hashable {
         self.status = status
     }
 
-    /// Convenience for the unconnected Week 1 prototype only. Backend list
-    /// membership is authoritative, so device time must not decide whether a
-    /// fetched request remains available.
+    /// Reflects backend-provided lifecycle state; it never compares `expiresAt`
+    /// with device time.
     var isActive: Bool {
         status == .open
     }

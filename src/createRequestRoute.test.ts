@@ -1,4 +1,7 @@
-import type { Request, Response } from "express";
+import express, { type Request, type Response } from "express";
+import { readFileSync, readdirSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import mongoose from "mongoose";
 import {
   afterEach,
@@ -25,7 +28,10 @@ vi.mock("./notifySubscribers.js", () => ({
 }));
 
 import { Request as MealRequest } from "../models/db.js";
-import { createRequest } from "./createRequestRoute.js";
+import {
+  createRequest,
+  createRequestRateLimiter,
+} from "./createRequestRoute.js";
 
 const requestId = new mongoose.Types.ObjectId("64b000000000000000000001");
 /** Frozen backend creation time; the route's `new Date()` resolves to this. */
@@ -107,7 +113,9 @@ beforeEach(() => {
   createDocument = vi
     .spyOn(MealRequest, "create")
     .mockImplementation(async (input) =>
-      persistedDocument(input as unknown as Record<string, unknown>)
+      persistedDocument(
+        input as unknown as Record<string, unknown>
+      ) as unknown as Awaited<ReturnType<typeof MealRequest.create>>
     ) as ReturnType<typeof vi.spyOn>;
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -128,7 +136,7 @@ describe("POST /api/request validation and persistence", () => {
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@example.edu",
-      pickupWindowText: "ASAP (within the next hour)",
+      pickupWindowText: "ASAP (within the next 5 hours)",
       windowStart: undefined,
       windowEnd: undefined,
       status: "open",
@@ -590,7 +598,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
 
     expect(createDocument).toHaveBeenCalledWith(
       expect.objectContaining({
-        pickupWindowText: "ASAP (within the next hour)",
+        pickupWindowText: "ASAP (within the next 5 hours)",
         windowStart: undefined,
         windowEnd: undefined,
       })
@@ -792,5 +800,114 @@ describe("POST /api/request side-effect ordering and errors", () => {
     expect(createDocument).not.toHaveBeenCalled();
     expect(resendSend).not.toHaveBeenCalled();
     expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("ASAP window text states the real five-hour lifetime", () => {
+  /**
+   * `ASAP_LIFETIME_MS` is five hours, and the iOS requester is told "It will
+   * expire in 5 hours". The window text is what *helpers* read, on every
+   * surface that renders a request, so a stale "within the next hour" made the
+   * two sides of the same request disagree: a request posted at 1pm still
+   * advertised the next hour at 5pm.
+   */
+  const PRODUCTION_SOURCES = [
+    "src",
+    "public",
+    "ios/CommonPlateios/CommonPlateios",
+  ];
+
+  function productionFiles(directory: string): string[] {
+    const root = new URL(`../${directory}/`, import.meta.url);
+    return readdirSync(root, { recursive: true, encoding: "utf8" })
+      .filter((entry) => /\.(ts|js|html|swift)$/.test(entry))
+      // Tests and sourcemaps are not surfaces anyone reads a request on.
+      .filter((entry) => !entry.includes(".test."))
+      .map((entry) => `${directory}/${entry}`);
+  }
+
+  it("leaves no production occurrence of the one-hour phrasing", () => {
+    const offenders = PRODUCTION_SOURCES.flatMap(productionFiles).filter(
+      (file) =>
+        readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes(
+          "within the next hour"
+        )
+    );
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps the five-hour expiration itself unchanged", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    const persisted = createDocument.mock.calls[0][0] as Record<string, unknown>;
+    expect(persisted.pickupWindowText).toBe("ASAP (within the next 5 hours)");
+    // The copy fix must not have moved the deadline it describes.
+    expect(persisted.expiresAt).toEqual(asapExpiresAt);
+    expect(persisted.deleteAt).toEqual(asapExpiresAt);
+    expect(
+      (asapExpiresAt.getTime() - createdAt.getTime()) / (60 * 60 * 1000)
+    ).toBe(5);
+  });
+});
+
+describe("POST /api/request rate limiting is a definitive pre-write refusal", () => {
+  /**
+   * Exercised over real HTTP because the limiter is middleware, not part of the
+   * handler. What matters is the *shape* of the sixth response: iOS classifies
+   * an undecodable failure on this non-idempotent POST as ambiguous, which
+   * locks request creation for the rest of the process. A throttled attempt
+   * never reaches validation or the write, so it must decode as a definitive
+   * `RATE_LIMITED` envelope instead.
+   */
+  it("allows five creations, then refuses the sixth with the envelope and no write", async () => {
+    vi.useRealTimers();
+
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.post("/api/request", createRequestRateLimiter, createRequest);
+    const server = createServer(testApp);
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve)
+    );
+
+    try {
+      const { port } = server.address() as AddressInfo;
+      const post = () =>
+        fetch(`http://127.0.0.1:${port}/api/request`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(canonicalAsap()),
+        });
+
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const allowed = await post();
+        expect(allowed.status).toBe(201);
+      }
+      expect(createDocument).toHaveBeenCalledTimes(5);
+
+      const refused = await post();
+
+      expect(refused.status).toBe(429);
+      await expect(refused.json()).resolves.toEqual({
+        error: {
+          code: "RATE_LIMITED",
+          message: "Too many attempts. Please wait a moment and try again.",
+          fields: null,
+        },
+      });
+      // The refusal happened ahead of the handler entirely: no daily-limit
+      // read, no document, no requester email, no subscriber notification.
+      expect(createDocument).toHaveBeenCalledTimes(5);
+      expect(countDocuments).toHaveBeenCalledTimes(5);
+      expect(resendSend).toHaveBeenCalledTimes(5);
+      expect(notifySubscribersForRequest).toHaveBeenCalledTimes(5);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
+    }
   });
 });

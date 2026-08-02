@@ -26,10 +26,9 @@ export function isExpiresAtTtlIndex(
 export class RequestTtlMigrationError extends Error {}
 
 /**
- * Pre-Day-4 request records are disposable by decision: this migration adds no
- * backfill and no compatibility layer. A legacy row would survive the index
- * swap with no deletion path at all — the `expiresAt` TTL index is gone and the
- * hourly cron matches on `deleteAt` — so the migration refuses instead.
+ * Refuses the index swap while any request uses the obsolete `requested`
+ * status or lacks `deleteAt`, because such a record would otherwise lose its
+ * deletion path when the `expiresAt` TTL index is removed.
  */
 export function describeLegacyRequestData(
   legacyStatusCount: number,
@@ -84,8 +83,8 @@ async function assertNoLegacyRequestData(): Promise<void> {
 export async function applyRequestTtlIndexMigration(): Promise<void> {
   await assertNoLegacyRequestData();
 
-  // Establish the replacement first, so there is never a gap in TTL
-  // responsibility for newly written Day 4 documents.
+  // Create the `deleteAt` TTL index before dropping `expiresAt` TTL indexes, so
+  // current-format records always retain a deletion path.
   await MealRequest.collection.createIndex(
     { deleteAt: 1 },
     {

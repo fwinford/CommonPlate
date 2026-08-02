@@ -1,3 +1,7 @@
+// GENERATED FILE — do not edit.
+// Built from src/client/*.ts by build-client.mjs (npm run build:client).
+// Edit the TypeScript source; edits here are overwritten by the next build.
+
 // src/utils/date.ts
 function formatMealRequestWindow(start, end, fallback) {
   if (fallback && /\b(AM|PM)\b|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(fallback)) {
@@ -88,7 +92,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (detailsFood) detailsFood.textContent = req.food || "";
       if (detailsWindow) {
         if (req.isAsap) {
-          detailsWindow.textContent = "ASAP (within the next hour)";
+          detailsWindow.textContent = "ASAP (within the next 5 hours)";
         } else if (req.windowStart || req.windowEnd) {
           detailsWindow.textContent = formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
         } else {
@@ -104,7 +108,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (elVendor) elVendor.textContent = req.vendor ? `at ${req.vendor}` : "";
       if (elFoodDetails) elFoodDetails.textContent = req.details || req.foodDetails || "";
       if (elPickup) elPickup.textContent = req.pickupName ? `Pickup Name: ${req.pickupName}` : "";
-      if (elWindow) elWindow.textContent = req.isAsap ? "ASAP (within the next hour)" : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
+      if (elWindow) elWindow.textContent = req.isAsap ? "ASAP (within the next 5 hours)" : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
     } catch (err) {
       errorMsg.textContent = "Unable to load request details.";
       errorMsg.style.display = "block";

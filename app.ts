@@ -1,8 +1,4 @@
-// ...existing code...
-// ...existing code...
-// ...existing code...
 
-// ...existing code...
 // Hourly cron job: send digest emails for requests with no real-time notifications
 cron.schedule("5 * * * *", async () => {
   try {
@@ -18,7 +14,6 @@ cron.schedule("5 * * * *", async () => {
     const { buildEffectiveAvailabilityFilter } = await import("./src/requestAvailability.js");
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
     const digestNow = new Date();
-    // Find requests created in the last hour with no SendLog
     const recentRequests = await MealRequest.find({
       createdAt: { $gte: oneHourAgo },
       ...buildEffectiveAvailabilityFilter(digestNow),
@@ -26,7 +21,6 @@ cron.schedule("5 * * * *", async () => {
     const notifiedRequestIds = new Set((await SendLog.find({ requestId: { $in: recentRequests.map(r => r._id) } }).lean()).map(l => String(l.requestId)));
     const unnotified = recentRequests.filter(r => !notifiedRequestIds.has(String(r._id)));
     if (!unnotified.length) return;
-    // Find eligible subscribers (under caps)
     const eligible = await Subscriber.find({
       status: "confirmed",
       bounced: false,
@@ -43,7 +37,6 @@ cron.schedule("5 * * * *", async () => {
           { _id: sub._id },
           { $set: { lastSentAt: new Date() }, $inc: { dailyCount: 1 } }
         );
-        // Log one SendLog per request for this digest
         for (const req of unnotified) {
           await SendLog.create({
             subscriberId: sub._id,
@@ -79,7 +72,7 @@ cron.schedule("*/10 * * * *", async () => {
     const { SendLog } = await import("./models/db.js");
     const monitorEmails = (process.env.MONITOR_EMAILS || '').split(',').map(s => s.trim()).filter(Boolean);
     const threshold = parseInt(process.env.MONITOR_THRESHOLD || '10', 10);
-    if (!monitorEmails.length) return; // nothing to notify
+    if (!monitorEmails.length) return;
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
     const failCount = await SendLog.countDocuments({ status: 'fail', sentAt: { $gte: oneHourAgo } });
     if (failCount >= threshold) {
@@ -119,7 +112,10 @@ import {
   RequestListDocument,
 } from "./src/requestListResponse.js";
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
-import { createRequest } from "./src/createRequestRoute.js";
+import {
+  createRequest,
+  createRequestRateLimiter,
+} from "./src/createRequestRoute.js";
 import {
   FULFILLMENT_ROUTE_PATH,
   fulfillRequest,
@@ -191,6 +187,9 @@ app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 app.use(express.static(path.join(process.cwd(), "public")));
 
 // rate limiting middleware - apply only to form endpoints
+// Request creation has its own bucket (`createRequestRateLimiter`) so that its
+// refusal can carry the structured error envelope iOS needs; this one now
+// covers subscribe alone.
 const limiter = rateLimit({ windowMs: 60_000, max: 5 }); // up to 5/min/IP
 
 // health check
@@ -223,13 +222,10 @@ app.post('/api/subscribe', pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE), lim
 
     const normalized = String(email).trim().toLowerCase();
 
-    // simple local validation (require an @ sign)
     if (!normalized.includes('@')) return res.status(400).json({ error: 'invalid email' });
 
-    // generate a lightweight confirm token
     const token = new mongoose.Types.ObjectId().toString();
 
-    // upsert a pending subscriber
     const sub = await Subscriber.findOneAndUpdate(
       { email: normalized },
       { $set: { email: normalized, status: 'pending', confirmToken: token, bounced: false } , $setOnInsert: { dailyCount: 0 } },
@@ -266,7 +262,6 @@ app.post('/api/subscribe', pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE), lim
       }
     })();
 
-    // respond with a tiny confirmation page
     res.send(`<html><body><h3>Subscription confirmed</h3><p>Thanks — you'll receive alerts from CommonPlate.</p></body></html>`);
   } catch (err) {
     next(err);
@@ -276,35 +271,6 @@ app.post('/api/subscribe', pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE), lim
 // serve fulfill page for a specific request
 app.get("/request/:id/fulfill", (req: Request, res: Response) => {
   res.sendFile(path.join(process.cwd(), "public", "fulfill.html"));
-});
-
-// Admin: send a test fulfillment email to fcw2020@nyu.edu
-// Protected by ADMIN_TOKEN env var (use header 'x-admin-token'). If ADMIN_TOKEN is
-// not set and NODE_ENV === 'production' the endpoint is disabled.
-app.post('/admin/test-fulfillment', async (req: Request, res: Response) => {
-  try {
-    const token = (req.get('x-admin-token') || '').toString();
-    if (process.env.ADMIN_TOKEN) {
-      if (!token || token !== process.env.ADMIN_TOKEN) return res.status(403).json({ error: 'Forbidden' });
-    } else if (process.env.NODE_ENV === 'production') {
-      return res.status(503).json({ error: 'Admin token not configured' });
-    }
-
-    const { sendFulfillmentEmail } = await import('./src/emailHelpers.js');
-    const testRequest = {
-      _id: new mongoose.Types.ObjectId(),
-      vendor: 'Test Vendor',
-      pickupName: 'Test Pickup',
-      pickupWindowText: 'ASAP (test)',
-      email: 'fcw2020@nyu.edu',
-    } as any;
-
-    await sendFulfillmentEmail(testRequest, 'TEST26', '15 minutes', 'Test message from admin tester', 'donor@example.org');
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('[admin] test-fulfillment failed', err);
-    res.status(500).json({ error: 'failed' });
-  }
 });
 
 // api: get all active requests
@@ -351,7 +317,12 @@ app.get("/api/active-subscriber-count", async (req: Request, res: Response, next
 // performs no validation side effect, sends no confirmation email, writes no
 // request, and notifies no subscribers. Nobody may post a meal that nobody
 // can fulfill while the fulfillment path is unavailable.
-app.post("/api/request", pausePublicAction(CREATE_UNAVAILABLE_MESSAGE, "PUBLIC_ACTIONS_PAUSED"), limiter, createRequest);
+// The limiter refuses before validation, email, and the write, so a throttled
+// attempt is a definitive no-write outcome. It answers with the structured
+// `RATE_LIMITED` envelope rather than a plain-string body, because iOS must be
+// able to tell that refusal apart from an unreadable response on a
+// non-idempotent POST — see "Definitive versus ambiguous create failures".
+app.post("/api/request", pausePublicAction(CREATE_UNAVAILABLE_MESSAGE, "PUBLIC_ACTIONS_PAUSED"), createRequestRateLimiter, createRequest);
 
 // Claim mutations are paused before their independent rate-limit buckets and
 // before token generation or database work.

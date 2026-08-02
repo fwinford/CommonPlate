@@ -56,9 +56,8 @@ extension AppRoute {
         return path + [route]
     }
 
-    /// Whether any helper-flow destination for `requestID` is still on the
-    /// stack. Used by tests to assert that a confirmed placement leaves nothing
-    /// behind that Back could reach.
+    /// Whether the stack still contains a request-detail or claimant destination
+    /// for `requestID`.
     static func containsHelperDestination(
         in path: [AppRoute],
         requestID: String

@@ -1,5 +1,3 @@
-// (removed unused helper) Use `Subscriber.countDocuments({ status: "confirmed", bounced: false })`
-// directly where needed (keeps a single canonical implementation in the route layer).
 // System model for key/value store (e.g. round-robin cursor)
 export interface ISystem extends Document {
   key: string;
@@ -42,7 +40,7 @@ const SubscriberSchema = new Schema<ISubscriber>({
 
 export const Subscriber = mongoose.models.Subscriber || mongoose.model<ISubscriber>("Subscriber", SubscriberSchema);
 
-// SendLog model (optional, for debugging)
+// Notification delivery ledger and duplicate-send guard.
 export interface ISendLog extends Document {
   subscriberId: Types.ObjectId;
   requestId?: Types.ObjectId;
@@ -133,9 +131,9 @@ const RequestSchema = new Schema<IRequest>({
   claimTokenDigest: { type: String, select: false },
 }, { timestamps: true });
 
-// `expiresAt` is the availability deadline. `deleteAt` is private retention
-// state and owns physical TTL deletion. For every unplaced request both values
-// are identical. Day 5 may move only `deleteAt` when placement is authoritative.
+// `expiresAt` is the availability deadline; `deleteAt` owns physical retention.
+// They match until placement, after which fulfillment moves only `deleteAt` to
+// the placed-request retention deadline.
 RequestSchema.pre("save", function (next) {
   if (!this.expiresAt) {
     const dayMs = 24 * 60 * 60 * 1000;

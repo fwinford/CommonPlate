@@ -43,7 +43,7 @@ function document(overrides: Record<string, unknown> = {}) {
     vendor: "Campus Market",
     food: "Vegetable rice bowl",
     pickupName: "Private Pickup Name",
-    pickupWindowText: "ASAP (within the next hour)",
+    pickupWindowText: "ASAP (within the next 5 hours)",
     windowStart: null,
     windowEnd: null,
     status: "claimed",
@@ -77,7 +77,7 @@ function mockAtomicResult(result: unknown) {
     lean: () => ({
       exec: vi.fn().mockResolvedValue(result),
     }),
-  } as ReturnType<typeof MealRequest.findOneAndUpdate>);
+  } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
 }
 
 function mockDiagnosticResult(result: unknown) {
@@ -87,7 +87,7 @@ function mockDiagnosticResult(result: unknown) {
         exec: vi.fn().mockResolvedValue(result),
       }),
     }),
-  } as ReturnType<typeof MealRequest.findById>);
+  } as unknown as ReturnType<typeof MealRequest.findById>);
 }
 
 function responseBody(context: ReturnType<typeof routeContext>) {
@@ -149,7 +149,7 @@ describe("POST /api/request/:id/claim", () => {
       id: requestId.toString(),
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
-      pickupWindowText: "ASAP (within the next hour)",
+      pickupWindowText: "ASAP (within the next 5 hours)",
       windowStart: null,
       windowEnd: null,
       status: "claimed",

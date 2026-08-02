@@ -46,7 +46,7 @@ function mockFindById(result: unknown): void {
     lean: () => ({
       exec: vi.fn().mockResolvedValue(result),
     }),
-  } as ReturnType<typeof MealRequest.findById>);
+  } as unknown as ReturnType<typeof MealRequest.findById>);
 }
 
 function routeContext(id = "64b000000000000000000001") {
@@ -186,7 +186,7 @@ describe("GET /api/request/:id", () => {
       lean: () => ({
         exec: vi.fn().mockRejectedValue(databaseError),
       }),
-    } as ReturnType<typeof MealRequest.findById>);
+    } as unknown as ReturnType<typeof MealRequest.findById>);
     const context = routeContext();
 
     await getPublicRequestDetail(context.req, context.res, context.next);

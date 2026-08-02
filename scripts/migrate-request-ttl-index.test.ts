@@ -15,7 +15,11 @@ describe("request TTL index migration targeting", () => {
     ).toBe(true);
   });
 
-  it.each([
+  it.each<{
+    name?: string;
+    key?: Record<string, number>;
+    expireAfterSeconds?: number;
+  }>([
     { name: "_id_", key: { _id: 1 } },
     { name: "expiresAt_1", key: { expiresAt: 1 } },
     {

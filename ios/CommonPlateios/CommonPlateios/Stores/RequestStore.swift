@@ -12,8 +12,7 @@ import Foundation
 
 /// View-readable, non-secret presentation for the helper's active claim. The
 /// matching raw token lives only in `RequestStore`'s private authorization
-/// record. Both are discarded naturally on app restart and cleared together
-/// when the flow ends. Week 2 does not implement durable claim recovery.
+/// record. Both are process-local and are cleared together when the flow ends.
 ///
 /// Every timestamp here is backend-owned. `claimExpiresAt` advances only when
 /// the extension endpoint confirms a new deadline; `requestExpiresAt` is the
@@ -169,9 +168,8 @@ struct ClaimUnavailableNotice: Identifiable, Equatable {
     let reason: ClaimUnavailableReason
 }
 
-/// Backend stable error codes for the accepted Day 4 claim and extension
-/// routes (docs/week-2-integration-spec.md, "Error contract"). Kept as one
-/// list so code handling cannot drift into scattered string literals.
+/// Stable backend claim and extension error codes, centralized so handling
+/// cannot drift into scattered string literals.
 enum ClaimErrorCode {
     static let invalidRequestID = "INVALID_REQUEST_ID"
     static let requestNotFound = "REQUEST_NOT_FOUND"
@@ -246,6 +244,18 @@ final class RequestStore: ObservableObject {
 
     @Published private(set) var isCreating = false
     @Published private(set) var createError: RequestServiceError?
+
+    /// `POST /api/request` has no client operation identity. After an ambiguous
+    /// result, this process-local guard blocks every later create to prevent
+    /// duplicates; it clears only when the store is destroyed. Durable recovery
+    /// requires backend idempotency and reconciliation.
+    @Published private(set) var unresolvedCreateError: RequestServiceError?
+
+    /// Read-only projection of the process-lifetime create block, for views
+    /// that need to render it but have no use for the underlying error.
+    var hasUnresolvedCreateAmbiguity: Bool {
+        unresolvedCreateError != nil
+    }
 
     @Published private(set) var isClaiming = false
     @Published private(set) var claimErrorEvent: ClaimErrorEvent?
@@ -376,25 +386,9 @@ final class RequestStore: ObservableObject {
         }
     }
 
-    /// `GET /api/public-actions`. Resolves whether the requester form may be
-    /// shown at all.
-    ///
-    /// Fail-closed in both directions: the state is reset to `.unknown` before
-    /// the probe starts, so a screen can never keep showing the form on the
-    /// strength of an earlier answer, and every failure — transport, non-2xx,
-    /// or an undecodable body — resolves to `.unavailable` rather than
-    /// `.available`. A cancelled probe returns to `.unknown` instead, because
-    /// cancellation is not evidence that posting is unavailable; both states
-    /// withhold the form, so nothing is revealed either way.
-    ///
-    /// A concurrent second call is dropped rather than restarting the probe, so
-    /// a redraw cannot reset a check that is already in flight. Dropping it is
-    /// safe only because the drop is no longer invisible: the attempt flag is
-    /// already set and the in-flight flag clears when the surviving probe ends,
-    /// so however that probe resolves — including back to `.unknown` after a
-    /// cancellation — the screen is left with a settled, retryable state rather
-    /// than a spinner with nothing behind it. Nothing here re-probes on its own;
-    /// recovery is the requester's explicit Try Again.
+    /// Runs one fail-closed availability probe. Cancellation returns to
+    /// `.unknown`; other failures become `.unavailable`. Concurrent calls are
+    /// dropped, and recovery is always requester-initiated.
     func refreshRequestCreationAvailability() async {
         guard !isCheckingRequestCreationAvailability else {
             return
@@ -417,7 +411,15 @@ final class RequestStore: ObservableObject {
     /// `POST /api/request`. Not automatically retried on failure, including
     /// when the service reports an ambiguous create outcome. Returns normally
     /// only after the confirmed request has been added to local state.
+    ///
+    /// Only `ambiguousCreateOutcome` arms the process-lifetime block. Decoded
+    /// server errors and the non-envelope 404 path are treated as definitive
+    /// and do not arm it.
     func createRequest(_ payload: CreateRequestPayload) async throws {
+        if let unresolvedCreateError {
+            createError = unresolvedCreateError
+            throw unresolvedCreateError
+        }
         guard !isCreating else {
             throw RequestServiceError.operationInProgress
         }
@@ -433,42 +435,21 @@ final class RequestStore: ObservableObject {
         } catch {
             let serviceError = Self.asServiceError(error)
             createError = serviceError
+            if case .ambiguousCreateOutcome = serviceError {
+                unresolvedCreateError = serviceError
+            }
             throw serviceError
         }
     }
 
-    /// `POST /api/request/:id/claim`. Local list state and the in-memory
-    /// active claim are updated only after the backend confirms the claim.
-    /// An ambiguous response never fabricates claim credentials. Returns
-    /// normally only after both confirmed request and claim state are updated,
-    /// which is also the only point at which the pickup name becomes readable
-    /// anywhere in the app.
-    ///
-    /// A duplicate call while one is in flight throws `operationInProgress`
-    /// before any second request is built, so repeated taps cannot produce a
-    /// second claim POST.
-    ///
-    /// Only one confirmed claim may be held locally at a time. A second claim
-    /// is refused because `beginActiveClaim` would otherwise replace the first
-    /// claim's presentation, its private token, and its lifecycle timer,
-    /// leaving that request reserved on the backend with no local claimant
-    /// state and no way to reach its pickup name. Week 2 has no release
-    /// endpoint, so the only safe answer is not to start the second claim.
-    /// Returning to the active request still routes into its existing flow
-    /// through `activeClaim`, which needs no new claim call.
-    ///
-    /// The refusal is reported as `existingActiveClaim` when the held claim
-    /// belongs to a *different* request, so the helper can be pointed at the
-    /// reservation they actually hold instead of being told they are already
-    /// starting to help with the request in front of them.
+    /// Publishes the pickup name and stores the raw token only after a confirmed
+    /// claim response. Duplicate or second-request claims are refused before
+    /// POST so the single active claim, token, and lifecycle timer cannot be
+    /// overwritten.
     func claim(requestID: String) async throws {
-        // Week 2 holds exactly one confirmation. Letting a second placement
-        // confirm before this one is acknowledged would overwrite a real
-        // sent / failed / unknown-email result with no way to get it back, so
-        // acknowledgement gates the next claim rather than the confirmation
-        // being silently replaced. Recorded as a claim error before any attempt
-        // exists — no POST is built — so the detail screen can explain the
-        // refusal instead of the tap appearing to do nothing.
+        // One unacknowledged placement result gates the next claim so a real
+        // sent, failed, or unknown-email outcome cannot be overwritten. The
+        // refusal is recorded before any POST so the detail screen can explain it.
         if let confirmation = fulfillmentConfirmation {
             recordPreflightClaimRefusal(
                 .unacknowledgedPlacement,
@@ -653,17 +634,15 @@ final class RequestStore: ObservableObject {
 
     /// Ends the claim locally: the in-memory claim and its raw token are
     /// dropped, the local timer is cancelled, and Active Requests is refreshed
-    /// from backend truth. Week 2 has no release endpoint, so this abandons the
-    /// reservation locally rather than returning it — the backend reopens it on
-    /// its own schedule when the claim lapses.
+    /// from backend truth. There is no release endpoint, so the backend reopens
+    /// the reservation when the claim lapses.
     ///
     /// Deliberately **not** wired to Back or a swipe dismissal. Leaving the
     /// claimant screen is navigation, not a decision to give up a reservation
     /// the backend still holds; dropping the pickup name and token there left
     /// the request blocked for every other helper with no local way back in.
-    /// This stays the seam for an explicit end-of-flow action — today only the
-    /// tests exercise it — and Day 5 fulfillment clears the same state through
-    /// `clearActiveClaim` after confirmed placement.
+    /// This remains the seam for an explicit end-of-flow action. Confirmed
+    /// fulfillment clears the same state through `clearActiveClaim`.
     func leaveActiveClaimFlow() {
         // An unresolved POST may already have recorded the external order. Its
         // raw token and claimant context are intentionally retained until
@@ -1046,18 +1025,9 @@ final class RequestStore: ObservableObject {
         }
     }
 
-    /// Publishes a refusal decided before any attempt exists, so no claim POST
-    /// is built and nothing about the held claim is touched.
-    ///
-    /// These guards used to throw straight out of `claim(requestID:)`, but the
-    /// only caller discards the error, so the accepted copy for each refusal was
-    /// unreachable. Routing them through the same request-scoped event the
-    /// backend-rejection path uses means `claimError(for:)` answers for the
-    /// request the helper actually tapped and for no other screen.
-    ///
-    /// `operationID` is the identity of whatever is doing the blocking — the
-    /// held claim, the in-flight attempt, or the unacknowledged confirmation —
-    /// so repeated taps report the same blocker rather than inventing one.
+    /// Publishes preflight refusals as request-scoped events because the caller
+    /// discards thrown errors. `operationID` keeps repeated taps tied to the
+    /// same blocker.
     private func recordPreflightClaimRefusal(
         _ error: RequestServiceError,
         requestID: String,
@@ -1482,26 +1452,9 @@ final class RequestStore: ObservableObject {
         fulfillmentAmbiguity?.isRecoveryAvailable = !context.hasConsumedRecovery
     }
 
-    /// Whether this failure leaves placement genuinely unknown, and therefore
-    /// earns the one privacy-safe read-only check. Two cases qualify.
-    ///
-    /// An unreadable response is the accepted Day 5 ambiguity: the POST may
-    /// have committed and iOS cannot tell.
-    ///
-    /// `INTERNAL_FAILURE` on the one permitted repeat is the second. The
-    /// accepted contract records that this code can accompany a placement that
-    /// in fact committed, so the repeat's failure is not proof that nothing was
-    /// written and a read may still find `placed`. It qualifies only for the
-    /// repeat: on a first submission the form is still on screen and offers the
-    /// helper the same safe resubmission, which is the accepted Day 5 handling.
-    ///
-    /// `RATE_LIMITED`, `TRANSACTIONS_UNAVAILABLE`, and
-    /// `INVALID_FULFILLMENT_PAYLOAD` are answered before any transaction can
-    /// commit, so a read after them could only re-report the *original*
-    /// ambiguity the first check already ran against — none is performed.
-    ///
-    /// Neither case re-opens the recovery: the opportunity is consumed before
-    /// the POST is sent, and everything that follows is read-only.
+    /// Runs the one privacy-safe status check only after an ambiguous response,
+    /// or after `INTERNAL_FAILURE` on the consumed manual repeat. Pre-transaction
+    /// refusals do not qualify, and the check never reopens recovery.
     private static func warrantsPlacementStatusCheck(
         _ error: RequestServiceError,
         attempt: FulfillmentAttempt

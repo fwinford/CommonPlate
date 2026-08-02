@@ -6,7 +6,6 @@ const FROM_EMAIL = process.env.FROM_EMAIL || "CommonPlate <onboarding@resend.dev
 const BASE_URL = process.env.BASE_URL || "https://commonplatenyu.org";
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Robust email sender: wraps resend.emails.send and handles errors
 export async function sendEmailSafe(opts: Parameters<typeof resend.emails.send>[0]): Promise<{ success: boolean; error?: string; }> {
 	try {
 		const result = await resend.emails.send(opts);
@@ -52,11 +51,7 @@ export async function sendNewRequestAlert(subscriber: ISubscriber, request: IReq
 	});
 }
 
-// Note: the old single-purpose contact email helper was removed in favor of
-// the combined `sendFulfillmentEmail` which includes donor message and reply-to.
 
-// Combined fulfillment email: includes order details, optional ETA and donor message,
-// and always shows a reply-to address so the requester can reply directly.
 export async function sendFulfillmentEmail(
 	request: IRequest,
 	orderNumber: string,

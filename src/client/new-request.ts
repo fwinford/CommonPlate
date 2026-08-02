@@ -50,10 +50,7 @@ interface RequestFormData {
   windowEnd?: string;
 }
 
-/// `POST /api/request` returns the canonical `{ request: {...} }` wrapper and
-/// the `{ error: { code, message } }` envelope. Other refusals reaching this
-/// page (the paused 503) still use the legacy flat `{ error: "message" }`, so
-/// both shapes are accepted until that migration finishes.
+/// Decodes both the structured create-error envelope and a flat error string.
 interface RequestResponse {
   request?: { id: string };
   error?: string | { code: string; message: string };
@@ -92,7 +89,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (submitBtn) submitBtn.disabled = false;
 
-  // Show/hide time range fields based on selection
   windowTypeRadios.forEach(radio => {
     radio.addEventListener('change', (e) => {
       const target = e.target as HTMLInputElement;
@@ -111,23 +107,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   form.addEventListener('submit', async (e: Event) => {
     e.preventDefault();
     
-    // Clear previous messages
     errorMsg.style.display = 'none';
     successMsg.style.display = 'none';
     submitBtn.disabled = true;
     submitBtn.textContent = 'Submitting...';
 
-    // Gather form data
     const formData = new FormData(form);
     const windowType = formData.get('windowType') as string;
 
-    // Compute pickupWindowText based on selection
     let pickupWindowText = '';
     
     if (windowType === 'asap') {
-      pickupWindowText = 'ASAP (within the next hour)';
+      pickupWindowText = 'ASAP (within the next 5 hours)';
     } else {
-      // Format the time range
       const start = formData.get('windowStart') as string;
       const end = formData.get('windowEnd') as string;
       
@@ -158,11 +150,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       pickupWindowText,
     };
 
-    // include structured window times when provided
     if (windowType === 'range') {
       const start = formData.get('windowStart') as string;
       const end = formData.get('windowEnd') as string;
-      // Convert local datetime (from datetime-local input) to UTC ISO string
       if (start) {
         const startDate = new Date(start);
         data.windowStart = startDate.toISOString();
@@ -188,12 +178,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         throw new Error(errorMessage(result.error) || 'Failed to submit request');
       }
 
-      // Success!
       successMsg.textContent = submissionSuccessText(result.request?.id);
       successMsg.style.display = 'block';
       form.reset();
 
-      // Redirect to home after 3 seconds
       setTimeout(() => {
         window.location.href = '/';
       }, 3000);

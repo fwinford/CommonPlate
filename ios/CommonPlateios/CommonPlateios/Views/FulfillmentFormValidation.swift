@@ -97,17 +97,9 @@ struct FulfillmentSubmissionResult: Equatable {
     let didSubmit: Bool
 }
 
-/// Client-side mirrors of the backend's own accepted rules for
-/// `POST /api/request/:id/fulfill`. Nothing here is a new rule: `fulfillerEmail`
-/// is the trimmed address the payload schema already requires, and
-/// `orderNumber` uses the backend's exact `^[0-9]{1,50}$` pattern.
-///
-/// Mirroring rather than inventing is the whole point. The backend answers a bad
-/// payload with one opaque `INVALID_FULFILLMENT_PAYLOAD` and `fields: null`, so
-/// nothing in the response can say *which* field was wrong. Checking the same
-/// rules here is what lets the failure be named on the field — and, more
-/// importantly, lets it be caught before a helper who has already paid for a
-/// real Grubhub order sees anything that reads like a system failure.
+/// Mirrors the backend's order-number rule and performs a client-side email
+/// format check so locally knowable errors can be attached to fields. The
+/// backend remains authoritative.
 enum FulfillmentFormValidator {
     static let emptyEmailMessage = "Enter your email address."
     static let invalidEmailMessage =
@@ -123,11 +115,8 @@ enum FulfillmentFormValidator {
     private static let orderNumberDigitsPattern = "^[0-9]+$"
     static let orderNumberMaximumLength = 50
 
-    /// Structural rather than clever: one `@`, something before it, and a dotted
-    /// domain after it, with no whitespace anywhere. It exists to catch the
-    /// mistakes a helper actually makes on a phone keyboard — a missing `@`, a
-    /// missing domain, a stray space — not to out-guess the backend, which stays
-    /// authoritative for anything this accepts.
+    /// Rejects common malformed addresses before submission; the backend
+    /// remains authoritative.
     private static let emailPattern = "^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$"
 
     /// Every local failure, in field order. Empty means the submit may proceed
@@ -155,7 +144,12 @@ enum FulfillmentFormValidator {
         if trimmed.isEmpty {
             return emptyEmailMessage
         }
-        return matches(trimmed, emailPattern) ? nil : invalidEmailMessage
+        return isValidEmail(trimmed) ? nil : invalidEmailMessage
+    }
+
+    static func isValidEmail(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return matches(trimmed, emailPattern)
     }
 
     /// Precedence is empty, then too long, then non-numeric. A value that breaks

@@ -11,13 +11,8 @@ import Foundation
 
 // MARK: - Wire status
 
-/// Backend-persisted status vocabulary (`open | claimed | placed`), per the
-/// accepted Day 4 contract in docs/week-2-integration-spec.md. The superseded
-/// `requested` value is not part of this contract: the backend writes new
-/// records as `open`, projects every listed request as `open`, and the TTL
-/// migration refuses to run while any `requested` record still exists. An
-/// unrecognized wire value fails to decode rather than mapping to a guessed
-/// lifecycle state. See `domainStatus` for the iOS lifecycle mapping.
+/// Persisted lifecycle vocabulary. Unknown values fail decoding rather than
+/// being mapped to a guessed state.
 enum RequestStatusWire: String, Decodable {
     case open
     case claimed

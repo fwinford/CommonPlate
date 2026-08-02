@@ -1,3 +1,7 @@
+// GENERATED FILE — do not edit.
+// Built from src/client/*.ts by build-client.mjs (npm run build:client).
+// Edit the TypeScript source; edits here are overwritten by the next build.
+
 // src/utils/date.ts
 function formatMealRequestWindow(start, end, fallback) {
   if (fallback && /\b(AM|PM)\b|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(fallback)) {

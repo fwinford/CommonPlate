@@ -142,32 +142,17 @@ enum FulfillmentPresentationError: Equatable {
     var message: String {
         switch self {
         case .invalidDetails:
-            // The fallback, and only the fallback. Every rule the backend
-            // enforces on these fields is mirrored locally and named on the
-            // field itself, so reaching this means the rejection could not be
-            // attributed — the response envelope carries `fields: null` and no
-            // field attribution of its own.
-            //
-            // Which is exactly why this cannot point at highlighted fields: by
-            // definition none are highlighted here, so that instruction sent
-            // the helper looking for a marker that does not exist. It names the
-            // two values the helper can actually re-check instead, without
-            // claiming which one the backend refused — nothing in the response
-            // says. The locked safety sentence stays: this is still a state
-            // where a second real order would cost a student money.
+            // The envelope has no field attribution. Ask the helper to recheck
+            // both locally validated fields and never suggest placing another
+            // external order.
             return "We couldn’t save these details. Check your email address and order number, then tap “I placed this order” again. Don’t place another Grubhub order."
         case .rateLimited:
             return "Too many tries. Wait a moment, then tap “I placed this order” again. Don’t place another Grubhub order."
         case .temporarilyUnavailable:
             return "CommonPlate can’t save the order right now. Stay on this screen and try again in a moment. Don’t place another Grubhub order."
         case .couldNotRecord:
-            // `INTERNAL_FAILURE` lands here, and the accepted contract records
-            // that it can accompany a placement that may in fact have committed
-            // (an exhausted unknown-commit result). So this must not assert that
-            // nothing was recorded. Re-submitting the same CommonPlate details
-            // is safe and is a real recovery — the backend answers a repeat with
-            // REQUEST_ALREADY_PLACED — but a second Grubhub order is not, and
-            // the two must not read as the same action.
+            // `INTERNAL_FAILURE` can follow an unknown commit. Repeating the
+            // CommonPlate write is safe; placing a second Grubhub order is not.
             return "CommonPlate may not have saved your order. Tap “I placed this order” again. Trying again here only updates CommonPlate. It does not place another Grubhub order."
         }
     }
@@ -440,12 +425,8 @@ struct FulfillRequestView: View {
         path = AppRoute.returningToActiveRequests(from: path)
     }
 
-    /// This screen renders nothing at all once both the claim and the
-    /// confirmation are gone — exactly the state acknowledging a placement
-    /// produces. It is never a state a helper should see, because the same
-    /// acknowledgement takes the screen off the stack; stated here so a
-    /// regression that leaves the destination behind is a test failure rather
-    /// than a blank screen under a "Your reservation" title.
+    /// Invariant: an empty claimant destination is removed from the navigation
+    /// path immediately.
     static func hasPresentableContent(hasClaim: Bool, hasConfirmation: Bool) -> Bool {
         hasClaim || hasConfirmation
     }
@@ -751,26 +732,14 @@ struct FulfillRequestView: View {
     static let ambiguousCheckingDetail =
         "Your order may already be saved. Don’t tap again or place another Grubhub order while we check."
 
-    /// After every permitted recovery action has been exhausted. At this point
-    /// there is no further POST, GET, or polling, so the copy must stop implying
-    /// a check is still running and say what the helper is left with.
-    ///
-    /// Deliberately generic about *why*. This state is reached from transport
-    /// loss, an undecodable response, and an explicit server refusal
-    /// (`RATE_LIMITED`, `TRANSACTIONS_UNAVAILABLE`, `INTERNAL_FAILURE`,
-    /// `INVALID_FULFILLMENT_PAYLOAD`) alike, so naming a lost connection would
-    /// be false in the refusal cases. Either write may still have landed — the
-    /// original one especially — which is exactly why no second real order is
-    /// safe.
+    /// Settled unresolved state after the read-only status check. A one-time
+    /// repeat may still be offered, but no second external order is safe.
     static let ambiguousUnresolvedTitle = "CommonPlate still can’t confirm the order details."
     static let ambiguousUnresolvedDetail =
         "The original save or the one-time retry may have worked. Don’t place another Grubhub order. You can’t try saving again from this screen."
 
-    /// Shown immediately above the locked recovery question. The checking-state
-    /// sentence that carried this fact ("Your order may already be saved") is
-    /// replaced the moment the recovery is offered, so without this the helper
-    /// decides whether to resend without being told what state they are in. The
-    /// locked strings say what the action does; this says what it is answering.
+    /// Restates that the first write may have committed before offering the one
+    /// repeat.
     static let ambiguityRecoveryContext =
         "CommonPlate still can’t confirm whether the first save worked, so these order details may already be recorded."
 
@@ -794,11 +763,7 @@ struct FulfillRequestView: View {
         !isCheckingStatus && isRecoveryAvailable
     }
 
-    /// Whether the section is presenting the recovery decision — the offer
-    /// itself, or the permitted repeat already running. Both states must carry
-    /// the context sentence and the locked question, because the helper who is
-    /// watching their one attempt run is owed the same framing as the helper
-    /// deciding to start it.
+    /// Keeps recovery framing visible while the one repeat is offered or running.
     static func showsAmbiguityRecoveryCopy(
         isRecoveryAvailable: Bool,
         isRecovering: Bool

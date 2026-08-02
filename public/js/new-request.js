@@ -1,3 +1,7 @@
+// GENERATED FILE — do not edit.
+// Built from src/client/*.ts by build-client.mjs (npm run build:client).
+// Edit the TypeScript source; edits here are overwritten by the next build.
+
 // src/client/new-request.ts
 var REQUEST_POSTING_PAUSED_MESSAGE = "Posting a meal request is temporarily unavailable.";
 async function fetchPublicActionsPaused() {
@@ -66,7 +70,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const windowType = formData.get("windowType");
     let pickupWindowText = "";
     if (windowType === "asap") {
-      pickupWindowText = "ASAP (within the next hour)";
+      pickupWindowText = "ASAP (within the next 5 hours)";
     } else {
       const start = formData.get("windowStart");
       const end = formData.get("windowEnd");

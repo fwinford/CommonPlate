@@ -40,7 +40,6 @@ export async function notifySubscribersForRequest(request: IRequest) {
     console.log(`[notify] no successful SendLog for request ${request._id}, proceeding`);
   }
 
-  // Find eligible subscribers (caps: 1/hour, 4/day). Be tolerant of missing fields.
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
   const eligible = await Subscriber.find({
     $and: [
@@ -58,16 +57,13 @@ export async function notifySubscribersForRequest(request: IRequest) {
     return;
   }
 
-  // Get round-robin cursor
   const cursorDoc = await System.findOne({ key: "notify_cursor" });
   const cursor = (cursorDoc?.value?.index ?? 0) % eligible.length;
 
-  // Pick up to 2, wrapping around
   const picks = [eligible[cursor]];
   if (eligible.length > 1) picks.push(eligible[(cursor + 1) % eligible.length]);
   const actualPicks = picks.filter(Boolean);
 
-  // Send and update
   let notified = 0;
   for (const sub of actualPicks) {
     console.log(`[notify] processing subscriber ${String(sub._id)} <${sub.email}> for request ${request._id}`);
@@ -96,7 +92,6 @@ export async function notifySubscribersForRequest(request: IRequest) {
     try {
       await sendNewRequestAlert(sub, request);
       console.log(`[notify] sendNewRequestAlert success for ${String(sub._id)} <${sub.email}> request ${request._id}`);
-      // Update subscriber counters only on success
       await Subscriber.updateOne(
         { _id: sub._id },
         {
@@ -104,7 +99,6 @@ export async function notifySubscribersForRequest(request: IRequest) {
           $inc: { dailyCount: 1 },
         }
       );
-      // Mark SendLog as sent
       await SendLog.updateOne(
         { requestId: request._id, subscriberId: sub._id },
         { $set: { status: 'sent', sentAt: new Date(), error: undefined } }
@@ -113,19 +107,16 @@ export async function notifySubscribersForRequest(request: IRequest) {
     } catch (err: unknown) {
       const errText = err instanceof Error ? err.message : String(err);
       console.error(`[notify] sendNewRequestAlert failed for ${String(sub._id)} <${sub.email}> request ${request._id}:`, errText);
-      // Update SendLog with failure details
       await SendLog.updateOne(
         { requestId: request._id, subscriberId: sub._id },
         { $set: { status: 'fail', sentAt: new Date(), error: errText } }
       );
-      // If hard error, mark bounced
       if (errText.match(/invalid|bounce|not found|recipient/i)) {
         await Subscriber.updateOne({ _id: sub._id }, { $set: { bounced: true } });
       }
     }
   }
 
-  // Advance cursor
   if (notified) {
     const newCursor = (cursor + notified) % eligible.length;
     await System.updateOne(
@@ -150,7 +141,6 @@ export async function notifySubscriberAboutRecentRequests(subscriber: ISubscribe
 
   console.log(`[notify:on-confirm] called for subscriber ${String(subscriber._id)} <${subscriber.email}>`);
   try {
-    // Respect confirmed status and bounced flag
     if (subscriber.status !== 'confirmed') {
       console.log(`[notify:on-confirm] subscriber ${String(subscriber._id)} not confirmed, skipping`);
       return;
@@ -160,7 +150,6 @@ export async function notifySubscriberAboutRecentRequests(subscriber: ISubscribe
       return;
     }
 
-    // Enforce daily cap and 1/hour rule
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
     if ((subscriber.dailyCount || 0) >= 4) {
       console.log(`[notify:on-confirm] subscriber ${String(subscriber._id)} reached daily cap, skipping`);
@@ -185,7 +174,6 @@ export async function notifySubscriberAboutRecentRequests(subscriber: ISubscribe
 
     let sentCount = 0;
     for (const req of recentRequests) {
-      // skip if already sent
       const already = await SendLog.exists({ requestId: req._id, subscriberId: subscriber._id, status: 'sent' });
       if (already) continue;
 
@@ -206,12 +194,9 @@ export async function notifySubscriberAboutRecentRequests(subscriber: ISubscribe
       try {
         await sendNewRequestAlert(subscriber as any, req as any);
         console.log(`[notify:on-confirm] sendNewRequestAlert success for subscriber ${String(subscriber._id)} request ${req._id}`);
-        // update subscriber counters
         await Subscriber.updateOne({ _id: subscriber._id }, { $set: { lastSentAt: new Date() }, $inc: { dailyCount: 1 } });
-        // mark sendlog sent
         await SendLog.updateOne({ requestId: req._id, subscriberId: subscriber._id }, { $set: { status: 'sent', sentAt: new Date(), error: undefined } });
         sentCount++;
-        // stop if we've hit daily cap
   const latest: any = await Subscriber.findById(subscriber._id).lean();
   if (latest && (latest.dailyCount >= 4)) break;
       } catch (err: unknown) {
@@ -219,7 +204,7 @@ export async function notifySubscriberAboutRecentRequests(subscriber: ISubscribe
         await SendLog.updateOne({ requestId: req._id, subscriberId: subscriber._id }, { $set: { status: 'fail', sentAt: new Date(), error: errText } });
         if (errText.match(/invalid|bounce|not found|recipient/i)) {
           await Subscriber.updateOne({ _id: subscriber._id }, { $set: { bounced: true } });
-          break; // stop further sends to this subscriber
+          break;
         }
       }
     }

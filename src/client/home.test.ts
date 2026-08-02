@@ -51,7 +51,7 @@ function publicRequest(
     id: "request-123",
     vendor: "Campus Market",
     food: "Vegetable rice bowl",
-    pickupWindowText: "ASAP (within the next hour)",
+    pickupWindowText: "ASAP (within the next 5 hours)",
     windowStart: null,
     windowEnd: null,
     status: "open",
@@ -155,7 +155,7 @@ describe("public request-list web contract", () => {
     const html = home.renderPublicRequestDetail(request);
 
     expect(html).toContain('class="modal-body"');
-    expect(html).toContain("ASAP (within the next hour)");
+    expect(html).toContain("ASAP (within the next 5 hours)");
     expect(html).toContain("Vegetable rice bowl");
     expect(html).toContain("Campus Market");
     expect(html).not.toContain("Requester Private Name");
@@ -182,7 +182,7 @@ describe("public request-list web contract", () => {
     });
 
     expect(home.publicRequestWindowText(publicRequest())).toBe(
-      "ASAP (within the next hour)"
+      "ASAP (within the next 5 hours)"
     );
     expect(
       home.publicRequestWindowText(

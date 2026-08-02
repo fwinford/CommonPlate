@@ -133,7 +133,9 @@ describeMongo("real MongoDB claim atomicity", () => {
     );
 
     const stored = await MealRequest.collection.findOne({
-      _id: request._id,
+      // Raw-driver boundary: mongoose types `_id` as `unknown`, while the
+      // driver's filter expects an ObjectId.
+      _id: request._id as mongoose.Types.ObjectId,
     });
     expect(stored?.status).toBe("claimed");
     expect(stored?.claimTokenDigest).toMatch(/^[a-f0-9]{64}$/);
@@ -227,7 +229,9 @@ describeMongo("real MongoDB claim atomicity", () => {
 
     expect(replacement.statusCode).toBe(200);
     const stored = await MealRequest.collection.findOne({
-      _id: request._id,
+      // Raw-driver boundary: mongoose types `_id` as `unknown`, while the
+      // driver's filter expects an ObjectId.
+      _id: request._id as mongoose.Types.ObjectId,
     });
     expect(stored?.claimExtendedAt).toBeNull();
     expect(stored?.claimTokenDigest).not.toBe(oldDigest);

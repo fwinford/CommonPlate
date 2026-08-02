@@ -9,7 +9,7 @@ I built it around a simple idea: students often have extra food resources, and o
 - students can post meal requests with a vendor, food item, pickup name, email, and time window
 - students with extra meal swipes can claim a request, place the order, and mark it as fulfilled
 - requesters get confirmation and fulfillment emails
-- old requests and events automatically expire
+- old requests automatically expire
 - rate limiting helps reduce spam
 
 ## tech stack
@@ -23,17 +23,21 @@ I built it around a simple idea: students often have extra food resources, and o
 
 ## data model
 
-CommonPlate uses three main collections:
+CommonPlate uses these collections:
 
 - **requests** — meal requests posted by students
 - **fulfillments** — order details linked to a request
-- **events** — free-food events posted separately
+- **subscribers** — students signed up for new-request email alerts
+- **sendlogs** — one delivery record per alert, which also prevents duplicate sends
+- **system** — small key/value store (currently the round-robin alert cursor)
 
-Requests can have one fulfillment. Events and requests are automatically deleted after their expiration window.
+A request can have at most one fulfillment, enforced by both a unique index and
+the transaction that records placement. Requests are automatically deleted after
+their retention window.
 
 ## technical decisions
 
-- **temporary data:** requests and events expire so the board stays current and private
+- **temporary data:** requests expire so the board stays current and private
 - **email over accounts:** requesters get updates without needing a full login system
 - **rate limiting:** form submissions are limited to reduce spam
 - **typescript:** used to make the codebase easier to maintain as it grew

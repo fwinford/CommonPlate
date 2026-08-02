@@ -8,6 +8,14 @@ import {
   type PublicRequestDocument,
 } from "./requestListResponse.js";
 import { formatMealRequestWindow } from "./utils/date.js";
+import { createDay4MutationRateLimiter } from "./claimRoute.js";
+
+/**
+ * Per-IP create throttle that returns the structured error envelope. Because
+ * create is non-idempotent, iOS must distinguish this definitive pre-write
+ * refusal from an unreadable, potentially committed response.
+ */
+export const createRequestRateLimiter = createDay4MutationRateLimiter(5);
 
 const requesterString = z.string().trim().min(1);
 const requesterEmail = z.string().trim().toLowerCase().email();
@@ -163,7 +171,7 @@ function validateCreateRequest(
         pickupName: result.data.pickupName,
         email: result.data.email,
         timing: "asap",
-        pickupWindowText: "ASAP (within the next hour)",
+        pickupWindowText: "ASAP (within the next 5 hours)",
       };
     }
 
@@ -196,7 +204,7 @@ function validateCreateRequest(
       pickupName: result.data.pickupName,
       email: result.data.email,
       timing: "asap",
-      pickupWindowText: "ASAP (within the next hour)",
+      pickupWindowText: "ASAP (within the next 5 hours)",
     };
   }
 

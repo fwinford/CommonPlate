@@ -6,7 +6,6 @@ import {
   isPublicActionsPaused,
 } from "./publicActionsPause.js";
 
-// Helper to send a digest email to a subscriber
 export async function sendDigestEmail(subscriber: ISubscriber, requests: IRequest[]) {
   // The hourly cron already returns before reaching this function while
   // paused. This throws rather than returning quietly so that any other

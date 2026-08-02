@@ -14,7 +14,7 @@
     "seed:ui": "tsx scripts/seed-ui-request.ts seed",
     "seed:ui:cleanup": "tsx scripts/seed-ui-request.ts cleanup",
     "lint": "eslint --ext .js,.ts src",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.typecheck.json",
     "prune": "ts-prune",
     "depcheck": "depcheck",
     "ci-check": "npm run lint && npm run typecheck && npm run prune && npm run build"

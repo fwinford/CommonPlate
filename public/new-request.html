@@ -4,11 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>New Request | CommonPlate</title>
-  <!-- Cabin for header -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cabin:wght@600&display=swap" rel="stylesheet">
-  <!-- Plus Jakarta Sans - warm, rounded font -->
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -55,7 +53,7 @@
           <div class="radio-group">
             <label class="radio-label">
               <input type="radio" name="windowType" value="asap" checked>
-              <span>ASAP (within the next hour)</span>
+              <span>ASAP (within the next 5 hours)</span>
             </label>
             <label class="radio-label">
               <input type="radio" name="windowType" value="range">
@@ -72,7 +70,6 @@
           <input type="datetime-local" id="windowEnd" name="windowEnd">
         </div>
 
-        <!-- Pickup window is computed from the selection above (ASAP or specific time range). -->
 
         <div id="error-message" class="error-message" style="display: none;"></div>
         <div id="success-message" class="success-message" style="display: none;"></div>

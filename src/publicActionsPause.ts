@@ -1,18 +1,9 @@
 import type { NextFunction, Request, Response } from "express";
 
 /**
- * Temporary rollout safety control for the deployed site.
- *
- * While the create → claim → fulfill path is incomplete, the public site must
- * not accept a meal request nobody can fulfill, must not invite a helper into
- * a paused flow, and must not accept a subscriber before confirmation and
- * unsubscribe work. One environment value carries that single decision to
- * every affected path.
- *
- * This is deliberately not a feature-flag framework: one predicate, two
- * messages, one middleware factory. It is also deliberately separate from the
- * legacy fulfillment refusal in `fulfillmentRoute.ts`, which stays enforced
- * regardless of this value until Day 5 replaces that endpoint atomically.
+ * Fail-closed deployment control for request creation, claims, subscriptions,
+ * and notifications. Fulfillment remains independently authorized by a valid
+ * active claim token.
  */
 export const PUBLIC_ACTIONS_PAUSED_ENV = "PUBLIC_ACTIONS_PAUSED";
 

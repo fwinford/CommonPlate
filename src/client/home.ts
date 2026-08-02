@@ -126,7 +126,6 @@ export function renderPublicRequestModal(request: PublicMealRequest): string {
   `;
 }
 
-// Show request detail modal
 function clientShowRequestDetail(request: PublicMealRequest): void {
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
@@ -146,7 +145,6 @@ function clientShowRequestDetail(request: PublicMealRequest): void {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // --- SUBSCRIBE PANEL LOGIC ---
   const subscribeBtn = document.getElementById('subscribe-cta-btn');
   const subscribePanel = document.getElementById('subscribe-panel');
   const subscribeForm = document.getElementById('subscribe-form') as HTMLFormElement | null;
@@ -211,7 +209,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const activeCountEl = document.getElementById('active-count');
   const totalSharedEl = document.getElementById('total-shared');
 
-  // Fetch and display active subscriber count in both hero and stats
   const heroCountEl = document.getElementById('active-subscriber-hero');
   async function updateActiveSubscriberCount() {
     try {
@@ -236,7 +233,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
   try {
-    // Fetch stats
     const statsResponse = await fetch('/api/stats');
     if (statsResponse.ok) {
       const stats = await statsResponse.json();
@@ -245,13 +241,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
     
-    // Fetch requests
     const requestsResponse = await fetch('/api/requests');
     if (requestsResponse.ok) {
       const response: PublicRequestListResponse = await requestsResponse.json();
       const requests = requestsFromResponse(response);
       
-      // Update activity stats
       if (activeCountEl) {
         const activeCount = requests.length;
         activeCountEl.textContent = activeCount === 1 
@@ -265,10 +259,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         requestsList.innerHTML = requests.map(renderPublicRequestCard).join('');
 
-        // Add click handlers for request cards (view details)
         document.querySelectorAll('.request-card').forEach(card => {
           card.addEventListener('click', (e) => {
-            // Don't show details if clicking the button
             if ((e.target as HTMLElement).classList.contains('card-action-btn')) return;
             
             const requestId = (card as HTMLElement).dataset.requestId;

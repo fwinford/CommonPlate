@@ -25,8 +25,28 @@ describe("public action routes are mounted behind the pause", () => {
     expect(line).toContain(
       "pausePublicAction(CREATE_UNAVAILABLE_MESSAGE, \"PUBLIC_ACTIONS_PAUSED\")"
     );
+    expect(line).toContain("createRequestRateLimiter");
     expect(line.indexOf("pausePublicAction")).toBeLessThan(
-      line.indexOf("limiter")
+      line.indexOf("createRequestRateLimiter")
+    );
+  });
+
+  it("gives request creation its own envelope-emitting limiter", () => {
+    const line = registrationLine(/app\.post\("\/api\/request",[^\n]*/);
+
+    // The shared `limiter` answers with the rate-limit library's plain-string
+    // body, which iOS cannot decode as an error envelope. On a non-idempotent
+    // create POST an undecodable failure is treated as ambiguous, so a
+    // throttled attempt would be reported as "your request may already exist".
+    // The create bucket must be the one built from `day4Error`.
+    expect(line).not.toMatch(/[^a-zA-Z]limiter[^a-zA-Z]/);
+
+    const routeSource = readFileSync(
+      new URL("./createRequestRoute.ts", import.meta.url),
+      "utf8"
+    );
+    expect(routeSource).toContain(
+      "export const createRequestRateLimiter = createDay4MutationRateLimiter(5)"
     );
   });
 

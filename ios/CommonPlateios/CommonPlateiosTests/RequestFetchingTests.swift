@@ -546,7 +546,7 @@ final class RequestFetchingTests: XCTestCase {
                 id: "created-asap",
                 vendor: "Palladium",
                 food: "Chicken bowl",
-                pickupWindowText: "ASAP (within the next hour)",
+                pickupWindowText: "ASAP (within the next 5 hours)",
                 status: "open",
                 createdAt: "2026-07-28T16:00:00.123Z",
                 expiresAt: "2026-07-28T21:00:00.000Z"
@@ -559,7 +559,7 @@ final class RequestFetchingTests: XCTestCase {
         XCTAssertEqual(created.status, .open)
         XCTAssertEqual(created.diningSpot.name, "Palladium")
         XCTAssertEqual(created.foodDescription, "Chicken bowl")
-        XCTAssertEqual(created.pickupWindowText, "ASAP (within the next hour)")
+        XCTAssertEqual(created.pickupWindowText, "ASAP (within the next 5 hours)")
         XCTAssertNil(created.windowStart)
         XCTAssertNil(created.windowEnd)
         XCTAssertEqual(created.createdAt, try iso8601Date("2026-07-28T16:00:00.123Z"))
@@ -591,6 +591,22 @@ final class RequestFetchingTests: XCTestCase {
             } catch {
                 XCTFail("Unexpected error for \(code): \(error)")
             }
+        }
+    }
+
+    func testUnstructuredHTTPFailureMakesCreateOutcomeAmbiguous() async {
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 504,
+            data: Data("Gateway Timeout".utf8)
+        ))
+
+        do {
+            _ = try await makeService().createRequest(makeCreatePayload())
+            XCTFail("A non-envelope HTTP failure cannot confirm whether creation committed")
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected create error: \(error)")
         }
     }
 
@@ -709,6 +725,41 @@ final class RequestFetchingTests: XCTestCase {
 
         // The POST may already have succeeded server-side, so exactly one
         // create must have been sent — no automatic retry.
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths.filter {
+                $0 == "/api/request"
+            }.count,
+            1
+        )
+    }
+
+    func testAmbiguousCreateBlocksLaterCreateAndRepublishesOutcome() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.failure(.networkConnectionLost))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("The first create should be ambiguous")
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected first-create error: \(error)")
+        }
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("An unresolved create must block every later create")
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // The stored ambiguity is republished to a re-entered form.
+        } catch {
+            XCTFail("Unexpected blocked-create error: \(error)")
+        }
+
+        if case .ambiguousCreateOutcome? = store.createError {
+            // Expected.
+        } else {
+            XCTFail("The store should republish the unresolved ambiguity")
+        }
         XCTAssertEqual(
             RequestFetchingURLProtocol.capturedRequestedPaths.filter {
                 $0 == "/api/request"

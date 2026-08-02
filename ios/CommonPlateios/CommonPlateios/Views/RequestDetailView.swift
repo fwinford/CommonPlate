@@ -45,7 +45,7 @@ enum ClaimPresentationError: Equatable {
         case .noLongerAvailable:
             return RequestDetailView.noLongerAvailableNotice
         case .publicActionsPaused:
-            // One source for the locked Day 2 helper-pause sentence.
+            // Single source for the backend-confirmed helper-pause sentence.
             return RequestDetailView.helperPauseNotice
         case .rateLimited:
             return "Too many attempts. Please wait a moment and try again."
@@ -109,8 +109,7 @@ enum ClaimPresentationError: Equatable {
 }
 
 struct RequestDetailView: View {
-    /// Locked Day 2 copy: shown when the backend refuses claiming because
-    /// public actions are paused.
+    /// Shown when claiming is refused with `PUBLIC_ACTIONS_PAUSED`.
     static let helperPauseNotice = "Helping with this meal is temporarily unavailable."
 
     /// Locked race-conflict copy, identical to the backend's HTTP 409
@@ -315,9 +314,8 @@ struct RequestDetailView: View {
     static let otherClaimInProgressNotice =
         "We’re still reserving another request. Try this one again in a moment."
 
-    /// The acknowledgement gate. Week 2 holds one placement result at a time, so
-    /// the previous one has to be read and dismissed — from the Active Requests
-    /// item that carries it — before another request can be started.
+    /// An unacknowledged placement result gates new claims until it is dismissed
+    /// from Active Requests.
     static let pendingPlacementTitle = "Check your last order first"
     static let pendingPlacementNotice =
         "Go back to Active Requests and tap “Got it” on your last order. Then you can help with another request."

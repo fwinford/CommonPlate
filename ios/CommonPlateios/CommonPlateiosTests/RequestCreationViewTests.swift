@@ -89,46 +89,51 @@ final class RequestCreationViewTests: XCTestCase {
     }
 
     func testMalformedCompletedRequestRevealsEmailErrorAndInvokesNoSubmission() async throws {
-        let draft = RequestFoodFormDraft(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            email: "taylor@",
-            timing: .asap,
-            preferredPickupTime: Date(timeIntervalSince1970: 0)
-        )
         var submissionCount = 0
 
-        XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
-            draft: draft,
-            submissionError: nil,
-            isCreating: false
-        ))
-        let result = try await RequestFoodView.orchestrateSubmission(
-            draft: draft,
-            now: Date(timeIntervalSince1970: 1_000),
-            calendar: utcCalendar,
-            presentation: RequestFoodValidationPresentation()
-        ) { _ in
-            submissionCount += 1
+        for invalidEmail in ["taylor@", "name@@nyu.edu", "name @nyu.edu", "name@."] {
+            let draft = RequestFoodFormDraft(
+                selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+                foodRequest: "Chicken bowl",
+                pickupName: "Taylor",
+                email: invalidEmail,
+                timing: .asap,
+                preferredPickupTime: Date(timeIntervalSince1970: 0)
+            )
+
+            XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
+                draft: draft,
+                submissionError: nil,
+                isCreating: false
+            ))
+            let result = try await RequestFoodView.orchestrateSubmission(
+                draft: draft,
+                now: Date(timeIntervalSince1970: 1_000),
+                calendar: utcCalendar,
+                presentation: RequestFoodValidationPresentation()
+            ) { _ in
+                submissionCount += 1
+            }
+            let errors = RequestFoodFormValidator.validate(
+                selectedDiningSpot: draft.selectedDiningSpot,
+                foodRequest: draft.foodRequest,
+                pickupName: draft.pickupName,
+                email: draft.email,
+                timing: draft.timing,
+                isScheduledWindowValid: true,
+                isScheduledTimingAvailable: true
+            )
+
+            XCTAssertFalse(result.didSubmit, invalidEmail)
+            XCTAssertEqual(result.firstInvalidTextField, .requesterEmail, invalidEmail)
+            XCTAssertEqual(
+                result.presentation.visibleError(for: .requesterEmail, from: errors)?.error,
+                .invalidEmail,
+                invalidEmail
+            )
         }
-        let errors = RequestFoodFormValidator.validate(
-            selectedDiningSpot: draft.selectedDiningSpot,
-            foodRequest: draft.foodRequest,
-            pickupName: draft.pickupName,
-            email: draft.email,
-            timing: draft.timing,
-            isScheduledWindowValid: true,
-            isScheduledTimingAvailable: true
-        )
 
         XCTAssertEqual(submissionCount, 0)
-        XCTAssertFalse(result.didSubmit)
-        XCTAssertEqual(result.firstInvalidTextField, .requesterEmail)
-        XCTAssertEqual(
-            result.presentation.visibleError(for: .requesterEmail, from: errors)?.error,
-            .invalidEmail
-        )
     }
 
     func testInFlightAndExistingLifecycleBlockDisableRequestSubmission() {
@@ -1155,6 +1160,7 @@ final class RequestCreationViewTests: XCTestCase {
         for error: RequestCreatePresentationError in [
             .invalidRequest,
             .requestLimitReached,
+            .rateLimited,
             .publicActionsPaused,
             .creationFailed,
             .operationInProgress
@@ -1323,6 +1329,7 @@ final class RequestCreationViewTests: XCTestCase {
     func testAvailablePostingShowsTheForm() {
         XCTAssertEqual(
             RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: false,
                 availability: .available,
                 isCheckingAvailability: false,
                 hasAttemptedAvailabilityCheck: true,
@@ -1335,6 +1342,7 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testPausedPostingHidesTheFormAndShowsTheLockedSentence() {
         let presentation = RequestFoodView.presentation(
+            hasUnresolvedCreateAmbiguity: false,
             availability: .paused,
             isCheckingAvailability: false,
             hasAttemptedAvailabilityCheck: true,
@@ -1357,6 +1365,7 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testFailedAvailabilityCheckHidesTheFormWithoutClaimingItIsPaused() {
         let presentation = RequestFoodView.presentation(
+            hasUnresolvedCreateAmbiguity: false,
             availability: .unavailable,
             isCheckingAvailability: false,
             hasAttemptedAvailabilityCheck: true,
@@ -1381,6 +1390,7 @@ final class RequestCreationViewTests: XCTestCase {
         for hasAttempted in [true, false] {
             XCTAssertEqual(
                 RequestFoodView.presentation(
+                    hasUnresolvedCreateAmbiguity: false,
                     availability: .unknown,
                     isCheckingAvailability: true,
                     hasAttemptedAvailabilityCheck: hasAttempted,
@@ -1397,6 +1407,7 @@ final class RequestCreationViewTests: XCTestCase {
     func testUnknownAvailabilityBeforeAnyProbeStaysPendingWithoutOfferingRetry() {
         XCTAssertEqual(
             RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: false,
                 availability: .unknown,
                 isCheckingAvailability: false,
                 hasAttemptedAvailabilityCheck: false,
@@ -1412,6 +1423,7 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testSettledUnknownAvailabilityOffersRetryInsteadOfAnIndefiniteSpinner() {
         let presentation = RequestFoodView.presentation(
+            hasUnresolvedCreateAmbiguity: false,
             availability: .unknown,
             isCheckingAvailability: false,
             hasAttemptedAvailabilityCheck: true,
@@ -1449,6 +1461,7 @@ final class RequestCreationViewTests: XCTestCase {
             for isChecking in [true, false] {
                 XCTAssertEqual(
                     RequestFoodView.presentation(
+                        hasUnresolvedCreateAmbiguity: false,
                         availability: availability,
                         isCheckingAvailability: isChecking,
                         hasAttemptedAvailabilityCheck: true,
@@ -1632,8 +1645,566 @@ final class RequestCreationViewTests: XCTestCase {
         }
     }
 
+    // MARK: - Process-lifetime ambiguous-create lock
+
+    /// The lock exists because `POST /api/request` is not idempotent and
+    /// carries no operation identity: once iOS cannot read the outcome, it can
+    /// never learn whether the record exists, so no further create is safe.
+    @MainActor
+    func testIndeterminateCreateArmsTheProcessLifetimeGuard() async {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+
+        await assertCreateThrowsAmbiguity(store)
+
+        XCTAssertTrue(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertNotNil(store.unresolvedCreateError)
+    }
+
+    /// The defect this closes: `submissionError` is `@State`, so a form rebuilt
+    /// after the ambiguous create came back with a nil error, a live Submit
+    /// button, and no warning — even though the store would refuse the tap.
+    @MainActor
+    func testReopeningTheFormRestoresTheBlockingAmbiguityPresentation() async throws {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        // A brand-new view instance: no local error survived the teardown.
+        let rebuiltViewError = RequestFoodView.effectiveSubmissionError(
+            hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity,
+            submissionError: nil
+        )
+
+        XCTAssertEqual(rebuiltViewError, .ambiguous)
+
+        let presentation = try XCTUnwrap(
+            RequestFoodView.submissionSectionPresentation(for: rebuiltViewError)
+        )
+        XCTAssertEqual(presentation.error, .ambiguous)
+        XCTAssertEqual(
+            presentation.message,
+            "We couldn’t confirm whether your request was posted. Check Active Requests before submitting again."
+        )
+        // The only offered move is leaving, never a retry.
+        XCTAssertTrue(presentation.showsReturnHomeAction)
+    }
+
+    @MainActor
+    func testSubmitStaysDisabledForACompleteDraftWhileTheGuardExists() async throws {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        let completeDraft = try completeRequestDraft()
+        // Without the guard this draft is submittable, so the assertion below
+        // is about the guard rather than about missing input.
+        XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
+            draft: completeDraft,
+            submissionError: nil,
+            isCreating: false
+        ))
+
+        XCTAssertFalse(RequestFoodView.isSubmissionEnabled(
+            draft: completeDraft,
+            submissionError: RequestFoodView.effectiveSubmissionError(
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity,
+                submissionError: nil
+            ),
+            isCreating: false
+        ))
+    }
+
+    /// The guard is a real refusal, not only a disabled button: even a caller
+    /// that reaches the store directly sends nothing.
+    @MainActor
+    func testGuardedCreateSendsNoSecondPOST() async {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request"]
+        )
+
+        // A stub that would confirm a create if the guard ever let one through.
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: createdRequestObject(id: "second"))
+        ))
+
+        await assertCreateThrowsAmbiguity(store)
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request"],
+            "A guarded create must not reach the network at all"
+        )
+        XCTAssertTrue(store.requests.isEmpty)
+    }
+
+    /// Editing the draft or rebuilding the screen are ordinary local actions.
+    /// Neither can resolve a question only the backend could answer.
+    @MainActor
+    func testDraftEditsAndViewRecreationDoNotClearTheGuard() async throws {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        var editedDraft = try completeRequestDraft()
+        editedDraft.foodRequest = "A completely different meal"
+        editedDraft.pickupName = "Someone Else"
+
+        XCTAssertTrue(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertEqual(
+            RequestFoodView.effectiveSubmissionError(
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity,
+                submissionError: nil
+            ),
+            .ambiguous,
+            "The guard is not scoped to the payload that raised it"
+        )
+        XCTAssertFalse(RequestFoodView.isSubmissionEnabled(
+            draft: editedDraft,
+            submissionError: RequestFoodView.effectiveSubmissionError(
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity,
+                submissionError: nil
+            ),
+            isCreating: false
+        ))
+    }
+
+    /// Deliberate limitation, recorded so it cannot be mistaken for a fix: the
+    /// guard lives in this store only. A relaunch loses it. Durable
+    /// reconciliation is Week 3 work and is a release blocker before external
+    /// testing.
+    @MainActor
+    func testGuardIsProcessLocalAndIsNotPersisted() async {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        XCTAssertTrue(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertFalse(
+            makeStore().hasUnresolvedCreateAmbiguity,
+            "Nothing persists the guard; a fresh store starts unguarded"
+        )
+    }
+
+    // MARK: - Ambiguity outranks availability
+
+    /// Every availability answer is a smaller fact than "your request may
+    /// already exist". None of them changes what this student can do next, so
+    /// none of them may take the screen.
+    @MainActor
+    func testBlockedPresentationWinsOverEveryAvailabilityState() {
+        let availabilityStates: [(String, RequestCreationAvailability, Bool, Bool)] = [
+            // label, availability, isChecking, hasAttempted
+            ("unknown before any probe", .unknown, false, false),
+            ("probe in flight", .unknown, true, true),
+            ("settled unknown", .unknown, false, true),
+            ("confirmed unavailable", .unavailable, false, true),
+            ("paused", .paused, false, true),
+            ("available", .available, false, true)
+        ]
+
+        for (label, availability, isChecking, hasAttempted) in availabilityStates {
+            XCTAssertEqual(
+                RequestFoodView.presentation(
+                    hasUnresolvedCreateAmbiguity: true,
+                    availability: availability,
+                    isCheckingAvailability: isChecking,
+                    hasAttemptedAvailabilityCheck: hasAttempted,
+                    didCreateRequest: false
+                ),
+                .blockedByUnresolvedCreateAmbiguity,
+                "\(label) must not replace the ambiguity warning"
+            )
+        }
+    }
+
+    /// The blocked screen is not the form with a message on it. There is
+    /// nothing to correct and nothing to resend, so no field or submit control
+    /// may exist to suggest otherwise.
+    @MainActor
+    func testBlockedStateNeverExposesTheRequestForm() async {
+        let store = makeStore()
+
+        // Reach the one availability answer that normally reveals the form,
+        // through the real probe, *before* arming the guard — so the block is
+        // demonstrably overriding `.available` rather than an absent answer.
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: publicActionsResponse(paused: false)
+        ))
+        await store.refreshRequestCreationAvailability()
+        XCTAssertEqual(presentation(for: store), .form)
+
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        XCTAssertEqual(store.requestCreationAvailability, .available)
+        XCTAssertEqual(
+            presentation(for: store),
+            .blockedByUnresolvedCreateAmbiguity
+        )
+        XCTAssertNotEqual(presentation(for: store), .form)
+    }
+
+    /// The blocked screen takes its words and its one action from the same seam
+    /// the in-form error row uses, so a change to either cannot leave them
+    /// describing one situation two ways.
+    @MainActor
+    func testBlockedPresentationReusesTheOriginalAmbiguityCopyAndAction() throws {
+        let presentation = try XCTUnwrap(
+            RequestFoodView.submissionSectionPresentation(for: .ambiguous)
+        )
+
+        XCTAssertEqual(presentation.error, .ambiguous)
+        XCTAssertEqual(
+            presentation.message,
+            "We couldn’t confirm whether your request was posted. Check Active Requests before submitting again."
+        )
+        XCTAssertTrue(presentation.showsReturnHomeAction)
+    }
+
+    /// Re-entry must not spend a request on an answer the screen cannot use.
+    /// This drives the production `.task` decision rather than restating it.
+    @MainActor
+    func testBlockedReentryStartsNoAvailabilityProbe() async {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        XCTAssertFalse(RequestFoodView.shouldProbeAvailability(
+            hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+        ))
+
+        // The body of the screen's `.task`, run exactly as production does.
+        if RequestFoodView.shouldProbeAvailability(
+            hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+        ) {
+            await store.refreshRequestCreationAvailability()
+        }
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request"],
+            "A blocked screen must not probe availability"
+        )
+        XCTAssertFalse(
+            RequestFetchingURLProtocol.capturedRequestedPaths
+                .contains("/api/public-actions")
+        )
+    }
+
+    /// The block is the only thing suppressed here. A store that never saw an
+    /// ambiguous create keeps the whole normal availability flow, probe
+    /// included.
+    @MainActor
+    func testUnguardedStoreKeepsTheNormalAvailabilityFlow() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: publicActionsResponse(paused: false)
+        ))
+
+        XCTAssertTrue(RequestFoodView.shouldProbeAvailability(
+            hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+        ))
+
+        if RequestFoodView.shouldProbeAvailability(
+            hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+        ) {
+            await store.refreshRequestCreationAvailability()
+        }
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/public-actions"]
+        )
+        XCTAssertEqual(presentation(for: store), .form)
+    }
+
+    /// Blocked means blocked: no create POST escapes through the new screen.
+    @MainActor
+    func testBlockedScreenSendsNoSecondCreatePOST() async {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: createdRequestObject(id: "escaped"))
+        ))
+        await assertCreateThrowsAmbiguity(store)
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request"]
+        )
+        XCTAssertTrue(store.requests.isEmpty)
+    }
+
+    /// Still deliberately not durable. A destroyed store starts clean and runs
+    /// the ordinary availability flow — see the Week 3 reconciliation deferral.
+    @MainActor
+    func testDestroyingTheStoreLosesTheBlockWithoutPersistence() async {
+        let store = makeStore()
+        enqueueIndeterminateCreateFailure()
+        await assertCreateThrowsAmbiguity(store)
+        XCTAssertEqual(presentation(for: store), .blockedByUnresolvedCreateAmbiguity)
+
+        let replacement = makeStore()
+
+        XCTAssertFalse(replacement.hasUnresolvedCreateAmbiguity)
+        XCTAssertNotEqual(
+            presentation(for: replacement),
+            .blockedByUnresolvedCreateAmbiguity
+        )
+        XCTAssertTrue(RequestFoodView.shouldProbeAvailability(
+            hasUnresolvedCreateAmbiguity: replacement.hasUnresolvedCreateAmbiguity
+        ))
+    }
+
+    // MARK: - Definitive create refusals never arm the guard
+
+    /// The throttle refuses ahead of validation, the write, and every side
+    /// effect, so it proves nothing was created. Reporting it as ambiguous
+    /// would turn a sixth tap inside one minute into a permanent lockout.
+    @MainActor
+    func testRateLimitedCreateIsDefinitiveAndLeavesTheGuardUnset() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 429,
+            data: Data(#"""
+            {"error":{"code":"RATE_LIMITED","message":"Too many attempts. Please wait a moment and try again.","fields":null}}
+            """#.utf8)
+        ))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("A throttled create must be refused")
+        } catch RequestServiceError.serverError(let code, _) {
+            XCTAssertEqual(code, "RATE_LIMITED")
+        } catch {
+            XCTFail("Unexpected create error: \(error)")
+        }
+
+        XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertNil(store.unresolvedCreateError)
+
+        let presented = RequestCreatePresentationError.map(
+            RequestServiceError.serverError(code: "RATE_LIMITED", message: "Too many attempts.")
+        )
+        XCTAssertEqual(presented, .rateLimited)
+        XCTAssertEqual(
+            presented.message,
+            "Too many attempts. Please wait a moment and try again."
+        )
+        // Recoverable in place: the student waits and submits the same request.
+        XCTAssertTrue(RequestFoodView.allowsSubmission(after: presented))
+        XCTAssertFalse(RequestFoodView.showsReturnHomeAction(for: presented))
+    }
+
+    /// A bare 404 means this route does not exist at this base URL — a
+    /// misconfigured host or an unmounted route. Nothing was created, so it must
+    /// not claim the request may already exist.
+    @MainActor
+    func testBareNotFoundIsDefinitiveAndPermitsAnotherAttempt() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 404,
+            data: Data("<html>Cannot POST /api/request</html>".utf8)
+        ))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("A 404 create must be refused")
+        } catch RequestServiceError.notFound {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected create error: \(error)")
+        }
+
+        XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertNil(store.unresolvedCreateError)
+
+        let presented = RequestCreatePresentationError.map(RequestServiceError.notFound)
+        XCTAssertNotEqual(presented, .ambiguous)
+        XCTAssertTrue(RequestFoodView.allowsSubmission(after: presented))
+
+        // Unblocked: the next attempt genuinely reaches the network, and this
+        // one is confirmed rather than retried automatically.
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 201,
+            data: createResponse(requestObject: createdRequestObject(id: "after-404"))
+        ))
+        try? await store.createRequest(makeCreatePayload())
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request", "/api/request"]
+        )
+        XCTAssertEqual(store.requests.map(\.id), ["after-404"])
+    }
+
+    // MARK: - Genuine indeterminacy stays ambiguous
+
+    /// Being an error is not proof of a rollback. Each of these leaves the
+    /// backend's write status genuinely unknown, so each arms the guard — and
+    /// each sends exactly one POST.
+    @MainActor
+    func testIndeterminateFailuresStayAmbiguousWithExactlyOnePOST() async {
+        let cases: [(String, RequestFetchingURLProtocol.Stub)] = [
+            ("timeout", .failure(.timedOut)),
+            ("transport loss", .failure(.networkConnectionLost)),
+            (
+                "undecodable 5xx",
+                .response(statusCode: 502, data: Data("Bad Gateway".utf8))
+            ),
+            (
+                "undecodable success body",
+                .response(statusCode: 201, data: Data("{".utf8))
+            )
+        ]
+
+        for (label, stub) in cases {
+            RequestFetchingURLProtocol.reset()
+            let store = makeStore()
+            RequestFetchingURLProtocol.enqueue(stub)
+
+            do {
+                try await store.createRequest(makeCreatePayload())
+                XCTFail("\(label) cannot confirm creation")
+            } catch RequestServiceError.ambiguousCreateOutcome {
+                // Expected.
+            } catch {
+                XCTFail("Unexpected error for \(label): \(error)")
+            }
+
+            XCTAssertTrue(
+                store.hasUnresolvedCreateAmbiguity,
+                "\(label) must arm the process-lifetime guard"
+            )
+            XCTAssertEqual(
+                RequestFetchingURLProtocol.capturedRequestedPaths,
+                ["/api/request"],
+                "\(label) must send exactly one POST and never retry"
+            )
+            XCTAssertTrue(store.requests.isEmpty)
+        }
+    }
+
+    // MARK: - ASAP wording
+
+    /// The backend keeps an ASAP request available for five hours, and the
+    /// requester is told so at submission. The window text helpers read said
+    /// "within the next hour", so a request posted at 1pm still advertised an
+    /// expired-sounding window at 5pm.
+    @MainActor
+    func testASAPWindowTextStatesTheRealFiveHourLifetime() async throws {
+        let asapWindowText = "ASAP (within the next 5 hours)"
+
+        let request = try await decodedCreatedRequest(
+            createResponse(requestObject: createdRequestObject(
+                id: "asap",
+                pickupWindowText: asapWindowText
+            ))
+        )
+        XCTAssertEqual(request.pickupWindowText, asapWindowText)
+        XCTAssertFalse(request.pickupWindowText.contains("within the next hour"))
+
+        // The two sides of the same request must agree.
+        XCTAssertTrue(
+            RequestFoodView.asapExpirationNotice.contains("5 hours"),
+            "The requester is told five hours; helpers must see the same"
+        )
+        XCTAssertTrue(
+            RequestFoodView.formExpirationNotice(for: .asap).contains("5 hours")
+        )
+    }
+
+    // MARK: - Ambiguity helpers
+
+    private func enqueueIndeterminateCreateFailure() {
+        RequestFetchingURLProtocol.enqueue(.failure(.timedOut))
+    }
+
+    @MainActor
+    private func assertCreateThrowsAmbiguity(
+        _ store: RequestStore,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("Expected an ambiguous create refusal", file: file, line: line)
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected create error: \(error)", file: file, line: line)
+        }
+    }
+
+    private func completeRequestDraft() throws -> RequestFoodFormDraft {
+        RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .asap,
+            preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
+        )
+    }
+
+    private func makeCreatePayload() -> CreateRequestPayload {
+        CreateRequestPayload(
+            vendor: "Palladium",
+            food: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .asap,
+            windowStart: nil,
+            windowEnd: nil
+        )
+    }
+
+    private func createResponse(requestObject: String) -> Data {
+        Data(#"{"request":\#(requestObject)}"#.utf8)
+    }
+
+    private func createdRequestObject(
+        id: String,
+        pickupWindowText: String = "ASAP (within the next 5 hours)"
+    ) -> String {
+        """
+        {
+          "id": "\(id)",
+          "vendor": "Palladium",
+          "food": "Chicken bowl",
+          "pickupWindowText": "\(pickupWindowText)",
+          "windowStart": null,
+          "windowEnd": null,
+          "status": "open",
+          "createdAt": "2026-07-28T16:00:00.000Z",
+          "expiresAt": "2026-07-28T21:00:00.000Z"
+        }
+        """
+    }
+
+    @MainActor
+    private func decodedCreatedRequest(_ data: Data) async throws -> FoodRequest {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 201, data: data))
+        try await store.createRequest(makeCreatePayload())
+        return try XCTUnwrap(store.requests.first)
+    }
+
+    /// Mirrors the production call exactly, guard included, so the availability
+    /// tests exercise the same precedence the screen applies.
     private func presentation(for store: RequestStore) -> RequestFormPresentation {
         RequestFoodView.presentation(
+            hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity,
             availability: store.requestCreationAvailability,
             isCheckingAvailability: store.isCheckingRequestCreationAvailability,
             hasAttemptedAvailabilityCheck: store.hasAttemptedRequestCreationAvailabilityCheck,
@@ -1641,7 +2212,7 @@ final class RequestCreationViewTests: XCTestCase {
         )
     }
 
-    private func makeAvailabilityStore() -> RequestStore {
+    private func makeStore() -> RequestStore {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RequestFetchingURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -1650,6 +2221,10 @@ final class RequestCreationViewTests: XCTestCase {
             session: session
         )
         return RequestStore(service: RequestService(client: client))
+    }
+
+    private func makeAvailabilityStore() -> RequestStore {
+        makeStore()
     }
 
     private func publicActionsResponse(paused: Bool) -> Data {

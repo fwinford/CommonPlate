@@ -2,9 +2,8 @@ import Foundation
 import XCTest
 @testable import CommonPlateios
 
-/// Stub transport for the Day 4 claim and extension slice. It keeps its own
-/// queue and captured requests rather than sharing `RequestFetchingURLProtocol`'s
-/// statics, so neither suite can consume the other's stubs.
+/// Isolated transport stub for claim and fulfillment tests; its private queue
+/// prevents cross-suite stub consumption.
 final class ClaimFlowURLProtocol: URLProtocol {
     struct Stub {
         let statusCode: Int
@@ -323,6 +322,26 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 1)
         // The action is withdrawn rather than offered again.
         XCTAssertFalse(RequestDetailView.showsClaimAction(for: .ambiguous))
+    }
+
+    func testUnstructuredHTTPFailureMakesClaimOutcomeAmbiguous() async {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 504,
+            data: Data("Gateway Timeout".utf8)
+        ))
+
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("A non-envelope HTTP failure cannot confirm whether the claim committed")
+        } catch RequestServiceError.ambiguousClaimOutcome {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected claim error: \(error)")
+        }
+
+        XCTAssertNil(store.activeClaim)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 1)
     }
 
     func testMismatchedClaimResponseIDIsAmbiguous() async {
@@ -1495,6 +1514,28 @@ final class ClaimFlowTests: XCTestCase {
             accuracy: 0.01
         )
         XCTAssertFalse(claim.hasUsedExtension)
+        XCTAssertEqual(
+            ClaimExtensionPresentationError.map(store.claimExtensionError),
+            .ambiguous
+        )
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/claim/extend") }.count,
+            1
+        )
+    }
+
+    func testUnstructuredHTTPFailureMakesExtensionOutcomeAmbiguous() async throws {
+        let store = makeStore()
+        let claimExpiresAt = Date().addingTimeInterval(10 * 60)
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(claimExpiresAt: claimExpiresAt)))
+        try await store.claim(requestID: requestID)
+
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 504,
+            data: Data("Gateway Timeout".utf8)
+        ))
+        await store.extendActiveClaim()
+
         XCTAssertEqual(
             ClaimExtensionPresentationError.map(store.claimExtensionError),
             .ambiguous

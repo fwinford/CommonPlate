@@ -2,7 +2,8 @@
 
 import { formatMealRequestWindow } from "../utils/date.js";
 
-// Handles the fulfill page: shows request details and submits order number + ETA text
+// Legacy web fulfillment remains disabled; claim-authorized placement is
+// handled by the iOS flow.
 
 export const WEB_ORDERING_UNAVAILABLE_MESSAGE =
   "Ordering from the web is temporarily unavailable.";
@@ -48,7 +49,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const detailsWindow = document.getElementById('details-window') as HTMLElement | null;
   const orderNumberVal = document.getElementById('order-number-val') as HTMLElement | null;
   const orderNumberDisplay = document.getElementById('order-number-display') as HTMLElement | null;
-  // ...existing code...
 
   if (!form || !submitBtn || !errorMsg || !successMsg) return;
 
@@ -57,7 +57,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return;
   }
 
-  // Extract request id from URL: /request/:id/fulfill
   const pathParts = window.location.pathname.split('/').filter(Boolean);
   const requestId = pathParts.length >= 2 ? pathParts[1] : null;
 
@@ -75,7 +74,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (detailsFood) detailsFood.textContent = req.food || '';
         if (detailsWindow) {
           if (req.isAsap) {
-            detailsWindow.textContent = 'ASAP (within the next hour)';
+            detailsWindow.textContent = 'ASAP (within the next 5 hours)';
           } else if (req.windowStart || req.windowEnd) {
               detailsWindow.textContent = formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
           } else {
@@ -83,7 +82,6 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         }
 
-        // Also populate the summary card elements (ids in `public/fulfill.html`)
         const elFood = document.getElementById('summary-food') as HTMLElement | null;
         const elVendor = document.getElementById('summary-vendor') as HTMLElement | null;
         const elFoodDetails = document.getElementById('summary-food-details') as HTMLElement | null;
@@ -94,7 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (elVendor) elVendor.textContent = req.vendor ? `at ${req.vendor}` : '';
         if (elFoodDetails) elFoodDetails.textContent = req.details || req.foodDetails || '';
         if (elPickup) elPickup.textContent = req.pickupName ? `Pickup Name: ${req.pickupName}` : '';
-        if (elWindow) elWindow.textContent = req.isAsap ? 'ASAP (within the next hour)' : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
+        if (elWindow) elWindow.textContent = req.isAsap ? 'ASAP (within the next 5 hours)' : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
     } catch (err) {
       errorMsg.textContent = 'Unable to load request details.';
       errorMsg.style.display = 'block';
@@ -215,7 +213,6 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Require donor email (fulfillerEmail) to be present
     if (!fulfillerEmail) {
       errorMsg.textContent = 'Please provide your email so the requester can contact you.';
       errorMsg.style.display = 'block';
@@ -233,7 +230,6 @@ document.addEventListener('DOMContentLoaded', () => {
       submitBtn.textContent = 'Place Order';
       return;
     }
-    // Basic email sanity check
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(fulfillerEmail)) {
       errorMsg.textContent = 'Please enter a valid email address.';
       errorMsg.style.display = 'block';
@@ -244,7 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
   const body: { orderNumber: string; eta?: string; fulfillerEmail?: string; contactMessage?: string } = { orderNumber };
-  if (eta) body.eta = eta; // free-text ETA
+  if (eta) body.eta = eta;
   if (fulfillerEmail) body.fulfillerEmail = fulfillerEmail;
   if (contactMessage) body.contactMessage = contactMessage;
 
@@ -257,7 +253,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const result = await resp.json();
       if (!resp.ok) throw new Error(result.error || 'Failed to fulfill request');
 
-      // Show order number prominently at top
       if (orderNumberVal) orderNumberVal.textContent = escapeHtmlSafe(orderNumber);
       if (orderNumberDisplay) orderNumberDisplay.style.display = 'block';
 
@@ -265,10 +260,8 @@ document.addEventListener('DOMContentLoaded', () => {
       successMsg.style.display = 'block';
       form.reset();
 
-      // show thank-you GIF
       tryShowThankYou();
 
-      // Redirect after a short delay
       setTimeout(() => { window.location.href = '/'; }, 3000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

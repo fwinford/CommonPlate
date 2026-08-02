@@ -163,9 +163,11 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       .select("+claimTokenDigest")
       .lean();
     expect(stored?.status).toBe("placed");
-    expect(stored?.placedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
-    expect(stored?.placedAt.getTime()).toBeLessThanOrEqual(after.getTime());
-    expect(stored?.deleteAt.getTime() - stored?.placedAt.getTime()).toBe(
+    // `placedAt` and `deleteAt` are optional on the schema but always written
+    // by the placement transaction this test just committed.
+    expect(stored?.placedAt!.getTime()).toBeGreaterThanOrEqual(before.getTime());
+    expect(stored?.placedAt!.getTime()).toBeLessThanOrEqual(after.getTime());
+    expect(stored!.deleteAt!.getTime() - stored!.placedAt!.getTime()).toBe(
       PLACED_RETENTION_MS
     );
     expect(stored?.expiresAt).toEqual(originalExpiresAt);

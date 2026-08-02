@@ -12,17 +12,12 @@ import Foundation
 
 /// Product-safe, structured failure surface for the request domain.
 ///
-/// The integration spec (`docs/week-2-integration-spec.md`) locks the error
-/// *envelope* shape (`{ error: { code, message, fields } }`) and, for the Day 4
-/// claim and extension routes, a set of stable codes. This type stays code-
-/// agnostic anyway: a decoded envelope is preserved verbatim as
-/// `.serverError(code:message:)`, and the deliberate mapping of those codes to
-/// product behavior lives one layer up, where the copy and recovery for each
-/// code belong. Endpoints outside the Day 4 routes still have endpoint-specific
-/// error shapes, which the same passthrough handles without guessing names.
+/// Decoded error envelopes remain code-agnostic here and are preserved as
+/// `.serverError(code:message:)`; presentation layers map stable codes to
+/// recovery and copy.
 enum RequestServiceError: Error {
-    /// Unambiguous at the HTTP level (404) regardless of which stable code
-    /// string the backend eventually adopts.
+    /// A non-envelope HTTP 404, indicating that the route is absent at the
+    /// configured base URL.
     case notFound
     /// A decoded `{ error: { code, message } }` whose `code` isn't yet
     /// mapped to a dedicated case. Carries the backend's own values as-is —
@@ -176,7 +171,18 @@ struct RequestService {
             throw RequestServiceError.ambiguousCreateOutcome(underlying: CancellationError())
         } catch let error as APIClientError {
             switch error {
-            case .transport, .decoding:
+            // A 404 is definitive at the HTTP level: this route does not exist
+            // at this base URL, so nothing was created. Classifying it as
+            // ambiguous would lock request creation for the rest of the
+            // process over a misconfigured host or an unmounted route.
+            case .unexpectedStatus(404):
+                throw RequestServiceError.notFound
+            // Everything else that reaches here is genuinely indeterminate:
+            // transport loss or a timeout after the body may already have been
+            // sent, an undecodable success body, or a status whose response
+            // does not prove that no write occurred. An unreadable 5xx stays
+            // ambiguous — being an error is not proof of a rollback.
+            case .transport, .decoding, .unexpectedStatus:
                 throw RequestServiceError.ambiguousCreateOutcome(underlying: error)
             default:
                 throw Self.translate(error)
@@ -209,7 +215,7 @@ struct RequestService {
             throw RequestServiceError.ambiguousClaimOutcome(underlying: CancellationError())
         } catch let error as APIClientError {
             switch error {
-            case .transport, .decoding:
+            case .transport, .decoding, .unexpectedStatus:
                 throw RequestServiceError.ambiguousClaimOutcome(underlying: error)
             default:
                 throw Self.translate(error)
@@ -261,7 +267,7 @@ struct RequestService {
             throw RequestServiceError.ambiguousExtensionOutcome(underlying: CancellationError())
         } catch let error as APIClientError {
             switch error {
-            case .transport, .decoding:
+            case .transport, .decoding, .unexpectedStatus:
                 throw RequestServiceError.ambiguousExtensionOutcome(underlying: error)
             default:
                 throw Self.translate(error)

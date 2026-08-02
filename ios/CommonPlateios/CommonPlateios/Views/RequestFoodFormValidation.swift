@@ -135,13 +135,7 @@ enum RequestFoodFormValidator {
     }
 
     static func isValidEmail(_ value: String) -> Bool {
-        let trimmedEmail = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let atIndex = trimmedEmail.firstIndex(of: "@"),
-              atIndex != trimmedEmail.startIndex,
-              atIndex != trimmedEmail.index(before: trimmedEmail.endIndex) else {
-            return false
-        }
-        return trimmedEmail[trimmedEmail.index(after: atIndex)...].contains(".")
+        FulfillmentFormValidator.isValidEmail(value)
     }
 }
 

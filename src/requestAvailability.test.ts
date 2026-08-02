@@ -68,7 +68,9 @@ describe("buildEffectiveAvailabilityFilter", () => {
     expect(filter.expiresAt.$gte).toEqual(
       new Date(other.getTime() + CLAIM_MINIMUM_REMAINING_MS)
     );
-    expect(filter.$or[1].claimExpiresAt.$lte).toEqual(other);
+    // `$or[1]` is the claimed branch, which the filter above always builds
+    // with a `claimExpiresAt` bound.
+    expect(filter.$or[1].claimExpiresAt!.$lte).toEqual(other);
   });
 });
 
