@@ -23,6 +23,5 @@ xcuserdata/
 docs/*
 !docs/system-contract.md
 !docs/testing.md
-!docs/week-3-notifications-spec.md
 !docs/decisions/
 !docs/decisions/**

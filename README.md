@@ -29,7 +29,7 @@ CommonPlate uses these collections:
 - **requests** — meal requests posted by students
 - **fulfillments** — order details linked to a request
 - **subscribers** — students signed up for new-request email alerts
-- **sendlogs** — one delivery record per alert, which also prevents duplicate sends
+- **sendlogs** — helper-alert/digest send-attempt ledger and duplicate-send guard for a request/subscriber pair; not a delivery, reading, or pickup receipt
 - **system** — small key/value store (currently the round-robin alert cursor)
 
 A request can have at most one fulfillment, enforced by both a unique index and
@@ -153,9 +153,9 @@ Rules:
   or `0` resumes public actions;
 - this is a temporary rollout safety control, not a product feature. Removing
   it requires the create → claim → fulfill path to be truthful and working;
-- legacy fulfillment (`POST /api/request/:id/fulfill`) is refused independently
-  of this value and stays refused even when it is `false`. Only the Day 5
-  atomic replacement lifts that refusal.
+- the legacy web fulfillment UI remains disabled. `POST /api/request/:id/fulfill`
+  is active only with a valid, active claim token; `PUBLIC_ACTIONS_PAUSED` does
+  not disable that valid-claim fulfillment path.
 
 ## UI test fixture
 
