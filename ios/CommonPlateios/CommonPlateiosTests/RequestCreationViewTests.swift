@@ -4,6 +4,11 @@ import XCTest
 
 @MainActor
 final class RequestCreationViewTests: XCTestCase {
+    override func tearDown() {
+        RequestFetchingURLProtocol.reset()
+        super.tearDown()
+    }
+
     // MARK: - Validation timing and presentation
 
     func testAllEmptyRequestDraftDisablesSubmission() {
@@ -113,7 +118,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: draft.pickupName,
             email: draft.email,
             timing: draft.timing,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
 
         XCTAssertEqual(submissionCount, 0)
@@ -154,7 +160,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "t",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         let presentation = RequestFoodValidationPresentation()
 
@@ -169,7 +176,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "  ",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         let malformed = RequestFoodFormValidator.validate(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
@@ -177,7 +185,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "taylor@",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
 
         XCTAssertEqual(empty.last?.message, "Enter your email address.")
@@ -191,7 +200,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "",
             email: "invalid",
             timing: .later,
-            isScheduledWindowValid: false
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: true
         )
         var presentation = RequestFoodValidationPresentation()
 
@@ -233,7 +243,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: draft.pickupName,
             email: draft.email,
             timing: draft.timing,
-            isScheduledWindowValid: false
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: true
         )
         let visible = result.presentation.visibleErrors(from: errors)
 
@@ -253,7 +264,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "invalid",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         var presentation = RequestFoodValidationPresentation()
         presentation.handleFocusTransition(
@@ -268,7 +280,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "taylor@nyu.edu",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         XCTAssertTrue(presentation.visibleErrors(from: corrected).isEmpty)
 
@@ -278,7 +291,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "taylor@",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         XCTAssertEqual(
             presentation.visibleErrors(from: invalidAgain).map(\.field),
@@ -292,7 +306,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         XCTAssertEqual(
             presentation.visibleError(for: .requesterEmail, from: emptied)?.message,
@@ -315,7 +330,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: draft.pickupName,
             email: draft.email,
             timing: draft.timing,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         var presentation = RequestFoodValidationPresentation()
         presentation.presentAll(initialErrors)
@@ -328,7 +344,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: draft.pickupName,
             email: draft.email,
             timing: draft.timing,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         XCTAssertNil(presentation.visibleError(for: .diningSpot, from: correctedErrors))
 
@@ -442,13 +459,14 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: draft.pickupName,
             email: draft.email,
             timing: draft.timing,
-            isScheduledWindowValid: false
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: false
         )
 
         XCTAssertEqual(submissionCount, 0)
         XCTAssertEqual(
             result.presentation.visibleError(for: .pickupSchedule, from: unavailableErrors)?.error,
-            .invalidScheduledTime
+            .scheduledTimingUnavailable
         )
 
         draft.timing = .asap
@@ -458,15 +476,306 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: draft.pickupName,
             email: draft.email,
             timing: draft.timing,
-            isScheduledWindowValid: false
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: false
         )
         XCTAssertNil(result.presentation.visibleError(for: .pickupSchedule, from: asapErrors))
 
         draft.timing = .later
         XCTAssertEqual(
             result.presentation.visibleError(for: .pickupSchedule, from: unavailableErrors)?.error,
-            .invalidScheduledTime
+            .scheduledTimingUnavailable
         )
+    }
+
+    /// While scheduling is still open, a bad start is a bad start: the picker is
+    /// on screen, so the instruction is to pick a different time.
+    func testInvalidStartWhileSchedulingIsOpenKeepsTheChooseAPickupTimeMessage() throws {
+        let now = try date("2026-07-28T22:00:00.000Z")
+        XCTAssertTrue(RequestFoodView.isScheduledTimingAvailable(
+            now: now,
+            calendar: utcCalendar
+        ))
+        XCTAssertEqual(
+            RequestFoodView.availableTimingOptions(now: now, calendar: utcCalendar),
+            RequestTiming.allCases
+        )
+
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            // A start in the past: correctable, because a valid one still exists.
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: true
+        )
+
+        XCTAssertEqual(errors.map(\.field), [.pickupSchedule])
+        XCTAssertEqual(errors.first?.error, .invalidScheduledTime)
+        XCTAssertEqual(
+            errors.first?.message,
+            "Choose a pickup time that leaves a full 30-minute window today."
+        )
+    }
+
+    /// The lapsed selection itself. Nothing is rewritten for the requester —
+    /// the draft still says Later — but the message stops pointing at a picker
+    /// that no longer exists and names the one move left.
+    func testLapsedLaterSelectionNamesASAPInsteadOfADepartedPicker() async throws {
+        let unavailableNow = try date("2026-07-28T23:45:00.000Z")
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
+        )
+        let originalDraft = draft
+
+        XCTAssertFalse(RequestFoodView.isScheduledTimingAvailable(
+            now: unavailableNow,
+            calendar: utcCalendar
+        ))
+        // The picker is gone, and with it the only control this state could
+        // have asked the requester to use.
+        XCTAssertEqual(
+            RequestFoodView.availableTimingOptions(now: unavailableNow, calendar: utcCalendar),
+            [.asap]
+        )
+
+        var submissionCount = 0
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: unavailableNow,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { _ in
+            submissionCount += 1
+        }
+
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertFalse(result.didSubmit)
+        // Nothing was switched on their behalf.
+        XCTAssertEqual(draft, originalDraft)
+        XCTAssertEqual(draft.timing, .later)
+
+        let errors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: false
+        )
+        let visible = try XCTUnwrap(
+            result.presentation.visibleError(for: .pickupSchedule, from: errors)
+        )
+        XCTAssertEqual(visible.error, .scheduledTimingUnavailable)
+        XCTAssertEqual(
+            visible.message,
+            "Scheduled pickups reopen tomorrow. Choose ASAP to post this request now."
+        )
+        XCTAssertNotEqual(visible.error, .invalidScheduledTime)
+        XCTAssertFalse(
+            visible.message.contains("Choose a pickup time that leaves a full 30-minute window today.")
+        )
+
+        // The completeness gate stays open: the draft is complete, just invalid,
+        // and the requester has to be able to tap Submit to hear why.
+        XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
+            draft: draft,
+            submissionError: nil,
+            isCreating: false
+        ))
+
+        // One statement about the closed window, not two.
+        XCTAssertFalse(RequestFoodView.showsScheduledUnavailableNotice(
+            isScheduledTimingAvailable: false,
+            visibleScheduleError: .scheduledTimingUnavailable
+        ))
+        // An ASAP draft still gets the plain footnote: it is the only thing
+        // explaining why Later is missing from the picker.
+        XCTAssertTrue(RequestFoodView.showsScheduledUnavailableNotice(
+            isScheduledTimingAvailable: false,
+            visibleScheduleError: nil
+        ))
+        XCTAssertTrue(
+            RequestFoodView.lapsedScheduledTimingNotice
+                .hasPrefix(RequestFoodView.scheduledUnavailableNotice)
+        )
+    }
+
+    /// A rejection with no text field to focus used to be silent. The tap now
+    /// leaves something visible next to the button that was tapped.
+    func testLocalRejectionWithNoFocusableFieldShowsTheSubmitAdjacentPointer() async throws {
+        let unavailableNow = try date("2026-07-28T23:45:00.000Z")
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
+        )
+
+        var submissionCount = 0
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: unavailableNow,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { _ in
+            submissionCount += 1
+        }
+
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertFalse(result.didSubmit)
+        XCTAssertNil(result.firstInvalidTextField)
+        XCTAssertTrue(RequestFoodView.showsLocalRejectionPointer(for: result))
+        XCTAssertTrue(RequestFoodView.showsLocalRejectionPointer(
+            isPresenting: true,
+            submissionError: nil
+        ))
+        XCTAssertEqual(
+            RequestFoodView.localRejectionPointerNotice,
+            "Check the highlighted fields above."
+        )
+        // It points at the adjacent errors; it never restates or replaces them.
+        XCTAssertNil(RequestFoodView.submissionSectionPresentation(for: nil))
+    }
+
+    /// Focus is its own answer to the tap, so the generic pointer stays away
+    /// from every rejection that can move it.
+    func testFocusableRejectionFocusesTheFieldWithoutTheGenericPointer() async throws {
+        let now = try date("2026-07-28T16:00:00.000Z")
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "not-an-email",
+            timing: .asap,
+            preferredPickupTime: now
+        )
+
+        var submissionCount = 0
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: now,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { _ in
+            submissionCount += 1
+        }
+
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertEqual(result.firstInvalidTextField, .requesterEmail)
+        XCTAssertFalse(RequestFoodView.showsLocalRejectionPointer(for: result))
+        XCTAssertFalse(RequestFoodView.showsLocalRejectionPointer(
+            isPresenting: false,
+            submissionError: nil
+        ))
+    }
+
+    /// Choosing ASAP is the correction the message asks for, so it has to be a
+    /// real way out: the scheduling error goes, everything else the requester
+    /// typed stays, and the submission proceeds normally.
+    func testChoosingASAPClearsTheLapsedErrorAndPermitsSubmission() async throws {
+        let unavailableNow = try date("2026-07-28T23:45:00.000Z")
+        var draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            email: "taylor@nyu.edu",
+            timing: .later,
+            preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
+        )
+
+        let rejected = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: unavailableNow,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { _ in }
+        XCTAssertTrue(RequestFoodView.showsLocalRejectionPointer(for: rejected))
+
+        draft.timing = .asap
+
+        let correctedErrors = RequestFoodFormValidator.validate(
+            selectedDiningSpot: draft.selectedDiningSpot,
+            foodRequest: draft.foodRequest,
+            pickupName: draft.pickupName,
+            email: draft.email,
+            timing: draft.timing,
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: false
+        )
+        XCTAssertTrue(correctedErrors.isEmpty)
+        // Presentation history is unchanged, and there is simply nothing left
+        // for it to reveal.
+        XCTAssertNil(
+            rejected.presentation.visibleError(for: .pickupSchedule, from: correctedErrors)
+        )
+
+        // Only the timing moved.
+        XCTAssertEqual(draft.selectedDiningSpot?.name, "Palladium")
+        XCTAssertEqual(draft.foodRequest, "Chicken bowl")
+        XCTAssertEqual(draft.pickupName, "Taylor")
+        XCTAssertEqual(draft.email, "taylor@nyu.edu")
+        XCTAssertEqual(draft.preferredPickupTime, try date("2026-07-28T23:00:00.000Z"))
+
+        var submitted: CreateRequestPayload?
+        let accepted = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: unavailableNow,
+            calendar: utcCalendar,
+            presentation: rejected.presentation
+        ) { payload in
+            submitted = payload
+        }
+
+        XCTAssertTrue(accepted.didSubmit)
+        XCTAssertFalse(RequestFoodView.showsLocalRejectionPointer(for: accepted))
+        XCTAssertEqual(submitted?.timing, .asap)
+        XCTAssertNil(submitted?.windowStart)
+        XCTAssertNil(submitted?.windowEnd)
+    }
+
+    /// The pointer is local-only. Anything the backend decided keeps the
+    /// submission section to itself, including the ambiguous outcome that
+    /// withdraws submission entirely.
+    func testBackendAndAmbiguousErrorsKeepTheirOwnSubmitAdjacentMessages() {
+        for error in [
+            RequestCreatePresentationError.invalidRequest,
+            .requestLimitReached,
+            .publicActionsPaused,
+            .creationFailed,
+            .operationInProgress,
+            .ambiguous
+        ] {
+            let presentation = RequestFoodView.submissionSectionPresentation(for: error)
+            XCTAssertEqual(presentation?.message, error.message, "\(error)")
+            XCTAssertNotEqual(
+                presentation?.message,
+                RequestFoodView.localRejectionPointerNotice,
+                "\(error)"
+            )
+            // Even if a stale local rejection were still flagged, a backend
+            // answer takes the section.
+            XCTAssertFalse(
+                RequestFoodView.showsLocalRejectionPointer(
+                    isPresenting: true,
+                    submissionError: error
+                ),
+                "\(error)"
+            )
+        }
+
+        XCTAssertTrue(RequestFoodView.showsReturnHomeAction(for: .ambiguous))
+        XCTAssertFalse(RequestFoodView.allowsSubmission(after: .ambiguous))
     }
 
     func testProgrammaticRequestFocusChangesCannotSubmitOrRevealSiblings() {
@@ -476,7 +785,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "",
             email: "invalid",
             timing: .asap,
-            isScheduledWindowValid: true
+            isScheduledWindowValid: true,
+            isScheduledTimingAvailable: true
         )
         var presentation = RequestFoodValidationPresentation()
         let submissionCount = 0
@@ -690,7 +1000,8 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "",
             email: "invalid",
             timing: .later,
-            isScheduledWindowValid: false
+            isScheduledWindowValid: false,
+            isScheduledTimingAvailable: true
         )
         var validationPresentation = RequestFoodValidationPresentation()
         validationPresentation.presentAll(errors)
@@ -966,6 +1277,8 @@ final class RequestCreationViewTests: XCTestCase {
                 calendar: utcCalendar
             )
         )
+        // At this `now` scheduling has already closed for the day, so the
+        // refusal is the lapsed one — there is no pickup time left to offer.
         XCTAssertThrowsError(
             try RequestFoodView.makePayload(
                 selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
@@ -978,6 +1291,28 @@ final class RequestCreationViewTests: XCTestCase {
                 calendar: utcCalendar
             )
         ) { error in
+            XCTAssertEqual(error as? RequestFoodFormError, .scheduledTimingUnavailable)
+        }
+
+        // The boundary rule itself is unchanged: while scheduling is still open,
+        // a start that lands in tomorrow is refused as a correctable start.
+        let openNow = try date("2026-07-28T16:00:00.000Z")
+        XCTAssertTrue(RequestFoodView.isScheduledTimingAvailable(
+            now: openNow,
+            calendar: utcCalendar
+        ))
+        XCTAssertThrowsError(
+            try RequestFoodView.makePayload(
+                selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+                foodRequest: "Chicken bowl",
+                pickupName: "Taylor",
+                email: "taylor@nyu.edu",
+                timing: .later,
+                preferredPickupTime: tomorrowMorning,
+                now: openNow,
+                calendar: utcCalendar
+            )
+        ) { error in
             XCTAssertEqual(error as? RequestFoodFormError, .invalidScheduledTime)
         }
     }
@@ -987,7 +1322,12 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testAvailablePostingShowsTheForm() {
         XCTAssertEqual(
-            RequestFoodView.presentation(availability: .available, didCreateRequest: false),
+            RequestFoodView.presentation(
+                availability: .available,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: true,
+                didCreateRequest: false
+            ),
             .form
         )
     }
@@ -996,6 +1336,8 @@ final class RequestCreationViewTests: XCTestCase {
     func testPausedPostingHidesTheFormAndShowsTheLockedSentence() {
         let presentation = RequestFoodView.presentation(
             availability: .paused,
+            isCheckingAvailability: false,
+            hasAttemptedAvailabilityCheck: true,
             didCreateRequest: false
         )
 
@@ -1016,6 +1358,8 @@ final class RequestCreationViewTests: XCTestCase {
     func testFailedAvailabilityCheckHidesTheFormWithoutClaimingItIsPaused() {
         let presentation = RequestFoodView.presentation(
             availability: .unavailable,
+            isCheckingAvailability: false,
+            hasAttemptedAvailabilityCheck: true,
             didCreateRequest: false
         )
 
@@ -1034,10 +1378,62 @@ final class RequestCreationViewTests: XCTestCase {
     /// cannot flash into view before availability is known.
     @MainActor
     func testUnknownAvailabilityShowsNeitherFormNorAnUnavailableClaim() {
+        for hasAttempted in [true, false] {
+            XCTAssertEqual(
+                RequestFoodView.presentation(
+                    availability: .unknown,
+                    isCheckingAvailability: true,
+                    hasAttemptedAvailabilityCheck: hasAttempted,
+                    didCreateRequest: false
+                ),
+                .checkingAvailability
+            )
+        }
+    }
+
+    /// Before the screen's own task has started anything there is nothing to
+    /// retry, so the pending state is correct — and still withholds the form.
+    @MainActor
+    func testUnknownAvailabilityBeforeAnyProbeStaysPendingWithoutOfferingRetry() {
         XCTAssertEqual(
-            RequestFoodView.presentation(availability: .unknown, didCreateRequest: false),
+            RequestFoodView.presentation(
+                availability: .unknown,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: false,
+                didCreateRequest: false
+            ),
             .checkingAvailability
         )
+    }
+
+    /// The defect this rule exists for: a probe that ended without an answer.
+    /// `.unknown` with nothing running is a finished attempt, not a pending
+    /// one, and must never render as an indefinite spinner.
+    @MainActor
+    func testSettledUnknownAvailabilityOffersRetryInsteadOfAnIndefiniteSpinner() {
+        let presentation = RequestFoodView.presentation(
+            availability: .unknown,
+            isCheckingAvailability: false,
+            hasAttemptedAvailabilityCheck: true,
+            didCreateRequest: false
+        )
+
+        XCTAssertEqual(
+            presentation,
+            .unavailable(
+                message: RequestFoodView.availabilityUnknownNotice,
+                retryable: true
+            )
+        )
+        XCTAssertNotEqual(presentation, .checkingAvailability)
+        XCTAssertNotEqual(presentation, .form)
+        // It says CommonPlate could not find out — not that posting is off, not
+        // that the network is at fault, and not that anything is retrying.
+        XCTAssertEqual(
+            RequestFoodView.availabilityUnknownNotice,
+            "We couldn’t check whether posting is available right now. Please try again in a moment."
+        )
+        XCTAssertNotEqual(RequestFoodView.availabilityUnknownNotice, RequestFoodView.pauseNotice)
     }
 
     /// A confirmed create keeps its success screen regardless of what the
@@ -1050,14 +1446,227 @@ final class RequestCreationViewTests: XCTestCase {
             .paused,
             .unavailable
         ] {
-            XCTAssertEqual(
-                RequestFoodView.presentation(
-                    availability: availability,
-                    didCreateRequest: true
-                ),
-                .success
-            )
+            for isChecking in [true, false] {
+                XCTAssertEqual(
+                    RequestFoodView.presentation(
+                        availability: availability,
+                        isCheckingAvailability: isChecking,
+                        hasAttemptedAvailabilityCheck: true,
+                        didCreateRequest: true
+                    ),
+                    .success
+                )
+            }
         }
+    }
+
+    // MARK: - Availability probe state machine
+
+    /// Entry probes once, and the screen shows the checking state only while
+    /// that probe is genuinely running.
+    func testEntryStartsOneProbeAndShowsCheckingOnlyWhileItRuns() async {
+        let store = makeAvailabilityStore()
+        let gate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: publicActionsResponse(paused: false),
+            gate: gate
+        ))
+
+        let probe = Task { await store.refreshRequestCreationAvailability() }
+        await waitUntil { gate.isWaiting }
+
+        XCTAssertTrue(store.isCheckingRequestCreationAvailability)
+        XCTAssertTrue(store.hasAttemptedRequestCreationAvailabilityCheck)
+        XCTAssertEqual(store.requestCreationAvailability, .unknown)
+        XCTAssertEqual(presentation(for: store), .checkingAvailability)
+
+        gate.open()
+        await probe.value
+
+        XCTAssertFalse(store.isCheckingRequestCreationAvailability)
+        XCTAssertEqual(store.requestCreationAvailability, .available)
+        XCTAssertEqual(presentation(for: store), .form)
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/public-actions"]
+        )
+    }
+
+    /// The exact race: a probe is cancelled by a screen exit, a re-entry's call
+    /// is dropped because the first is still marked in flight, and the first
+    /// then resolves back to `.unknown`. That used to strand the screen on a
+    /// spinner with nothing running behind it.
+    func testCancelledProbeAndReentryCannotStrandAnIndefiniteSpinner() async {
+        let store = makeAvailabilityStore()
+        let gate = RequestFetchingGate()
+        RequestFetchingURLProtocol.enqueue(.response(
+            data: publicActionsResponse(paused: false),
+            gate: gate
+        ))
+
+        let probe = Task { await store.refreshRequestCreationAvailability() }
+        await waitUntil { gate.isWaiting }
+
+        probe.cancel()
+        // The re-entering screen's task, arriving before the cancelled probe
+        // has settled: it must not open a second connection.
+        await store.refreshRequestCreationAvailability()
+        gate.open()
+        await probe.value
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/public-actions"],
+            "A dropped concurrent call must not duplicate the network request"
+        )
+        // Cancellation is not a backend verdict, so the state stays `.unknown`…
+        XCTAssertEqual(store.requestCreationAvailability, .unknown)
+        XCTAssertNotEqual(store.requestCreationAvailability, .unavailable)
+        // …but nothing is running, and the attempt is on record, so the screen
+        // settles into a retryable state instead of a permanent spinner.
+        XCTAssertFalse(store.isCheckingRequestCreationAvailability)
+        XCTAssertTrue(store.hasAttemptedRequestCreationAvailabilityCheck)
+        XCTAssertEqual(
+            presentation(for: store),
+            .unavailable(
+                message: RequestFoodView.availabilityUnknownNotice,
+                retryable: true
+            )
+        )
+        XCTAssertNotEqual(presentation(for: store), .checkingAvailability)
+        XCTAssertNotEqual(presentation(for: store), .form)
+    }
+
+    /// Retry is the only recovery, and it has to actually probe again.
+    func testRetryAfterAnUnresolvedProbeStartsANewProbeAndCanRevealTheForm() async {
+        let store = makeAvailabilityStore()
+        RequestFetchingURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .unavailable)
+        XCTAssertEqual(
+            presentation(for: store),
+            .unavailable(
+                message: RequestFoodView.availabilityUnknownNotice,
+                retryable: true
+            )
+        )
+
+        RequestFetchingURLProtocol.enqueue(.response(data: publicActionsResponse(paused: false)))
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .available)
+        XCTAssertEqual(presentation(for: store), .form)
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/public-actions", "/api/public-actions"]
+        )
+    }
+
+    /// Structured refusals and transport loss both land on the same truthful
+    /// retryable state, and neither is ever mistaken for a confirmed pause.
+    func testStructuredAndTransportFailuresBothReachTheRetryableState() async {
+        let failures: [(String, RequestFetchingURLProtocol.Stub)] = [
+            ("transport", .failure(.notConnectedToInternet)),
+            ("structured", .response(
+                statusCode: 500,
+                data: Data(#"{"error":{"code":"INTERNAL_FAILURE","message":"boom"}}"#.utf8)
+            ))
+        ]
+
+        for (label, stub) in failures {
+            RequestFetchingURLProtocol.reset()
+            let store = makeAvailabilityStore()
+            RequestFetchingURLProtocol.enqueue(stub)
+
+            await store.refreshRequestCreationAvailability()
+
+            XCTAssertEqual(store.requestCreationAvailability, .unavailable, label)
+            XCTAssertFalse(store.isCheckingRequestCreationAvailability, label)
+            XCTAssertEqual(
+                presentation(for: store),
+                .unavailable(
+                    message: RequestFoodView.availabilityUnknownNotice,
+                    retryable: true
+                ),
+                label
+            )
+            XCTAssertNotEqual(presentation(for: store), .form, label)
+        }
+    }
+
+    /// A confirmed pause is unchanged: locked sentence, no retry, no fields.
+    func testConfirmedPauseKeepsItsExistingUnavailableBehavior() async {
+        let store = makeAvailabilityStore()
+        RequestFetchingURLProtocol.enqueue(.response(data: publicActionsResponse(paused: true)))
+
+        await store.refreshRequestCreationAvailability()
+
+        XCTAssertEqual(store.requestCreationAvailability, .paused)
+        XCTAssertEqual(
+            presentation(for: store),
+            .unavailable(message: RequestFoodView.pauseNotice, retryable: false)
+        )
+        XCTAssertFalse(
+            RequestFetchingURLProtocol.capturedRequestedPaths.contains("/api/request")
+        )
+    }
+
+    /// Whatever the availability path does, it may never reveal the fields on
+    /// anything but a confirmed available answer.
+    func testFormIsWithheldUntilAvailabilityIsAffirmativelyConfirmed() async {
+        let stubs: [RequestFetchingURLProtocol.Stub] = [
+            .response(data: publicActionsResponse(paused: true)),
+            .failure(.notConnectedToInternet),
+            .response(data: Data(#"{"paused":"maybe"}"#.utf8))
+        ]
+
+        for stub in stubs {
+            RequestFetchingURLProtocol.reset()
+            let store = makeAvailabilityStore()
+            RequestFetchingURLProtocol.enqueue(stub)
+
+            await store.refreshRequestCreationAvailability()
+
+            XCTAssertNotEqual(presentation(for: store), .form)
+        }
+    }
+
+    private func presentation(for store: RequestStore) -> RequestFormPresentation {
+        RequestFoodView.presentation(
+            availability: store.requestCreationAvailability,
+            isCheckingAvailability: store.isCheckingRequestCreationAvailability,
+            hasAttemptedAvailabilityCheck: store.hasAttemptedRequestCreationAvailabilityCheck,
+            didCreateRequest: false
+        )
+    }
+
+    private func makeAvailabilityStore() -> RequestStore {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestFetchingURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let client = APIClient(
+            configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
+            session: session
+        )
+        return RequestStore(service: RequestService(client: client))
+    }
+
+    private func publicActionsResponse(paused: Bool) -> Data {
+        Data(#"{"paused":\#(paused)}"#.utf8)
+    }
+
+    private func waitUntil(
+        timeoutIterations: Int = 100,
+        condition: @MainActor () -> Bool
+    ) async {
+        for _ in 0..<timeoutIterations {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("Timed out waiting for condition")
     }
 
     private var utcCalendar: Calendar {

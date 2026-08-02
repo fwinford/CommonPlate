@@ -235,6 +235,15 @@ final class RequestStore: ObservableObject {
     /// screen that has not yet probed cannot reveal the requester form.
     @Published private(set) var requestCreationAvailability: RequestCreationAvailability = .unknown
 
+    /// Whether a probe is running right now, and whether one has ever been
+    /// started. `.unknown` alone cannot tell those apart, and the difference is
+    /// the difference between a spinner that is about to answer and a spinner
+    /// that never will: a probe cancelled by a screen exit resolves back to
+    /// `.unknown` with nothing left running, which is a finished attempt with no
+    /// result rather than a check in progress.
+    @Published private(set) var isCheckingRequestCreationAvailability = false
+    @Published private(set) var hasAttemptedRequestCreationAvailabilityCheck = false
+
     @Published private(set) var isCreating = false
     @Published private(set) var createError: RequestServiceError?
 
@@ -277,7 +286,6 @@ final class RequestStore: ObservableObject {
     private let service: RequestService
     private var fetchGeneration = 0
     private var collectionRevision = 0
-    private var isCheckingRequestCreationAvailability = false
     private var activeClaimAuthorization: ActiveClaimAuthorization?
     private var activeClaimAttempt: ClaimAttempt?
     private var activeClaimExtensionAttempt: ClaimExtensionAttempt?
@@ -379,12 +387,19 @@ final class RequestStore: ObservableObject {
     /// cancellation is not evidence that posting is unavailable; both states
     /// withhold the form, so nothing is revealed either way.
     ///
-    /// A concurrent second call is dropped rather than restarting the probe,
-    /// so a redraw cannot reset a check that is already in flight.
+    /// A concurrent second call is dropped rather than restarting the probe, so
+    /// a redraw cannot reset a check that is already in flight. Dropping it is
+    /// safe only because the drop is no longer invisible: the attempt flag is
+    /// already set and the in-flight flag clears when the surviving probe ends,
+    /// so however that probe resolves — including back to `.unknown` after a
+    /// cancellation — the screen is left with a settled, retryable state rather
+    /// than a spinner with nothing behind it. Nothing here re-probes on its own;
+    /// recovery is the requester's explicit Try Again.
     func refreshRequestCreationAvailability() async {
         guard !isCheckingRequestCreationAvailability else {
             return
         }
+        hasAttemptedRequestCreationAvailabilityCheck = true
         isCheckingRequestCreationAvailability = true
         requestCreationAvailability = .unknown
         defer { isCheckingRequestCreationAvailability = false }

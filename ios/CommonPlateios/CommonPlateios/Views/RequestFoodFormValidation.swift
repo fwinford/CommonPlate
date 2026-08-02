@@ -84,13 +84,20 @@ enum RequestFoodFormValidator {
         }
     }
 
+    /// `isScheduledWindowValid` answers whether *this* chosen start still fits;
+    /// `isScheduledTimingAvailable` answers whether any start does. Both are
+    /// derived from the same time snapshot by the caller, and the pair is what
+    /// separates a start the requester can correct from scheduling having closed
+    /// underneath them — two failures that need different instructions, because
+    /// only one of them still has a control to act on.
     static func validate(
         selectedDiningSpot: DiningSpot?,
         foodRequest: String,
         pickupName: String,
         email: String,
         timing: RequestTiming,
-        isScheduledWindowValid: Bool
+        isScheduledWindowValid: Bool,
+        isScheduledTimingAvailable: Bool
     ) -> [RequestFoodFieldError] {
         var errors: [RequestFoodFieldError] = []
 
@@ -104,7 +111,17 @@ enum RequestFoodFormValidator {
             errors.append(RequestFoodFieldError(field: .pickupName, error: .missingPickupName))
         }
         if timing == .later && !isScheduledWindowValid {
-            errors.append(RequestFoodFieldError(field: .pickupSchedule, error: .invalidScheduledTime))
+            // Telling someone to choose a different pickup time is only useful
+            // while there is a time left to choose. Once the last full window
+            // has passed, the picker is gone and the only move left is ASAP —
+            // so that is what this says, rather than pointing at a control the
+            // form has already withdrawn.
+            errors.append(RequestFoodFieldError(
+                field: .pickupSchedule,
+                error: isScheduledTimingAvailable
+                    ? .invalidScheduledTime
+                    : .scheduledTimingUnavailable
+            ))
         }
 
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)

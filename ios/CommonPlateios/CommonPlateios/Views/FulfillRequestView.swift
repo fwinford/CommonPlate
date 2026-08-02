@@ -146,10 +146,16 @@ enum FulfillmentPresentationError: Equatable {
             // enforces on these fields is mirrored locally and named on the
             // field itself, so reaching this means the rejection could not be
             // attributed — the response envelope carries `fields: null` and no
-            // field attribution of its own. The locked safety sentence stays:
-            // this is still a state where a second real order would cost a
-            // student money.
-            return "We couldn’t save these details. Check the highlighted fields and try again. Don’t place another Grubhub order."
+            // field attribution of its own.
+            //
+            // Which is exactly why this cannot point at highlighted fields: by
+            // definition none are highlighted here, so that instruction sent
+            // the helper looking for a marker that does not exist. It names the
+            // two values the helper can actually re-check instead, without
+            // claiming which one the backend refused — nothing in the response
+            // says. The locked safety sentence stays: this is still a state
+            // where a second real order would cost a student money.
+            return "We couldn’t save these details. Check your email address and order number, then tap “I placed this order” again. Don’t place another Grubhub order."
         case .rateLimited:
             return "Too many tries. Wait a moment, then tap “I placed this order” again. Don’t place another Grubhub order."
         case .temporarilyUnavailable:

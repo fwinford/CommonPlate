@@ -13,6 +13,10 @@ enum RequestFoodFormError: Error, Equatable {
     case missingEmail
     case invalidEmail
     case invalidScheduledTime
+    /// A `Later` selection that outlived scheduling itself. Distinct from
+    /// `invalidScheduledTime` because the correction is different: there is no
+    /// pickup time left to choose today, only ASAP.
+    case scheduledTimingUnavailable
 
     var message: String {
         switch self {
@@ -28,6 +32,8 @@ enum RequestFoodFormError: Error, Equatable {
             return "Enter a valid email address."
         case .invalidScheduledTime:
             return "Choose a pickup time that leaves a full 30-minute window today."
+        case .scheduledTimingUnavailable:
+            return RequestFoodView.lapsedScheduledTimingNotice
         }
     }
 }
@@ -101,7 +107,8 @@ struct RequestSubmissionSectionPresentation: Equatable {
 /// exists, so `.form` — the only state with editable private fields and a
 /// submit control — is reachable only from a confirmed `.available` answer.
 enum RequestFormPresentation: Equatable {
-    /// Availability is still unknown. No fields, no submit.
+    /// A probe is running. No fields, no submit. Reached only while a check is
+    /// genuinely in flight, so this state always has an answer coming.
     case checkingAvailability
     /// Posting is confirmed available: the Day 3 form renders normally.
     case form
@@ -156,12 +163,31 @@ struct RequestFoodView: View {
     /// picker; tomorrow scheduling is not part of this flow.
     static let scheduledUnavailableNotice = "Scheduled pickups reopen tomorrow."
 
+    /// The same fact plus the only move left, for a requester who selected
+    /// `Later` while it was still offered and stayed on the form past the last
+    /// valid window. Their selection is never rewritten for them — a draft that
+    /// silently changes itself is worse than one that explains what to do — so
+    /// the error names ASAP and waits for them to choose it.
+    static let lapsedScheduledTimingNotice =
+        "Scheduled pickups reopen tomorrow. Choose ASAP to post this request now."
+
+    /// The pointer shown beside `Submit Request` when a local rejection has no
+    /// text field to focus. Every invalid field already carries its own message,
+    /// but the only two that cannot take focus are pickers, and a tap that moves
+    /// nothing and says nothing reads as a broken button — which is exactly what
+    /// a lapsed `Later` selection produced.
+    static let localRejectionPointerNotice = "Check the highlighted fields above."
+
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: RequestStore
 
     @State private var draft = RequestFoodFormDraft()
     @State private var validationPresentation = RequestFoodValidationPresentation()
     @State private var submissionError: RequestCreatePresentationError?
+    /// Set only by a local rejection that had no text field to focus. Backend
+    /// failures never set it — they own `submissionError`, which is the
+    /// authoritative message for anything the server decided.
+    @State private var showsLocalRejectionPointer = false
     @State private var didCreateRequest = false
     /// The timing of the request the backend confirmed, captured at submission
     /// so the success screen states that request's real expiration rather than
@@ -199,6 +225,8 @@ struct RequestFoodView: View {
         Group {
             switch Self.presentation(
                 availability: store.requestCreationAvailability,
+                isCheckingAvailability: store.isCheckingRequestCreationAvailability,
+                hasAttemptedAvailabilityCheck: store.hasAttemptedRequestCreationAvailabilityCheck,
                 didCreateRequest: didCreateRequest
             ) {
             case .success:
@@ -222,8 +250,18 @@ struct RequestFoodView: View {
     /// Fail-closed presentation rule. Only a confirmed `.available` reaches
     /// `.form`; every other availability state withholds the fields entirely
     /// rather than merely disabling submission.
+    ///
+    /// `.unknown` is the state that needs the two flags. It is where a probe
+    /// begins, and also where a cancelled one ends, so on its own it cannot say
+    /// whether an answer is still coming. A running check keeps the spinner; a
+    /// finished attempt that produced no usable answer becomes the same
+    /// retryable state a failed probe produces, because that is what it is —
+    /// CommonPlate could not find out. The two are still distinct in the store:
+    /// cancellation never claims the backend refused anything.
     static func presentation(
         availability: RequestCreationAvailability,
+        isCheckingAvailability: Bool,
+        hasAttemptedAvailabilityCheck: Bool,
         didCreateRequest: Bool
     ) -> RequestFormPresentation {
         if didCreateRequest {
@@ -234,7 +272,15 @@ struct RequestFoodView: View {
         case .available:
             return .form
         case .unknown:
-            return .checkingAvailability
+            if isCheckingAvailability {
+                return .checkingAvailability
+            }
+            return hasAttemptedAvailabilityCheck
+                ? .unavailable(message: availabilityUnknownNotice, retryable: true)
+                // Nothing has run yet — the screen's own `.task` is about to
+                // start the first probe. Withheld, never retryable: there is
+                // nothing to retry.
+                : .checkingAvailability
         case .paused:
             return .unavailable(message: pauseNotice, retryable: false)
         case .unavailable:
@@ -301,6 +347,9 @@ struct RequestFoodView: View {
         )
         let timingOptions = Self.availableTimingOptions(now: now, calendar: calendar)
         let errors = validationErrors(now: now)
+        let visibleScheduleError = validationPresentation
+            .visibleError(for: .pickupSchedule, from: errors)?
+            .error
 
         return Form {
             Section("Food request") {
@@ -366,7 +415,14 @@ struct RequestFoodView: View {
                     )
                 }
 
-                if !isScheduledTimingAvailable {
+                // Withheld once the lapsed-Later error is on screen: that
+                // message already opens with this exact sentence, and printing
+                // it twice would read as two separate findings about the same
+                // closed window.
+                if Self.showsScheduledUnavailableNotice(
+                    isScheduledTimingAvailable: isScheduledTimingAvailable,
+                    visibleScheduleError: visibleScheduleError
+                ) {
                     Text(Self.scheduledUnavailableNotice)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -429,6 +485,19 @@ struct RequestFoodView: View {
             }
 
             Section {
+                // Only when the rejection had nowhere to move focus. A backend
+                // failure owns this section through `submissionError` and is
+                // never replaced or accompanied by the pointer.
+                if Self.showsLocalRejectionPointer(
+                    isPresenting: showsLocalRejectionPointer,
+                    submissionError: submissionError
+                ) {
+                    Text(Self.localRejectionPointerNotice)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("request-submission-pointer")
+                }
+
                 if let presentation = Self.submissionSectionPresentation(for: submissionError) {
                     Text(presentation.message)
                         .foregroundStyle(.red)
@@ -471,11 +540,18 @@ struct RequestFoodView: View {
                 errors: validationErrors(now: transitionNow)
             )
         }
+        // Any edit — including switching the timing to ASAP, which is the
+        // correction the lapsed-Later message asks for — retires the pointer.
+        // The field errors themselves keep updating live on their own terms.
+        .onChange(of: draft) { _, _ in
+            showsLocalRejectionPointer = false
+        }
     }
 
     @MainActor
     private func submit() async {
         submissionError = nil
+        showsLocalRejectionPointer = false
 
         let now = Date()
         let submittedDraft = draft
@@ -494,6 +570,7 @@ struct RequestFoodView: View {
                 didCreateRequest = true
             } else {
                 focusedField = result.firstInvalidTextField
+                showsLocalRejectionPointer = Self.showsLocalRejectionPointer(for: result)
             }
         } catch {
             submissionError = RequestCreatePresentationError.map(error)
@@ -522,7 +599,13 @@ struct RequestFoodView: View {
             pickupName: draft.pickupName,
             email: draft.email,
             timing: draft.timing,
-            isScheduledWindowValid: scheduledWindowIsValid
+            isScheduledWindowValid: scheduledWindowIsValid,
+            // Same `now` as the window check above: one snapshot decides both
+            // halves of this submission, so they cannot disagree.
+            isScheduledTimingAvailable: isScheduledTimingAvailable(
+                now: now,
+                calendar: calendar
+            )
         )
         var updatedPresentation = presentation
         updatedPresentation.presentAll(errors)
@@ -553,6 +636,9 @@ struct RequestFoodView: View {
         )
     }
 
+    /// Every caller passes the snapshot it is already reasoning about — the
+    /// render's `now`, or the focus transition's — so availability, validity,
+    /// and what is drawn are all answers about the same instant.
     private func validationErrors(now: Date) -> [RequestFoodFieldError] {
         RequestFoodFormValidator.validate(
             selectedDiningSpot: draft.selectedDiningSpot,
@@ -562,6 +648,10 @@ struct RequestFoodView: View {
             timing: draft.timing,
             isScheduledWindowValid: Self.isValidScheduledWindow(
                 startingAt: draft.preferredPickupTime,
+                now: now,
+                calendar: calendar
+            ),
+            isScheduledTimingAvailable: Self.isScheduledTimingAvailable(
                 now: now,
                 calendar: calendar
             )
@@ -618,6 +708,33 @@ struct RequestFoodView: View {
         for error: RequestCreatePresentationError?
     ) -> Bool {
         error == .ambiguous
+    }
+
+    /// The plain "reopen tomorrow" footnote is suppressed exactly when the
+    /// lapsed-Later error is visible, because that error already states it and
+    /// then adds the correction. It still renders for an ASAP draft, where it is
+    /// the only explanation of why `Later` is missing from the picker.
+    static func showsScheduledUnavailableNotice(
+        isScheduledTimingAvailable: Bool,
+        visibleScheduleError: RequestFoodFormError?
+    ) -> Bool {
+        !isScheduledTimingAvailable && visibleScheduleError != .scheduledTimingUnavailable
+    }
+
+    /// A local rejection that moved focus has already answered the tap. One that
+    /// could not — every remaining error belongs to a picker — needs a line the
+    /// requester can see without hunting up a form they may be scrolled past.
+    static func showsLocalRejectionPointer(for result: RequestFoodSubmissionResult) -> Bool {
+        !result.didSubmit && result.firstInvalidTextField == nil
+    }
+
+    /// The render-time rule. The pointer is local-only, so a backend answer
+    /// always wins the section.
+    static func showsLocalRejectionPointer(
+        isPresenting: Bool,
+        submissionError: RequestCreatePresentationError?
+    ) -> Bool {
+        isPresenting && submissionError == nil
     }
 
     static func submissionSectionPresentation(
@@ -693,7 +810,11 @@ struct RequestFoodView: View {
             pickupName: pickupName,
             email: email,
             timing: timing,
-            isScheduledWindowValid: scheduledWindowIsValid
+            isScheduledWindowValid: scheduledWindowIsValid,
+            isScheduledTimingAvailable: isScheduledTimingAvailable(
+                now: now,
+                calendar: calendar
+            )
         )
         if let firstError = errors.first {
             throw firstError.error

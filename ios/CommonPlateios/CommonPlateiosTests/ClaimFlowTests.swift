@@ -3057,12 +3057,12 @@ final class ClaimFlowTests: XCTestCase {
             FulfillmentPresentationError.temporarilyUnavailable.message
                 .contains("Stay on this screen and try again in a moment.")
         )
-        // Field-blind by design now: the specific rule that failed is named on
-        // the field, so the fallback points at the highlights instead of
-        // guessing which field was wrong.
+        // Field-blind by design: the specific rule that failed is named on the
+        // field, so the fallback names the two values the helper can re-check
+        // without guessing which one the backend refused.
         XCTAssertTrue(
             FulfillmentPresentationError.invalidDetails.message
-                .contains("Check the highlighted fields and try again.")
+                .contains("then tap “I placed this order” again")
         )
         for error in [
             FulfillmentPresentationError.invalidDetails,
@@ -5377,13 +5377,128 @@ final class ClaimFlowTests: XCTestCase {
         )
     }
 
+    /// The state this fallback actually describes: every locally checkable rule
+    /// passed, the backend still refused, and its envelope carries no field
+    /// attribution. So there is nothing highlighted to check — the message has
+    /// to name the values the helper can re-read for themselves, without
+    /// claiming which one was refused, and leave the same save action available.
+    func testUnattributedPayloadRejectionNamesRecheckableValuesWithoutInventingFieldErrors() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 400,
+            data: errorResponse(
+                code: "INVALID_FULFILLMENT_PAYLOAD",
+                message: "Invalid fulfillment payload"
+            )
+        ))
+
+        let draft = FulfillmentFormDraft(
+            fulfillerEmail: "helper@example.edu",
+            orderNumber: "00070154321",
+            eta: FulfillmentReadyTime.fortyFiveMinutes.etaValue,
+            readyTime: .fortyFiveMinutes,
+            contactMessage: "Leaving it at the front desk"
+        )
+        let originalDraft = draft
+        // Mirrors `submitFulfillment`, which assigns the returned presentation
+        // only on the success path. A thrown backend rejection must therefore
+        // leave presentation history exactly as it was.
+        var presentation = FulfillmentValidationPresentation()
+
+        do {
+            let result = try await FulfillRequestView.orchestrateSubmission(
+                draft: draft,
+                presentation: presentation
+            ) { values in
+                try await store.fulfill(
+                    requestID: requestID,
+                    fulfillerEmail: values.fulfillerEmail,
+                    orderNumber: values.orderNumber,
+                    eta: values.eta,
+                    contactMessage: values.contactMessage
+                )
+            }
+            presentation = result.presentation
+            XCTFail("The backend rejection must escape the production seam")
+        } catch RequestServiceError.serverError(let code, _) {
+            XCTAssertEqual(code, "INVALID_FULFILLMENT_PAYLOAD")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(
+            FulfillmentPresentationError.map(store.fulfillError),
+            .invalidDetails
+        )
+        XCTAssertEqual(
+            FulfillmentPresentationError.invalidDetails.message,
+            "We couldn’t save these details. Check your email address and order number, then tap “I placed this order” again. Don’t place another Grubhub order."
+        )
+
+        // Nothing local failed, so nothing local may be named: the values are
+        // still valid and no field error exists for this rejection to reveal.
+        let fieldErrors = FulfillmentFormValidator.validate(
+            fulfillerEmail: draft.fulfillerEmail,
+            orderNumber: draft.orderNumber
+        )
+        XCTAssertTrue(fieldErrors.isEmpty)
+        XCTAssertTrue(presentation.presentedFields.isEmpty)
+        XCTAssertTrue(presentation.visibleErrors(from: fieldErrors).isEmpty)
+        // And the copy cannot send the helper looking for a marker that the
+        // previous sentence promised and this state never renders.
+        XCTAssertFalse(
+            FulfillmentPresentationError.invalidDetails.message
+                .localizedCaseInsensitiveContains("highlighted")
+        )
+
+        // The submission the helper would repeat is the one still on screen.
+        XCTAssertEqual(draft, originalDraft)
+        XCTAssertEqual(draft.fulfillerEmail, "helper@example.edu")
+        XCTAssertEqual(draft.orderNumber, "00070154321")
+        XCTAssertEqual(draft.eta, "45 minutes")
+        XCTAssertEqual(draft.readyTime, .fortyFiveMinutes)
+        XCTAssertEqual(draft.contactMessage, "Leaving it at the front desk")
+
+        // A rejected payload is not a claim verdict: the reservation stands and
+        // the same CommonPlate save the message points at is still permitted.
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.fulfillmentAmbiguity)
+        XCTAssertEqual(
+            ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
+            1
+        )
+
+        // The action it names is the in-app save. The only Grubhub sentence is
+        // the locked one that forbids a second order.
+        XCTAssertTrue(
+            FulfillmentPresentationError.invalidDetails.message
+                .contains("tap “\(FulfillRequestView.submitTitle)” again")
+        )
+        XCTAssertTrue(
+            FulfillmentPresentationError.invalidDetails.message.contains(Self.safetySentence)
+        )
+        XCTAssertEqual(
+            FulfillmentPresentationError.invalidDetails.message
+                .components(separatedBy: "Grubhub").count - 1,
+            1
+        )
+        XCTAssertFalse(
+            FulfillmentPresentationError.invalidDetails.message
+                .localizedCaseInsensitiveContains("order again")
+        )
+    }
+
     /// The generic message is the fallback, never the first answer, and the
     /// sentence that made a formatting mistake look like a system failure is
     /// gone from the flow entirely.
     func testGenericFallbackIsReservedAndTheOldBlanketSentenceIsRetired() {
         XCTAssertEqual(
             FulfillmentPresentationError.invalidDetails.message,
-            "We couldn’t save these details. Check the highlighted fields and try again. Don’t place another Grubhub order."
+            "We couldn’t save these details. Check your email address and order number, then tap “I placed this order” again. Don’t place another Grubhub order."
         )
         // The locked safety sentence still applies to this state.
         XCTAssertTrue(
