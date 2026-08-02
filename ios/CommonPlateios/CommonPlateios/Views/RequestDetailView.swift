@@ -33,7 +33,7 @@ enum ClaimPresentationError: Equatable {
     case existingActiveClaim
     /// A confirmed placement result is still waiting to be acknowledged.
     case pendingPlacementAcknowledgement
-    /// `INTERNAL_FAILURE`, transport loss before submission, or an unmapped code.
+    /// A definitive claim failure that does not have a more specific mapping.
     case couldNotStart
 
     var message: String {
@@ -50,7 +50,7 @@ enum ClaimPresentationError: Equatable {
         case .rateLimited:
             return "Too many attempts. Please wait a moment and try again."
         case .ambiguous:
-            return "We couldn’t tell whether your reservation went through. Go back to Active Requests—if you got it, it will appear at the top. Don’t place a Grubhub order until you see it."
+            return "We couldn’t confirm whether your reservation succeeded. Don’t place a Grubhub order. CommonPlate can’t recover this result in the current session, and the request may disappear from the public list until an unresolved reservation expires."
         case .operationInProgress:
             return "You’re already starting to help with this request."
         case .otherClaimInProgress:
@@ -88,8 +88,9 @@ enum ClaimPresentationError: Equatable {
             case ClaimErrorCode.rateLimited:
                 return .rateLimited
             default:
-                // Includes INVALID_REQUEST_ID and INTERNAL_FAILURE: neither is
-                // the helper's to act on beyond trying again.
+                // Includes INVALID_REQUEST_ID and other definitive codes that
+                // do not have a specific helper action. Claim INTERNAL_FAILURE
+                // is translated to ambiguousClaimOutcome before this mapping.
                 return .couldNotStart
             }
         case .ambiguousClaimOutcome:
@@ -254,9 +255,26 @@ struct RequestDetailView: View {
             .accessibilityIdentifier("go-to-active-reservation")
         }
 
-        // A confirmed pause and an unconfirmed claim both withdraw the
-        // action: one because the backend will refuse it, the other
-        // because the POST may already have been applied.
+        if Self.showsPauseRecoveryAction(for: inlineClaimError) {
+            Button {
+                startClaim()
+            } label: {
+                if store.isClaiming(requestID: request.id) {
+                    HStack {
+                        ProgressView()
+                        Text("Reserving…")
+                    }
+                } else {
+                    Text(Self.pauseRecoveryActionTitle)
+                }
+            }
+            .disabled(store.isClaiming(requestID: request.id))
+            .accessibilityIdentifier("claim-pause-recovery")
+        }
+
+        // The ordinary action stays withdrawn for a confirmed pause because its
+        // accepted recovery is named separately above. An unconfirmed claim also
+        // withdraws it because the POST may already have been applied.
         if Self.showsClaimAction(for: inlineClaimError) {
             // Stated before the tap, because the tap is the commitment: it
             // reserves the request immediately and there is no way to hand it
@@ -320,13 +338,17 @@ struct RequestDetailView: View {
     static let pendingPlacementNotice =
         "Go back to Active Requests and tap “Got it” on your last order. Then you can help with another request."
 
+    static let pauseRecoveryActionTitle = "Check again"
+
+    static func showsPauseRecoveryAction(for error: ClaimPresentationError?) -> Bool {
+        error == .publicActionsPaused
+    }
+
     /// The claim action is withheld only where offering it would be untruthful:
-    /// a paused backend will refuse it, an unconfirmed claim may already have
-    /// succeeded so a second attempt could double-book the helper, an existing
-    /// reservation elsewhere makes this claim impossible until that one ends,
-    /// and an unacknowledged placement result blocks every new claim until it
-    /// is read. In each case the store refuses before building a request, so
-    /// leaving the button would be a control that can only fail.
+    /// a paused backend uses its explicit recovery action instead, an unconfirmed
+    /// claim may already have succeeded, an existing reservation elsewhere makes
+    /// this claim impossible until that one ends, and an unacknowledged placement
+    /// result blocks every new claim until it is read.
     static func showsClaimAction(for error: ClaimPresentationError?) -> Bool {
         error != .publicActionsPaused
             && error != .ambiguous

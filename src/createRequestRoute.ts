@@ -244,10 +244,10 @@ async function attemptRequesterConfirmation(
         <p><strong>Food:</strong> ${htmlFood}</p>
         <p><strong>Pickup Name:</strong> ${htmlPickupName}</p>
         <p><strong>Pickup Window:</strong> ${htmlPickupWindow}</p>
-        <p>We'll notify you when someone fulfills your request.</p>
+        <p>When someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.</p>
         <p>Request ID: ${requestId}</p>
       `,
-      text: `Your meal request has been submitted!\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Name: ${request.pickupName}\nPickup Window: ${request.pickupWindowText}\nRequest ID: ${requestId}`,
+      text: `Your meal request has been submitted!\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Name: ${request.pickupName}\nPickup Window: ${request.pickupWindowText}\nWhen someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.\nRequest ID: ${requestId}`,
     });
 
     if (result.error) {

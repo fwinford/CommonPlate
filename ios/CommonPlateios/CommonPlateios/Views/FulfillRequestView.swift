@@ -29,13 +29,13 @@ enum ClaimExtensionPresentationError: Equatable {
     var message: String {
         switch self {
         case .insufficientTime:
-            return "There isn’t enough time left on this request for five more minutes."
+            return "Five more minutes weren’t added because there isn’t enough time left on this request. Work from the reservation time shown above."
         case .alreadyUsed:
-            return "This reservation has already been extended once."
+            return "Another extension wasn’t added. Work from the reservation time shown above."
         case .publicActionsPaused:
-            return RequestDetailView.helperPauseNotice
+            return "The extension wasn’t added because helping is temporarily unavailable. Work from the reservation time shown above."
         case .rateLimited:
-            return "Too many attempts. Please wait a moment and try again."
+            return "The extension wasn’t added. Work from the reservation time shown above."
         case .ambiguous:
             return "We couldn’t confirm the extra time. Work from the reservation time shown above."
         case .couldNotExtend:
@@ -226,9 +226,7 @@ struct FulfillRequestView: View {
 
     var body: some View {
         Form {
-            if let confirmation = matchingConfirmation {
-                confirmationSection(confirmation)
-            } else if let claim {
+            if let claim {
                 if store.isShowingClaimExtensionPrompt {
                     extensionPromptSection
                 }
@@ -385,33 +383,16 @@ struct FulfillRequestView: View {
                 errors: currentFieldErrors
             )
         }
-        // The claim ending — expiration, or a backend verdict that the
-        // reservation is no longer ours — closes this screen from either entry
-        // path, so claimant-private state is never left on display without a
-        // live claim behind it and the notice lands on Active Requests. The
-        // whole helper flow is unwound rather than one level, because the
-        // request detail underneath is just as stale. Back navigation does not
-        // clear `activeClaim`, so it does not trigger this.
-        .onChange(of: store.activeClaim?.requestID) { _, activeRequestID in
-            if !Self.keepsClaimedFlowPresented(
-                activeRequestID: activeRequestID,
-                confirmationRequestID: store.fulfillmentConfirmation?.requestID,
-                requestID: request.id
-            ) {
-                returnToActiveRequests()
-            }
+        // Any terminal end to this claim removes the entire request-scoped flow.
+        // Confirmed placement also publishes a confirmation card, which belongs
+        // on Active Requests rather than keeping this completed screen alive.
+        .onChange(of: store.activeClaim?.requestID) { _, _ in
+            synchronizeClaimedFlowPath()
         }
-        // The same rule from the confirmation's side, so the invariant holds no
-        // matter which surface acknowledged the placement — this screen's own
-        // button, or the Active Requests card that carries the same result. A
-        // screen with nothing left to render leaves instead of going blank.
+        // Observe confirmation directly as well as the cleared claim so the
+        // navigation result does not depend on SwiftUI's publication order.
         .onChange(of: store.fulfillmentConfirmation?.id) { _, _ in
-            if !Self.hasPresentableContent(
-                hasClaim: claim != nil,
-                hasConfirmation: matchingConfirmation != nil
-            ) {
-                returnToActiveRequests()
-            }
+            synchronizeClaimedFlowPath()
         }
     }
 
@@ -425,27 +406,29 @@ struct FulfillRequestView: View {
         path = AppRoute.returningToActiveRequests(from: path)
     }
 
-    /// Invariant: an empty claimant destination is removed from the navigation
-    /// path immediately.
-    static func hasPresentableContent(hasClaim: Bool, hasConfirmation: Bool) -> Bool {
-        hasClaim || hasConfirmation
+    private func synchronizeClaimedFlowPath() {
+        path = Self.claimedFlowPath(
+            path,
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: store.fulfillmentConfirmation?.requestID,
+            requestID: request.id
+        )
     }
 
-    /// A confirmed placement clears claimant credentials immediately, but its
-    /// confirmation stays on this screen until acknowledged. This keeps the
-    /// screen on the stack for that safe terminal presentation only.
-    static func keepsClaimedFlowPresented(
+    /// Keeps request-scoped destinations only while this exact reservation is
+    /// active and no placement confirmation for it exists. A confirmed placement
+    /// truncates immediately so system Back has no stale detail to reveal.
+    static func claimedFlowPath(
+        _ path: [AppRoute],
         activeRequestID: String?,
         confirmationRequestID: String?,
         requestID: String
-    ) -> Bool {
-        activeRequestID == requestID || confirmationRequestID == requestID
-    }
-
-    private var matchingConfirmation: FulfillmentConfirmation? {
-        guard let confirmation = store.fulfillmentConfirmation,
-              confirmation.requestID == request.id else { return nil }
-        return confirmation
+    ) -> [AppRoute] {
+        guard confirmationRequestID != requestID,
+              activeRequestID == requestID else {
+            return AppRoute.returningToActiveRequests(from: path)
+        }
+        return path
     }
 
     private var matchingAmbiguity: FulfillmentAmbiguityPresentation? {
@@ -561,22 +544,6 @@ struct FulfillRequestView: View {
                 .foregroundStyle(.red)
                 .accessibilityIdentifier(identifier)
         }
-    }
-
-    @ViewBuilder
-    private func confirmationSection(_ confirmation: FulfillmentConfirmation) -> some View {
-        Section {
-            Text(Self.confirmationTitle)
-                .font(.title2.bold())
-            Text(Self.confirmationDetail(for: confirmation.kind))
-            Button(Self.returnTitle) {
-                store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
-                returnToActiveRequests()
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityIdentifier("fulfillment-confirmation-return")
-        }
-        .accessibilityIdentifier("fulfillment-confirmation")
     }
 
     private var isSubmissionEnabled: Bool {
@@ -711,10 +678,10 @@ struct FulfillRequestView: View {
     /// has to act on before touching anything else on the screen.
     static let completedOrderNotice =
         "Place the Grubhub order first. Then save the details here."
-    /// The student sees this address on the emailed order details and can reply
-    /// to it, so the disclosure has to be plain rather than conditional.
+    /// The provider submission carries this address as Reply-To, but provider
+    /// acceptance cannot prove the message reached the student.
     static let helperEmailNotice =
-        "The student will see this email and can reply."
+        "If the email reaches the student, they can reply to this address."
     static let orderNumberNotice = "From your Grubhub confirmation."
     /// A question, because the control answers one. "Ready in" read as a label
     /// on a value rather than as something to choose.
@@ -796,7 +763,7 @@ struct FulfillRequestView: View {
     static func confirmationDetail(for kind: FulfillmentConfirmationKind) -> String {
         switch kind {
         case .notificationSent:
-            return "We sent the order details to the student’s email. They’ll pick up the food themselves—you’re done. If they reply, it goes to the address you entered."
+            return "CommonPlate submitted the order details for email delivery. We can’t confirm that the student received or read the email, or that they will pick up the food. If they reply, it goes to the address you entered."
         case .notificationFailed:
             return "Your order is recorded, but we couldn’t email the student. They may not know their food is waiting. Don’t place another Grubhub order."
         case .emailStatusUnknown:

@@ -215,6 +215,13 @@ struct RequestService {
             throw RequestServiceError.ambiguousClaimOutcome(underlying: CancellationError())
         } catch let error as APIClientError {
             switch error {
+            // A readable claim INTERNAL_FAILURE does not prove the conditional
+            // mutation was rejected: MongoDB may have applied it before the
+            // driver lost its acknowledgement. The one-time credentials then
+            // cannot be reconstructed, so preserve the existing no-retry
+            // ambiguous-claim recovery rather than inviting another claim.
+            case .apiError(let code, _) where code == ClaimErrorCode.internalFailure:
+                throw RequestServiceError.ambiguousClaimOutcome(underlying: error)
             case .transport, .decoding, .unexpectedStatus:
                 throw RequestServiceError.ambiguousClaimOutcome(underlying: error)
             default:

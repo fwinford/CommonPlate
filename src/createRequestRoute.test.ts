@@ -704,6 +704,24 @@ describe("POST /api/request side-effect ordering and errors", () => {
     expect(context.status).toHaveBeenCalledWith(201);
   });
 
+  it("describes later requester email as an attempt in both email bodies", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    const submission = resendSend.mock.calls[0][0] as {
+      html: string;
+      text: string;
+    };
+    for (const body of [submission.html, submission.text]) {
+      expect(body).toContain("will attempt to email you the order details");
+      expect(body).toContain(
+        "Request creation does not guarantee that later email will be delivered"
+      );
+      expect(body).not.toContain("We'll notify you");
+    }
+  });
+
   it("keeps the persisted success when Resend returns { data, error } failure", async () => {
     resendSend.mockResolvedValue({
       data: null,

@@ -169,6 +169,27 @@ describe("web request form explains why it needs an email", () => {
   });
 });
 
+describe("web request form privacy disclosure", () => {
+  const pageSource = readFileSync(
+    new URL("../../public/new-request.html", import.meta.url),
+    "utf8"
+  );
+
+  it("states the scoped data sharing and retention facts without an absolute", () => {
+    for (const expected of [
+      "Pickup name is shared only with the successful helper",
+      "the helper’s email may be sent to the requester for coordination",
+      "Placed Request data is retained for seven days",
+      "Fulfillment records may be retained longer",
+    ]) {
+      expect(pageSource).toContain(expected);
+    }
+    expect(pageSource).not.toContain(
+      "We never share your personal information"
+    );
+  });
+});
+
 describe("web request form pause probe", () => {
   it("reports paused when the server says so", async () => {
     vi.stubGlobal(

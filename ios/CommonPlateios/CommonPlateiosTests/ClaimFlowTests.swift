@@ -318,6 +318,13 @@ final class ClaimFlowTests: XCTestCase {
             ClaimPresentationError.map(try XCTUnwrap(store.claimError(for: requestID))),
             .ambiguous
         )
+        XCTAssertEqual(
+            ClaimPresentationError.ambiguous.message,
+            "We couldn’t confirm whether your reservation succeeded. Don’t place a Grubhub order. CommonPlate can’t recover this result in the current session, and the request may disappear from the public list until an unresolved reservation expires."
+        )
+        XCTAssertFalse(
+            ClaimPresentationError.ambiguous.message.contains("appear at the top")
+        )
         // No automatic retry of a non-idempotent POST.
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 1)
         // The action is withdrawn rather than offered again.
@@ -1082,8 +1089,7 @@ final class ClaimFlowTests: XCTestCase {
     func testPausedAndRateLimitedClaimsKeepTheHelperOnTheDetailScreen() async {
         let cases: [(code: String, status: Int, expected: ClaimPresentationError)] = [
             ("PUBLIC_ACTIONS_PAUSED", 503, .publicActionsPaused),
-            ("RATE_LIMITED", 429, .rateLimited),
-            ("INTERNAL_FAILURE", 500, .couldNotStart)
+            ("RATE_LIMITED", 429, .rateLimited)
         ]
 
         for entry in cases {
@@ -1109,13 +1115,155 @@ final class ClaimFlowTests: XCTestCase {
             XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, ["/api/request/\(requestID)/claim"])
         }
 
-        // Locked Day 2 helper-pause sentence, and no claim action offered.
+        // The ordinary claim action stays withdrawn while the accepted pause
+        // recovery is offered under its own explicit title.
         XCTAssertEqual(
             ClaimPresentationError.publicActionsPaused.message,
             "Helping with this meal is temporarily unavailable."
         )
         XCTAssertFalse(RequestDetailView.showsClaimAction(for: .publicActionsPaused))
+        XCTAssertTrue(RequestDetailView.showsPauseRecoveryAction(for: .publicActionsPaused))
+        XCTAssertEqual(RequestDetailView.pauseRecoveryActionTitle, "Check again")
         XCTAssertTrue(RequestDetailView.showsClaimAction(for: .rateLimited))
+    }
+
+    func testStructuredClaimInternalFailureIsAmbiguousAndOffersNoRepeat() async {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: errorResponse(
+                code: ClaimErrorCode.internalFailure,
+                message: "Unable to claim this request right now."
+            )
+        ))
+
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("A structured INTERNAL_FAILURE must not confirm a claim")
+        } catch RequestServiceError.ambiguousClaimOutcome {
+            // The route may have committed the reservation before its reply was
+            // lost, so this uses the existing no-retry ambiguous-claim state.
+        } catch {
+            XCTFail("Unexpected claim error: \(error)")
+        }
+
+        let presentation = ClaimPresentationError.map(
+            try! XCTUnwrap(store.claimError(for: requestID))
+        )
+        XCTAssertEqual(presentation, .ambiguous)
+        XCTAssertEqual(presentation.message, ClaimPresentationError.ambiguous.message)
+        XCTAssertNil(store.activeClaim)
+        XCTAssertFalse(RequestDetailView.showsClaimAction(for: presentation))
+        XCTAssertFalse(RequestDetailView.showsPauseRecoveryAction(for: presentation))
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, ["/api/request/\(requestID)/claim"])
+    }
+
+    func testPausedClaimWaitsForExplicitCheckAgainAndKeepsRecoveryIfStillPaused() async {
+        let store = makeStore()
+        let paused = ClaimFlowURLProtocol.Stub.response(
+            statusCode: 503,
+            data: errorResponse(code: "PUBLIC_ACTIONS_PAUSED", message: "Paused.")
+        )
+        ClaimFlowURLProtocol.enqueue(paused)
+
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("A paused claim must not succeed")
+        } catch {
+            XCTAssertEqual(ClaimPresentationError.map(error), .publicActionsPaused)
+        }
+
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 1)
+        XCTAssertTrue(RequestDetailView.showsPauseRecoveryAction(
+            for: ClaimPresentationError.map(try! XCTUnwrap(store.claimError(for: requestID)))
+        ))
+
+        // Merely remaining on or re-entering the detail sends nothing. This next
+        // stub cannot be consumed until the helper explicitly invokes claim again.
+        ClaimFlowURLProtocol.enqueue(paused)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 1)
+
+        do {
+            try await store.claim(requestID: requestID)
+            XCTFail("The backend is still paused")
+        } catch {
+            XCTAssertEqual(ClaimPresentationError.map(error), .publicActionsPaused)
+        }
+
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 2)
+        XCTAssertTrue(RequestDetailView.showsPauseRecoveryAction(
+            for: ClaimPresentationError.map(try! XCTUnwrap(store.claimError(for: requestID)))
+        ))
+    }
+
+    func testCheckAgainCanEnterTheNormalActiveReservationAfterPause() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 503,
+            data: errorResponse(code: "PUBLIC_ACTIONS_PAUSED", message: "Paused.")
+        ))
+        try? await store.claim(requestID: requestID)
+
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(pickupName: "Taylor")))
+        try await store.claim(requestID: requestID)
+
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.requestID, requestID)
+        XCTAssertEqual(claim.pickupName, "Taylor")
+        XCTAssertNil(store.claimError(for: requestID))
+        XCTAssertTrue(RequestDetailView.opensClaimedFlow(
+            activeClaim: claim,
+            requestID: requestID
+        ))
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 2)
+    }
+
+    func testDuplicateCheckAgainTapsCannotSendConcurrentClaimPosts() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 503,
+            data: errorResponse(code: "PUBLIC_ACTIONS_PAUSED", message: "Paused.")
+        ))
+        try? await store.claim(requestID: requestID)
+
+        let gate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(), gate: gate))
+        let checkAgain = Task { try await store.claim(requestID: requestID) }
+        await waitUntil { gate.isWaiting }
+
+        for _ in 0..<3 {
+            do {
+                try await store.claim(requestID: requestID)
+                XCTFail("A duplicate Check again tap must be refused locally")
+            } catch RequestServiceError.operationInProgress {
+                // Expected.
+            } catch {
+                XCTFail("Unexpected duplicate-tap error: \(error)")
+            }
+        }
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 2)
+
+        gate.open()
+        try await checkAgain.value
+        XCTAssertNotNil(store.activeClaim)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.count, 2)
+    }
+
+    func testOnlyPausedClaimsExposeCheckAgain() {
+        XCTAssertTrue(RequestDetailView.showsPauseRecoveryAction(for: .publicActionsPaused))
+        for error in [
+            ClaimPresentationError.alreadyClaimed,
+            .noLongerAvailable,
+            .rateLimited,
+            .ambiguous,
+            .couldNotStart,
+            .operationInProgress,
+            .otherClaimInProgress,
+            .existingActiveClaim,
+            .pendingPlacementAcknowledgement,
+        ] {
+            XCTAssertFalse(RequestDetailView.showsPauseRecoveryAction(for: error), "\(error)")
+        }
     }
 
     func testDelayedUnavailableFailureForRequestADoesNotAffectRequestBDetail() async {
@@ -1461,6 +1609,9 @@ final class ClaimFlowTests: XCTestCase {
                 ClaimExtensionPresentationError.map(store.claimExtensionError),
                 failure.expected
             )
+            let message = failure.expected.message
+            XCTAssertTrue(message.contains("reservation time shown above"), message)
+            XCTAssertFalse(message.localizedCaseInsensitiveContains("try again"), message)
             XCTAssertFalse(store.isShowingClaimExtensionPrompt)
             XCTAssertTrue(store.hasResolvedClaimExtensionPrompt)
         }
@@ -1487,6 +1638,9 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertFalse(claim.isExtensionAvailable)
         XCTAssertTrue(store.hasResolvedClaimExtensionPrompt)
         XCTAssertFalse(store.isShowingClaimExtensionPrompt)
+        let message = ClaimExtensionPresentationError.alreadyUsed.message
+        XCTAssertTrue(message.contains("reservation time shown above"), message)
+        XCTAssertFalse(message.localizedCaseInsensitiveContains("try again"), message)
         XCTAssertEqual(
             claim.claimExpiresAt.timeIntervalSince1970,
             claimExpiresAt.timeIntervalSince1970,
@@ -2536,7 +2690,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(FulfillRequestView.confirmationTitle, "Order recorded")
         XCTAssertEqual(
             FulfillRequestView.confirmationDetail(for: .notificationSent),
-            "We sent the order details to the student’s email. They’ll pick up the food themselves—you’re done. If they reply, it goes to the address you entered."
+            "CommonPlate submitted the order details for email delivery. We can’t confirm that the student received or read the email, or that they will pick up the food. If they reply, it goes to the address you entered."
         )
         XCTAssertEqual(
             FulfillRequestView.confirmationDetail(for: .notificationFailed),
@@ -2555,21 +2709,13 @@ final class ClaimFlowTests: XCTestCase {
             FulfillRequestView.confirmationDetail(for: .emailStatusUnknown)
         ]
         XCTAssertEqual(Set(details).count, 3, "Email outcomes must stay distinguishable")
-        XCTAssertFalse(details[0].localizedCaseInsensitiveContains("delivered"))
+        for forbidden in ["received the email.", "read the email.", "they’ll pick up"] {
+            XCTAssertFalse(details[0].localizedCaseInsensitiveContains(forbidden), details[0])
+        }
         for detail in details.dropFirst() {
             XCTAssertTrue(detail.localizedCaseInsensitiveContains("may not know"), detail)
             XCTAssertTrue(detail.contains(Self.safetySentence), detail)
         }
-        XCTAssertTrue(FulfillRequestView.keepsClaimedFlowPresented(
-            activeRequestID: nil,
-            confirmationRequestID: requestID,
-            requestID: requestID
-        ))
-        XCTAssertFalse(FulfillRequestView.keepsClaimedFlowPresented(
-            activeRequestID: nil,
-            confirmationRequestID: nil,
-            requestID: requestID
-        ))
     }
 
     func testExpiredClaimIsBlockedBeforeFulfillmentAndForegroundReturnClearsIt() async throws {
@@ -4706,32 +4852,38 @@ final class ClaimFlowTests: XCTestCase {
             contactMessage: nil
         )
 
-        // Placement clears the claim immediately; the unacknowledged
-        // confirmation is the only thing keeping the screen alive.
+        // Placement clears the claim immediately and leaves the confirmation
+        // for the Active Requests card, not for this completed screen.
         let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
         XCTAssertNil(store.activeClaim)
-        XCTAssertTrue(FulfillRequestView.keepsClaimedFlowPresented(
+        path = FulfillRequestView.claimedFlowPath(
+            path,
             activeRequestID: store.activeClaim?.requestID,
             confirmationRequestID: confirmation.requestID,
             requestID: requestID
-        ))
-
-        // "Back to Active Requests".
-        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
-        path = AppRoute.returningToActiveRequests(from: path)
+        )
 
         XCTAssertEqual(path, [.activeRequests])
+        XCTAssertEqual(path.last, .activeRequests)
         XCTAssertFalse(AppRoute.containsHelperDestination(in: path, requestID: requestID))
-        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNotNil(
+            store.fulfillmentConfirmation,
+            "Active Requests must still have the placement-confirmation card to render"
+        )
         XCTAssertNil(store.activeClaim)
         XCTAssertFalse(store.requests.contains { $0.id == requestID })
-        // With neither a claim nor a confirmation the claimant screen renders
-        // nothing at all — the blank "Your reservation" screen. It must be off
-        // the stack, not merely emptied.
-        XCTAssertFalse(FulfillRequestView.hasPresentableContent(
-            hasClaim: store.activeClaim != nil,
-            hasConfirmation: store.fulfillmentConfirmation != nil
-        ))
+
+        let pathsAfterPlacement = ClaimFlowURLProtocol.capturedPaths
+        do {
+            try await store.claim(requestID: "meal-b")
+            XCTFail("The unacknowledged placement must still gate another claim")
+        } catch RequestServiceError.unacknowledgedPlacement {
+            // Expected before any POST.
+        }
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, pathsAfterPlacement)
+
+        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
+        XCTAssertNil(store.fulfillmentConfirmation)
     }
 
     /// The second supported entry: reopening the reservation from the pinned
@@ -4762,12 +4914,16 @@ final class ClaimFlowTests: XCTestCase {
         let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
         XCTAssertEqual(confirmation.kind, .notificationFailed)
 
-        store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
-        path = AppRoute.returningToActiveRequests(from: path)
+        path = FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: confirmation.requestID,
+            requestID: requestID
+        )
 
         XCTAssertEqual(path, [.activeRequests])
         XCTAssertFalse(AppRoute.containsHelperDestination(in: path, requestID: requestID))
-        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertEqual(store.fulfillmentConfirmation?.id, confirmation.id)
     }
 
     /// Whatever the helper flow stacked up, leaving it leaves nothing behind
@@ -4807,16 +4963,24 @@ final class ClaimFlowTests: XCTestCase {
             .activeRequests, .requestDetail(request), .fulfillment(request)
         ]
 
-        XCTAssertFalse(FulfillRequestView.keepsClaimedFlowPresented(
-            activeRequestID: nil, confirmationRequestID: nil, requestID: requestID
-        ))
-        XCTAssertFalse(FulfillRequestView.keepsClaimedFlowPresented(
-            activeRequestID: "meal-b", confirmationRequestID: nil, requestID: requestID
-        ))
-        XCTAssertTrue(FulfillRequestView.keepsClaimedFlowPresented(
-            activeRequestID: requestID, confirmationRequestID: nil, requestID: requestID
-        ))
-        XCTAssertEqual(AppRoute.returningToActiveRequests(from: path), [.activeRequests])
+        XCTAssertEqual(FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: nil,
+            confirmationRequestID: nil,
+            requestID: requestID
+        ), [.activeRequests])
+        XCTAssertEqual(FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: "meal-b",
+            confirmationRequestID: nil,
+            requestID: requestID
+        ), [.activeRequests])
+        XCTAssertEqual(FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: requestID,
+            confirmationRequestID: nil,
+            requestID: requestID
+        ), path)
     }
 
     /// Entering is driven by republishable store state, so the push has to be
@@ -4842,17 +5006,93 @@ final class ClaimFlowTests: XCTestCase {
         )
     }
 
-    func testEmptiedReservationScreenHasNothingToRender() {
-        XCTAssertTrue(
-            FulfillRequestView.hasPresentableContent(hasClaim: true, hasConfirmation: false)
+    func testConfirmedPlacementAlwaysWinsOverAStaleActiveClaimWhenTruncating() {
+        let request = foodRequest(id: requestID)
+        let path: [AppRoute] = [
+            .activeRequests, .requestDetail(request), .fulfillment(request)
+        ]
+
+        let returned = FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: requestID,
+            confirmationRequestID: requestID,
+            requestID: requestID
         )
-        XCTAssertTrue(
-            FulfillRequestView.hasPresentableContent(hasClaim: false, hasConfirmation: true)
-        )
-        XCTAssertFalse(
-            FulfillRequestView.hasPresentableContent(hasClaim: false, hasConfirmation: false)
-        )
+
+        XCTAssertEqual(returned, [.activeRequests])
+        XCTAssertFalse(AppRoute.containsHelperDestination(in: returned, requestID: requestID))
         XCTAssertEqual(FulfillRequestView.navigationTitle, "Your reservation")
+    }
+
+    func testFailedFulfillmentDoesNotPrematurelyUnwindNavigation() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        let claimed = try XCTUnwrap(store.activeClaim?.request)
+        let path: [AppRoute] = [
+            .activeRequests, .requestDetail(claimed), .fulfillment(claimed)
+        ]
+        ClaimFlowURLProtocol.enqueue(.response(
+            statusCode: 503,
+            data: errorResponse(code: "TRANSACTIONS_UNAVAILABLE", message: "Unavailable.")
+        ))
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("A failed fulfillment must not confirm placement")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertEqual(FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: store.fulfillmentConfirmation?.requestID,
+            requestID: requestID
+        ), path)
+    }
+
+    func testAmbiguousFulfillmentDoesNotPrematurelyUnwindNavigation() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
+        try await store.claim(requestID: requestID)
+        let claimed = try XCTUnwrap(store.activeClaim?.request)
+        let path: [AppRoute] = [
+            .activeRequests, .requestDetail(claimed), .fulfillment(claimed)
+        ]
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "open")))
+
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("An unresolved fulfillment must stay ambiguous")
+        } catch RequestServiceError.ambiguousFulfillmentOutcome {
+            // Expected.
+        }
+
+        XCTAssertNotNil(store.fulfillmentAmbiguity)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertEqual(store.activeClaim?.requestID, requestID)
+        XCTAssertEqual(FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: store.fulfillmentConfirmation?.requestID,
+            requestID: requestID
+        ), path)
     }
 
     // MARK: - When will it be ready?
@@ -4933,7 +5173,7 @@ final class ClaimFlowTests: XCTestCase {
         )
         XCTAssertEqual(
             FulfillRequestView.helperEmailNotice,
-            "The student will see this email and can reply."
+            "If the email reaches the student, they can reply to this address."
         )
         XCTAssertEqual(
             FulfillRequestView.orderNumberNotice,

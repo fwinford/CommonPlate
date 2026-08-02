@@ -7,6 +7,7 @@ import {
   it,
   vi,
 } from "vitest";
+import { readFileSync } from "node:fs";
 import type { PublicMealRequest } from "./home.js";
 
 let home: typeof import("./home.js");
@@ -195,5 +196,45 @@ describe("public request-list web contract", () => {
     ).toBe("Jul 26, 4:00 PM – 5:00 PM");
 
     expect(dateNow).not.toHaveBeenCalled();
+  });
+});
+
+describe("homepage truthfulness copy", () => {
+  const pageSource = readFileSync(
+    new URL("../../public/home.html", import.meta.url),
+    "utf8"
+  );
+  const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+
+  it("describes confirmation and fulfillment email as attempts", () => {
+    expect(pageSource).toContain(
+      "CommonPlate attempts to send a confirmation email; delivery is not guaranteed"
+    );
+    expect(pageSource).toContain(
+      "When someone helps, CommonPlate attempts to email the pickup details; delivery is not guaranteed"
+    );
+    expect(pageSource).toContain(
+      "CommonPlate attempts to email the requester the order details"
+    );
+    expect(pageSource).not.toContain("Requester automatically receives");
+
+    expect(readme).toContain(
+      "CommonPlate attempts requester confirmation and fulfillment emails; request creation and provider submission do not guarantee delivery"
+    );
+    expect(readme).not.toContain("requesters get confirmation and fulfillment emails");
+  });
+
+  it("states the scoped data sharing and retention facts", () => {
+    for (const expected of [
+      "Pickup name is shared only with the successful helper",
+      "the helper’s email may be sent to the requester for coordination",
+      "Placed Request data is retained for seven days",
+      "Fulfillment records may be retained longer",
+    ]) {
+      expect(pageSource).toContain(expected);
+    }
+    expect(pageSource).not.toContain(
+      "No personal data stored after requests are completed"
+    );
   });
 });

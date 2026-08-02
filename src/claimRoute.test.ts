@@ -80,6 +80,14 @@ function mockAtomicResult(result: unknown) {
   } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
 }
 
+function mockAtomicRejection(error: Error) {
+  return vi.spyOn(MealRequest, "findOneAndUpdate").mockReturnValue({
+    lean: () => ({
+      exec: vi.fn().mockRejectedValue(error),
+    }),
+  } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
+}
+
 function mockDiagnosticResult(result: unknown) {
   return vi.spyOn(MealRequest, "findById").mockReturnValue({
     select: () => ({
@@ -292,6 +300,30 @@ describe("POST /api/request/:id/claim", () => {
     expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
       /secret-material|claimTokenDigest/
     );
+  });
+
+  it("returns structured INTERNAL_FAILURE when the atomic execution rejects", async () => {
+    // A rejected driver operation does not prove no claim was written: MongoDB
+    // may have applied the conditional mutation before its acknowledgement was
+    // lost. The route deliberately preserves its structured error envelope.
+    const atomic = mockAtomicRejection(new Error("acknowledgement lost"));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(atomic).toHaveBeenCalledOnce();
+    expect(context.status).toHaveBeenCalledWith(500);
+    expect(responseBody(context)).toEqual({
+      error: {
+        code: "INTERNAL_FAILURE",
+        message: "Unable to claim this request right now.",
+        fields: null,
+      },
+    });
+    expect(consoleError).toHaveBeenCalledOnce();
   });
 });
 

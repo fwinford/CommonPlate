@@ -8,7 +8,7 @@ I built it around a simple idea: students often have extra food resources, and o
 
 - students can post meal requests with a vendor, food item, pickup name, email, and time window
 - students with extra meal swipes can claim a request, place the order, and mark it as fulfilled
-- requesters get confirmation and fulfillment emails
+- CommonPlate attempts requester confirmation and fulfillment emails; request creation and provider submission do not guarantee delivery
 - old requests automatically expire
 - rate limiting helps reduce spam
 
