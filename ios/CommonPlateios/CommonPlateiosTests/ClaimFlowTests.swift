@@ -2808,7 +2808,7 @@ final class ClaimFlowTests: XCTestCase {
         }
     }
 
-    func testNonterminalStructuredFulfillmentFailureKeepsClaimAndAllowsNoAutomaticRetry() async throws {
+    func testFirstFulfillmentInternalFailureUsesOneReadAndOneControlledRecovery() async throws {
         let store = makeStore()
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
@@ -2816,6 +2816,7 @@ final class ClaimFlowTests: XCTestCase {
             statusCode: 500,
             data: errorResponse(code: ClaimErrorCode.internalFailure, message: "Could not persist")
         ))
+        ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
         do {
             try await store.fulfill(
@@ -2825,47 +2826,63 @@ final class ClaimFlowTests: XCTestCase {
                 eta: "15 minutes",
                 contactMessage: nil
             )
-            XCTFail("A structured failure must not be success")
-        } catch RequestServiceError.serverError(let code, _) {
-            XCTAssertEqual(code, ClaimErrorCode.internalFailure)
+            XCTFail("A commit-uncertain failure must not be success")
+        } catch RequestServiceError.ambiguousFulfillmentOutcome {
+            // Expected after the one read-only status check.
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
 
         XCTAssertNotNil(store.activeClaim)
-        XCTAssertNil(store.fulfillmentAmbiguity)
+        let ambiguity = try XCTUnwrap(store.fulfillmentAmbiguity)
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 1)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0 == "/api/request/\(requestID)" }.count, 1)
 
         // INTERNAL_FAILURE can accompany a placement that may in fact have
         // committed, so the copy must not assert that nothing was recorded, and
         // must separate re-sending these CommonPlate details from placing a
         // second Grubhub order.
-        XCTAssertEqual(FulfillmentPresentationError.map(store.fulfillError), .couldNotRecord)
-        let message = FulfillmentPresentationError.couldNotRecord.message
-        XCTAssertEqual(
-            message,
-            "CommonPlate may not have saved your order. Tap “I placed this order” again. Trying again here only updates CommonPlate. It does not place another Grubhub order."
-        )
-        XCTAssertTrue(message.localizedCaseInsensitiveContains("may not have saved"))
-        // The retry it offers is the in-app one, named by the button it means.
-        XCTAssertTrue(message.contains(FulfillRequestView.submitTitle))
-        XCTAssertTrue(message.contains(Self.inAppRetryDisclaimer))
-        XCTAssertFalse(message.contains("We couldn’t record the order."))
+        XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
+            draft: FulfillmentFormDraft(
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
+                readyTime: .fifteenMinutes
+            ),
+            isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
+        ))
+        let message = FulfillRequestView.ambiguousDetail(isCheckingStatus: false)
+        XCTAssertTrue(message.contains(Self.safetySentence))
+        XCTAssertFalse(message.contains("place another external order"))
 
-        // Nonterminal means the helper may still record manually. Proving the
-        // resubmission actually goes through also proves nothing retried it
-        // automatically in the meantime: this is the second fulfill POST.
-        XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
+        // The only retry reuses the retained original payload and is consumed
+        // before its POST starts.
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
-        try await store.fulfill(
-            requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
-            orderNumber: "70154321",
-            eta: "15 minutes",
-            contactMessage: nil
+        try await store.resubmitAmbiguousFulfillment(
+            ambiguityID: ambiguity.id,
+            requestID: requestID
         )
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 2)
+        let fulfillmentBodies = try ClaimFlowURLProtocol.capturedRequests
+            .filter { $0.path.hasSuffix("/fulfill") }
+            .map { try canonicalJSON($0.bodyObject) }
+        XCTAssertEqual(fulfillmentBodies.count, 2)
+        XCTAssertEqual(fulfillmentBodies[0], fulfillmentBodies[1])
         XCTAssertEqual(store.fulfillmentConfirmation?.kind, .notificationSent)
+        do {
+            try await store.fulfill(
+                requestID: requestID,
+                fulfillerEmail: "helper@example.edu",
+                orderNumber: "70154321",
+                eta: "15 minutes",
+                contactMessage: nil
+            )
+            XCTFail("The ordinary submit remains unavailable after recovery")
+        } catch RequestServiceError.noActiveClaim {
+            // Expected: a second fulfillment POST is forbidden.
+        }
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count, 2)
     }
 
     func testAmbiguousTransportPerformsOneReadAndBlocksEveryFurtherPost() async throws {
@@ -4180,8 +4197,8 @@ final class ClaimFlowTests: XCTestCase {
                     requestID: requestID
                 )
                 XCTFail("An unresolved repeat reports its verdict: \(entry.name)")
-            } catch RequestServiceError.serverError(let code, _) {
-                XCTAssertEqual(code, ClaimErrorCode.internalFailure, entry.name)
+            } catch RequestServiceError.ambiguousFulfillmentOutcome {
+                // The second commit-uncertain response remains ambiguous.
             }
 
             let blocked = try XCTUnwrap(store.fulfillmentAmbiguity, entry.name)
@@ -4676,8 +4693,8 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(
-            statusCode: 500,
-            data: errorResponse(code: ClaimErrorCode.internalFailure, message: "Could not persist")
+            statusCode: 429,
+            data: errorResponse(code: ClaimErrorCode.rateLimited, message: "Too many attempts")
         ))
         try? await store.fulfill(
             requestID: requestID,
@@ -5613,8 +5630,8 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(
-            statusCode: 500,
-            data: errorResponse(code: ClaimErrorCode.internalFailure, message: "Could not persist")
+            statusCode: 429,
+            data: errorResponse(code: ClaimErrorCode.rateLimited, message: "Too many attempts")
         ))
 
         let draft = FulfillmentFormDraft(
@@ -5641,7 +5658,7 @@ final class ClaimFlowTests: XCTestCase {
             }
             XCTFail("The backend rejection must escape the production seam")
         } catch RequestServiceError.serverError(let code, _) {
-            XCTAssertEqual(code, ClaimErrorCode.internalFailure)
+            XCTAssertEqual(code, ClaimErrorCode.rateLimited)
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -5651,7 +5668,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(draft.eta, "30 minutes")
         XCTAssertEqual(draft.contactMessage, "Text me at pickup")
         XCTAssertEqual(store.activeClaim?.requestID, requestID)
-        XCTAssertEqual(FulfillmentPresentationError.map(store.fulfillError), .couldNotRecord)
+        XCTAssertEqual(FulfillmentPresentationError.map(store.fulfillError), .rateLimited)
         XCTAssertEqual(
             ClaimFlowURLProtocol.capturedPaths.filter { $0.hasSuffix("/fulfill") }.count,
             1

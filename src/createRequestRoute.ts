@@ -287,6 +287,8 @@ export async function createRequest(
   }
 
   try {
+    // This serial read-before-write is intentionally best-effort abuse control,
+    // not a transactional quota guarantee under concurrent requests.
     const startOfDay = new Date(now);
     startOfDay.setHours(0, 0, 0, 0);
 
@@ -305,6 +307,9 @@ export async function createRequest(
       }
     } catch {
       console.error("[route] Failed to enforce request daily limit");
+      return res.status(500).json(
+        errorEnvelope("REQUEST_CREATION_FAILED", "Unable to create request")
+      );
     }
 
     const expiresAt = requestExpiration(validated, now);

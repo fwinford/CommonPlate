@@ -4,7 +4,7 @@
 //
 //  Created by faith on 7/13/26.
 //
-// Wire-level types for the request domain, per docs/week-2-integration-spec.md.
+// Wire-level types for the request domain, per docs/system-contract.md.
 // These decode/encode exactly what the backend contracts define. DTO-to-domain
 // mapping (RequestResponseDTO -> FoodRequest) belongs to RequestService, not here.
 import Foundation

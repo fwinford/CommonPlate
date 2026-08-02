@@ -8,7 +8,7 @@ import SwiftUI
 
 /// How a claim attempt is presented to the helper. Backend codes are mapped
 /// deliberately, with a fallback for anything unrecognized, per the error
-/// contract in docs/week-2-integration-spec.md. The stable code itself stays on
+/// contract in docs/system-contract.md. The stable code itself stays on
 /// the request-scoped `RequestStore` event; only the copy lives here.
 enum ClaimPresentationError: Equatable {
     /// HTTP 409 `REQUEST_ALREADY_CLAIMED`. Locked message.

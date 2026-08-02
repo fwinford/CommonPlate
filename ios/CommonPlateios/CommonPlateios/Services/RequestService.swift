@@ -5,7 +5,7 @@
 //  Created by faith on 7/13/26.
 //
 // Owns CommonPlate endpoint knowledge and DTO-to-domain mapping, per
-// docs/week-2-integration-spec.md. Talks to the backend only through
+// docs/system-contract.md. Talks to the backend only through
 // APIClient; never calls URLSession directly. Contains no SwiftUI state and
 // no user-facing copy. Never retries POST operations automatically.
 import Foundation
@@ -320,6 +320,12 @@ struct RequestService {
             throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: CancellationError())
         } catch let error as APIClientError {
             switch error {
+            // A readable fulfillment INTERNAL_FAILURE can follow a committed
+            // transaction whose acknowledgement was lost. It is therefore not
+            // a definitive ordinary failure: retain the original payload for
+            // the existing one-read, one-resend ambiguity recovery flow.
+            case .apiError(let code, _) where code == ClaimErrorCode.internalFailure:
+                throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
             case .transport, .decoding, .unexpectedStatus:
                 throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
             default:

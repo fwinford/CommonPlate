@@ -5,7 +5,7 @@
 //  Created by faith on 7/13/26.
 //
 // Coordinates RequestService calls and updates local state only after
-// confirmed backend responses, per docs/week-2-integration-spec.md. Owns no
+// confirmed backend responses, per docs/system-contract.md. Owns no
 // SwiftUI screen; views call its operation-specific methods.
 import Combine
 import Foundation

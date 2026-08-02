@@ -702,6 +702,8 @@ describe("POST /api/request side-effect ordering and errors", () => {
       notifySubscribersForRequest.mock.invocationCallOrder[0]
     );
     expect(context.status).toHaveBeenCalledWith(201);
+    expect(countDocuments).toHaveBeenCalledOnce();
+    expect(createDocument).toHaveBeenCalledOnce();
   });
 
   it("describes later requester email as an attempt in both email bodies", async () => {
@@ -791,7 +793,7 @@ describe("POST /api/request side-effect ordering and errors", () => {
     expect(notifySubscribersForRequest).not.toHaveBeenCalled();
   });
 
-  it("returns REQUEST_LIMIT_REACHED when a valid request exceeds the daily limit", async () => {
+  it("returns REQUEST_LIMIT_REACHED when the best-effort daily abuse-control count is at the limit", async () => {
     countDocuments.mockResolvedValue(3);
     const context = routeContext(canonicalAsap());
 
@@ -802,6 +804,24 @@ describe("POST /api/request side-effect ordering and errors", () => {
       error: {
         code: "REQUEST_LIMIT_REACHED",
         message: "You have reached the daily limit of 3 meal requests",
+      },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the daily abuse-control count cannot be read", async () => {
+    countDocuments.mockRejectedValue(new Error("count unavailable"));
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(500);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: "REQUEST_CREATION_FAILED",
+        message: "Unable to create request",
       },
     });
     expect(createDocument).not.toHaveBeenCalled();

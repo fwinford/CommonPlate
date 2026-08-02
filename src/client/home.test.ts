@@ -63,6 +63,20 @@ function publicRequest(
 }
 
 describe("homepage subscription pause", () => {
+  function subscriberCountRoot() {
+    const activeCount = { textContent: "" };
+    const heroCount = { textContent: "" };
+    const elements: Record<string, unknown> = {
+      "active-count": activeCount,
+      "active-subscriber-hero": heroCount,
+    };
+    return {
+      activeCount,
+      heroCount,
+      root: { getElementById: (id: string) => elements[id] ?? null } as unknown as Document,
+    };
+  }
+
   function heroRoot() {
     const subscribeBtn = { hidden: false };
     const subscribePanel = { hidden: false, style: { display: "block" } };
@@ -111,6 +125,37 @@ describe("homepage subscription pause", () => {
     );
 
     await expect(home.fetchPublicActionsPaused()).resolves.toBe(false);
+  });
+
+  it("never describes subscribers as ready to fulfill after pause is established", () => {
+    const { activeCount, heroCount, root } = subscriberCountRoot();
+
+    home.applyActiveSubscriberCount(root, 4, true);
+
+    expect(activeCount.textContent).toBe(home.VOLUNTEER_AVAILABILITY_PAUSED_MESSAGE);
+    expect(heroCount.textContent).toBe(home.VOLUNTEER_AVAILABILITY_PAUSED_MESSAGE);
+    expect(`${activeCount.textContent}${heroCount.textContent}`).not.toContain(
+      "ready to fulfill"
+    );
+  });
+
+  it("does not let a late subscriber count overwrite paused copy", () => {
+    const { activeCount, heroCount, root } = subscriberCountRoot();
+
+    home.applyActiveSubscriberCount(root, undefined, true);
+    home.applyActiveSubscriberCount(root, 4, true);
+
+    expect(activeCount.textContent).toBe(home.VOLUNTEER_AVAILABILITY_PAUSED_MESSAGE);
+    expect(heroCount.textContent).toBe(home.VOLUNTEER_AVAILABILITY_PAUSED_MESSAGE);
+  });
+
+  it("keeps the normal ready-count copy when actions are available", () => {
+    const { activeCount, heroCount, root } = subscriberCountRoot();
+
+    home.applyActiveSubscriberCount(root, 1, false);
+
+    expect(activeCount.textContent).toBe("1 volunteer ready to fulfill requests");
+    expect(heroCount.textContent).toBe("1 volunteer ready to fulfill requests");
   });
 });
 

@@ -24,6 +24,31 @@ export const WEB_ORDERING_UNAVAILABLE_MESSAGE =
 export const ALERTS_UNAVAILABLE_MESSAGE =
   "Meal request alerts are temporarily unavailable.";
 
+export const VOLUNTEER_AVAILABILITY_PAUSED_MESSAGE =
+  "Volunteer availability is temporarily paused.";
+
+export function activeSubscriberCountMessage(
+  count: unknown,
+  publicActionsPaused: boolean
+): string {
+  if (publicActionsPaused) return VOLUNTEER_AVAILABILITY_PAUSED_MESSAGE;
+  return typeof count === "number" && count > 0
+    ? `${count} volunteer${count === 1 ? "" : "s"} ready to fulfill requests`
+    : "Volunteers are signing up—check back soon!";
+}
+
+export function applyActiveSubscriberCount(
+  root: Document,
+  count: unknown,
+  publicActionsPaused: boolean
+): void {
+  const message = activeSubscriberCountMessage(count, publicActionsPaused);
+  const activeCount = root.getElementById("active-count");
+  const heroCount = root.getElementById("active-subscriber-hero");
+  if (activeCount) activeCount.textContent = message;
+  if (heroCount) heroCount.textContent = message;
+}
+
 /**
  * Asks the server whether public actions are paused. Any failure is treated as
  * paused: no address should be accepted while confirmation and unsubscribe are
@@ -155,8 +180,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Fire-and-forget so the pause probe never delays browsing. The signup
   // control is withheld as soon as the answer arrives; the server refuses
   // POST /api/subscribe throughout, so no address can be accepted meanwhile.
+  let publicActionsPaused = false;
   void fetchPublicActionsPaused().then((paused) => {
-    if (paused) applySubscriptionPause(document);
+    publicActionsPaused = paused;
+    if (paused) {
+      applySubscriptionPause(document);
+      applyActiveSubscriberCount(document, undefined, true);
+    }
   });
 
   if (subscribeBtn && subscribePanel && subscribeForm && subscribeEmail && subscribeCancel && subscribeMessage) {
@@ -215,11 +245,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const resp = await fetch('/api/active-subscriber-count');
       if (resp.ok) {
         const data = await resp.json();
-        const msg = (typeof data.count === 'number' && data.count > 0)
-          ? `${data.count} volunteer${data.count === 1 ? '' : 's'} ready to fulfill requests`
-          : 'Volunteers are signing up—check back soon!';
-        if (activeCountEl) activeCountEl.textContent = msg;
-        if (heroCountEl) heroCountEl.textContent = msg;
+        applyActiveSubscriberCount(document, data.count, publicActionsPaused);
       } else {
         if (activeCountEl) activeCountEl.textContent = '';
         if (heroCountEl) heroCountEl.textContent = '';

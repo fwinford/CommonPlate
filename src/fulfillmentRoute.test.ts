@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateClaimToken } from "./claimToken.js";
+import { Fulfillment, Request as MealRequest } from "../models/db.js";
 
 const sendFulfillmentEmail = vi.hoisted(() => vi.fn());
 vi.mock("./emailHelpers.js", () => ({ sendFulfillmentEmail }));
@@ -303,5 +304,48 @@ describe("POST /api/request/:id/fulfill validation", () => {
     expect(responseBody(context).error.code).toBe("INTERNAL_FAILURE");
     expect(startSession).not.toHaveBeenCalled();
     expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
+  it("continues the committed placement response path when session cleanup fails", async () => {
+    const placedRequest = {
+      _id: new mongoose.Types.ObjectId(requestId),
+      vendor: "Campus Market",
+      food: "Vegetable rice bowl",
+      pickupWindowText: "ASAP",
+      status: "placed",
+      createdAt: new Date("2026-08-02T12:00:00.000Z"),
+      expiresAt: new Date("2026-08-02T17:00:00.000Z"),
+    };
+    const update = vi.fn().mockReturnValue({ exec: vi.fn().mockResolvedValue({}) });
+    const placement = vi.fn().mockReturnValue({
+      exec: vi.fn().mockResolvedValue(placedRequest),
+    });
+    const ledger = vi.spyOn(Fulfillment, "create").mockResolvedValue([] as never);
+    vi.spyOn(MealRequest, "findOneAndUpdate").mockImplementation(placement as never);
+    vi.spyOn(MealRequest, "updateOne").mockImplementation(update as never);
+    const session = {
+      withTransaction: vi.fn().mockImplementation(async (operation) => operation()),
+      endSession: vi.fn().mockRejectedValue(new Error("cleanup unavailable")),
+    };
+    vi.spyOn(mongoose, "startSession").mockResolvedValue(session as any);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const context = routeContext(validBody());
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(session.withTransaction).toHaveBeenCalledOnce();
+    expect(session.endSession).toHaveBeenCalledOnce();
+    expect(placement).toHaveBeenCalledOnce();
+    expect(ledger).toHaveBeenCalledOnce();
+    expect(context.status).not.toHaveBeenCalled();
+    expect(responseBody(context)).toEqual({
+      request: expect.objectContaining({ id: requestId, status: "placed" }),
+      notification: { status: "sent" },
+    });
+    expect(consoleError).toHaveBeenCalledWith(
+      "[fulfillment] MongoDB session cleanup failed after placement attempt"
+    );
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain("helper@example.edu");
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain("70154321");
   });
 });

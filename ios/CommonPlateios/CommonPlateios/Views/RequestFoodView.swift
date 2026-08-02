@@ -56,7 +56,7 @@ enum RequestCreatePresentationError: Equatable {
         case .invalidRequest:
             return "Check the information you entered and try again."
         case .requestLimitReached:
-            return "The daily request limit has been reached. Please try again tomorrow."
+            return "CommonPlate attempts to limit each email to three meal requests a day. Please try again tomorrow."
         case .rateLimited:
             // Same sentence the helper sees for a throttled claim, since the
             // situation and the next step are identical.

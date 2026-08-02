@@ -340,7 +340,14 @@ export async function fulfillRequest(
     );
   } finally {
     if (session) {
-      await session.endSession();
+      try {
+        await session.endSession();
+      } catch {
+        // The transaction outcome is already known here. Cleanup cannot change
+        // placement truth or prevent the committed response path from running.
+        // Deliberately omit request, token, order, and contact details.
+        console.error("[fulfillment] MongoDB session cleanup failed after placement attempt");
+      }
     }
   }
 

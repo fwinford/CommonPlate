@@ -11,6 +11,7 @@ I built it around a simple idea: students often have extra food resources, and o
 - CommonPlate attempts requester confirmation and fulfillment emails; request creation and provider submission do not guarantee delivery
 - old requests automatically expire
 - rate limiting helps reduce spam
+- daily request limits are best-effort abuse control; concurrent requests may exceed the limit
 
 ## tech stack
 

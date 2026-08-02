@@ -4,7 +4,7 @@
 //
 //  Created by faith on 7/13/26.
 //
-// Generic HTTP client foundation, per docs/week-2-integration-spec.md. Owns
+// Generic HTTP client foundation, per docs/system-contract.md. Owns
 // endpoint URL construction, request/response encoding and decoding, ISO-8601
 // date handling, HTTP status validation, and error-envelope decoding. It does
 // not know about specific endpoints, DTO-to-domain mapping, or retries —

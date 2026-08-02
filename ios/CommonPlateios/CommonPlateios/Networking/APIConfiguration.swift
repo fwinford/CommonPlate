@@ -4,7 +4,7 @@
 //
 //  Created by faith on 7/13/26.
 //
-// Centralizes backend base-URL ownership, per docs/week-2-integration-spec.md.
+// Centralizes backend base-URL ownership, per docs/system-contract.md.
 // Views, services, and stores must not hard-code backend URLs; they receive
 // configuration through this type instead.
 //
