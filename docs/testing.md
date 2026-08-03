@@ -43,7 +43,7 @@ Run:
 npm test
 ```
 
-The current accepted baseline is **266 passed, 27 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
+The current accepted baseline is **295 passed, 52 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
 
 Representative coverage includes validation, route logic, error envelopes, browser behavior, copy guards, and source-wiring assertions. Some tests read source text instead of importing `app.ts`, because `app.ts` connects to MongoDB and starts listening at module scope. These assertions are not end-to-end route tests.
 
@@ -61,7 +61,7 @@ Run:
 npm run test:mongo
 ```
 
-The current accepted baseline is **27 passed**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
+The current accepted baseline is **52 passed across 5 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
 
 A replica set is required because placement verification exercises MongoDB transactions; standalone MongoDB cannot provide that behavior. Mongo verification remains incomplete until this command passes. `npm test` reporting the Mongo suites as skipped does not replace this run.
 
@@ -147,13 +147,14 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-Week 2 closeout results are a reference baseline, not a substitute for rerunning affected checks after future changes.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend rows were last recorded at the Week 3 signup-slice closeout; the iOS row remains the Week 2 closeout result and was not re-run for that backend-only slice.
 
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Passed |
-| `npm test` | 266 passed; 27 Mongo-gated skipped |
-| `npm run test:mongo` | 27 passed |
-| `CommonPlateiosTests` | 258 passed; 0 failed; 0 skipped |
+| `npm test` | 295 passed; 52 Mongo-gated skipped |
+| `npm run test:mongo` | 52 passed across 5 files |
+| `npm run ci-check` | Passed (lint, typecheck, prune, build) |
+| `CommonPlateiosTests` | 258 passed; 0 failed; 0 skipped (Week 2 closeout) |
 | `npm run build:client` | Passed |
 | `git diff --check` | Passed |

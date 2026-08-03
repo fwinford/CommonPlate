@@ -69,12 +69,13 @@ work.
 
 ## Subscription Boundary
 
-Signup currently auto-confirms incorrectly. The accepted lifecycle is
+Signup no longer auto-confirms: it creates or rotates pending confirmation
+state and stays behind `pausePublicAction`. The accepted lifecycle is
 `pending → confirmed → unsubscribed`; pending and unsubscribed subscribers
 receive no alerts. Subscriptions must remain paused until confirmation and
 unsubscribe are both implemented, accepted, and tested. Do not unpause signup
-or choose token/reconfirmation behavior without Faith's decision and the Week
-3 spec.
+or choose token, reconfirmation, migration, or activation behavior without
+Faith's decision and the Week 3 spec.
 
 ## Verification
 
@@ -82,7 +83,7 @@ or choose token/reconfirmation behavior without Faith's decision and the Week
 
 - TypeScript/backend: `npm run typecheck` plus focused tests.
 - Complete non-Mongo backend: `npm test`.
-- Mongo persistence, transactions, uniqueness, or index work: `npm run test:mongo` in addition to `npm test`. `npm test` skips the real Mongo suite (currently 27 Mongo-gated tests).
+- Mongo persistence, transactions, uniqueness, or index work: `npm run test:mongo` in addition to `npm test`. `npm test` skips the real Mongo suite (currently 52 Mongo-gated tests).
 - Browser client: focused tests, `npm run typecheck`, and `npm run build:client`.
 - iOS or cross-stack: focused iOS tests and the complete `CommonPlateiosTests` target.
 - Every change: `git diff --check`.

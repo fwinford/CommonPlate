@@ -24,6 +24,7 @@ The public request projection is allowlisted: `id`, vendor, food, pickup-window 
 | --- | --- |
 | Requester email and pickup name | Never public. Pickup name is returned only in the successful claimant's claim response. |
 | Claim token, token digest, claim deadline, claim timestamps | Never public. The raw token is claimant authorization; the backend persists only its digest. |
+| Confirmation token, its digest, expiry, and send-ownership fields | Never public. The raw confirmation token exists only in the emailed link; the backend persists only its SHA-256 digest. |
 | `deleteAt`, requester-notification state, fulfillment/contact fields, and other internal fields | Never public. |
 | Helper email | May be sent to the requester in the committed-placement email for coordination. |
 
@@ -62,9 +63,47 @@ Provider acceptance means only that CommonPlate submitted an email to the provid
 
 ## 9. Subscriber lifecycle
 
-The current signup code is incorrect for a confirmed-subscription system: it sends a confirmation link but auto-confirms the subscriber in the signup handler. Confirmation and unsubscribe routes do not exist. Signup must remain paused while this remains true.
+The lifecycle is `signup → pending → confirmed → unsubscribed`. Only `confirmed` subscribers are eligible for real-time helper alerts and the hourly digest; `pending` and `unsubscribed` subscribers are excluded by both the alert query and the recent-request path. Signing up again never silently reactivates alerts.
 
-The accepted target lifecycle is `signup → pending → confirmed → unsubscribed`: pending and unsubscribed subscribers receive no alerts; a confirmation link changes pending to confirmed; an unsubscribe action changes confirmed to unsubscribed; signing up again starts a new pending confirmation instead of silently reactivating alerts. This target lifecycle is not implemented today.
+Signup is implemented; confirmation and unsubscribe are not. There is no route that redeems a confirmation or unsubscribe token, so no new signup can reach `confirmed`. Rows already marked `confirmed` by the removed auto-confirm handler stay `confirmed` and alert-eligible; this slice added fields only and migrated no data. Signup therefore remains paused (section 10).
+
+### 9.1 `POST /api/subscribe`
+
+The handler validates a strict body: the sole field is `email`, unexpected fields are rejected, and the address is trimmed and lowercased before any database work. Invalid input returns the shared structured error envelope with HTTP 400 and `INVALID_EMAIL`.
+
+Every valid attempt — brand-new, unexpired pending, expired pending, unsubscribed, and already-confirmed — returns the identical generic response, so the response cannot be used to enumerate subscription status:
+
+```http
+HTTP 202
+{ "message": "If confirmation is needed, check your email for the next step." }
+```
+
+Confirmation-email submission failure returns the shared structured error envelope:
+
+```http
+HTTP 503
+{ "error": { "code": "CONFIRMATION_EMAIL_UNAVAILABLE", "message": "Email confirmation is temporarily unavailable. Please try again.", "fields": null } }
+```
+
+An already-confirmed address performs no mutation and submits no email. Signup never auto-confirms, never creates unsubscribe credentials, never resets delivery history, and never dispatches recent-request alerts. Re-signup preserves `bounced`, `dailyCount`, `lastSentAt`, unsubscribe-token state, unsubscribe timestamp, and existing delivery history.
+
+### 9.2 Confirmation tokens and pending state
+
+The raw confirmation token is a cryptographically random 32-byte base64url value that exists only for the emailed link. Only its SHA-256 digest is persisted, in the private `confirmationTokenDigest`. `confirmationExpiresAt` is backend time plus exactly 24 hours. `confirmationTokenDigest`, `confirmationExpiresAt`, `confirmationSendAttemptId`, and `confirmationSendAttemptAt` are private (`select: false`) and never public.
+
+The confirmation link is built from trusted configured `BASE_URL`, never from a request `Host`, `X-Forwarded-Host`, or request protocol, because the link carries a bearer token.
+
+A brand-new address creates one Subscriber. Unexpired pending, expired pending, and unsubscribed addresses rotate the existing document, preserving its `_id`. Rotation issues a new token, digest, and expiry, so any previous confirmation link becomes invalid.
+
+### 9.3 Concurrency, send ownership, and compensation
+
+Creation relies on the unique normalized-email index; a duplicate-key loss re-reads state and returns the same 202. Existing-lifecycle rotation is one exact conditional mutation that matches every prior lifecycle field, including field presence. A losing concurrent attempt re-reads state and never submits a token whose digest is not the persisted one.
+
+One attempt owns provider submission through `confirmationSendAttemptId` under a two-minute lease. Ownership with no timestamp, or a timestamp at or before the lease cutoff, is stale and takeover-eligible, so a process that dies mid-flight cannot make an address permanently unconfirmable. The confirmation provider request carries a real 30-second abort deadline — strictly shorter than the lease — so an unanswered provider releases its lifecycle within the lease.
+
+Successful submission leaves the Subscriber `pending` and clears the owner conditionally on `_id`, digest, and attempt ID. Submission failure conditionally deletes only the record created by that attempt, or restores the exact previous field values and field-presence semantics of the record it rotated; both compensations match `_id`, digest, and attempt ID, so stale cleanup cannot damage a newer lifecycle.
+
+If an owner-clear, deletion, or rollback operation itself rejects, its database outcome is unknown rather than known-failed, and is logged as unverified with only the subscriber ID, attempt ID, and a sanitized reason — never a raw token or confirmation URL. API behavior is unchanged by that ambiguity: 202 after provider success even when the owner clear is unacknowledged, and the exact 503 after provider failure even when compensation is unacknowledged. The bounded lease is what makes an unresolved owner recoverable by a later signup.
 
 ## 10. Public-actions pause and scheduled jobs
 
@@ -74,8 +113,10 @@ The accepted target lifecycle is `signup → pending → confirmed → unsubscri
 
 ## 11. Durable deferrals that constrain current behavior
 
-- Confirmation and unsubscribe routes/lifecycle for alerts.
-- Provider timeouts and durable email-outcome persistence.
+- Confirmation and unsubscribe routes, pages, and mutations. Signup creates pending state only, so no address can become alert-eligible today.
+- Cleanup of expired pending Subscribers; they stay notification-ineligible, so the current consequence is storage growth.
+- Provider timeouts outside the confirmation email, and durable email-outcome persistence. Only `sendSubscriptionConfirmationEmail` currently carries an abort deadline.
+- Browser rendering of the shared structured error envelope on the signup form, which must land before signup is unpaused.
 - Create idempotency and reconciliation.
 - Paid-but-unrecorded recovery beyond the in-memory, one-resend fulfillment safeguard.
 - Physical-device and release backend configuration.
