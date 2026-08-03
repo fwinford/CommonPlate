@@ -1,0 +1,249 @@
+import { readFileSync } from "node:fs";
+import type { Request, Response } from "express";
+import mongoose from "mongoose";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Subscriber } from "../models/db.js";
+
+vi.mock("./emailHelpers.js", () => ({
+  CONFIRMATION_EMAIL_TIMEOUT_MS: 30_000,
+  sendSubscriptionConfirmationEmail: vi.fn(),
+}));
+
+import { CONFIRMATION_EMAIL_TIMEOUT_MS } from "./emailHelpers.js";
+import {
+  CONFIRMATION_SEND_LEASE_MS,
+  CONFIRMATION_TOKEN_BYTES,
+  SUBSCRIBE_ACCEPTED_RESPONSE,
+  createSubscribeHandler,
+  generateConfirmationToken,
+} from "./subscribeRoute.js";
+
+function routeContext(body: unknown) {
+  const req = {
+    body,
+    protocol: "https",
+    get: () => "commonplate.test",
+  } as unknown as Request;
+  const res = {} as Response;
+  let statusCode = 200;
+  let bodyValue: unknown;
+  res.status = vi.fn((value: number) => {
+    statusCode = value;
+    return res;
+  }) as any;
+  res.json = vi.fn((value: unknown) => {
+    bodyValue = value;
+    return res;
+  }) as any;
+  return {
+    req,
+    res,
+    get statusCode() {
+      return statusCode;
+    },
+    get body() {
+      return bodyValue;
+    },
+  };
+}
+
+function queryResult(value: unknown) {
+  const query = {
+    select: vi.fn(),
+    lean: vi.fn(),
+    exec: vi.fn().mockResolvedValue(value),
+  };
+  query.select.mockReturnValue(query);
+  query.lean.mockReturnValue(query);
+  return query as any;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("subscribe request validation", () => {
+  it.each([
+    undefined,
+    null,
+    {},
+    { email: "" },
+    { email: "not-an-email" },
+    { email: "helper@example.edu", extra: true },
+  ])("rejects an invalid or non-strict body before database work", async (body) => {
+    const find = vi.spyOn(Subscriber, "findOne");
+    const sendConfirmationEmail = vi.fn();
+    const context = routeContext(body);
+
+    await createSubscribeHandler({ sendConfirmationEmail })(
+      context.req,
+      context.res
+    );
+
+    expect(context.statusCode).toBe(400);
+    expect(context.body).toEqual({
+      error: {
+        code: "INVALID_EMAIL",
+        message: "Enter a valid email address.",
+        fields: null,
+      },
+    });
+    expect(find).not.toHaveBeenCalled();
+    expect(sendConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  it("trims and lowercases before the lookup", async () => {
+    const id = new mongoose.Types.ObjectId();
+    const find = vi
+      .spyOn(Subscriber, "findOne")
+      .mockReturnValue(
+        queryResult({
+          _id: id,
+          email: "helper@example.edu",
+          status: "confirmed",
+        })
+      );
+    const sendConfirmationEmail = vi.fn();
+    const context = routeContext({ email: "  Helper@Example.EDU  " });
+
+    await createSubscribeHandler({ sendConfirmationEmail })(
+      context.req,
+      context.res
+    );
+
+    expect(find).toHaveBeenCalledWith({ email: "helper@example.edu" });
+    expect(context.statusCode).toBe(202);
+    expect(context.body).toEqual(SUBSCRIBE_ACCEPTED_RESPONSE);
+    expect(sendConfirmationEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("confirmation token generation", () => {
+  it("generates cryptographically random-shaped 32-byte base64url tokens", () => {
+    const tokens = Array.from({ length: 20 }, generateConfirmationToken);
+
+    expect(new Set(tokens)).toHaveLength(tokens.length);
+    for (const token of tokens) {
+      expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(Buffer.from(token, "base64url")).toHaveLength(
+        CONFIRMATION_TOKEN_BYTES
+      );
+    }
+  });
+});
+
+describe("send ownership losers", () => {
+  const backendNow = new Date("2026-08-03T18:30:00.000Z");
+
+  function owned(overrides: Record<string, unknown>) {
+    return {
+      _id: new mongoose.Types.ObjectId(),
+      email: "helper@example.edu",
+      status: "pending",
+      confirmationTokenDigest: "a".repeat(64),
+      confirmationSendAttemptId: "winner-attempt",
+      ...overrides,
+    };
+  }
+
+  it("re-reads a leased lifecycle without generating or sending a token", async () => {
+    const record = owned({ confirmationSendAttemptAt: backendNow });
+    const find = vi
+      .spyOn(Subscriber, "findOne")
+      .mockReturnValue(queryResult(record));
+    const generateRawToken = vi.fn();
+    const sendConfirmationEmail = vi.fn();
+    const context = routeContext({ email: record.email });
+
+    await createSubscribeHandler({
+      now: () => backendNow,
+      generateRawToken,
+      sendConfirmationEmail,
+    })(context.req, context.res);
+
+    expect(find).toHaveBeenCalledTimes(2);
+    expect(generateRawToken).not.toHaveBeenCalled();
+    expect(sendConfirmationEmail).not.toHaveBeenCalled();
+    expect(context.statusCode).toBe(202);
+    expect(context.body).toEqual(SUBSCRIBE_ACCEPTED_RESPONSE);
+  });
+
+  it.each([
+    [
+      "an owner exactly at the lease boundary",
+      new Date(backendNow.getTime() - CONFIRMATION_SEND_LEASE_MS),
+    ],
+    [
+      "an owner past the lease boundary",
+      new Date(backendNow.getTime() - CONFIRMATION_SEND_LEASE_MS - 1),
+    ],
+    ["an owner with no lease timestamp at all", undefined],
+  ])("treats %s as stale and attempts takeover", async (_label, attemptAt) => {
+    const record = owned(
+      attemptAt === undefined ? {} : { confirmationSendAttemptAt: attemptAt }
+    );
+    vi.spyOn(Subscriber, "findOne").mockReturnValue(queryResult(record));
+    // The takeover CAS loses here, which is what keeps the response generic;
+    // the point is that a stale owner no longer short-circuits before it.
+    const update = vi
+      .spyOn(Subscriber, "findOneAndUpdate")
+      .mockReturnValue(queryResult(null));
+    const sendConfirmationEmail = vi.fn();
+    const context = routeContext({ email: record.email });
+
+    await createSubscribeHandler({
+      now: () => backendNow,
+      sendConfirmationEmail,
+    })(context.req, context.res);
+
+    expect(update).toHaveBeenCalledOnce();
+    expect(context.statusCode).toBe(202);
+    expect(context.body).toEqual(SUBSCRIBE_ACCEPTED_RESPONSE);
+  });
+
+  it("bounds provider submission well inside the send lease", () => {
+    expect(CONFIRMATION_EMAIL_TIMEOUT_MS).toBeLessThanOrEqual(30_000);
+    expect(CONFIRMATION_EMAIL_TIMEOUT_MS).toBeLessThan(CONFIRMATION_SEND_LEASE_MS);
+  });
+});
+
+describe("confirmation link origin", () => {
+  it("submits no request-derived base URL even under hostile headers", async () => {
+    const sendConfirmationEmail = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(Subscriber, "findOne").mockReturnValue(queryResult(null));
+    const created = { _id: new mongoose.Types.ObjectId() };
+    vi.spyOn(Subscriber, "create").mockResolvedValue(created as never);
+    vi.spyOn(Subscriber, "exists").mockResolvedValue(created as never);
+    vi.spyOn(Subscriber, "updateOne").mockResolvedValue(null as never);
+
+    const req = {
+      body: { email: "helper@example.edu" },
+      protocol: "http",
+      get: () => "evil.test",
+    } as unknown as Request;
+    const res = {} as Response;
+    res.status = vi.fn(() => res) as never;
+    res.json = vi.fn(() => res) as never;
+
+    await createSubscribeHandler({
+      generateRawToken: () => "raw-token",
+      sendConfirmationEmail,
+    })(req, res);
+
+    expect(sendConfirmationEmail).toHaveBeenCalledOnce();
+    const submitted = sendConfirmationEmail.mock.calls[0] as unknown[];
+    expect(submitted).toEqual(["helper@example.edu", "raw-token"]);
+    expect(JSON.stringify(submitted)).not.toContain("evil.test");
+  });
+
+  it("reads no request host or protocol anywhere in the route", () => {
+    const source = readFileSync(
+      new URL("./subscribeRoute.ts", import.meta.url),
+      "utf8"
+    );
+
+    expect(source).not.toContain("req.protocol");
+    expect(source).not.toMatch(/req\.get\(/);
+    expect(source).not.toMatch(/x-forwarded/i);
+  });
+});

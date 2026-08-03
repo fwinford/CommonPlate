@@ -140,6 +140,7 @@ import {
   isPublicActionsPaused,
   pausePublicAction,
 } from "./src/publicActionsPause.js";
+import { subscribe } from "./src/subscribeRoute.js";
 
 // --- Environment validation (fail fast with clear message) ---
 const { MONGO_URI, RESEND_API_KEY } = process.env;
@@ -215,58 +216,7 @@ app.get("/api/public-actions", (req: Request, res: Response) => {
 // api: subscribe to digest emails (creates a pending Subscriber and sends confirmation)
 // The pause runs ahead of the limiter so no subscriber is created or confirmed,
 // no confirmation email is sent, and no recent-request alerts are dispatched.
-app.post('/api/subscribe', pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE), limiter, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { email } = req.body || {};
-    if (!email || typeof email !== 'string') return res.status(400).json({ error: 'missing email' });
-
-    const normalized = String(email).trim().toLowerCase();
-
-    if (!normalized.includes('@')) return res.status(400).json({ error: 'invalid email' });
-
-    const token = new mongoose.Types.ObjectId().toString();
-
-    const sub = await Subscriber.findOneAndUpdate(
-      { email: normalized },
-      { $set: { email: normalized, status: 'pending', confirmToken: token, bounced: false } , $setOnInsert: { dailyCount: 0 } },
-      { upsert: true, new: true }
-    );
-
-    // send confirmation email (non-blocking failures will still return 200 to avoid UX breakage)
-    try {
-      const requestBase = req.protocol + '://' + req.get('host');
-      const BASE_URL = process.env.BASE_URL || requestBase;
-      const confirmUrl = `${BASE_URL}/api/subscribe/confirm?token=${encodeURIComponent(token)}`;
-      await resend.emails.send({
-        from: 'CommonPlate <noreply@commonplatenyu.org>',
-        to: normalized,
-        subject: 'Confirm your CommonPlate subscription',
-        html: `<p>Please confirm your subscription to CommonPlate alerts by clicking the link below:</p><p><a href="${confirmUrl}">${confirmUrl}</a></p><p>If you didn't request this, you can ignore this email.</p>`,
-      });
-    } catch (emailErr) {
-      console.error('[email] Subscribe confirmation send failed:', emailErr);
-    }
-    if (!sub) return res.status(404).send('token not found');
-  sub.status = 'confirmed';
-  sub.confirmToken = undefined as any;
-  // ensure unsubToken exists (schema requires unsubToken when status is 'confirmed')
-  if (!sub.unsubToken) sub.unsubToken = new mongoose.Types.ObjectId().toString();
-  await sub.save();
-    // Fire-and-forget: notify this newly-confirmed subscriber about recent open requests
-    (async () => {
-      try {
-        const { notifySubscriberAboutRecentRequests } = await import("./src/notifySubscribers.js");
-        await notifySubscriberAboutRecentRequests(sub as any);
-      } catch (err) {
-        console.error('[notify] notify-on-confirm failed', err);
-      }
-    })();
-
-    res.send(`<html><body><h3>Subscription confirmed</h3><p>Thanks — you'll receive alerts from CommonPlate.</p></body></html>`);
-  } catch (err) {
-    next(err);
-  }
-});
+app.post('/api/subscribe', pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE), limiter, subscribe);
 
 // serve fulfill page for a specific request
 app.get("/request/:id/fulfill", (req: Request, res: Response) => {

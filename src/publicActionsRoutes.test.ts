@@ -57,6 +57,24 @@ describe("public action routes are mounted behind the pause", () => {
     expect(line.indexOf("pausePublicAction")).toBeLessThan(
       line.indexOf("limiter")
     );
+    expect(line.indexOf("limiter")).toBeLessThan(line.lastIndexOf("subscribe"));
+    expect(line).toContain("limiter, subscribe");
+  });
+
+  it("keeps signup focused on pending confirmation without notification dispatch", () => {
+    const routeSource = readFileSync(
+      new URL("./subscribeRoute.ts", import.meta.url),
+      "utf8"
+    );
+    const subscribeStart = appSource.indexOf("app.post('/api/subscribe'");
+    const subscribeEnd = appSource.indexOf("// serve fulfill page", subscribeStart);
+    const subscribeRegistration = appSource.slice(subscribeStart, subscribeEnd);
+
+    expect(routeSource).not.toContain("notifySubscriberAboutRecentRequests");
+    expect(routeSource).not.toContain("notifySubscribersForRequest");
+    expect(subscribeRegistration).not.toContain("status = 'confirmed'");
+    expect(subscribeRegistration).not.toContain("unsubToken");
+    expect(subscribeRegistration).not.toContain("resend.emails.send");
   });
 
   it("leaves public browsing routes ungated", () => {
@@ -166,5 +184,28 @@ describe("public action routes are mounted behind the pause", () => {
     expect(pauseCheck).toBeLessThan(firstQuery);
     expect(pauseCheck).toBeLessThan(firstSend);
     expect(pauseCheck).toBeLessThan(firstSendLogWrite);
+  });
+
+  it("keeps pending and unsubscribed subscribers out of the digest query", () => {
+    const digestStart = appSource.indexOf('cron.schedule("5 * * * *"');
+    // Five-field cron, matching app.ts. A boundary that does not resolve would
+    // silently widen the slice to the rest of the file, so both ends are
+    // asserted before slicing: `status: "confirmed"` also appears in the daily
+    // reset job and the active-subscriber-count route.
+    const digestEnd = appSource.indexOf('cron.schedule("0 3 * * *"', digestStart);
+    expect(digestStart).toBeGreaterThanOrEqual(0);
+    expect(digestEnd).toBeGreaterThan(digestStart);
+    const digestSource = appSource.slice(digestStart, digestEnd);
+
+    const queryStart = digestSource.indexOf(
+      "const eligible = await Subscriber.find({"
+    );
+    expect(queryStart).toBeGreaterThanOrEqual(0);
+    const queryEnd = digestSource.indexOf("});", queryStart);
+    expect(queryEnd).toBeGreaterThan(queryStart);
+    const eligibilityQuery = digestSource.slice(queryStart, queryEnd);
+
+    expect(eligibilityQuery).toContain('status: "confirmed"');
+    expect(eligibilityQuery).not.toMatch(/status:\s*\{\s*\$in:/);
   });
 });

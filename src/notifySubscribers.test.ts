@@ -121,6 +121,35 @@ describe("notification dispatch when public actions are resumed", () => {
     expect(sendNewRequestAlert).not.toHaveBeenCalled();
   });
 
+  it("queries only confirmed subscribers for real-time alerts", async () => {
+    models.Request.exists.mockResolvedValue({ _id: request()._id });
+    models.SendLog.exists.mockResolvedValue(null);
+    models.Subscriber.find.mockReturnValue({
+      sort: vi.fn().mockResolvedValue([]),
+    });
+
+    await notifySubscribersForRequest(request());
+
+    expect(models.Subscriber.find).toHaveBeenCalledWith({
+      $and: expect.arrayContaining([{ status: "confirmed" }]),
+    });
+    expect(sendNewRequestAlert).not.toHaveBeenCalled();
+  });
+
+  it.each(["pending", "unsubscribed"] as const)(
+    "keeps a %s subscriber ineligible for recent-request alerts",
+    async (status) => {
+      await notifySubscriberAboutRecentRequests({
+        ...subscriber(),
+        status,
+      } as ISubscriber);
+
+      expect(models.Request.find).not.toHaveBeenCalled();
+      expect(sendNewRequestAlert).not.toHaveBeenCalled();
+      expect(models.SendLog.create).not.toHaveBeenCalled();
+    }
+  );
+
   it("resumes the recent-request path past the pause guard", async () => {
     models.Request.find.mockReturnValue({
       sort: () => ({ limit: () => ({ lean: () => Promise.resolve([]) }) }),

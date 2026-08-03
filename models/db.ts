@@ -21,6 +21,11 @@ import mongoose, { Schema, Document, Types } from "mongoose";
 export interface ISubscriber extends Document {
   email: string;
   status: "pending" | "confirmed" | "unsubscribed";
+  confirmationTokenDigest?: string;
+  confirmationExpiresAt?: Date;
+  confirmationSendAttemptId?: string;
+  confirmationSendAttemptAt?: Date;
+  // Legacy raw-token fields remain readable for exact rollback of old rows.
   confirmToken?: string;
   unsubToken?: string;
   lastSentAt?: Date;
@@ -31,7 +36,24 @@ export interface ISubscriber extends Document {
 const SubscriberSchema = new Schema<ISubscriber>({
   email: { type: String, required: true, unique: true, trim: true, lowercase: true },
   status: { type: String, enum: ["pending", "confirmed", "unsubscribed"], default: "pending" },
-  confirmToken: { type: String, required: function(this: ISubscriber) { return this.status === "pending"; } },
+  confirmationTokenDigest: {
+    type: String,
+    required: function(this: ISubscriber) { return this.status === "pending"; },
+    select: false,
+  },
+  confirmationExpiresAt: {
+    type: Date,
+    required: function(this: ISubscriber) { return this.status === "pending"; },
+    select: false,
+  },
+  // This private owner serializes rotation with provider submission. It is
+  // cleared after success and removed by digest-matched compensation on error.
+  // Its timestamp bounds the claim: an attempt that dies mid-flight leaves the
+  // owner behind, so ownership is honoured only inside a short lease and the
+  // lifecycle stays recoverable instead of becoming permanently unconfirmable.
+  confirmationSendAttemptId: { type: String, select: false },
+  confirmationSendAttemptAt: { type: Date, select: false },
+  confirmToken: { type: String, select: false },
   unsubToken: { type: String, required: function(this: ISubscriber) { return this.status === "confirmed"; } },
   lastSentAt: { type: Date, default: null },
   dailyCount: { type: Number, default: 0 },

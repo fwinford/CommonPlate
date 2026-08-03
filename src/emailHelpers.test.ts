@@ -13,8 +13,11 @@ vi.mock("resend", () => ({
 }));
 
 import {
+  EmailProviderTimeoutError,
+  confirmationBaseUrl,
   sendFulfillmentEmail,
   sendNewRequestAlert,
+  sendSubscriptionConfirmationEmail,
 } from "./emailHelpers.js";
 
 const requesterEmail = "requester-private@example.edu";
@@ -53,6 +56,7 @@ function subscriber(): ISubscriber {
 
 afterEach(() => {
   resendSend.mockReset();
+  vi.unstubAllEnvs();
 });
 
 describe("helper new-request alert email", () => {
@@ -121,6 +125,122 @@ describe("helper new-request alert email", () => {
     expect(email.html).not.toContain(injectedPickupWindow);
     expect(email.html).not.toContain("&amp;amp;");
     expect(email.html).not.toContain("&amp;lt;");
+  });
+});
+
+describe("subscription confirmation email", () => {
+  it("places the raw token only in the submitted confirmation URL", async () => {
+    vi.stubEnv("BASE_URL", "https://commonplate.test/");
+    resendSend.mockResolvedValue({ data: { id: "email-id" }, error: null });
+    const rawToken = Buffer.alloc(32, 7).toString("base64url");
+
+    await sendSubscriptionConfirmationEmail("helper@example.edu", rawToken);
+
+    const email = resendSend.mock.calls[0][0] as {
+      to: string;
+      subject: string;
+      html: string;
+      text: string;
+    };
+    const expectedUrl = `https://commonplate.test/api/subscribe/confirm?token=${rawToken}`;
+    expect(email.to).toBe("helper@example.edu");
+    expect(email.subject).toBe("Confirm your CommonPlate subscription");
+    expect(email.html).toContain(expectedUrl);
+    expect(email.text).toContain(expectedUrl);
+  });
+
+  it("builds the confirmation URL only from trusted configuration", () => {
+    vi.stubEnv("BASE_URL", "https://commonplate.test");
+    expect(confirmationBaseUrl()).toBe("https://commonplate.test");
+
+    // No request is reachable from here at all, so no `Host`,
+    // `X-Forwarded-Host`, or forwarded protocol can reach a bearer-token link.
+    const source = readFileSync(
+      new URL("./emailHelpers.ts", import.meta.url),
+      "utf8"
+    );
+    const confirmationStart = source.indexOf(
+      "export async function sendSubscriptionConfirmationEmail"
+    );
+    expect(confirmationStart).toBeGreaterThanOrEqual(0);
+    const confirmationEnd = source.indexOf(
+      "export async function sendNewRequestAlert",
+      confirmationStart
+    );
+    expect(confirmationEnd).toBeGreaterThan(confirmationStart);
+    const confirmationSource = source.slice(confirmationStart, confirmationEnd);
+    expect(confirmationSource).not.toMatch(/req\b|host|protocol|forwarded/i);
+  });
+
+  it.each([
+    ["returned error", () => resendSend.mockResolvedValue({ error: { message: "rejected" } })],
+    ["thrown error", () => resendSend.mockRejectedValue(new Error("offline"))],
+  ])("rejects a provider %s", async (_label, arrange) => {
+    arrange();
+
+    await expect(
+      sendSubscriptionConfirmationEmail(
+        "helper@example.edu",
+        Buffer.alloc(32, 8).toString("base64url")
+      )
+    ).rejects.toThrow();
+  });
+
+  it("hands the provider a real abort signal and cancels it at the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | undefined;
+      // Never settles on its own: only a genuine abort can end this call, so a
+      // racing promise that left the request in flight would time the test out.
+      resendSend.mockImplementation(
+        (_payload: unknown, options: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            capturedSignal = options?.signal;
+            options?.signal?.addEventListener("abort", () =>
+              reject(new Error("The operation was aborted"))
+            );
+          })
+      );
+
+      const pending = sendSubscriptionConfirmationEmail(
+        "helper@example.edu",
+        Buffer.alloc(32, 9).toString("base64url"),
+        1_000
+      );
+      const settled = expect(pending).rejects.toBeInstanceOf(
+        EmailProviderTimeoutError
+      );
+
+      expect(capturedSignal).toBeInstanceOf(AbortSignal);
+      expect(capturedSignal!.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(capturedSignal!.aborted).toBe(true);
+
+      await settled;
+      // Pinned: `subscribeRoute.mongo.test.ts` drives the compensation path
+      // with an error carrying exactly this name.
+      await expect(pending).rejects.toMatchObject({
+        name: "EmailProviderTimeoutError",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears its deadline once the provider answers", async () => {
+    vi.useFakeTimers();
+    try {
+      resendSend.mockResolvedValue({ data: { id: "email-id" }, error: null });
+
+      await sendSubscriptionConfirmationEmail(
+        "helper@example.edu",
+        Buffer.alloc(32, 10).toString("base64url")
+      );
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

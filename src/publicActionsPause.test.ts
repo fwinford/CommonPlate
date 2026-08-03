@@ -126,4 +126,41 @@ describe("pausePublicAction middleware", () => {
     expect(result.body).toEqual({ created: true });
     expect(result.handler).toHaveBeenCalledOnce();
   });
+
+  it("stops signup before its limiter and all handler-owned work", async () => {
+    vi.stubEnv(PUBLIC_ACTIONS_PAUSED_ENV, "true");
+    const testApp = express();
+    testApp.use(express.json());
+    const limiter = vi.fn((_req, _res, next) => next());
+    const subscribe = vi.fn((_req, res) => res.status(202).json({ ok: true }));
+    testApp.post(
+      "/api/subscribe",
+      pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE),
+      limiter,
+      subscribe
+    );
+    const server = createServer(testApp);
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+
+    try {
+      const { port } = server.address() as AddressInfo;
+      const response = await fetch(`http://127.0.0.1:${port}/api/subscribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "not-valid" }),
+      });
+
+      expect(response.status).toBe(503);
+      expect(limiter).not.toHaveBeenCalled();
+      expect(subscribe).not.toHaveBeenCalled();
+    } finally {
+      if (server.listening) {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
+    }
+  });
 });

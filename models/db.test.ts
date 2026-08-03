@@ -1,5 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { Fulfillment, Request as MealRequest } from "./db.js";
+import { Fulfillment, Request as MealRequest, Subscriber } from "./db.js";
+
+describe("Subscriber pending-confirmation schema", () => {
+  it("keeps confirmation digests, expiry, ownership, and legacy raw state private", () => {
+    for (const field of [
+      "confirmationTokenDigest",
+      "confirmationExpiresAt",
+      "confirmationSendAttemptId",
+      "confirmationSendAttemptAt",
+      "confirmToken",
+    ]) {
+      expect((Subscriber.schema.path(field) as any).options.select).toBe(false);
+    }
+  });
+
+  it("requires the digest and expiry for new pending subscribers", () => {
+    const missingLifecycle = new Subscriber({ email: "helper@example.edu" });
+    const validPending = new Subscriber({
+      email: "helper@example.edu",
+      status: "pending",
+      confirmationTokenDigest: "a".repeat(64),
+      confirmationExpiresAt: new Date("2026-08-04T00:00:00.000Z"),
+    });
+
+    expect(missingLifecycle.validateSync()?.errors).toHaveProperty(
+      "confirmationTokenDigest"
+    );
+    expect(missingLifecycle.validateSync()?.errors).toHaveProperty(
+      "confirmationExpiresAt"
+    );
+    expect(validPending.validateSync()).toBeUndefined();
+  });
+});
 
 describe("Request lifecycle and retention schema", () => {
   it("uses only open, claimed, and placed with open as the default", () => {
