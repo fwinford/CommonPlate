@@ -25,6 +25,10 @@ export interface ISubscriber extends Document {
   confirmationExpiresAt?: Date;
   confirmationSendAttemptId?: string;
   confirmationSendAttemptAt?: Date;
+  lastConfirmedTokenDigest?: string;
+  lastConfirmedTokenExpiresAt?: Date;
+  unsubscribeTokenDigest?: string;
+  unsubscribedAt?: Date;
   // Legacy raw-token fields remain readable for exact rollback of old rows.
   confirmToken?: string;
   unsubToken?: string;
@@ -32,6 +36,9 @@ export interface ISubscriber extends Document {
   dailyCount: number;
   bounced: boolean;
 }
+
+// The stored unsubscribe credential is a SHA-256 hex digest.
+const UNSUBSCRIBE_TOKEN_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 
 const SubscriberSchema = new Schema<ISubscriber>({
   email: { type: String, required: true, unique: true, trim: true, lowercase: true },
@@ -53,8 +60,28 @@ const SubscriberSchema = new Schema<ISubscriber>({
   // lifecycle stays recoverable instead of becoming permanently unconfirmable.
   confirmationSendAttemptId: { type: String, select: false },
   confirmationSendAttemptAt: { type: Date, select: false },
+  // Receipt of the confirmation token that won the transition, kept only until
+  // that token's original expiry. Reopening the same confirmation link is
+  // ordinary user behaviour, so the redeemed digest must stay recognisable for
+  // an idempotent success instead of degrading into an invalid-token answer.
+  lastConfirmedTokenDigest: { type: String, select: false },
+  lastConfirmedTokenExpiresAt: { type: Date, select: false },
+  unsubscribeTokenDigest: {
+    type: String,
+    select: false,
+    match: [
+      UNSUBSCRIBE_TOKEN_DIGEST_PATTERN,
+      "unsubscribeTokenDigest must be a 64-character lowercase hexadecimal SHA-256 digest",
+    ],
+  },
+  unsubscribedAt: { type: Date },
   confirmToken: { type: String, select: false },
-  unsubToken: { type: String, required: function(this: ISubscriber) { return this.status === "confirmed"; } },
+  // A confirmed subscriber must hold a revocable unsubscribe credential.
+  // Legacy confirmed rows carry a raw `unsubToken`; rows confirmed by the
+  // digest lifecycle carry a well-formed `unsubscribeTokenDigest` and never
+  // persist a raw one. A malformed digest is not a credential, so it does not
+  // satisfy the invariant on its own.
+  unsubToken: { type: String, required: function(this: ISubscriber) { return this.status === "confirmed" && !UNSUBSCRIBE_TOKEN_DIGEST_PATTERN.test(this.unsubscribeTokenDigest ?? ""); } },
   lastSentAt: { type: Date, default: null },
   dailyCount: { type: Number, default: 0 },
   bounced: { type: Boolean, default: false },

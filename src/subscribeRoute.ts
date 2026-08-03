@@ -1,10 +1,15 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import type { FilterQuery, UpdateQuery } from "mongoose";
 import { z } from "zod";
 import { Subscriber, type ISubscriber } from "../models/db.js";
 import { sendDay4Error } from "./day4Errors.js";
 import { sendSubscriptionConfirmationEmail } from "./emailHelpers.js";
+import {
+  SUBSCRIPTION_TOKEN_BYTES,
+  digestSubscriptionToken,
+  generateSubscriptionToken,
+} from "./subscriptionTokens.js";
 
 export const SUBSCRIBE_ACCEPTED_RESPONSE = {
   message: "If confirmation is needed, check your email for the next step.",
@@ -12,7 +17,7 @@ export const SUBSCRIBE_ACCEPTED_RESPONSE = {
 
 export const CONFIRMATION_EMAIL_UNAVAILABLE_MESSAGE =
   "Email confirmation is temporarily unavailable. Please try again.";
-export const CONFIRMATION_TOKEN_BYTES = 32;
+export const CONFIRMATION_TOKEN_BYTES = SUBSCRIPTION_TOKEN_BYTES;
 export const CONFIRMATION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 /**
  * How long one attempt may own provider submission. Ownership blocks rotation,
@@ -87,12 +92,14 @@ const defaultDependencies: SubscribeDependencies = {
   sendConfirmationEmail: sendSubscriptionConfirmationEmail,
 };
 
+// Signup issues the confirmation token and redemption verifies it, so both
+// slices delegate to one shared shape and hash rather than repeating them.
 export function generateConfirmationToken(): string {
-  return randomBytes(CONFIRMATION_TOKEN_BYTES).toString("base64url");
+  return generateSubscriptionToken();
 }
 
 export function digestConfirmationToken(rawToken: string): string {
-  return createHash("sha256").update(rawToken).digest("hex");
+  return digestSubscriptionToken(rawToken);
 }
 
 function hasOwn(value: object, field: string): boolean {

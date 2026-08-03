@@ -33,6 +33,77 @@ describe("Subscriber pending-confirmation schema", () => {
   });
 });
 
+describe("Subscriber confirmed unsubscribe credential", () => {
+  const digest = "a1b2c3d4".repeat(8);
+
+  it("accepts a legacy confirmed subscriber holding a raw unsubToken", () => {
+    const legacy = new Subscriber({
+      email: "legacy@example.edu",
+      status: "confirmed",
+      unsubToken: "legacy-raw-unsubscribe-token",
+    });
+
+    expect(legacy.validateSync()).toBeUndefined();
+  });
+
+  it("accepts a confirmed subscriber holding only a well-formed digest", () => {
+    const modern = new Subscriber({
+      email: "modern@example.edu",
+      status: "confirmed",
+      unsubscribeTokenDigest: digest,
+    });
+
+    expect(digest).toHaveLength(64);
+    expect(modern.validateSync()).toBeUndefined();
+  });
+
+  it("rejects a confirmed subscriber with no unsubscribe credential at all", () => {
+    const uncredentialed = new Subscriber({
+      email: "none@example.edu",
+      status: "confirmed",
+    });
+
+    expect(uncredentialed.validateSync()?.errors).toHaveProperty("unsubToken");
+  });
+
+  it.each([
+    ["an uppercase digest", digest.toUpperCase()],
+    ["a truncated digest", digest.slice(0, 63)],
+    ["an over-long digest", `${digest}0`],
+    ["a non-hexadecimal digest", `${"z".repeat(64)}`],
+  ])("rejects a confirmed subscriber with %s", (_label, malformed) => {
+    const malformedDigest = new Subscriber({
+      email: "malformed@example.edu",
+      status: "confirmed",
+      unsubscribeTokenDigest: malformed,
+    });
+
+    const errors = malformedDigest.validateSync()?.errors;
+    expect(errors).toHaveProperty("unsubscribeTokenDigest");
+    // A malformed digest is not a credential, so it cannot stand in for the
+    // legacy raw token either.
+    expect(errors).toHaveProperty("unsubToken");
+  });
+
+  it.each(["pending", "unsubscribed"] as const)(
+    "leaves a %s subscriber valid without any unsubscribe credential",
+    (status) => {
+      const subscriber = new Subscriber({
+        email: "lifecycle@example.edu",
+        status,
+        ...(status === "pending"
+          ? {
+              confirmationTokenDigest: "a".repeat(64),
+              confirmationExpiresAt: new Date("2026-08-04T00:00:00.000Z"),
+            }
+          : {}),
+      });
+
+      expect(subscriber.validateSync()).toBeUndefined();
+    }
+  );
+});
+
 describe("Request lifecycle and retention schema", () => {
   it("uses only open, claimed, and placed with open as the default", () => {
     const statusPath = MealRequest.schema.path("status") as unknown as {
