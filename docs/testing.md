@@ -43,7 +43,7 @@ Run:
 npm test
 ```
 
-The current accepted baseline is **295 passed, 52 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
+The current accepted baseline is **322 passed, 65 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
 
 Representative coverage includes validation, route logic, error envelopes, browser behavior, copy guards, and source-wiring assertions. Some tests read source text instead of importing `app.ts`, because `app.ts` connects to MongoDB and starts listening at module scope. These assertions are not end-to-end route tests.
 
@@ -61,11 +61,13 @@ Run:
 npm run test:mongo
 ```
 
-The current accepted baseline is **52 passed across 5 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
+The current accepted baseline is **65 passed across 6 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
 
 A replica set is required because placement verification exercises MongoDB transactions; standalone MongoDB cannot provide that behavior. Mongo verification remains incomplete until this command passes. `npm test` reporting the Mongo suites as skipped does not replace this run.
 
 `MONGO_INTEGRATION_URI` is an integration-test environment input. Do not set it to a real shared or production URI.
+
+Mongo test files execute concurrently against one temporary replica set, and suites that clear a whole collection between cases can therefore delete another file's fixtures. Suites sharing a collection must not share a database: the confirmation Mongo suite connects with its own `dbName`, separate from the Day 2 subscription Mongo suite, so neither can remove the other's Subscriber fixtures. Apply the same isolation to any new suite that clears a shared collection.
 
 ## 6. Browser-client bundles
 
@@ -147,14 +149,14 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend rows were last recorded at the Week 3 signup-slice closeout; the iOS row remains the Week 2 closeout result and was not re-run for that backend-only slice.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend rows were last recorded at the Week 3 confirmation-primitive slice closeout; the iOS row remains the Week 2 closeout result and was not re-run for that backend-only slice.
 
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Passed |
-| `npm test` | 295 passed; 52 Mongo-gated skipped |
-| `npm run test:mongo` | 52 passed across 5 files |
-| `npm run ci-check` | Passed (lint, typecheck, prune, build) |
+| `npm test` | 322 passed; 65 Mongo-gated skipped |
+| `npm run test:mongo` | 65 passed across 6 files |
+| `npm run ci-check` | Not re-run at this closeout; changed production files passed lint |
 | `CommonPlateiosTests` | 258 passed; 0 failed; 0 skipped (Week 2 closeout) |
-| `npm run build:client` | Passed |
+| `npm run build:client` | Not re-run at this closeout; no browser-client source changed |
 | `git diff --check` | Passed |

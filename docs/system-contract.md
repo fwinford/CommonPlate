@@ -25,6 +25,7 @@ The public request projection is allowlisted: `id`, vendor, food, pickup-window 
 | Requester email and pickup name | Never public. Pickup name is returned only in the successful claimant's claim response. |
 | Claim token, token digest, claim deadline, claim timestamps | Never public. The raw token is claimant authorization; the backend persists only its digest. |
 | Confirmation token, its digest, expiry, and send-ownership fields | Never public. The raw confirmation token exists only in the emailed link; the backend persists only its SHA-256 digest. |
+| Used-confirmation-token receipt (`lastConfirmedTokenDigest`, `lastConfirmedTokenExpiresAt`) and `unsubscribeTokenDigest` | Never public. The raw unsubscribe token is returned once to the internal caller that wins confirmation; the backend persists only its SHA-256 digest. |
 | `deleteAt`, requester-notification state, fulfillment/contact fields, and other internal fields | Never public. |
 | Helper email | May be sent to the requester in the committed-placement email for coordination. |
 
@@ -65,7 +66,9 @@ Provider acceptance means only that CommonPlate submitted an email to the provid
 
 The lifecycle is `signup → pending → confirmed → unsubscribed`. Only `confirmed` subscribers are eligible for real-time helper alerts and the hourly digest; `pending` and `unsubscribed` subscribers are excluded by both the alert query and the recent-request path. Signing up again never silently reactivates alerts.
 
-Signup is implemented; confirmation and unsubscribe are not. There is no route that redeems a confirmation or unsubscribe token, so no new signup can reach `confirmed`. Rows already marked `confirmed` by the removed auto-confirm handler stay `confirmed` and alert-eligible; this slice added fields only and migrated no data. Signup therefore remains paused (section 10).
+Signup is implemented. Confirmation exists only as an internal backend primitive (section 9.4): no confirmation page, browser copy, or registered route reaches it, so no public action can move an address to `confirmed` today. Unsubscribe redemption is not implemented at all. Rows already marked `confirmed` by the removed auto-confirm handler stay `confirmed` and alert-eligible; neither slice migrated or modified legacy confirmed rows. Signup therefore remains paused (section 10), and alert delivery remains paused with it.
+
+A `confirmed` Subscriber must hold a revocable unsubscribe credential: either a supported legacy raw `unsubToken`, or an `unsubscribeTokenDigest` of exactly 64 lowercase hexadecimal characters. A malformed digest does not satisfy the invariant on its own. Rows confirmed by the current lifecycle retain the digest only and never persist a raw unsubscribe token.
 
 ### 9.1 `POST /api/subscribe`
 
@@ -105,6 +108,32 @@ Successful submission leaves the Subscriber `pending` and clears the owner condi
 
 If an owner-clear, deletion, or rollback operation itself rejects, its database outcome is unknown rather than known-failed, and is logged as unverified with only the subscriber ID, attempt ID, and a sanitized reason — never a raw token or confirmation URL. API behavior is unchanged by that ambiguity: 202 after provider success even when the owner clear is unacknowledged, and the exact 503 after provider failure even when compensation is unacknowledged. The bounded lease is what makes an unresolved owner recoverable by a later signup.
 
+### 9.4 Confirmation redemption primitive
+
+An internal primitive redeems a raw confirmation token against backend time:
+
+```text
+valid pending confirmation token
+→ one conditional atomic mutation
+→ confirmed Subscriber
+```
+
+Eligibility requires all three of `status: "pending"`, a matching SHA-256 `confirmationTokenDigest`, and `confirmationExpiresAt` strictly after backend now. The transition is one conditional atomic Mongo mutation, not read-check-save, so two concurrent redemptions cannot both observe `pending` and both write.
+
+A successful transition sets `status` to `confirmed`; clears the active `confirmationTokenDigest` and `confirmationExpiresAt`; clears the confirmation send-attempt ownership and lease fields; clears the legacy raw `confirmToken` and `unsubToken`; sets `bounced` to `false`, `dailyCount` to `0`, and `lastSentAt` to `null`; generates a new unsubscribe token and persists only its SHA-256 digest; clears any prior `unsubscribedAt`; and retains a bounded receipt of the used confirmation-token digest until that token's original expiry.
+
+Reopening the same valid confirmation link before its original expiry mutates nothing, issues no second unsubscribe token, and yields the internal `alreadyConfirmed` result. After the original expiry the used token no longer needs to be recognised.
+
+The primitive distinguishes four internal outcomes — `confirmed`, `alreadyConfirmed`, `expired`, and `invalid`. Expired and invalid tokens mutate no state. These are internal results, not a response shape: no caller has yet decided what a browser or API surface may learn from them.
+
+Concurrency and interaction with signup send ownership:
+
+- Simultaneous confirmation attempts produce exactly one lifecycle mutation and exactly one unsubscribe-token digest; the losing valid attempt receives `alreadyConfirmed` rather than an invalid-token answer.
+- Confirmation may succeed while a signup send lease is live or orphaned. Success clears that ownership, because the lifecycle the lease guarded no longer exists.
+- A late signup deletion, rollback, timeout, compensation, or owner-clear filter cannot undo a confirmed Subscriber: every such filter still requires the confirmation digest and attempt ID that confirmation cleared.
+
+Confirmation-token generation, shape validation, and SHA-256 digest calculation are shared with signup through `src/subscriptionTokens.ts`; signup behaviour is otherwise unchanged.
+
 ## 10. Public-actions pause and scheduled jobs
 
 `PUBLIC_ACTIONS_PAUSED` fails closed unless explicitly set to `false` or `0`. It blocks public request creation, subscription signup, claim and claim-extension mutations, real-time helper alerts, and hourly subscriber digests. It does not block fulfillment: a valid active claim token is already the authorization to record an order, and blocking that path could strand a helper who has already placed one.
@@ -113,8 +142,10 @@ If an owner-clear, deletion, or rollback operation itself rejects, its database 
 
 ## 11. Durable deferrals that constrain current behavior
 
-- Confirmation and unsubscribe routes, pages, and mutations. Signup creates pending state only, so no address can become alert-eligible today.
+- Confirmation routes, pages, and browser copy, and the whole unsubscribe redemption path. The confirmation mutation exists internally only, so no public action can make an address alert-eligible today.
+- Unsubscribe-link credential generation. Alert and digest email code still builds unsubscribe URLs from a raw `subscriber.unsubToken`, while Subscribers confirmed by the current lifecycle retain only `unsubscribeTokenDigest`. This must be resolved before signup or alert delivery is unpaused.
 - Cleanup of expired pending Subscribers; they stay notification-ineligible, so the current consequence is storage growth.
+- Physical cleanup of expired confirmation receipts (`lastConfirmedTokenDigest`, `lastConfirmedTokenExpiresAt`). The expiry comparison already prevents recognition after the original window, so the remaining consequence is stored data, not behaviour.
 - Provider timeouts outside the confirmation email, and durable email-outcome persistence. Only `sendSubscriptionConfirmationEmail` currently carries an abort deadline.
 - Browser rendering of the shared structured error envelope on the signup form, which must land before signup is unpaused.
 - Create idempotency and reconciliation.
