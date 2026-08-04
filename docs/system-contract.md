@@ -86,6 +86,8 @@ Every Subscriber holds a revocable unsubscribe credential by construction: it is
 
 The handler validates a strict body: the sole field is `email`, unexpected fields are rejected, and the address is trimmed and lowercased before any database work. Invalid input returns the shared structured error envelope with HTTP 400 and `INVALID_EMAIL`.
 
+Alert signup additionally accepts only NYU addresses. The exact allowlist is `nyu.edu` and `stern.nyu.edu`, compared against the whole normalized domain after the final `@` — never by suffix or substring, so `fake-nyu.edu`, `nyu.edu.example.com`, and unlisted subdomains such as `law.nyu.edu` are all refused. Plus-addressing on an allowed domain is accepted. A non-allowlisted address is part of the same strict schema and so is refused with the identical HTTP 400 `INVALID_EMAIL` envelope, before any Subscriber lookup or mutation; its message is `Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu.` The allowlist gates signup only: it never affects confirmation or unsubscribe, and existing Subscriber rows on other domains keep their lifecycle. `src/allowedEmailDomains.ts` is the single implementation. `POST /api/request` does not enforce it.
+
 Every valid attempt — brand-new, unexpired pending, expired pending, unsubscribed, and already-confirmed — returns the identical generic response, so the response cannot be used to enumerate subscription status:
 
 ```http
