@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { publicBaseOrigin } from "./publicBaseUrl.js";
+import { isPublicActionsPaused } from "./publicActionsPause.js";
 
 /**
  * Stable, authentic unsubscribe credentials.
@@ -78,6 +79,36 @@ function assertSigningSecret(secret: Buffer): void {
       `${UNSUBSCRIBE_SIGNING_SECRET_ENV} must contain at least ${MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES} UTF-8 bytes`
     );
   }
+}
+
+/**
+ * Activation prerequisite, checked once at startup.
+ *
+ * An unpaused process must not be able to reach a public action at all without
+ * a usable signing secret. Every surface that depends on one — signup and its
+ * confirmation email, the confirmation routes, real-time alerts, the hourly
+ * digest, and both unsubscribe verbs — becomes reachable only when the pause is
+ * off, so the pause is also the condition under which the secret becomes
+ * required. Without this check a deployment could accept signups and confirm
+ * addresses for hours before the first alert discovered, at send time, that no
+ * unsubscribe link could be signed.
+ *
+ * Paused startup reads nothing: the environment variable is not consulted, so a
+ * local or test process serving unrelated functionality is not asked for a
+ * secret it cannot use. That ordering is deliberate — it mirrors the paused
+ * request paths, which refuse before touching this configuration.
+ *
+ * The verified secret is deliberately discarded rather than returned or cached.
+ * Every signing and verification path already reads it where it is needed, and
+ * this exists to fail closed at boot, not to become a second source of key
+ * material. Both failure messages name the variable only; neither can carry its
+ * value, because the caller logs the message and exits.
+ */
+export function assertUnsubscribeSigningSecretForActivation(
+  environment: NodeJS.ProcessEnv = process.env
+): void {
+  if (isPublicActionsPaused(environment)) return;
+  readUnsubscribeSigningSecret(environment);
 }
 
 export function isValidUnsubscribeCredentialVersion(

@@ -392,7 +392,7 @@ describe("public action routes are mounted behind the pause", () => {
     expect(pauseCheck).toBeLessThan(firstSendLogWrite);
   });
 
-  it("keeps pending and unsubscribed subscribers out of the digest query", () => {
+  it("pins every digest eligibility predicate to the production query", () => {
     const digestStart = appSource.indexOf('cron.schedule("5 * * * *"');
     // Five-field cron, matching app.ts. A boundary that does not resolve would
     // silently widen the slice to the rest of the file, so both ends are
@@ -413,5 +413,21 @@ describe("public action routes are mounted behind the pause", () => {
 
     expect(eligibilityQuery).toContain('status: "confirmed"');
     expect(eligibilityQuery).not.toMatch(/status:\s*\{\s*\$in:/);
+
+    // Status alone does not describe who receives a digest. A bounced address,
+    // a subscriber already at the daily budget, or one still inside the hourly
+    // cooldown must stay out too, so every predicate is pinned here: dropping
+    // any one of them silently widens the send set without failing a test.
+    expect(eligibilityQuery).toMatch(/bounced:\s*false/);
+    expect(eligibilityQuery).toMatch(/dailyCount:\s*\{\s*\$lt:\s*4\s*\}/);
+
+    // Both cooldown alternatives, matching app.ts: a subscriber who has never
+    // been sent to (`lastSentAt: null`) or whose last send precedes the hourly
+    // window. Losing either branch drops or over-sends a whole cohort.
+    expect(eligibilityQuery).toMatch(/\$or:\s*\[/);
+    expect(eligibilityQuery).toMatch(
+      /\{\s*lastSentAt:\s*\{\s*\$lt:\s*oneHourAgo\s*\}\s*\}/
+    );
+    expect(eligibilityQuery).toMatch(/\{\s*lastSentAt:\s*null\s*\}/);
   });
 });

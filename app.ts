@@ -133,6 +133,7 @@ import {
   pauseDay4Mutation,
 } from "./src/claimRoute.js";
 import { readClaimTokenHmacSecret } from "./src/claimToken.js";
+import { assertUnsubscribeSigningSecretForActivation } from "./src/unsubscribeCredential.js";
 import { buildEffectiveAvailabilityFilter } from "./src/requestAvailability.js";
 import {
   CREATE_UNAVAILABLE_MESSAGE,
@@ -177,6 +178,24 @@ try {
 } catch (error) {
   console.error(
     error instanceof Error ? error.message : "Invalid claim-token HMAC secret"
+  );
+  process.exit(1);
+}
+// Required only once public actions are unpaused, and checked here — before the
+// Express app exists, before any route is registered, before the database
+// connection, and before this process listens — so an unpaused deployment
+// cannot accept a signup, confirm an address, send an alert, deliver a digest,
+// or serve an unsubscribe link without being able to sign one. The scheduled
+// digest is registered above but cannot deliver: its callback needs the event
+// loop, and this exit is synchronous. Paused startup reads nothing, so local
+// and test processes still start without the secret.
+try {
+  assertUnsubscribeSigningSecretForActivation();
+} catch (error) {
+  console.error(
+    error instanceof Error
+      ? error.message
+      : "Invalid unsubscribe signing secret"
   );
   process.exit(1);
 }

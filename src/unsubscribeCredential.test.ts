@@ -1,6 +1,8 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
 import {
+  assertUnsubscribeSigningSecretForActivation,
   INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION,
   MAXIMUM_UNSUBSCRIBE_CREDENTIAL_VERSION,
   MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES,
@@ -113,6 +115,172 @@ describe("unsubscribe signing secret configuration", () => {
     expect(readUnsubscribeSigningSecret()).toEqual(
       Buffer.from("u".repeat(64), "utf8")
     );
+  });
+});
+
+describe("activation validation of the signing secret", () => {
+  // Environments are described as plain objects rather than stubbed process
+  // variables, so no case can leak configuration into another. The two cases
+  // that exist to prove the default source are the exception.
+  const PAUSED = { [PUBLIC_ACTIONS_PAUSED_ENV]: "true" };
+  const UNPAUSED = { [PUBLIC_ACTIONS_PAUSED_ENV]: "false" };
+
+  const EXACTLY_32_BYTES = "u".repeat(
+    MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES
+  );
+  const MORE_THAN_32_BYTES = "u".repeat(
+    MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES + 1
+  );
+  const THIRTY_ONE_BYTES = "u".repeat(
+    MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES - 1
+  );
+
+  it.each([
+    ["absent", {}],
+    ["valid", { [UNSUBSCRIBE_SIGNING_SECRET_ENV]: EXACTLY_32_BYTES }],
+  ])("lets a paused process start with a %s secret", (_label, secret) => {
+    expect(() =>
+      assertUnsubscribeSigningSecretForActivation({ ...PAUSED, ...secret })
+    ).not.toThrow();
+  });
+
+  it("lets a paused process start when the pause variable is absent", () => {
+    // The repository's existing reading: anything but an explicit `false` or
+    // `0` is paused, including no value at all.
+    expect(() =>
+      assertUnsubscribeSigningSecretForActivation({})
+    ).not.toThrow();
+  });
+
+  it("does not read the secret at all while paused", () => {
+    // A getter rather than a value: a paused start must not consult the
+    // variable, so local and test processes are never asked for a secret they
+    // cannot use.
+    let reads = 0;
+    const environment = {
+      ...PAUSED,
+      get [UNSUBSCRIBE_SIGNING_SECRET_ENV]() {
+        reads++;
+        return EXACTLY_32_BYTES;
+      },
+    } as unknown as NodeJS.ProcessEnv;
+
+    assertUnsubscribeSigningSecretForActivation(environment);
+
+    expect(reads).toBe(0);
+  });
+
+  it.each([
+    ["absent", {}],
+    ["empty", { [UNSUBSCRIBE_SIGNING_SECRET_ENV]: "" }],
+    [
+      "shorter than 32 UTF-8 bytes",
+      { [UNSUBSCRIBE_SIGNING_SECRET_ENV]: THIRTY_ONE_BYTES },
+    ],
+  ])("refuses to activate with a %s secret", (_label, secret) => {
+    expect(() =>
+      assertUnsubscribeSigningSecretForActivation({ ...UNPAUSED, ...secret })
+    ).toThrow(UnsubscribeCredentialConfigurationError);
+  });
+
+  it.each([
+    ["exactly 32 UTF-8 bytes", EXACTLY_32_BYTES],
+    ["more than 32 UTF-8 bytes", MORE_THAN_32_BYTES],
+  ])("activates with a secret of %s", (_label, configured) => {
+    expect(() =>
+      assertUnsubscribeSigningSecretForActivation({
+        ...UNPAUSED,
+        [UNSUBSCRIBE_SIGNING_SECRET_ENV]: configured,
+      })
+    ).not.toThrow();
+  });
+
+  it("counts UTF-8 bytes rather than JavaScript characters", () => {
+    // 16 characters, 32 bytes: a character count would refuse this, and the
+    // credential contract is specified in bytes because that is what the HMAC
+    // key actually is.
+    const sixteenTwoByteCharacters = "é".repeat(16);
+    expect(sixteenTwoByteCharacters).toHaveLength(16);
+    expect(Buffer.byteLength(sixteenTwoByteCharacters, "utf8")).toBe(
+      MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES
+    );
+
+    expect(() =>
+      assertUnsubscribeSigningSecretForActivation({
+        ...UNPAUSED,
+        [UNSUBSCRIBE_SIGNING_SECRET_ENV]: sixteenTwoByteCharacters,
+      })
+    ).not.toThrow();
+  });
+
+  it("still refuses a value whose character count only looks long enough", () => {
+    // 31 characters and 31 bytes. The counterpart of the case above: the two
+    // together are what distinguish a byte count from a character count.
+    expect(THIRTY_ONE_BYTES).toHaveLength(
+      MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES - 1
+    );
+    expect(Buffer.byteLength(THIRTY_ONE_BYTES, "utf8")).toBeLessThan(
+      MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES
+    );
+
+    expect(() =>
+      assertUnsubscribeSigningSecretForActivation({
+        ...UNPAUSED,
+        [UNSUBSCRIBE_SIGNING_SECRET_ENV]: THIRTY_ONE_BYTES,
+      })
+    ).toThrow(/at least 32 UTF-8 bytes/);
+  });
+
+  it("never puts the configured value in the failure it reports", () => {
+    // The caller logs this message and exits, so anything it carries reaches
+    // the deployment log.
+    const configured = "short-but-secret-material";
+
+    try {
+      assertUnsubscribeSigningSecretForActivation({
+        ...UNPAUSED,
+        [UNSUBSCRIBE_SIGNING_SECRET_ENV]: configured,
+      });
+      expect.unreachable("a short secret must refuse activation");
+    } catch (error) {
+      const reported = String(
+        error instanceof Error ? error.message : error
+      );
+      expect(reported).toContain(UNSUBSCRIBE_SIGNING_SECRET_ENV);
+      expect(reported).not.toContain(configured);
+    }
+  });
+
+  it("substitutes no other configured secret for a missing one", () => {
+    expect(() =>
+      assertUnsubscribeSigningSecretForActivation({
+        ...UNPAUSED,
+        CLAIM_TOKEN_HMAC_SECRET: "c".repeat(64),
+        BASE_URL: "https://commonplate.test",
+      })
+    ).toThrow(/Missing required environment variable/);
+  });
+
+  it("reads the process environment by default", () => {
+    vi.stubEnv(PUBLIC_ACTIONS_PAUSED_ENV, "false");
+    vi.stubEnv(UNSUBSCRIBE_SIGNING_SECRET_ENV, undefined);
+
+    expect(() => assertUnsubscribeSigningSecretForActivation()).toThrow(
+      UnsubscribeCredentialConfigurationError
+    );
+
+    vi.stubEnv(UNSUBSCRIBE_SIGNING_SECRET_ENV, EXACTLY_32_BYTES);
+
+    expect(() => assertUnsubscribeSigningSecretForActivation()).not.toThrow();
+  });
+
+  it("returns nothing, so no caller can hold the key material it checked", () => {
+    expect(
+      assertUnsubscribeSigningSecretForActivation({
+        ...UNPAUSED,
+        [UNSUBSCRIBE_SIGNING_SECRET_ENV]: EXACTLY_32_BYTES,
+      })
+    ).toBeUndefined();
   });
 });
 

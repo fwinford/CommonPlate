@@ -69,6 +69,17 @@ The lifecycle is `signup → pending → confirmed → unsubscribed`. Only `conf
 
 Signup is implemented. Confirmation is implemented as an internal backend primitive (section 9.4) reached by a public browser flow (section 9.5). Unsubscribe credentials and their emailed links are implemented (section 9.6), and so is unsubscribe redemption (section 9.7). Rows already marked `confirmed` by the removed auto-confirm handler stay `confirmed` and alert-eligible; no slice migrated or modified legacy confirmed rows. Signup, confirmation, and alert delivery all remain paused (section 10).
 
+The accepted end-to-end runtime path, proven end to end against real MongoDB through the production handlers and the real emails, is:
+
+```text
+signup → pending Subscriber → confirmation email → safe confirmation GET
+→ explicit confirmation POST → confirmed and alert-eligible
+→ alert or digest email carrying a valid unsubscribe link
+→ safe unsubscribe GET → explicit unsubscribe POST → unsubscribed and ineligible
+```
+
+Signing up again after unsubscribing rotates a fresh pending confirmation credential onto the same document — preserving `_id`, `unsubscribeCredentialVersion`, `dailyCount`, `lastSentAt`, `bounced`, `unsubscribedAt`, and SendLog history — and reconfirming restores eligibility. The unsubscribe link emailed before any of that still opens the page and still unsubscribes afterwards. Neither half of either emailed link mutates anything on a GET.
+
 Every Subscriber holds a revocable unsubscribe credential by construction: it is signed on demand from `_id` and `unsubscribeCredentialVersion` (section 9.6) rather than stored, so no confirmed-row credential invariant is needed and no unsubscribe credential is persisted in any form. The legacy raw `unsubToken` field is retained on existing rows but excluded from ordinary projections (`select: false`); nothing issues, requires, or explicitly selects one, and confirmation still clears it when it transitions a row that carries one.
 
 ### 9.1 `POST /api/subscribe`
@@ -244,6 +255,23 @@ Real-time helper alerts and hourly digests build the link while composing the me
 
 `BASE_URL` is the single public base-URL setting, resolved in one place (`src/publicBaseUrl.ts`) and never taken from a request `Host`, `X-Forwarded-Host`, or forwarded protocol. Both send paths remain behind `PUBLIC_ACTIONS_PAUSED`, so no such link has been delivered.
 
+#### Activation prerequisite
+
+`UNSUBSCRIBE_SIGNING_SECRET` is validated at startup, from the same `app.ts` environment-validation block as `CLAIM_TOKEN_HMAC_SECRET` and through one reader (`src/unsubscribeCredential.ts`). The check runs before the Express app is constructed, before any route is registered, before the MongoDB connection, and before the process listens, so an unpaused process cannot expose a public-action surface, accept a signup or confirmation, send an alert, deliver a digest, or serve an unsubscribe link without being able to sign one.
+
+The requirement is conditional on the pause, which is what makes those surfaces reachable at all:
+
+| Public actions | `UNSUBSCRIBE_SIGNING_SECRET` | Startup |
+| --- | --- | --- |
+| Paused | Absent | Starts; paused routes and delivery stay unavailable |
+| Paused | Valid | Starts; functionality stays paused |
+| Unpaused | Absent | Refused |
+| Unpaused | Empty | Refused |
+| Unpaused | Fewer than 32 UTF-8 bytes | Refused |
+| Unpaused | 32 UTF-8 bytes or more | Starts |
+
+While paused the variable is not read at all, so a paused local or deployed process is never asked for a secret no paused path can use. A refusal logs a message naming only the variable — never its value — and exits non-zero. No other secret is substituted for a missing one, and the validated secret is discarded rather than returned or cached: every signing and verification path still reads it where it is needed.
+
 ### 9.7 Unsubscribe redemption routes
 
 `GET /unsubscribe?credential=<credential>` and `POST /unsubscribe` are the browser surface for the emailed link. Both answer in HTML behind the shared emailed-link security headers (section 9.5) and an HTML pause guard.
@@ -292,11 +320,12 @@ Redemption existing is not activation: `pauseUnsubscribePage` refuses both verbs
 
 `PUBLIC_ACTIONS_PAUSED` fails closed unless explicitly set to `false` or `0`. It blocks public request creation, subscription signup, both halves of the browser confirmation flow (section 9.5), both halves of the unsubscribe flow (section 9.7), claim and claim-extension mutations, real-time helper alerts, and hourly subscriber digests. The API mutations answer a paused request in JSON through `pausePublicAction`; the confirmation and unsubscribe routes answer in HTML through `pauseConfirmationPage` and `pauseUnsubscribePage`. It does not block fulfillment: a valid active claim token is already the authorization to record an order, and blocking that path could strand a helper who has already placed one.
 
+The same variable is the activation switch for the unsubscribe signing secret: unpausing is what makes that secret a startup requirement (section 9.6).
+
 `CRON_ENABLED=true` controls only the hourly expired-request cleanup backup to TTL deletion. The hourly digest, daily confirmed-subscriber `dailyCount` reset, and ten-minute SendLog failure monitor are registered independently of `CRON_ENABLED`; the digest additionally exits when public actions are paused.
 
 ## 11. Durable deferrals that constrain current behavior
 
-- Startup validation of `UNSUBSCRIBE_SIGNING_SECRET`. Unlike `CLAIM_TOKEN_HMAC_SECRET`, it is not checked at boot; a missing or short secret fails when an alert or digest link is built, and makes a redemption attempt answer with the generic temporarily-unavailable page. Both paths are paused, so nothing depends on it today.
 - Cleanup of expired pending Subscribers; they stay notification-ineligible, so the current consequence is storage growth.
 - Physical cleanup of expired confirmation receipts (`lastConfirmedTokenDigest`, `lastConfirmedTokenExpiresAt`) on rows that stay confirmed. Unsubscribing now clears the receipt outright, and the expiry comparison already prevents recognition after the original window, so the remaining consequence is stored data, not behaviour.
 - Provider timeouts outside the confirmation email, and durable email-outcome persistence. Only `sendSubscriptionConfirmationEmail` currently carries an abort deadline.
