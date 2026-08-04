@@ -88,7 +88,7 @@ const describeMongo = mongoUri ? describe : describe.skip;
 const SIGNING_SECRET = "l".repeat(MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES);
 const SECRET = Buffer.from(SIGNING_SECRET, "utf8");
 const BASE_URL = "https://commonplate.test";
-const EMAIL = "lifecycle-helper@example.edu";
+const EMAIL = "lifecycle-helper@nyu.edu";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 

@@ -118,7 +118,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
   it("creates one pending record with only a digest and an exact 24-hour expiry", async () => {
     const token = rawToken(1);
     const sendConfirmationEmail = vi.fn().mockResolvedValue(undefined);
-    const context = routeContext("  New.Helper@Example.EDU  ");
+    const context = routeContext("  New.Helper@NYU.EDU  ");
 
     await createSubscribeHandler({
       now: () => backendNow,
@@ -129,11 +129,11 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
 
     expectAccepted(context);
     expect(sendConfirmationEmail).toHaveBeenCalledWith(
-      "new.helper@example.edu",
+      "new.helper@nyu.edu",
       token
     );
     const stored = await Subscriber.collection.findOne({
-      email: "new.helper@example.edu",
+      email: "new.helper@nyu.edu",
     });
     expect(stored?.status).toBe("pending");
     expect(stored?.confirmationTokenDigest).toBe(
@@ -158,7 +158,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const lastSentAt = new Date("2026-08-01T16:00:00.000Z");
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "pending@example.edu",
+      email: "pending@nyu.edu",
       status: "pending",
       confirmationTokenDigest: previousDigest,
       confirmationExpiresAt: previousExpiry,
@@ -167,7 +167,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       lastSentAt,
     });
     const token = rawToken(2);
-    const context = routeContext("pending@example.edu");
+    const context = routeContext("pending@nyu.edu");
 
     await createSubscribeHandler({
       now: () => backendNow,
@@ -196,7 +196,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const id = new mongoose.Types.ObjectId();
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "expired@example.edu",
+      email: "expired@nyu.edu",
       status: "pending",
       confirmationTokenDigest: "b".repeat(64),
       confirmationExpiresAt: new Date(backendNow.getTime() - 1),
@@ -205,7 +205,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       lastSentAt: null,
     });
     const token = rawToken(3);
-    const context = routeContext("expired@example.edu");
+    const context = routeContext("expired@nyu.edu");
 
     await createSubscribeHandler({
       now: () => backendNow,
@@ -229,7 +229,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const unsubscribedAt = new Date("2026-08-01T12:00:00.000Z");
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "unsubscribed@example.edu",
+      email: "unsubscribed@nyu.edu",
       status: "unsubscribed",
       bounced: true,
       dailyCount: 4,
@@ -240,7 +240,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       deliveryHistoryMarker: { provider: "preserved" },
     });
     const token = rawToken(4);
-    const context = routeContext("unsubscribed@example.edu");
+    const context = routeContext("unsubscribed@nyu.edu");
 
     await createSubscribeHandler({
       now: () => backendNow,
@@ -269,7 +269,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
 
   it("gives a brand-new subscriber the initial credential version", async () => {
     const token = rawToken(40);
-    const context = routeContext("brand-new-version@example.edu");
+    const context = routeContext("brand-new-version@nyu.edu");
 
     await createSubscribeHandler({
       now: () => backendNow,
@@ -280,7 +280,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
 
     expectAccepted(context);
     const stored = await Subscriber.collection.findOne({
-      email: "brand-new-version@example.edu",
+      email: "brand-new-version@nyu.edu",
     });
     // Nothing in the route names this field: the schema default supplies it.
     expect(stored?.unsubscribeCredentialVersion).toBe(1);
@@ -291,14 +291,14 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const id = new mongoose.Types.ObjectId();
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "legacy-version@example.edu",
+      email: "legacy-version@nyu.edu",
       status: "unsubscribed",
       bounced: false,
       dailyCount: 2,
       lastSentAt: new Date("2026-07-30T12:00:00.000Z"),
     });
     const token = rawToken(41);
-    const context = routeContext("legacy-version@example.edu");
+    const context = routeContext("legacy-version@nyu.edu");
 
     await createSubscribeHandler({
       now: () => backendNow,
@@ -320,7 +320,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const id = new mongoose.Types.ObjectId();
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "confirmed@example.edu",
+      email: "confirmed@nyu.edu",
       status: "confirmed",
       bounced: false,
       dailyCount: 1,
@@ -329,7 +329,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const before = await Subscriber.collection.findOne({ _id: id });
     const sendConfirmationEmail = vi.fn();
     const update = vi.spyOn(Subscriber, "findOneAndUpdate");
-    const context = routeContext("confirmed@example.edu");
+    const context = routeContext("confirmed@nyu.edu");
 
     await createSubscribeHandler({ sendConfirmationEmail })(
       context.req,
@@ -343,7 +343,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
   });
 
   it("conditionally deletes a new record when the provider throws", async () => {
-    const context = routeContext("new-failure@example.edu");
+    const context = routeContext("new-failure@nyu.edu");
 
     await createSubscribeHandler({
       generateRawToken: () => rawToken(5),
@@ -353,7 +353,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
 
     expectProviderUnavailable(context);
     expect(
-      await Subscriber.countDocuments({ email: "new-failure@example.edu" })
+      await Subscriber.countDocuments({ email: "new-failure@nyu.edu" })
     ).toBe(0);
   });
 
@@ -361,7 +361,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const id = new mongoose.Types.ObjectId();
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "rollback@example.edu",
+      email: "rollback@nyu.edu",
       status: "unsubscribed",
       confirmationExpiresAt: null,
       confirmToken: "legacy-raw-token",
@@ -372,7 +372,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       unsubscribedAt: new Date("2026-08-01T00:00:00.000Z"),
     });
     const before = await Subscriber.collection.findOne({ _id: id });
-    const context = routeContext("rollback@example.edu");
+    const context = routeContext("rollback@nyu.edu");
 
     await createSubscribeHandler({
       generateRawToken: () => rawToken(6),
@@ -389,7 +389,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
   it("cannot delete a newer lifecycle during stale new-record cleanup", async () => {
     const enteredProvider = deferred();
     const releaseProvider = deferred();
-    const context = routeContext("stale-delete@example.edu");
+    const context = routeContext("stale-delete@nyu.edu");
     const attempt = createSubscribeHandler({
       generateRawToken: () => rawToken(7),
       generateAttemptId: () => "stale-delete-attempt",
@@ -403,7 +403,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     await enteredProvider.promise;
     const newerDigest = "c".repeat(64);
     await Subscriber.updateOne(
-      { email: "stale-delete@example.edu" },
+      { email: "stale-delete@nyu.edu" },
       {
         $set: {
           confirmationTokenDigest: newerDigest,
@@ -416,7 +416,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
 
     expectProviderUnavailable(context);
     const stored = await Subscriber.collection.findOne({
-      email: "stale-delete@example.edu",
+      email: "stale-delete@nyu.edu",
     });
     expect(stored?.confirmationTokenDigest).toBe(newerDigest);
     expect(stored?.confirmationSendAttemptId).toBe("newer-attempt");
@@ -426,7 +426,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const id = new mongoose.Types.ObjectId();
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "stale-rollback@example.edu",
+      email: "stale-rollback@nyu.edu",
       status: "pending",
       confirmationTokenDigest: "d".repeat(64),
       confirmationExpiresAt: new Date(backendNow.getTime() + 60_000),
@@ -435,7 +435,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     });
     const enteredProvider = deferred();
     const releaseProvider = deferred();
-    const context = routeContext("stale-rollback@example.edu");
+    const context = routeContext("stale-rollback@nyu.edu");
     const attempt = createSubscribeHandler({
       generateRawToken: () => rawToken(8),
       generateAttemptId: () => "stale-rollback-attempt",
@@ -496,8 +496,8 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       generateAttemptId: () => `first-owner-${++attemptNumber}`,
       sendConfirmationEmail,
     });
-    const first = routeContext("concurrent-new@example.edu");
-    const second = routeContext("concurrent-new@example.edu");
+    const first = routeContext("concurrent-new@nyu.edu");
+    const second = routeContext("concurrent-new@nyu.edu");
     const firstAttempt = handler(first.req, first.res);
     const secondAttempt = handler(second.req, second.res);
 
@@ -517,12 +517,12 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     expect(
       find.mock.calls.filter(
         ([filter]) =>
-          (filter as { email?: string }).email === "concurrent-new@example.edu"
+          (filter as { email?: string }).email === "concurrent-new@nyu.edu"
       )
     ).toHaveLength(3);
-    expect(await Subscriber.countDocuments({ email: "concurrent-new@example.edu" })).toBe(1);
+    expect(await Subscriber.countDocuments({ email: "concurrent-new@nyu.edu" })).toBe(1);
     const stored = await Subscriber.collection.findOne({
-      email: "concurrent-new@example.edu",
+      email: "concurrent-new@nyu.edu",
     });
     const submittedToken = (
       sendConfirmationEmail.mock.calls as unknown as [string, string, string][]
@@ -544,7 +544,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     const id = new mongoose.Types.ObjectId();
     await Subscriber.collection.insertOne({
       _id: id,
-      email: "concurrent-pending@example.edu",
+      email: "concurrent-pending@nyu.edu",
       status: "pending",
       confirmationTokenDigest: "f".repeat(64),
       confirmationExpiresAt: new Date(backendNow.getTime() + 60_000),
@@ -586,8 +586,8 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       generateAttemptId: () => `pending-owner-${++attemptNumber}`,
       sendConfirmationEmail,
     });
-    const first = routeContext("concurrent-pending@example.edu");
-    const second = routeContext("concurrent-pending@example.edu");
+    const first = routeContext("concurrent-pending@nyu.edu");
+    const second = routeContext("concurrent-pending@nyu.edu");
     const find = vi.spyOn(Subscriber, "findOne");
     const firstAttempt = handler(first.req, first.res);
     const secondAttempt = handler(second.req, second.res);
@@ -609,7 +609,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       find.mock.calls.filter(
         ([filter]) =>
           (filter as { email?: string }).email ===
-          "concurrent-pending@example.edu"
+          "concurrent-pending@nyu.edu"
       )
     ).toHaveLength(3);
     const submittedToken = (
@@ -630,7 +630,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
   });
 
   describe("bounded send-ownership lease", () => {
-    const email = "leased@example.edu";
+    const email = "leased@nyu.edu";
     const heldDigest = "1".repeat(64);
 
     async function insertOwned(attemptAt: Date | undefined) {
@@ -796,7 +796,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
 
   describe("provider timeout and compensation containment", () => {
     it("routes a provider timeout through deletion and the exact 503", async () => {
-      const context = routeContext("timeout-new@example.edu");
+      const context = routeContext("timeout-new@nyu.edu");
 
       await createSubscribeHandler({
         generateRawToken: () => rawToken(25),
@@ -806,7 +806,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
 
       expectProviderUnavailable(context);
       expect(
-        await Subscriber.countDocuments({ email: "timeout-new@example.edu" })
+        await Subscriber.countDocuments({ email: "timeout-new@nyu.edu" })
       ).toBe(0);
     });
 
@@ -816,7 +816,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         new Error("delete unavailable") as never
       );
       const token = rawToken(26);
-      const context = routeContext("delete-fails@example.edu");
+      const context = routeContext("delete-fails@nyu.edu");
 
       await createSubscribeHandler({
         generateRawToken: () => token,
@@ -844,7 +844,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       const id = new mongoose.Types.ObjectId();
       await Subscriber.collection.insertOne({
         _id: id,
-        email: "rollback-fails@example.edu",
+        email: "rollback-fails@nyu.edu",
         status: "unsubscribed",
         bounced: false,
         dailyCount: 0,
@@ -855,7 +855,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         new Error("rollback unavailable") as never
       );
       const token = rawToken(27);
-      const context = routeContext("rollback-fails@example.edu");
+      const context = routeContext("rollback-fails@nyu.edu");
 
       await createSubscribeHandler({
         generateRawToken: () => token,
@@ -908,7 +908,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     }
 
     it("blocks new-record deletion when only the digest moved on", async () => {
-      const email = "digest-only-delete@example.edu";
+      const email = "digest-only-delete@nyu.edu";
       const newerDigest = "2".repeat(64);
       const context = await runInterruptedAttempt(
         email,
@@ -930,7 +930,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     });
 
     it("blocks new-record deletion when only the attempt moved on", async () => {
-      const email = "attempt-only-delete@example.edu";
+      const email = "attempt-only-delete@nyu.edu";
       const context = await runInterruptedAttempt(
         email,
         // The digest is deliberately left untouched, so only the attempt-ID
@@ -966,7 +966,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     ])(
       "blocks existing-record rollback when %s",
       async (_label, newerState, attemptId) => {
-        const email = `${attemptId}@example.edu`;
+        const email = `${attemptId}@nyu.edu`;
         const id = new mongoose.Types.ObjectId();
         await Subscriber.collection.insertOne({
           _id: id,
@@ -998,14 +998,14 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       const id = new mongoose.Types.ObjectId();
       await Subscriber.collection.insertOne({
         _id: id,
-        email: "legacy@example.edu",
+        email: "legacy@nyu.edu",
         status: "pending",
         confirmToken: "legacy-raw-token",
         bounced: false,
         dailyCount: 0,
       });
       const token = rawToken(29);
-      const context = routeContext("legacy@example.edu");
+      const context = routeContext("legacy@nyu.edu");
 
       await createSubscribeHandler({
         now: () => backendNow,

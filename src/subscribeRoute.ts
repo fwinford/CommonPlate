@@ -3,6 +3,10 @@ import type { Request, Response } from "express";
 import type { FilterQuery, UpdateQuery } from "mongoose";
 import { z } from "zod";
 import { Subscriber, type ISubscriber } from "../models/db.js";
+import {
+  NYU_EMAIL_REQUIRED_MESSAGE,
+  hasAllowedEmailDomain,
+} from "./allowedEmailDomains.js";
 import { sendDay4Error } from "./day4Errors.js";
 import { sendSubscriptionConfirmationEmail } from "./emailHelpers.js";
 import {
@@ -29,8 +33,18 @@ export const CONFIRMATION_LIFETIME_MS = 24 * 60 * 60 * 1000;
  */
 export const CONFIRMATION_SEND_LEASE_MS = 2 * 60 * 1000;
 
+// The allowlist is part of the body schema rather than a later check, so a
+// non-NYU address is refused in the same place and at the same point as a
+// malformed one: before any Subscriber lookup or mutation.
 const subscribeBodySchema = z
-  .object({ email: z.string().trim().toLowerCase().email() })
+  .object({
+    email: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .email()
+      .refine(hasAllowedEmailDomain),
+  })
   .strict();
 
 type LifecycleField =
@@ -209,11 +223,15 @@ export function createSubscribeHandler(
   return async function subscribe(req: Request, res: Response): Promise<Response> {
     const validated = subscribeBodySchema.safeParse(req.body);
     if (!validated.success) {
+      // Malformed and non-allowlisted addresses share one code and one
+      // message. Both mean the same thing to the person typing — this is not
+      // an address alerts can be sent to — and separating them would add a
+      // public error code the client contract does not define.
       return sendDay4Error(
         res,
         400,
         "INVALID_EMAIL",
-        "Enter a valid email address."
+        NYU_EMAIL_REQUIRED_MESSAGE
       );
     }
 

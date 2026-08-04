@@ -972,7 +972,7 @@ describeMongo("browser unsubscribe routes against real MongoDB", () => {
     });
 
     it("lets a re-signup create a fresh pending confirmation credential", async () => {
-      const email = "resignup@example.edu";
+      const email = "resignup@nyu.edu";
       const spentToken = rawToken(63);
       const id = await insertSubscriber({
         status: "confirmed",
@@ -1004,7 +1004,7 @@ describeMongo("browser unsubscribe routes against real MongoDB", () => {
     });
 
     it("keeps the original unsubscribe link working after re-signup and reconfirmation", async () => {
-      const email = "durable@example.edu";
+      const email = "durable@nyu.edu";
       const id = await insertSubscriber({
         status: "confirmed",
         confirmedToken: rawToken(65),

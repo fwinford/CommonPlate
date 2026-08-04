@@ -12,6 +12,12 @@ struct ContentView: View {
     ]
 
     @StateObject private var requestStore: RequestStore
+    /// Alert signup keeps its own state owner. Its lifecycle, responses, and
+    /// failures have nothing in common with the request flow's, and holding it
+    /// here — rather than inside the screen — lets the transient accepted state
+    /// survive leaving and reopening the screen within this session. Nothing
+    /// about it survives relaunch.
+    @StateObject private var alertSubscriptionStore: AlertSubscriptionStore
     @Environment(\.scenePhase) private var scenePhase
 
     /// The one navigation stack in the app, owned here so any screen inside it
@@ -23,6 +29,11 @@ struct ContentView: View {
         let client = APIClient(configuration: .localSimulator)
         let service = RequestService(client: client)
         _requestStore = StateObject(wrappedValue: RequestStore(service: service))
+        _alertSubscriptionStore = StateObject(
+            wrappedValue: AlertSubscriptionStore(
+                service: AlertSubscriptionService(client: client)
+            )
+        )
     }
 
     var body: some View {
@@ -49,7 +60,10 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
 
-                NavigationLink("About alerts", value: AppRoute.alerts)
+                // Stays deliberately broad. Today it opens the email screen;
+                // naming it for email would have to be undone the moment there
+                // is more than one way to be notified.
+                NavigationLink("Notify me", value: AppRoute.alerts)
                     .frame(maxWidth: 280)
                     .buttonStyle(.bordered)
 
@@ -98,7 +112,7 @@ struct ContentView: View {
         case .activeRequests:
             ActiveRequestsView(store: requestStore)
         case .alerts:
-            AlertSignupView()
+            AlertSignupView(store: alertSubscriptionStore)
         case .privacySafety:
             PrivacySafetyView()
         case .requestDetail(let request):

@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Subscriber } from "../models/db.js";
+import { NYU_EMAIL_REQUIRED_MESSAGE } from "./allowedEmailDomains.js";
 
 vi.mock("./emailHelpers.js", () => ({
   CONFIRMATION_EMAIL_TIMEOUT_MS: 30_000,
@@ -69,7 +70,7 @@ describe("subscribe request validation", () => {
     {},
     { email: "" },
     { email: "not-an-email" },
-    { email: "helper@example.edu", extra: true },
+    { email: "helper@nyu.edu", extra: true },
   ])("rejects an invalid or non-strict body before database work", async (body) => {
     const find = vi.spyOn(Subscriber, "findOne");
     const sendConfirmationEmail = vi.fn();
@@ -84,12 +85,76 @@ describe("subscribe request validation", () => {
     expect(context.body).toEqual({
       error: {
         code: "INVALID_EMAIL",
-        message: "Enter a valid email address.",
+        message: NYU_EMAIL_REQUIRED_MESSAGE,
         fields: null,
       },
     });
     expect(find).not.toHaveBeenCalled();
     expect(sendConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "helper@gmail.com",
+    "helper@law.nyu.edu",
+    "helper@nyu.edu.fake",
+    "helper@fake-nyu.edu",
+    "helper@nyu.edu.example.com",
+    "helper@notnyu.edu",
+  ])(
+    "refuses %s with the same code before any Subscriber lookup or mutation",
+    async (email) => {
+      const find = vi.spyOn(Subscriber, "findOne");
+      const create = vi.spyOn(Subscriber, "create");
+      const update = vi.spyOn(Subscriber, "findOneAndUpdate");
+      const sendConfirmationEmail = vi.fn();
+      const generateRawToken = vi.fn();
+      const context = routeContext({ email });
+
+      await createSubscribeHandler({ sendConfirmationEmail, generateRawToken })(
+        context.req,
+        context.res
+      );
+
+      expect(context.statusCode).toBe(400);
+      expect(context.body).toEqual({
+        error: {
+          code: "INVALID_EMAIL",
+          message: NYU_EMAIL_REQUIRED_MESSAGE,
+          fields: null,
+        },
+      });
+      expect(find).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(generateRawToken).not.toHaveBeenCalled();
+      expect(sendConfirmationEmail).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ["  Helper@NYU.EDU  ", "helper@nyu.edu"],
+    ["student@stern.nyu.edu", "student@stern.nyu.edu"],
+    ["Helper+alerts@NYU.edu", "helper+alerts@nyu.edu"],
+  ])("accepts %s and looks it up normalized", async (submitted, stored) => {
+    const find = vi
+      .spyOn(Subscriber, "findOne")
+      .mockReturnValue(
+        queryResult({
+          _id: new mongoose.Types.ObjectId(),
+          email: stored,
+          status: "confirmed",
+        })
+      );
+    const context = routeContext({ email: submitted });
+
+    await createSubscribeHandler({ sendConfirmationEmail: vi.fn() })(
+      context.req,
+      context.res
+    );
+
+    expect(find).toHaveBeenCalledWith({ email: stored });
+    expect(context.statusCode).toBe(202);
+    expect(context.body).toEqual(SUBSCRIBE_ACCEPTED_RESPONSE);
   });
 
   it("trims and lowercases before the lookup", async () => {
@@ -99,19 +164,19 @@ describe("subscribe request validation", () => {
       .mockReturnValue(
         queryResult({
           _id: id,
-          email: "helper@example.edu",
+          email: "helper@nyu.edu",
           status: "confirmed",
         })
       );
     const sendConfirmationEmail = vi.fn();
-    const context = routeContext({ email: "  Helper@Example.EDU  " });
+    const context = routeContext({ email: "  Helper@NYU.EDU  " });
 
     await createSubscribeHandler({ sendConfirmationEmail })(
       context.req,
       context.res
     );
 
-    expect(find).toHaveBeenCalledWith({ email: "helper@example.edu" });
+    expect(find).toHaveBeenCalledWith({ email: "helper@nyu.edu" });
     expect(context.statusCode).toBe(202);
     expect(context.body).toEqual(SUBSCRIBE_ACCEPTED_RESPONSE);
     expect(sendConfirmationEmail).not.toHaveBeenCalled();
@@ -147,7 +212,7 @@ describe("re-signup credential and history preservation", () => {
   it("rotates an existing lifecycle without touching the credential version, counters, or history", async () => {
     const existing = {
       _id: new mongoose.Types.ObjectId(),
-      email: "helper@example.edu",
+      email: "helper@nyu.edu",
       status: "unsubscribed" as const,
     };
     vi.spyOn(Subscriber, "findOne").mockReturnValue(queryResult(existing));
@@ -183,7 +248,7 @@ describe("re-signup credential and history preservation", () => {
       .mockResolvedValue(created as never);
     vi.spyOn(Subscriber, "exists").mockResolvedValue(created as never);
     vi.spyOn(Subscriber, "updateOne").mockResolvedValue(null as never);
-    const context = routeContext({ email: "new@example.edu" });
+    const context = routeContext({ email: "new@nyu.edu" });
 
     await createSubscribeHandler({
       now: () => backendNow,
@@ -208,7 +273,7 @@ describe("send ownership losers", () => {
   function owned(overrides: Record<string, unknown>) {
     return {
       _id: new mongoose.Types.ObjectId(),
-      email: "helper@example.edu",
+      email: "helper@nyu.edu",
       status: "pending",
       confirmationTokenDigest: "a".repeat(64),
       confirmationSendAttemptId: "winner-attempt",
@@ -287,7 +352,7 @@ describe("confirmation link origin", () => {
     vi.spyOn(Subscriber, "updateOne").mockResolvedValue(null as never);
 
     const req = {
-      body: { email: "helper@example.edu" },
+      body: { email: "helper@nyu.edu" },
       protocol: "http",
       get: () => "evil.test",
     } as unknown as Request;
@@ -302,7 +367,7 @@ describe("confirmation link origin", () => {
 
     expect(sendConfirmationEmail).toHaveBeenCalledOnce();
     const submitted = sendConfirmationEmail.mock.calls[0] as unknown[];
-    expect(submitted).toEqual(["helper@example.edu", "raw-token"]);
+    expect(submitted).toEqual(["helper@nyu.edu", "raw-token"]);
     expect(JSON.stringify(submitted)).not.toContain("evil.test");
   });
 
