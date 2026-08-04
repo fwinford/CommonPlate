@@ -43,7 +43,7 @@ Run:
 npm test
 ```
 
-The current accepted baseline is **611 passed, 127 Mongo-gated skipped**, across **30 files passed, 10 files skipped, 40 files total**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
+The current accepted baseline is **634 passed, 127 Mongo-gated skipped**, across **30 files passed, 10 files skipped, 40 files total**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
 
 Representative coverage includes validation, route logic, error envelopes, browser behavior, copy guards, and source-wiring assertions. Some tests read source text instead of importing `app.ts`, because `app.ts` connects to MongoDB and starts listening at module scope. These assertions are not end-to-end route tests.
 
@@ -124,6 +124,26 @@ Cancellation is two outcomes, and `AlertSignupTests.swift` pins both. Cancellati
 
 The Slice 4B mongo suite drives the production handlers, so it stubs both `PUBLIC_ACTIONS_PAUSED` and `UNSUBSCRIBE_SIGNING_SECRET` per case rather than injecting a secret. Fixtures that describe malformed persisted state — a physically absent version field, or a physical `null` — are written through the driver, because the schema default, its bounds, and its integer validator would otherwise replace or reject them before they reached the collection. Its lifecycle cases also mount the confirmation routes and call the signup handler directly, so that file replaces `emailHelpers.js` — whose module scope constructs a Resend client that refuses to build without an API key — and injects its own send function. Pause middleware is unaffected: signup, confirmation, and unsubscribe all remain paused in production registration.
 
+### NYU food-request allowlist coverage
+
+Week 3 Day 5 Slice 5B applies the same allowlist to `POST /api/request` and the iOS Request Food form, adding, relative to the alert-signup baseline:
+
+- 23 cases in `src/createRequestRoute.test.ts`. They prove acceptance and normalization of both exact domains including uppercase, surrounding whitespace, and plus-addressing — asserted on the persisted document, the daily-limit count, and the requester email, so all three use the normalized address; refusal of malformed, non-NYU, lookalike, and unlisted-subdomain addresses with the `INVALID_EMAIL` envelope; the same rule on the canonical scheduled and legacy web shapes; and that a refused address reaches no side effect, asserted as `Request.countDocuments`, `Request.create`, the Resend send, and `notifySubscribersForRequest` each never being called. Two further cases pin precedence: a missing or blank `email` keeps the generic `INVALID_REQUEST` payload message, and so does a bad address accompanied by a blank field, a bad `timing`, an unexpected key, or an ended window;
+- 21 cases in `ios/CommonPlateios/CommonPlateiosTests/RequestEmailAllowlistTests.swift`. They prove both exact domains, uppercase and whitespace normalization, plus-addressing, and the malformed, non-NYU, lookalike, and unlisted-subdomain refusals; that the empty field keeps its own distinct message; that a refused address blocks submission, focuses the email field, and — driven through the real store, service, `APIClient`, and `URLSession` — issues no HTTP request and never arms the process-lifetime create block, while an allowed address still posts once and creates; that every other entered value and the timing selection survive an email rejection with only the email field marked presented; that a backend `INVALID_EMAIL` maps to the same sentence without showing the backend's own wording, and that every other create code and the ambiguous and in-progress outcomes map exactly as before; and that submit enabling, the duplicate-submit refusal, and the ambiguity guard are unchanged. Six of those cases cover the pre-entry eligibility notice: its exact sentence, that every `@`-prefixed token in it is an allowed domain and every allowed domain appears in it — so the copy and `NYUEmailPolicy.allowedDomains` cannot drift apart — that it is distinct from the validation message, the empty-field message, and the purpose notice, that the validator never emits it for any input and a rejected address still produces its own error, and that it promises no email delivery.
+
+Those six cases are copy and validator tests: they cover the sentence and its relationship to the validation errors, not where or how it is drawn. There is no UI-test target, so four properties of the pre-entry notice were **verified by code inspection of `RequestFoodView.swift` only, not by automated UI verification**:
+
+- that it is rendered before submission — the `Text` is unconditional, with no dependence on `validationPresentation`, `errors`, or `submissionError`;
+- that it remains visible during editing — the same absence of any focus or edit-state condition;
+- that it uses scalable `.footnote` typography with vertical expansion — `.font(.footnote)` plus `.fixedSize(horizontal: false, vertical: true)`;
+- that it appears in the intended accessibility reading order — placed between the email `TextField` and `fieldErrorText`, carrying `request-email-eligibility`, and adding nothing to the field's `accessibilityHint`, which the error still owns.
+
+A future UI-test target would be what actually pins those four. Until then, changes to that section's layout, styling, or ordering will not be caught by `CommonPlateiosTests`.
+
+`src/allowedEmailDomains.test.ts` already proves the helper matrix, so it gained no cases. The route suite's requester fixtures moved from `@example.edu` to `@nyu.edu` for the same reason the signup fixtures did in Slice 5A: they drive the real handler, which now refuses the former. One existing iOS assertion changed — `testEmptyAndMalformedEmailHaveDistinctCopy` now expects the NYU sentence for a malformed address, and additionally asserts that the empty and malformed messages still differ.
+
+No Mongo suite drives `POST /api/request`, so no Mongo fixture changed and `npm run test:mongo` is unchanged at 127. No browser-client source changed; `src/client/new-request.ts` already decodes `error` as a string or `{code, message}` and renders the message, which `src/client/new-request.test.ts` already proves, so the new envelope cannot render as `[object Object]`.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -202,7 +222,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted baseline is **284 passed, 0 failed, 0 skipped, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
+The current accepted baseline is **305 passed, 0 failed, 0 skipped, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
 
 ## 10. Test-file organization
 
@@ -235,14 +255,14 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. Every row was last recorded at the Week 3 Day 5 Slice 5A NYU alert-signup allowlist slice, including the iOS row, which was re-run for that slice because it changed iOS code.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. Every row was last recorded at the Week 3 Day 5 Slice 5B NYU food-request allowlist slice, including the iOS row, which was re-run for that slice because it changed shared request-form validation.
 
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Passed |
-| `npm test` | 611 passed; 127 Mongo-gated skipped (30 files passed, 10 skipped, 40 total) |
+| `npm test` | 634 passed; 127 Mongo-gated skipped (30 files passed, 10 skipped, 40 total) |
 | `npm run test:mongo` | 127 passed across 10 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | 284 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
-| `npm run build:client` | Not re-run at this closeout; no browser-client source changed |
+| `CommonPlateiosTests` | 305 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
+| `npm run build:client` | Ran as part of `ci-check`; regenerated bundles are byte-identical, and no browser-client source changed |
 | `git diff --check` | Passed |

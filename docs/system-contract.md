@@ -48,6 +48,17 @@ Fulfillment `INTERNAL_FAILURE` is ambiguous. iOS performs one read-only request-
 
 Creation uses strict backend validation for canonical and legacy request shapes, email, required text, scheduling bounds, and a still-usable scheduled end time. Where iOS can know an error locally, it validates before submission (including required fields, email, and scheduling/form constraints).
 
+The requester email must be an allowed NYU address. Both alert signup and food-request creation require one, enforced by the same `src/allowedEmailDomains.ts` helper with the same exact allowlist, normalization, and refusal of lookalikes and unlisted subdomains described in section 9.1. This verifies control of an eligible NYU-domain address; it is not authentication and does not prove enrollment. Existing requests created on other domains are unaffected — the allowlist gates creation only.
+
+The allowlist runs last, after the whole payload has otherwise passed, so it changes no existing error and can only refuse a request that would otherwise have been created:
+
+- a missing, blank, or wrongly typed `email` remains a structural failure with the existing HTTP 400 `INVALID_REQUEST` / `Invalid request payload`, matching `vendor`, `food`, and `pickupName`, as does any payload that is invalid in another way as well;
+- an address that is present and non-blank but malformed or non-allowlisted returns HTTP 400 with code `INVALID_EMAIL` and message `Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu.` — the same code and sentence `POST /api/subscribe` returns for the same condition. `POST /api/request` keeps its own two-key `{error: {code, message}}` envelope.
+
+Refusal precedes the daily abuse-control count, the write, the requester confirmation email, and helper-alert notification. The iOS Request Food form and the website both remain non-authoritative: iOS refuses an obviously ineligible address before sending and renders the same sentence for a backend `INVALID_EMAIL`, and the website renders `error.message` from the same envelope.
+
+The iOS form also states the rule before anything is typed. `Use your @nyu.edu or @stern.nyu.edu email.` is standing help text beneath the email field, present while the field is empty and while it is being edited; it neither replaces nor suppresses the validation error, which keeps its own styling, its own identifier, and the field's accessibility hint. The website form carries no equivalent sentence; its email input placeholder is `abc123@nyu.edu`.
+
 Creation has no operation identity. If iOS cannot confirm a create outcome, it blocks further creation for the lifetime of that `RequestStore`/app process to avoid duplicates. Durable reconciliation and backend idempotency do not exist. `REQUEST_CREATION_FAILED` therefore remains a Week 3 reconciliation concern rather than proof that no request was created.
 
 ## 7. Daily request abuse control
@@ -86,7 +97,7 @@ Every Subscriber holds a revocable unsubscribe credential by construction: it is
 
 The handler validates a strict body: the sole field is `email`, unexpected fields are rejected, and the address is trimmed and lowercased before any database work. Invalid input returns the shared structured error envelope with HTTP 400 and `INVALID_EMAIL`.
 
-Alert signup additionally accepts only NYU addresses. The exact allowlist is `nyu.edu` and `stern.nyu.edu`, compared against the whole normalized domain after the final `@` — never by suffix or substring, so `fake-nyu.edu`, `nyu.edu.example.com`, and unlisted subdomains such as `law.nyu.edu` are all refused. Plus-addressing on an allowed domain is accepted. A non-allowlisted address is part of the same strict schema and so is refused with the identical HTTP 400 `INVALID_EMAIL` envelope, before any Subscriber lookup or mutation; its message is `Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu.` The allowlist gates signup only: it never affects confirmation or unsubscribe, and existing Subscriber rows on other domains keep their lifecycle. `src/allowedEmailDomains.ts` is the single implementation. `POST /api/request` does not enforce it.
+Alert signup additionally accepts only NYU addresses. The exact allowlist is `nyu.edu` and `stern.nyu.edu`, compared against the whole normalized domain after the final `@` — never by suffix or substring, so `fake-nyu.edu`, `nyu.edu.example.com`, and unlisted subdomains such as `law.nyu.edu` are all refused. Plus-addressing on an allowed domain is accepted. A non-allowlisted address is part of the same strict schema and so is refused with the identical HTTP 400 `INVALID_EMAIL` envelope, before any Subscriber lookup or mutation; its message is `Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu.` The allowlist gates signup only: it never affects confirmation or unsubscribe, and existing Subscriber rows on other domains keep their lifecycle. `src/allowedEmailDomains.ts` is the single implementation, shared with food-request creation (section 6).
 
 Every valid attempt — brand-new, unexpired pending, expired pending, unsubscribed, and already-confirmed — returns the identical generic response, so the response cannot be used to enumerate subscription status:
 
