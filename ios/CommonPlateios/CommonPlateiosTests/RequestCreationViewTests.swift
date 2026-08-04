@@ -195,7 +195,11 @@ final class RequestCreationViewTests: XCTestCase {
         )
 
         XCTAssertEqual(empty.last?.message, "Enter your email address.")
-        XCTAssertEqual(malformed.last?.message, "Enter a valid email address.")
+        XCTAssertEqual(
+            malformed.last?.message,
+            "Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu."
+        )
+        XCTAssertNotEqual(empty.last?.message, malformed.last?.message)
     }
 
     func testProductionFocusTransitionRevealsOnlyTheExitedInvalidRequestField() {

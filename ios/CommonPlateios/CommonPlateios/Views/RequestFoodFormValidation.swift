@@ -124,18 +124,26 @@ enum RequestFoodFormValidator {
             ))
         }
 
+        // Empty stays its own failure: an address that has not been typed yet
+        // is not an ineligible address, and telling someone their blank field
+        // is not an NYU address answers a question they have not asked. Any
+        // non-empty value is judged by the one shared rule, so a malformed
+        // address and a Gmail address get the same correction — the backend
+        // refuses both identically.
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedEmail.isEmpty {
             errors.append(RequestFoodFieldError(field: .requesterEmail, error: .missingEmail))
-        } else if !isValidEmail(trimmedEmail) {
+        } else if !isAllowedRequesterEmail(trimmedEmail) {
             errors.append(RequestFoodFieldError(field: .requesterEmail, error: .invalidEmail))
         }
 
         return errors
     }
 
-    static func isValidEmail(_ value: String) -> Bool {
-        FulfillmentFormValidator.isValidEmail(value)
+    /// Requester addresses are held to the same exact NYU allowlist as alert
+    /// signup, enforced independently by `POST /api/request`.
+    static func isAllowedRequesterEmail(_ value: String) -> Bool {
+        NYUEmailPolicy.isAllowed(value)
     }
 }
 

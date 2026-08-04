@@ -44,7 +44,7 @@ function canonicalAsap(overrides: Record<string, unknown> = {}) {
     vendor: "  Campus Market  ",
     food: "  Vegetable rice bowl  ",
     pickupName: "  Requester Private Name  ",
-    email: "  REQUESTER@EXAMPLE.EDU  ",
+    email: "  REQUESTER@NYU.EDU  ",
     timing: "asap",
     ...overrides,
   };
@@ -55,7 +55,7 @@ function canonicalScheduled(overrides: Record<string, unknown> = {}) {
     vendor: "Campus Market",
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
-    email: "requester@example.edu",
+    email: "requester@nyu.edu",
     timing: "scheduled",
     windowStart: "2026-07-28T17:00:00.000Z",
     windowEnd: "2026-07-28T18:00:00.000Z",
@@ -135,7 +135,7 @@ describe("POST /api/request validation and persistence", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@example.edu",
+      email: "requester@nyu.edu",
       pickupWindowText: "ASAP (within the next 5 hours)",
       windowStart: undefined,
       windowEnd: undefined,
@@ -217,6 +217,26 @@ describe("POST /api/request validation and persistence", () => {
     await createRequest(context.req, context.res);
 
     expect(context.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("keeps the generic payload message for a missing or blank email", async () => {
+    // A field that is absent or empty is a malformed payload, not an address
+    // problem, so it stays with `vendor`, `food`, and `pickupName` rather than
+    // being answered with advice about NYU domains.
+    for (const email of [undefined, "   "]) {
+      const context = routeContext(canonicalAsap({ email }));
+
+      await createRequest(context.req, context.res);
+
+      expect(context.json).toHaveBeenCalledWith({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "Invalid request payload",
+        },
+      });
+    }
+
     expect(createDocument).not.toHaveBeenCalled();
   });
 
@@ -348,6 +368,171 @@ describe("POST /api/request validation and persistence", () => {
   });
 });
 
+describe("POST /api/request NYU requester-email allowlist", () => {
+  /**
+   * The helper matrix itself is proved once in `allowedEmailDomains.test.ts`.
+   * These cases prove the route reaches that decision, on both create shapes,
+   * with the accepted envelope, and strictly before any side effect.
+   */
+  const NYU_MESSAGE =
+    "Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu.";
+
+  function legacyWeb(email: string) {
+    return {
+      vendor: "Campus Market",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email,
+      pickupWindowText: "Legacy display",
+    };
+  }
+
+  it.each([
+    ["  REQUESTER@NYU.EDU  ", "requester@nyu.edu"],
+    ["student@stern.nyu.edu", "student@stern.nyu.edu"],
+    ["\tStudent@Stern.NYU.EDU\n", "student@stern.nyu.edu"],
+    ["requester+food@nyu.edu", "requester+food@nyu.edu"],
+  ])("accepts and normalizes %s", async (email, stored) => {
+    const context = routeContext(canonicalAsap({ email }));
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ email: stored })
+    );
+    // The normalized address is also what the daily abuse-control count and
+    // the requester confirmation email use.
+    expect(countDocuments).toHaveBeenCalledWith(
+      expect.objectContaining({ email: stored })
+    );
+    expect(resendSend).toHaveBeenCalledWith(
+      expect.objectContaining({ to: stored })
+    );
+  });
+
+  it.each([
+    "not-an-email",
+    "requester@",
+    "@nyu.edu",
+    "requester@@nyu.edu",
+    "requester @nyu.edu",
+    "requester@gmail.com",
+    "requester@example.edu",
+    "requester@law.nyu.edu",
+    "requester@sps.nyu.edu",
+    "requester@nyu.edu.fake",
+    "requester@fake-nyu.edu",
+    "requester@nyu.edu.example.com",
+    "requester@notnyu.edu",
+    "requester@nyu.education",
+  ])("refuses %s with the NYU envelope and no side effect", async (email) => {
+    const context = routeContext(canonicalAsap({ email }));
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: { code: "INVALID_EMAIL", message: NYU_MESSAGE },
+    });
+    // The refusal precedes every side effect: no daily-limit read, no
+    // document, no requester email, no helper alert.
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("applies the same rule to the canonical scheduled and legacy web shapes", async () => {
+    const scheduled = routeContext(
+      canonicalScheduled({ email: "requester@gmail.com" })
+    );
+    await createRequest(scheduled.req, scheduled.res);
+
+    const legacy = routeContext(legacyWeb("requester@law.nyu.edu"));
+    await createRequest(legacy.req, legacy.res);
+
+    for (const context of [scheduled, legacy]) {
+      expect(context.status).toHaveBeenCalledWith(400);
+      expect(context.json).toHaveBeenCalledWith({
+        error: { code: "INVALID_EMAIL", message: NYU_MESSAGE },
+      });
+    }
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+
+    const allowedLegacy = routeContext(legacyWeb("requester@stern.nyu.edu"));
+    await createRequest(allowedLegacy.req, allowedLegacy.res);
+
+    expect(allowedLegacy.status).toHaveBeenCalledWith(201);
+  });
+
+  it("does not match an allowed domain by suffix or substring", async () => {
+    for (const email of [
+      "requester@evil-nyu.edu",
+      "requester@nyu.edu.evil.test",
+      "requester@stern.nyu.edu.evil.test",
+    ]) {
+      const context = routeContext(canonicalAsap({ email }));
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(400);
+      expect(context.json).toHaveBeenCalledWith({
+        error: { code: "INVALID_EMAIL", message: NYU_MESSAGE },
+      });
+    }
+
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("still reports another invalid field as a payload error", async () => {
+    // Precedence is unchanged: the allowlist runs last and can only refuse a
+    // payload that would otherwise have been created, so a request that is
+    // wrong in more than one way keeps the message it has always returned.
+    for (const body of [
+      canonicalAsap({ email: "requester@gmail.com", vendor: "   " }),
+      canonicalAsap({ email: "requester@gmail.com", timing: "soon" }),
+      canonicalAsap({ email: "requester@gmail.com", status: "placed" }),
+      canonicalScheduled({
+        email: "requester@gmail.com",
+        windowStart: "2026-07-28T14:00:00.000Z",
+        windowEnd: "2026-07-28T15:00:00.000Z",
+      }),
+    ]) {
+      const context = routeContext(body);
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(400);
+      expect(context.json).toHaveBeenCalledWith({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "Invalid request payload",
+        },
+      });
+    }
+
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("leaves the daily limit unchanged for an allowed address", async () => {
+    countDocuments.mockResolvedValue(3);
+    const limited = routeContext(canonicalAsap());
+    await createRequest(limited.req, limited.res);
+
+    expect(limited.status).toHaveBeenCalledWith(429);
+    expect(limited.json).toHaveBeenCalledWith({
+      error: {
+        code: "REQUEST_LIMIT_REACHED",
+        message: "You have reached the daily limit of 3 meal requests",
+      },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /api/request backend-owned expiration", () => {
   it("expires an ASAP request five hours after the backend creation time", async () => {
     const context = routeContext(canonicalAsap());
@@ -414,7 +599,7 @@ describe("POST /api/request backend-owned expiration", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@example.edu",
+      email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       expiresAt: clientExpiration,
     });
@@ -533,7 +718,7 @@ describe("POST /api/request backend-owned expiration", () => {
         vendor: "Campus Market",
         food: "Vegetable rice bowl",
         pickupName: "Requester Private Name",
-        email: "requester@example.edu",
+        email: "requester@nyu.edu",
         pickupWindowText: "Legacy display",
         windowStart,
         windowEnd,
@@ -590,7 +775,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@example.edu",
+      email: "requester@nyu.edu",
       pickupWindowText: "Client-owned text must be ignored",
     });
 
@@ -611,7 +796,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@example.edu",
+      email: "requester@nyu.edu",
       pickupWindowText: "Wrong client display text",
       windowStart: "2026-07-28T17:00:00.000Z",
       windowEnd: "2026-07-28T18:00:00.000Z",
@@ -650,7 +835,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@example.edu",
+      email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       ...window,
     });
@@ -666,7 +851,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@example.edu",
+      email: "requester@nyu.edu",
     });
     await createRequest(
       missingCompatibilityMarker.req,
@@ -677,7 +862,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@example.edu",
+      email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       status: "requested",
     });
@@ -743,7 +928,7 @@ describe("POST /api/request side-effect ordering and errors", () => {
       `[email] Request confirmation failed after persistence for request ${requestId}`
     );
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
-      "requester@example.edu"
+      "requester@nyu.edu"
     );
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
       "Requester Private Name"

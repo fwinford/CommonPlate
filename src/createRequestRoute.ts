@@ -2,6 +2,10 @@ import type { Request, Response } from "express";
 import { Resend } from "resend";
 import { z } from "zod";
 import { Request as MealRequest } from "../models/db.js";
+import {
+  NYU_EMAIL_REQUIRED_MESSAGE,
+  hasAllowedEmailDomain,
+} from "./allowedEmailDomains.js";
 import { escapeHtml } from "./htmlEscape.js";
 import {
   buildPublicRequestDetailResponse,
@@ -18,7 +22,23 @@ import { createDay4MutationRateLimiter } from "./claimRoute.js";
 export const createRequestRateLimiter = createDay4MutationRateLimiter(5);
 
 const requesterString = z.string().trim().min(1);
-const requesterEmail = z.string().trim().toLowerCase().email();
+/**
+ * The shape rule only. A present, non-blank `email` is a well-formed payload;
+ * whether the address itself is usable is decided by `isEligibleRequesterEmail`
+ * after the whole payload has passed, so a missing or blank address stays the
+ * same structural failure as a missing `vendor` rather than becoming an
+ * address problem the requester is told to fix.
+ */
+const requesterEmail = z.string().trim().toLowerCase().min(1);
+/**
+ * Syntax plus the shared exact-domain allowlist, applied to the already
+ * trimmed and lowercased value. `.email()` is the same syntax check this route
+ * has always used; the allowlist is the one `POST /api/subscribe` enforces.
+ */
+const eligibleRequesterEmail = z
+  .string()
+  .email()
+  .refine(hasAllowedEmailDomain);
 const isoTimestamp = z.iso.datetime({ offset: true });
 
 const requesterFields = {
@@ -156,7 +176,7 @@ function isUsableScheduledWindow(windowEnd: Date, now: Date): boolean {
   return windowEnd.getTime() > now.getTime();
 }
 
-function validateCreateRequest(
+function validateCreateShape(
   body: unknown,
   now: Date
 ): ValidatedCreateRequest | null {
@@ -224,6 +244,44 @@ function validateCreateRequest(
   };
 }
 
+/**
+ * Why a create payload was refused.
+ *
+ * `payload` is every structural failure this route has always answered with one
+ * generic message: a missing, blank, or wrongly typed field, an unexpected key,
+ * a bad `timing`, a mismatched or already-ended window, on either create shape.
+ * `email` is reserved for an address that is present and non-blank but fails
+ * syntax or the NYU allowlist.
+ */
+type CreateRefusal = "payload" | "email";
+
+type CreateValidation =
+  | { ok: true; request: ValidatedCreateRequest }
+  | { ok: false; refusal: CreateRefusal };
+
+function isEligibleRequesterEmail(email: string): boolean {
+  return eligibleRequesterEmail.safeParse(email).success;
+}
+
+/**
+ * The allowlist is strictly additive and runs last, so it can only refuse a
+ * payload that would otherwise have been created. Every existing failure — and
+ * every case where another field is also invalid — keeps the exact generic
+ * error it has always returned, and the address-specific message is reserved
+ * for the one case where the address is the only thing wrong.
+ *
+ * Both refusals happen here, before the daily-limit read, the write, the
+ * requester confirmation email, and helper notification.
+ */
+function validateCreateRequest(body: unknown, now: Date): CreateValidation {
+  const request = validateCreateShape(body, now);
+  if (!request) return { ok: false, refusal: "payload" };
+  if (!isEligibleRequesterEmail(request.email)) {
+    return { ok: false, refusal: "email" };
+  }
+  return { ok: true, request };
+}
+
 async function attemptRequesterConfirmation(
   request: ValidatedCreateRequest,
   requestId: string
@@ -279,12 +337,20 @@ export async function createRequest(
   // measured from the same instant.
   const now = new Date();
 
-  const validated = validateCreateRequest(req.body, now);
-  if (!validated) {
-    return res
-      .status(400)
-      .json(errorEnvelope("INVALID_REQUEST", "Invalid request payload"));
+  const validation = validateCreateRequest(req.body, now);
+  if (!validation.ok) {
+    // `INVALID_EMAIL` is the code `POST /api/subscribe` already returns for
+    // this exact condition, rather than a second meaning loaded onto
+    // `INVALID_REQUEST`. Clients that do not know it still render the message.
+    return validation.refusal === "email"
+      ? res
+          .status(400)
+          .json(errorEnvelope("INVALID_EMAIL", NYU_EMAIL_REQUIRED_MESSAGE))
+      : res
+          .status(400)
+          .json(errorEnvelope("INVALID_REQUEST", "Invalid request payload"));
   }
+  const validated = validation.request;
 
   try {
     // This serial read-before-write is intentionally best-effort abuse control,

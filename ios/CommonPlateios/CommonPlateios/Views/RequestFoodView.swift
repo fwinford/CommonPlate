@@ -29,7 +29,11 @@ enum RequestFoodFormError: Error, Equatable {
         case .missingEmail:
             return "Enter your email address."
         case .invalidEmail:
-            return "Enter a valid email address."
+            // One sentence covers both an address that is not an address and
+            // one that is not an NYU address: the backend refuses them with the
+            // same envelope, and naming the accepted domains is the correction
+            // in either case.
+            return NYUEmailPolicy.requiredMessage
         case .invalidScheduledTime:
             return "Choose a pickup time that leaves a full 30-minute window today."
         case .scheduledTimingUnavailable:
@@ -40,6 +44,11 @@ enum RequestFoodFormError: Error, Equatable {
 
 enum RequestCreatePresentationError: Equatable {
     case invalidRequest
+    /// `INVALID_EMAIL`. The backend enforces the NYU allowlist independently,
+    /// so this arrives when the local check and the backend disagree — an
+    /// allowlist that has moved, or an older build. It reads exactly like the
+    /// local email failure, because it is the same rule and the same fix.
+    case invalidEmail
     case requestLimitReached
     /// `RATE_LIMITED`. Distinct from `requestLimitReached`: that one is the
     /// daily allowance and reopens tomorrow, this one is a short per-IP
@@ -55,6 +64,8 @@ enum RequestCreatePresentationError: Equatable {
         switch self {
         case .invalidRequest:
             return "Check the information you entered and try again."
+        case .invalidEmail:
+            return RequestFoodFormError.invalidEmail.message
         case .requestLimitReached:
             return "CommonPlate attempts to limit each email to three meal requests a day. Please try again tomorrow."
         case .rateLimited:
@@ -84,6 +95,8 @@ enum RequestCreatePresentationError: Equatable {
             switch code {
             case "INVALID_REQUEST":
                 return .invalidRequest
+            case "INVALID_EMAIL":
+                return .invalidEmail
             case "REQUEST_LIMIT_REACHED":
                 return .requestLimitReached
             case "RATE_LIMITED":
@@ -146,6 +159,16 @@ struct RequestFoodView: View {
     /// could not find out, and it must not claim otherwise.
     static let availabilityUnknownNotice =
         "We couldn’t check whether posting is available right now. Please try again in a moment."
+
+    /// States the eligibility rule before anything is typed, so the accepted
+    /// domains are not something the requester discovers by being refused.
+    ///
+    /// Deliberately not the validation message: this is a standing requirement
+    /// shown while the field is empty and while it is being edited, and it
+    /// neither replaces nor suppresses the error, which keeps its own red
+    /// styling, its own identifier, and the field's accessibility hint.
+    static let emailEligibilityNotice =
+        "Use your @nyu.edu or @stern.nyu.edu email."
 
     /// Explains why email is collected: public endpoints never return it, and
     /// request creation does not guarantee email delivery.
@@ -525,6 +548,20 @@ struct RequestFoodView: View {
                     .autocorrectionDisabled()
                     .focused($focusedField, equals: .requesterEmail)
                     .accessibilityHint(Text(fieldError(.requesterEmail, errors: errors) ?? ""))
+
+                // Unconditional, so it is present before submission and stays
+                // through editing and through a rejection. The error below it
+                // is unaffected: it still renders, still owns the red styling
+                // and the field's spoken hint, and is never swapped for this.
+                Text(Self.emailEligibilityNotice)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    // The neighbouring prose wraps on its own, but this
+                    // sentence is mostly two long unbreakable addresses, which
+                    // is exactly what gets truncated at accessibility text
+                    // sizes instead of growing taller.
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("request-email-eligibility")
 
                 fieldErrorText(
                     .requesterEmail,
@@ -954,7 +991,7 @@ struct RequestFoodView: View {
         return end <= dayEnd
     }
 
-    static func isValidEmail(_ value: String) -> Bool {
-        RequestFoodFormValidator.isValidEmail(value)
+    static func isAllowedRequesterEmail(_ value: String) -> Bool {
+        RequestFoodFormValidator.isAllowedRequesterEmail(value)
     }
 }
