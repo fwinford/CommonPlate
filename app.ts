@@ -141,6 +141,16 @@ import {
   pausePublicAction,
 } from "./src/publicActionsPause.js";
 import { subscribe } from "./src/subscribeRoute.js";
+import {
+  CONFIRMATION_ROUTE_PATH,
+  confirmSubscriptionPage,
+  confirmationBodyParser,
+  confirmationParserError,
+  confirmationRateLimiter,
+  confirmationSecurityHeaders,
+  pauseConfirmationPage,
+  showConfirmationPage,
+} from "./src/confirmSubscriptionRoute.js";
 
 // --- Environment validation (fail fast with clear message) ---
 const { MONGO_URI, RESEND_API_KEY } = process.env;
@@ -181,6 +191,33 @@ if (trustProxyEnv === '1' || trustProxyEnv === 'true' || process.env.NODE_ENV ==
 }
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Browser confirmation flow for the emailed link. Both halves answer in HTML
+// behind route-owned security headers and an HTML pause guard. The GET only
+// renders a form and never mutates a Subscriber, because inbox scanners and
+// prefetchers fetch links without a person acting; the explicit POST carries
+// its own limiter bucket so confirming cannot spend the signup allowance.
+//
+// Registered ahead of the global body parsers deliberately. A global parser
+// runs before route middleware, so a body it rejected would be answered by the
+// global JSON error handler — bypassing these headers, the pause guard, and the
+// HTML contract, and logging a parser error that can quote the raw token. This
+// route parses its own body instead, after the pause and the limiter.
+app.get(
+  CONFIRMATION_ROUTE_PATH,
+  confirmationSecurityHeaders,
+  pauseConfirmationPage,
+  showConfirmationPage
+);
+app.post(
+  CONFIRMATION_ROUTE_PATH,
+  confirmationSecurityHeaders,
+  pauseConfirmationPage,
+  confirmationRateLimiter,
+  confirmationBodyParser,
+  confirmSubscriptionPage,
+  confirmationParserError
+);
 
 // middleware to parse JSON and serve static files
 app.use(express.json({ limit: '100kb' }));

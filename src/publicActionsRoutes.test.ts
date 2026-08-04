@@ -61,6 +61,105 @@ describe("public action routes are mounted behind the pause", () => {
     expect(line).toContain("limiter, subscribe");
   });
 
+  it("renders the confirmation GET behind headers and the HTML pause guard", () => {
+    const registration = appSource.match(
+      /app\.get\(\s*CONFIRMATION_ROUTE_PATH,[\s\S]*?\);/
+    );
+
+    expect(registration).not.toBeNull();
+    const line = registration![0];
+    expect(line).toContain("confirmationSecurityHeaders");
+    expect(line).toContain("pauseConfirmationPage");
+    expect(line).toContain("showConfirmationPage");
+    expect(line.indexOf("confirmationSecurityHeaders")).toBeLessThan(
+      line.indexOf("pauseConfirmationPage")
+    );
+    expect(line.indexOf("pauseConfirmationPage")).toBeLessThan(
+      line.indexOf("showConfirmationPage")
+    );
+    // The GET only renders a form. Throttling it would refuse people whose
+    // mail client prefetched the link, and it mutates nothing to protect.
+    expect(line).not.toContain("confirmationRateLimiter");
+    expect(line).not.toContain("pausePublicAction");
+  });
+
+  it("guards the confirmation POST before its own limiter, parser, and redemption", () => {
+    const registration = appSource.match(
+      /app\.post\(\s*CONFIRMATION_ROUTE_PATH,[\s\S]*?\);/
+    );
+
+    expect(registration).not.toBeNull();
+    const line = registration![0];
+    const order = [
+      "confirmationSecurityHeaders",
+      "pauseConfirmationPage",
+      "confirmationRateLimiter",
+      "confirmationBodyParser",
+      "confirmSubscriptionPage",
+      "confirmationParserError",
+    ];
+    const positions = order.map((name) => line.indexOf(name));
+    expect(positions.every((index) => index > -1)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+
+    // The confirmation POST answers in HTML, so it must not reuse the JSON
+    // guard or spend the shared signup allowance.
+    expect(line).not.toContain("pausePublicAction");
+    expect(line).not.toMatch(/[^a-zA-Z]limiter[^a-zA-Z]/);
+    // Route-local parsing is URL-encoded only: the accepted form submits
+    // nothing else, and JSON must stay unparsed rather than error.
+    expect(line).not.toContain("express.json");
+  });
+
+  it("registers the confirmation POST ahead of the global body parsers", () => {
+    const confirmationPost = appSource.indexOf(
+      "app.post(\n  CONFIRMATION_ROUTE_PATH"
+    );
+    const globalJson = appSource.indexOf("app.use(express.json(");
+    const globalUrlencoded = appSource.indexOf("app.use(express.urlencoded(");
+
+    expect(confirmationPost).toBeGreaterThan(-1);
+    expect(globalJson).toBeGreaterThan(-1);
+    expect(globalUrlencoded).toBeGreaterThan(-1);
+    // A global parser runs before route middleware. Registered after them, a
+    // body they rejected would be answered by the global JSON error handler —
+    // outside this route's security headers, pause guard, and HTML contract,
+    // and logged by a handler that prints the error.
+    expect(confirmationPost).toBeLessThan(globalJson);
+    expect(confirmationPost).toBeLessThan(globalUrlencoded);
+
+    // The global parsers themselves are untouched for every other route.
+    expect(appSource).toContain("app.use(express.json({ limit: '100kb' }));");
+    expect(appSource).toContain(
+      "app.use(express.urlencoded({ extended: true, limit: '100kb' }));"
+    );
+    expect(appSource.match(/app\.use\(express\.json\(/g)).toHaveLength(1);
+    expect(appSource.match(/app\.use\(express\.urlencoded\(/g)).toHaveLength(1);
+  });
+
+  it("registers the confirmation flow from its own route module", () => {
+    expect(appSource).toContain('from "./src/confirmSubscriptionRoute.js"');
+    // Both halves of the browser flow share one locked path constant.
+    expect(appSource).not.toContain('"/api/subscribe/confirm"');
+    expect(
+      appSource.match(/CONFIRMATION_ROUTE_PATH,/g)?.length
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("leaves the shared signup limiter unchanged", () => {
+    expect(appSource).toContain(
+      "const limiter = rateLimit({ windowMs: 60_000, max: 5 })"
+    );
+    expect(appSource.match(/rateLimit\(/g)).toHaveLength(1);
+  });
+
+  it("registers the one persistent confirmation limiter, not a fresh instance", () => {
+    // Tests build their own buckets through the factory; production must keep
+    // a single instance, or each registration would start an empty window.
+    expect(appSource).toContain("confirmationRateLimiter,");
+    expect(appSource).not.toContain("createConfirmationRateLimiter");
+  });
+
   it("keeps signup focused on pending confirmation without notification dispatch", () => {
     const routeSource = readFileSync(
       new URL("./subscribeRoute.ts", import.meta.url),
