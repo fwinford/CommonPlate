@@ -132,6 +132,76 @@ describe("confirmation token generation", () => {
   });
 });
 
+describe("re-signup credential and history preservation", () => {
+  const backendNow = new Date("2026-08-03T18:30:00.000Z");
+  // Every field a signup attempt must leave exactly as it found it.
+  const PRESERVED_FIELDS = [
+    "unsubscribeCredentialVersion",
+    "dailyCount",
+    "lastSentAt",
+    "bounced",
+    "unsubscribedAt",
+    "unsubToken",
+  ];
+
+  it("rotates an existing lifecycle without touching the credential version, counters, or history", async () => {
+    const existing = {
+      _id: new mongoose.Types.ObjectId(),
+      email: "helper@example.edu",
+      status: "unsubscribed" as const,
+    };
+    vi.spyOn(Subscriber, "findOne").mockReturnValue(queryResult(existing));
+    const update = vi
+      .spyOn(Subscriber, "findOneAndUpdate")
+      .mockReturnValue(queryResult({ _id: existing._id }));
+    vi.spyOn(Subscriber, "exists").mockResolvedValue(existing as never);
+    vi.spyOn(Subscriber, "updateOne").mockResolvedValue(null as never);
+    const context = routeContext({ email: existing.email });
+
+    await createSubscribeHandler({
+      now: () => backendNow,
+      generateRawToken: () => "raw-token",
+      generateAttemptId: () => "resignup-attempt",
+      sendConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+    })(context.req, context.res);
+
+    expect(update).toHaveBeenCalledOnce();
+    const rotation = JSON.stringify((update.mock.calls[0] as unknown[])[1]);
+    for (const field of PRESERVED_FIELDS) {
+      // A rotated unsubscribe credential version would silently break every
+      // unsubscribe link this address was ever emailed.
+      expect(rotation).not.toContain(field);
+    }
+    expect(context.statusCode).toBe(202);
+  });
+
+  it("creates a brand-new subscriber without dictating any of them", async () => {
+    vi.spyOn(Subscriber, "findOne").mockReturnValue(queryResult(null));
+    const created = { _id: new mongoose.Types.ObjectId() };
+    const create = vi
+      .spyOn(Subscriber, "create")
+      .mockResolvedValue(created as never);
+    vi.spyOn(Subscriber, "exists").mockResolvedValue(created as never);
+    vi.spyOn(Subscriber, "updateOne").mockResolvedValue(null as never);
+    const context = routeContext({ email: "new@example.edu" });
+
+    await createSubscribeHandler({
+      now: () => backendNow,
+      generateRawToken: () => "raw-token",
+      generateAttemptId: () => "new-attempt",
+      sendConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+    })(context.req, context.res);
+
+    // The schema default supplies the initial version; signup names none of
+    // these fields, so it can neither seed nor reset them.
+    const document = JSON.stringify(create.mock.calls[0]);
+    for (const field of PRESERVED_FIELDS) {
+      expect(document).not.toContain(field);
+    }
+    expect(context.statusCode).toBe(202);
+  });
+});
+
 describe("send ownership losers", () => {
   const backendNow = new Date("2026-08-03T18:30:00.000Z");
 

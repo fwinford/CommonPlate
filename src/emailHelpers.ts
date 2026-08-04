@@ -1,10 +1,20 @@
 import { IRequest, ISubscriber } from "../models/db.js";
 import { Resend } from "resend";
 import { escapeHtml } from "./htmlEscape.js";
+import { publicBaseOrigin, publicBaseUrl } from "./publicBaseUrl.js";
+import { buildUnsubscribeUrl } from "./unsubscribeCredential.js";
 
 const FROM_EMAIL = process.env.FROM_EMAIL || "CommonPlate <onboarding@resend.dev>";
-const BASE_URL = process.env.BASE_URL || "https://commonplatenyu.org";
 const resend = new Resend(process.env.RESEND_API_KEY);
+
+/**
+ * Test seam for the emailed unsubscribe link. Production omits it and the
+ * credential module reads the configured signing secret; a test supplies a
+ * fixed secret instead of mutating the process environment.
+ */
+export interface UnsubscribeLinkOptions {
+  unsubscribeSigningSecret?: Buffer;
+}
 
 type EmailRequestOptions = NonNullable<Parameters<typeof resend.emails.send>[1]> & {
 	signal?: AbortSignal;
@@ -48,7 +58,7 @@ export class EmailProviderTimeoutError extends Error {
  * confirmation token to an attacker-controlled origin.
  */
 export function confirmationBaseUrl(): string {
-	return process.env.BASE_URL || "https://commonplatenyu.org";
+	return publicBaseUrl();
 }
 
 export async function sendSubscriptionConfirmationEmail(
@@ -83,10 +93,18 @@ export async function sendSubscriptionConfirmationEmail(
 	}
 }
 
-export async function sendNewRequestAlert(subscriber: ISubscriber, request: IRequest) {
-	if (!subscriber.unsubToken) throw new Error("Missing unsubToken");
-	const requestListUrl = `${BASE_URL.replace(/\/+$/, "")}/`;
-	const unsubUrl = `${BASE_URL}/api/unsubscribe?token=${encodeURIComponent(subscriber.unsubToken)}`;
+export async function sendNewRequestAlert(
+	subscriber: ISubscriber,
+	request: IRequest,
+	options: UnsubscribeLinkOptions = {}
+) {
+	const requestListUrl = `${publicBaseOrigin()}/`;
+	// Signed here from identity the subscriber already carries, so building an
+	// alert reads and writes no database state and stores no raw credential.
+	const unsubUrl = buildUnsubscribeUrl(
+		subscriber,
+		options.unsubscribeSigningSecret
+	);
 	const htmlVendor = escapeHtml(request.vendor);
 	const htmlFood = escapeHtml(request.food);
 	const htmlPickupWindow = escapeHtml(request.pickupWindowText);
@@ -99,7 +117,7 @@ export async function sendNewRequestAlert(subscriber: ISubscriber, request: IReq
 			</ul>
 		<p><a href="${requestListUrl}">View meal request</a></p>
 		<hr>
-		<p style="font-size:0.9em;">To unsubscribe from these alerts, <a href="${unsubUrl}">click here</a>.</p>
+		<p style="font-size:0.9em;">To unsubscribe from these alerts, <a href="${escapeHtml(unsubUrl)}">click here</a>.</p>
 	`;
 	const text = `New meal request: ${request.vendor} · ${request.pickupWindowText}\n\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Window: ${request.pickupWindowText}\n\nView meal request: ${requestListUrl}\n\nTo unsubscribe: ${unsubUrl}`;
 	await sendEmailSafe({

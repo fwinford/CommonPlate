@@ -16,6 +16,10 @@ export const System = mongoose.models.System || mongoose.model<ISystem>("System"
 // - Fulfillment: log when an order is placed
 
 import mongoose, { Schema, Document, Types } from "mongoose";
+import {
+  INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION,
+  MAXIMUM_UNSUBSCRIBE_CREDENTIAL_VERSION,
+} from "../src/unsubscribeCredential.js";
 
 // Subscriber model
 export interface ISubscriber extends Document {
@@ -27,7 +31,7 @@ export interface ISubscriber extends Document {
   confirmationSendAttemptAt?: Date;
   lastConfirmedTokenDigest?: string;
   lastConfirmedTokenExpiresAt?: Date;
-  unsubscribeTokenDigest?: string;
+  unsubscribeCredentialVersion?: number;
   unsubscribedAt?: Date;
   // Legacy raw-token fields remain readable for exact rollback of old rows.
   confirmToken?: string;
@@ -36,9 +40,6 @@ export interface ISubscriber extends Document {
   dailyCount: number;
   bounced: boolean;
 }
-
-// The stored unsubscribe credential is a SHA-256 hex digest.
-const UNSUBSCRIBE_TOKEN_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 
 const SubscriberSchema = new Schema<ISubscriber>({
   email: { type: String, required: true, unique: true, trim: true, lowercase: true },
@@ -66,22 +67,29 @@ const SubscriberSchema = new Schema<ISubscriber>({
   // an idempotent success instead of degrading into an invalid-token answer.
   lastConfirmedTokenDigest: { type: String, select: false },
   lastConfirmedTokenExpiresAt: { type: Date, select: false },
-  unsubscribeTokenDigest: {
-    type: String,
-    select: false,
-    match: [
-      UNSUBSCRIBE_TOKEN_DIGEST_PATTERN,
-      "unsubscribeTokenDigest must be a 64-character lowercase hexadecimal SHA-256 digest",
-    ],
+  // The revocation counter behind the emailed unsubscribe link. No unsubscribe
+  // credential is stored: it is signed on demand from `_id` and this version,
+  // so every subscriber holds a revocable credential by construction and an
+  // issued link stays valid until this number moves. Signup and confirmation
+  // must never touch it, or an old emailed link would stop working.
+  unsubscribeCredentialVersion: {
+    type: Number,
+    default: INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION,
+    min: INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION,
+    max: MAXIMUM_UNSUBSCRIBE_CREDENTIAL_VERSION,
+    validate: {
+      validator: Number.isInteger,
+      message: "unsubscribeCredentialVersion must be an integer",
+    },
   },
   unsubscribedAt: { type: Date },
   confirmToken: { type: String, select: false },
-  // A confirmed subscriber must hold a revocable unsubscribe credential.
-  // Legacy confirmed rows carry a raw `unsubToken`; rows confirmed by the
-  // digest lifecycle carry a well-formed `unsubscribeTokenDigest` and never
-  // persist a raw one. A malformed digest is not a credential, so it does not
-  // satisfy the invariant on its own.
-  unsubToken: { type: String, required: function(this: ISubscriber) { return this.status === "confirmed" && !UNSUBSCRIBE_TOKEN_DIGEST_PATTERN.test(this.unsubscribeTokenDigest ?? ""); } },
+  // Legacy raw credential from pre-digest rows. Nothing issues or requires
+  // one — the current unsubscribe credential is derived, never stored — so it
+  // stays out of ordinary projections like every other private credential
+  // field. Existing values are left in place; confirmation still clears the
+  // field when it transitions a row that carries one.
+  unsubToken: { type: String, select: false },
   lastSentAt: { type: Date, default: null },
   dailyCount: { type: Number, default: 0 },
   bounced: { type: Boolean, default: false },

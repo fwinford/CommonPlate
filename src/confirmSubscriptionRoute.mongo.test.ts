@@ -28,8 +28,6 @@ import {
 const mongoUri = process.env.MONGO_INTEGRATION_URI;
 const describeMongo = mongoUri ? describe : describe.skip;
 
-const UNSUBSCRIBE_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
-
 function rawToken(byte: number): string {
   return Buffer.alloc(SUBSCRIPTION_TOKEN_BYTES, byte).toString("base64url");
 }
@@ -139,11 +137,9 @@ describeMongo("browser confirmation route against real MongoDB", () => {
 
     const persisted = await readSubscriberDocument(id);
     expect(persisted?.status).toBe("confirmed");
-    expect(persisted?.unsubscribeTokenDigest).toMatch(
-      UNSUBSCRIBE_DIGEST_PATTERN
-    );
-    // The raw unsubscribe credential exists only in the winning caller's
-    // memory; the route discarded it and nothing persisted it.
+    // Confirmation issues no unsubscribe credential in any form: the emailed
+    // link is signed on demand from `_id` and the credential version.
+    expect(persisted?.unsubscribeTokenDigest).toBeUndefined();
     expect(persisted?.unsubToken).toBeUndefined();
     expect(persisted?.confirmationTokenDigest).toBeUndefined();
   });
@@ -170,11 +166,9 @@ describeMongo("browser confirmation route against real MongoDB", () => {
     );
 
     const afterSecond = await readSubscriberDocument(id);
-    expect(afterSecond?.unsubscribeTokenDigest).toBe(
-      afterFirst?.unsubscribeTokenDigest
-    );
     // The whole document is compared, so a second lifecycle mutation of any
-    // field — not merely a reissued unsubscribe credential — fails this.
+    // field — including the unsubscribe credential version an emailed link
+    // depends on — fails this.
     expect(afterSecond).toEqual(afterFirst);
   });
 });

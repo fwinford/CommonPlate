@@ -328,9 +328,9 @@ export function createConfirmSubscriptionPageHandler(
 
     switch (result.outcome) {
       case "confirmed":
-        // `result.rawUnsubscribeToken` is deliberately never read: the raw
-        // unsubscribe credential ends here until the unsubscribe slice decides
-        // how a usable link is issued.
+        // The primitive returns no credential to render or log: an unsubscribe
+        // link is signed on demand when an alert or digest is built, never
+        // issued or stored by confirmation.
         return sendConfirmationPage(res, 200, CONFIRMED_PAGE);
       case "alreadyConfirmed":
         return sendConfirmationPage(res, 200, ALREADY_CONFIRMED_PAGE);

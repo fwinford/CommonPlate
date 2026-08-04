@@ -98,10 +98,12 @@ const VALID_TOKEN = Buffer.alloc(SUBSCRIPTION_TOKEN_BYTES, 7).toString(
 const OTHER_VALID_TOKEN = Buffer.alloc(SUBSCRIPTION_TOKEN_BYTES, 9).toString(
   "base64url"
 );
-const RAW_UNSUBSCRIBE_TOKEN = Buffer.alloc(
-  SUBSCRIPTION_TOKEN_BYTES,
-  11
-).toString("base64url");
+/**
+ * Internal detail the primitive hands back on a win. The route may act on the
+ * outcome and nothing else, so this identifier must never reach a page, a
+ * header, or a log line.
+ */
+const PRIVATE_SUBSCRIBER_ID = "64b000000000000000000abc";
 
 const globalErrorHandler = vi.fn();
 
@@ -483,8 +485,7 @@ describe("POST /api/subscribe/confirm outcome mapping", () => {
     {
       outcome: {
         outcome: "confirmed",
-        subscriberId: "abc",
-        rawUnsubscribeToken: RAW_UNSUBSCRIBE_TOKEN,
+        subscriberId: PRIVATE_SUBSCRIBER_ID,
       },
       status: 200,
       heading: "Email alerts confirmed.",
@@ -536,14 +537,13 @@ describe("POST /api/subscribe/confirm outcome mapping", () => {
     });
   }
 
-  it("never renders the raw unsubscribe token from a winning confirmation", async () => {
+  it("never renders internal subscriber detail from a winning confirmation", async () => {
     resumePublicActions();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const primitive = vi.fn<ConfirmFn>(async () => ({
       outcome: "confirmed",
-      subscriberId: "abc",
-      rawUnsubscribeToken: RAW_UNSUBSCRIBE_TOKEN,
+      subscriberId: PRIVATE_SUBSCRIBER_ID,
     }));
 
     await withServer(
@@ -554,14 +554,14 @@ describe("POST /api/subscribe/confirm outcome mapping", () => {
           VALID_TOKEN
         );
 
-        expect(html).not.toContain(RAW_UNSUBSCRIBE_TOKEN);
+        expect(html).not.toContain(PRIVATE_SUBSCRIBER_ID);
         expect(response.headers.get("set-cookie")).toBeNull();
         expect(response.headers.get("location")).toBeNull();
         for (const call of [
           ...consoleError.mock.calls,
           ...consoleLog.mock.calls,
         ]) {
-          expect(JSON.stringify(call)).not.toContain(RAW_UNSUBSCRIBE_TOKEN);
+          expect(JSON.stringify(call)).not.toContain(PRIVATE_SUBSCRIBER_ID);
         }
       }
     );
@@ -815,7 +815,7 @@ describe("confirmation body parsing stays inside the route", () => {
     resumePublicActions();
     const primitive = vi.fn<ConfirmFn>(async () => ({
       outcome: "confirmed",
-      rawUnsubscribeToken: RAW_UNSUBSCRIBE_TOKEN,
+      subscriberId: PRIVATE_SUBSCRIBER_ID,
     }));
 
     await withServer(
@@ -1088,7 +1088,7 @@ describe("confirmation security headers", () => {
 
   it("accompanies every confirmation outcome", async () => {
     const outcomes: ConfirmationResult[] = [
-      { outcome: "confirmed", rawUnsubscribeToken: RAW_UNSUBSCRIBE_TOKEN },
+      { outcome: "confirmed", subscriberId: PRIVATE_SUBSCRIBER_ID },
       { outcome: "alreadyConfirmed" },
       { outcome: "expired" },
       { outcome: "invalid" },
@@ -1206,7 +1206,7 @@ describe("confirmation logging", () => {
 
     expect(logged).not.toContain(VALID_TOKEN);
     expect(logged).not.toContain(digest);
-    expect(logged).not.toContain(RAW_UNSUBSCRIBE_TOKEN);
+    expect(logged).not.toContain(PRIVATE_SUBSCRIBER_ID);
     expect(logged).not.toContain(CONFIRMATION_ROUTE_PATH);
     expect(logged).not.toContain("provider failure");
     expect(logged).not.toContain("token=");
@@ -1244,8 +1244,7 @@ describe("confirmation page copy and structure", () => {
       buildTestApp({
         confirmSubscription: async () => ({
           outcome: "confirmed",
-          subscriberId: "abc",
-          rawUnsubscribeToken: RAW_UNSUBSCRIBE_TOKEN,
+          subscriberId: PRIVATE_SUBSCRIBER_ID,
         }),
       }),
       async (baseUrl) => {
@@ -1459,7 +1458,7 @@ describe("confirmation page copy and structure", () => {
   it("shows no address, token, or internal vocabulary on any page", () => {
     for (const [name, html] of Object.entries(pages)) {
       if (name !== "form") expect(html).not.toContain(VALID_TOKEN);
-      expect(html).not.toContain(RAW_UNSUBSCRIBE_TOKEN);
+      expect(html).not.toContain(PRIVATE_SUBSCRIBER_ID);
       expect(html).not.toContain("@");
       expect(html).not.toMatch(/digest|hash|Subscriber|database|status:/i);
     }

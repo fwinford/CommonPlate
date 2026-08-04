@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import {
+  INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION,
+  MAXIMUM_UNSUBSCRIBE_CREDENTIAL_VERSION,
+} from "../src/unsubscribeCredential.js";
 import { Fulfillment, Request as MealRequest, Subscriber } from "./db.js";
 
 describe("Subscriber pending-confirmation schema", () => {
@@ -33,60 +37,71 @@ describe("Subscriber pending-confirmation schema", () => {
   });
 });
 
-describe("Subscriber confirmed unsubscribe credential", () => {
-  const digest = "a1b2c3d4".repeat(8);
-
-  it("accepts a legacy confirmed subscriber holding a raw unsubToken", () => {
-    const legacy = new Subscriber({
-      email: "legacy@example.edu",
-      status: "confirmed",
-      unsubToken: "legacy-raw-unsubscribe-token",
+describe("Subscriber unsubscribe credential version", () => {
+  it("gives every new subscriber the initial version without being asked", () => {
+    const created = new Subscriber({
+      email: "helper@example.edu",
+      status: "pending",
+      confirmationTokenDigest: "a".repeat(64),
+      confirmationExpiresAt: new Date("2026-08-04T00:00:00.000Z"),
     });
 
-    expect(legacy.validateSync()).toBeUndefined();
+    expect(created.unsubscribeCredentialVersion).toBe(
+      INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION
+    );
+    expect(INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION).toBe(1);
+    expect(created.validateSync()).toBeUndefined();
   });
 
-  it("accepts a confirmed subscriber holding only a well-formed digest", () => {
-    const modern = new Subscriber({
-      email: "modern@example.edu",
-      status: "confirmed",
-      unsubscribeTokenDigest: digest,
-    });
+  it("keeps the version readable in ordinary projections", () => {
+    // Alert and digest sends build the unsubscribe link from this field, so
+    // unlike the confirmation digests it must not be `select: false`.
+    const versionPath = Subscriber.schema.path(
+      "unsubscribeCredentialVersion"
+    ) as any;
 
-    expect(digest).toHaveLength(64);
-    expect(modern.validateSync()).toBeUndefined();
-  });
-
-  it("rejects a confirmed subscriber with no unsubscribe credential at all", () => {
-    const uncredentialed = new Subscriber({
-      email: "none@example.edu",
-      status: "confirmed",
-    });
-
-    expect(uncredentialed.validateSync()?.errors).toHaveProperty("unsubToken");
+    expect(versionPath.options.select).toBeUndefined();
   });
 
   it.each([
-    ["an uppercase digest", digest.toUpperCase()],
-    ["a truncated digest", digest.slice(0, 63)],
-    ["an over-long digest", `${digest}0`],
-    ["a non-hexadecimal digest", `${"z".repeat(64)}`],
-  ])("rejects a confirmed subscriber with %s", (_label, malformed) => {
-    const malformedDigest = new Subscriber({
-      email: "malformed@example.edu",
+    ["zero", 0],
+    ["a negative version", -1],
+    ["a fractional version", 1.5],
+    ["a version past the ceiling", MAXIMUM_UNSUBSCRIBE_CREDENTIAL_VERSION + 1],
+  ])("rejects %s", (_label, version) => {
+    const outOfRange = new Subscriber({
+      email: "version@example.edu",
       status: "confirmed",
-      unsubscribeTokenDigest: malformed,
+      unsubscribeCredentialVersion: version,
     });
 
-    const errors = malformedDigest.validateSync()?.errors;
-    expect(errors).toHaveProperty("unsubscribeTokenDigest");
-    // A malformed digest is not a credential, so it cannot stand in for the
-    // legacy raw token either.
-    expect(errors).toHaveProperty("unsubToken");
+    expect(outOfRange.validateSync()?.errors).toHaveProperty(
+      "unsubscribeCredentialVersion"
+    );
   });
 
-  it.each(["pending", "unsubscribed"] as const)(
-    "leaves a %s subscriber valid without any unsubscribe credential",
+  it("keeps the legacy raw unsubscribe token out of ordinary projections", () => {
+    // Nothing reads it any more, so it should behave like every other private
+    // credential field rather than riding along on ordinary Subscriber reads.
+    expect(
+      (Subscriber.schema.path("unsubToken") as any).options.select
+    ).toBe(false);
+  });
+
+  it("no longer models a stored unsubscribe credential", () => {
+    // The credential is signed on demand, so there is nothing to store and no
+    // confirmed-row invariant that a stored digest could satisfy.
+    expect(Subscriber.schema.path("unsubscribeTokenDigest")).toBeUndefined();
+    expect(
+      new Subscriber({
+        email: "confirmed@example.edu",
+        status: "confirmed",
+      }).validateSync()
+    ).toBeUndefined();
+  });
+
+  it.each(["pending", "confirmed", "unsubscribed"] as const)(
+    "leaves a %s subscriber valid carrying only the derived credential",
     (status) => {
       const subscriber = new Subscriber({
         email: "lifecycle@example.edu",
@@ -100,6 +115,9 @@ describe("Subscriber confirmed unsubscribe credential", () => {
       });
 
       expect(subscriber.validateSync()).toBeUndefined();
+      expect(subscriber.unsubscribeCredentialVersion).toBe(
+        INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION
+      );
     }
   );
 });

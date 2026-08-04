@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import mongoose from "mongoose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Subscriber } from "../models/db.js";
-import { createConfirmSubscription } from "./confirmSubscription.js";
+import { confirmSubscription } from "./confirmSubscription.js";
 import {
   SUBSCRIPTION_TOKEN_BYTES,
   digestSubscriptionToken,
@@ -95,9 +95,7 @@ describe("confirmation token redemption", () => {
     const { update, find, exists } = confirmingModel(id);
     const token = rawToken(3);
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(4),
-    })(token, backendNow);
+    const result = await confirmSubscription(token, backendNow);
 
     expect(result.outcome).toBe("confirmed");
     expect(result.subscriberId).toBe(String(id));
@@ -115,9 +113,7 @@ describe("confirmation token redemption", () => {
   it("clears the active confirmation, send ownership, lease, unsubscribe timestamp, and legacy raw credentials", async () => {
     const { update } = confirmingModel(new mongoose.Types.ObjectId());
 
-    await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(5),
-    })(rawToken(3), backendNow);
+    await confirmSubscription(rawToken(3), backendNow);
 
     const { set, unset } = transitionStages(
       (update.mock.calls[0] as unknown[])[1]
@@ -137,9 +133,7 @@ describe("confirmation token redemption", () => {
   it("resets bounce and delivery counters", async () => {
     const { update } = confirmingModel(new mongoose.Types.ObjectId());
 
-    await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(5),
-    })(rawToken(3), backendNow);
+    await confirmSubscription(rawToken(3), backendNow);
 
     const { set } = transitionStages((update.mock.calls[0] as unknown[])[1]);
     expect(set.bounced).toEqual({ $literal: false });
@@ -147,47 +141,45 @@ describe("confirmation token redemption", () => {
     expect(set.lastSentAt).toEqual({ $literal: null });
   });
 
-  it("persists only the unsubscribe digest and returns the raw token in memory", async () => {
+  it("issues no unsubscribe credential and returns none to its caller", async () => {
     const { update } = confirmingModel(new mongoose.Types.ObjectId());
-    const unsubscribeToken = rawToken(6);
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => unsubscribeToken,
-    })(rawToken(3), backendNow);
+    const result = await confirmSubscription(rawToken(3), backendNow);
 
-    expect(result.rawUnsubscribeToken).toBe(unsubscribeToken);
-    const { set } = transitionStages((update.mock.calls[0] as unknown[])[1]);
-    expect(set.unsubscribeTokenDigest).toEqual({
-      $literal: digestSubscriptionToken(unsubscribeToken),
-    });
-    expect(JSON.stringify(update.mock.calls[0])).not.toContain(unsubscribeToken);
+    // The unsubscribe link is signed on demand from `_id` and the credential
+    // version, so there is no token to generate, return, persist, or leak.
+    expect(result).toEqual({ outcome: "confirmed", subscriberId: expect.any(String) });
+    const { set, unset } = transitionStages(
+      (update.mock.calls[0] as unknown[])[1]
+    );
+    expect(set).not.toHaveProperty("unsubscribeTokenDigest");
     expect(JSON.stringify(update.mock.calls[0])).not.toContain(rawToken(3));
+    // The revocation counter is the one thing a delivered unsubscribe link
+    // depends on. Confirmation must neither set nor clear it.
+    expect(set).not.toHaveProperty("unsubscribeCredentialVersion");
+    expect(unset).not.toContain("unsubscribeCredentialVersion");
   });
 
-  it("writes a digest the confirmed-subscriber schema invariant accepts", async () => {
-    const { update } = confirmingModel(new mongoose.Types.ObjectId());
+  it("leaves a confirmed subscriber valid under the Subscriber schema", async () => {
+    confirmingModel(new mongoose.Types.ObjectId());
 
-    await createConfirmSubscription()(rawToken(3), backendNow);
+    await confirmSubscription(rawToken(3), backendNow);
 
-    const { set } = transitionStages((update.mock.calls[0] as unknown[])[1]);
-    const { $literal: unsubscribeTokenDigest } = set.unsubscribeTokenDigest as {
-      $literal: string;
-    };
+    // Nothing beyond `status` is required of a confirmed row now: every
+    // subscriber holds a derived unsubscribe credential by construction.
     const confirmedByThisLifecycle = new Subscriber({
       email: "helper@example.edu",
       status: "confirmed",
-      unsubscribeTokenDigest,
     });
 
     expect(confirmedByThisLifecycle.validateSync()).toBeUndefined();
+    expect(confirmedByThisLifecycle.unsubscribeCredentialVersion).toBe(1);
   });
 
   it("keeps a receipt of the used token carrying its original expiry", async () => {
     const { update } = confirmingModel(new mongoose.Types.ObjectId());
 
-    await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(5),
-    })(rawToken(3), backendNow);
+    await confirmSubscription(rawToken(3), backendNow);
 
     const { set } = transitionStages((update.mock.calls[0] as unknown[])[1]);
     // Copied from the document, not recomputed: the spent link stays
@@ -200,17 +192,13 @@ describe("confirmation token redemption", () => {
     const update = vi.spyOn(Subscriber, "findOneAndUpdate");
     const find = vi.spyOn(Subscriber, "findOne");
     const exists = vi.spyOn(Subscriber, "exists");
-    const generateRawUnsubscribeToken = vi.fn();
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken,
-    })("not-a-token", backendNow);
+    const result = await confirmSubscription("not-a-token", backendNow);
 
     expect(result).toEqual({ outcome: "invalid" });
     expect(update).not.toHaveBeenCalled();
     expect(find).not.toHaveBeenCalled();
     expect(exists).not.toHaveBeenCalled();
-    expect(generateRawUnsubscribeToken).not.toHaveBeenCalled();
   });
 
   it("reports an unknown well-formed token as invalid without mutating", async () => {
@@ -220,9 +208,7 @@ describe("confirmation token redemption", () => {
     vi.spyOn(Subscriber, "findOne").mockReturnValue(queryResult(null));
     vi.spyOn(Subscriber, "exists").mockResolvedValue(null as never);
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(7),
-    })(rawToken(8), backendNow);
+    const result = await confirmSubscription(rawToken(8), backendNow);
 
     expect(result).toEqual({ outcome: "invalid" });
     // The conditional filter is the only guard that ran; nothing matched it.
@@ -239,9 +225,7 @@ describe("confirmation token redemption", () => {
       .mockResolvedValue({ _id: new mongoose.Types.ObjectId() } as never);
     const token = rawToken(9);
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(10),
-    })(token, backendNow);
+    const result = await confirmSubscription(token, backendNow);
 
     expect(result).toEqual({ outcome: "expired" });
     expect(exists).toHaveBeenCalledWith({
@@ -260,11 +244,8 @@ describe("confirmation token redemption", () => {
       .mockReturnValue(queryResult({ _id: id }));
     const exists = vi.spyOn(Subscriber, "exists");
     const token = rawToken(11);
-    const unsubscribeToken = rawToken(12);
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => unsubscribeToken,
-    })(token, backendNow);
+    const result = await confirmSubscription(token, backendNow);
 
     expect(result).toEqual({
       outcome: "alreadyConfirmed",
@@ -276,9 +257,8 @@ describe("confirmation token redemption", () => {
       lastConfirmedTokenExpiresAt: { $gt: backendNow },
     });
     expect(exists).not.toHaveBeenCalled();
-    // No second unsubscribe credential: the repeated read is the only work,
-    // and the mutation that would have written a digest matched nothing.
+    // No second lifecycle mutation: the repeated read is the only work, and
+    // the conditional update matched nothing.
     expect(update).toHaveBeenCalledOnce();
-    expect(result.rawUnsubscribeToken).toBeUndefined();
   });
 });

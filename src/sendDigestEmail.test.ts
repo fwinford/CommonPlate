@@ -11,6 +11,16 @@ vi.mock("./emailHelpers.js", () => ({
 }));
 
 import { sendDigestEmail } from "./sendDigestEmail.js";
+import {
+  UNSUBSCRIBE_CREDENTIAL_PARAMETER,
+  UNSUBSCRIBE_ROUTE_PATH,
+  verifyUnsubscribeCredential,
+} from "./unsubscribeCredential.js";
+
+// Injected rather than stubbed into the environment, so these cases carry
+// their own signing configuration.
+const SIGNING_SECRET = Buffer.alloc(32, 6);
+const SUBSCRIBER_ID = "64b000000000000000000003";
 
 function request(
   id: string,
@@ -35,16 +45,31 @@ function request(
   } as unknown as IRequest;
 }
 
-function subscriber(): ISubscriber {
+function subscriber(overrides: Record<string, unknown> = {}): ISubscriber {
   return {
-    _id: "64b000000000000000000003",
+    _id: SUBSCRIBER_ID,
     email: "helper@example.edu",
     status: "confirmed",
-    unsubToken: "unsubscribe-token",
+    unsubscribeCredentialVersion: 1,
     dailyCount: 0,
     bounced: false,
+    ...overrides,
   } as unknown as ISubscriber;
 }
+
+function unsubscribeUrlIn(text: string): string {
+  const match = text.match(
+    new RegExp(`https?://[^\\s"'<>]*${UNSUBSCRIBE_ROUTE_PATH}\\?credential=[^\\s"'<>]+`)
+  );
+  expect(match).not.toBeNull();
+  return match![0];
+}
+
+function credentialFrom(url: string): string | null {
+  return new URL(url).searchParams.get(UNSUBSCRIBE_CREDENTIAL_PARAMETER);
+}
+
+const signingOptions = { unsubscribeSigningSecret: SIGNING_SECRET };
 
 // These cases describe the resumed send path; the paused case is asserted
 // separately below.
@@ -63,9 +88,17 @@ describe("helper digest email while public actions are paused", () => {
     sendEmailSafe.mockResolvedValue({ success: true });
 
     await expect(
-      sendDigestEmail(subscriber(), [
-        request("64b000000000000000000001", "Private Name", "private@example.edu"),
-      ])
+      sendDigestEmail(
+        subscriber(),
+        [
+          request(
+            "64b000000000000000000001",
+            "Private Name",
+            "private@example.edu"
+          ),
+        ],
+        signingOptions
+      )
     ).rejects.toThrow(PUBLIC_ACTIONS_PAUSED_ENV);
 
     expect(sendEmailSafe).not.toHaveBeenCalled();
@@ -95,7 +128,7 @@ describe("helper digest email", () => {
         privateValues[1],
         privateValues[3]
       ),
-    ]);
+    ], signingOptions);
 
     const email = sendEmailSafe.mock.calls[0][0] as {
       subject: string;
@@ -140,7 +173,7 @@ describe("helper digest email", () => {
           pickupWindowText: injectedPickupWindow,
         }
       ),
-    ]);
+    ], signingOptions);
 
     const email = sendEmailSafe.mock.calls[0][0] as { html: string };
     expect(email.html).toContain(
@@ -155,5 +188,109 @@ describe("helper digest email", () => {
     expect(email.html).not.toContain(injectedPickupWindow);
     expect(email.html).not.toContain("&amp;amp;");
     expect(email.html).not.toContain("&amp;lt;");
+  });
+});
+
+describe("helper digest unsubscribe link", () => {
+  const digestRequests = () => [
+    request("64b000000000000000000001", "Private Name", "private@example.edu"),
+  ];
+
+  // Vitest supplies its own `BASE_URL`, so the configured origin is stated
+  // here rather than inherited from whatever the runner happens to set.
+  beforeEach(() => {
+    vi.stubEnv("BASE_URL", "https://commonplate.test/");
+  });
+
+  it("carries a correctly formed unsubscribe URL in both bodies", async () => {
+    sendEmailSafe.mockResolvedValue({ success: true });
+
+    await sendDigestEmail(subscriber(), digestRequests(), signingOptions);
+
+    const email = sendEmailSafe.mock.calls[0][0] as {
+      html: string;
+      text: string;
+    };
+    const htmlUrl = unsubscribeUrlIn(email.html);
+
+    expect(unsubscribeUrlIn(email.text)).toBe(htmlUrl);
+    expect(
+      htmlUrl.startsWith(`https://commonplate.test${UNSUBSCRIBE_ROUTE_PATH}?`)
+    ).toBe(true);
+    expect([...new URL(htmlUrl).searchParams.keys()]).toEqual([
+      UNSUBSCRIBE_CREDENTIAL_PARAMETER,
+    ]);
+  });
+
+  it("emails a credential that verifies for exactly this subscriber", async () => {
+    sendEmailSafe.mockResolvedValue({ success: true });
+
+    await sendDigestEmail(subscriber(), digestRequests(), signingOptions);
+
+    const email = sendEmailSafe.mock.calls[0][0] as { html: string };
+
+    expect(
+      verifyUnsubscribeCredential(
+        credentialFrom(unsubscribeUrlIn(email.html)),
+        SIGNING_SECRET
+      )
+    ).toEqual({ subscriberId: SUBSCRIBER_ID, credentialVersion: 1 });
+  });
+
+  it("needs no stored raw unsubscribe token to build the link", async () => {
+    sendEmailSafe.mockResolvedValue({ success: true });
+
+    await sendDigestEmail(
+      subscriber({ unsubscribeCredentialVersion: undefined }),
+      digestRequests(),
+      signingOptions
+    );
+
+    const email = sendEmailSafe.mock.calls[0][0] as { html: string };
+
+    expect(
+      verifyUnsubscribeCredential(
+        credentialFrom(unsubscribeUrlIn(email.html)),
+        SIGNING_SECRET
+      )
+    ).toEqual({ subscriberId: SUBSCRIBER_ID, credentialVersion: 1 });
+  });
+
+  it("signs the digest link at the subscriber's own credential version", async () => {
+    sendEmailSafe.mockResolvedValue({ success: true });
+
+    await sendDigestEmail(
+      subscriber({ unsubscribeCredentialVersion: 4 }),
+      digestRequests(),
+      signingOptions
+    );
+
+    const email = sendEmailSafe.mock.calls[0][0] as { html: string };
+    const verified = verifyUnsubscribeCredential(
+      credentialFrom(unsubscribeUrlIn(email.html)),
+      SIGNING_SECRET
+    );
+
+    expect(verified).toEqual({
+      subscriberId: SUBSCRIBER_ID,
+      credentialVersion: 4,
+    });
+    // A silent downgrade to version 1 would hand a revoked address a working
+    // link, so the version is asserted directly rather than only via a match.
+    expect(verified?.credentialVersion).not.toBe(1);
+  });
+
+  it("keeps the emailed link stable across sends", async () => {
+    sendEmailSafe.mockResolvedValue({ success: true });
+
+    await sendDigestEmail(subscriber(), digestRequests(), signingOptions);
+    await sendDigestEmail(subscriber(), digestRequests(), signingOptions);
+
+    const [first, second] = sendEmailSafe.mock.calls.map(
+      (call: unknown[]) => (call[0] as { html: string }).html
+    );
+    // No rotation per email: a link the subscriber kept from an older alert
+    // must still be the same credential the newest one carries.
+    expect(unsubscribeUrlIn(second)).toBe(unsubscribeUrlIn(first));
   });
 });

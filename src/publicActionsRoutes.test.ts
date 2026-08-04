@@ -160,6 +160,32 @@ describe("public action routes are mounted behind the pause", () => {
     expect(appSource).not.toContain("createConfirmationRateLimiter");
   });
 
+  it("exposes no unsubscribe redemption surface yet", () => {
+    // The credential slice delivers generation and emailed links only. The
+    // redemption route is a later slice, and nothing may serve `/unsubscribe`
+    // until it exists — otherwise a delivered link would reach a 404 or, worse,
+    // a handler nobody accepted.
+    expect(appSource).not.toMatch(/app\.(get|post)\(\s*["'`]\/unsubscribe/);
+    expect(appSource).not.toContain("UNSUBSCRIBE_ROUTE_PATH");
+    expect(appSource).not.toContain("unsubscribeCredential");
+  });
+
+  it("keeps alert delivery and signup paused while unsubscribe is unimplemented", () => {
+    // Every emailed unsubscribe link is built by an alert or digest send, and
+    // both of those remain behind the pause, so no unredeemable link can reach
+    // a subscriber before the redemption slice lands.
+    const subscribeLine = registrationLine(
+      /app\.post\('\/api\/subscribe',[^\n]*/
+    );
+
+    expect(subscribeLine).toContain("pausePublicAction");
+    expect(subscribeLine.indexOf("pausePublicAction")).toBeLessThan(
+      subscribeLine.indexOf("limiter")
+    );
+    expect(appSource).toContain('cron.schedule("5 * * * *"');
+    expect(appSource).not.toContain("PUBLIC_ACTIONS_PAUSED=false");
+  });
+
   it("keeps signup focused on pending confirmation without notification dispatch", () => {
     const routeSource = readFileSync(
       new URL("./subscribeRoute.ts", import.meta.url),

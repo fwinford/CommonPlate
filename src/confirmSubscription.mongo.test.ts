@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { Subscriber } from "../models/db.js";
-import { createConfirmSubscription } from "./confirmSubscription.js";
+import { confirmSubscription } from "./confirmSubscription.js";
 import {
   SUBSCRIPTION_TOKEN_BYTES,
   digestSubscriptionToken,
@@ -26,6 +26,7 @@ interface PendingOverrides {
   unsubscribedAt?: Date;
   confirmToken?: string;
   unsubToken?: string;
+  unsubscribeCredentialVersion?: number;
 }
 
 async function insertPending(token: string, overrides: PendingOverrides = {}) {
@@ -78,16 +79,12 @@ describeMongo("confirmation redemption against real MongoDB", () => {
       dailyCount: 4,
       lastSentAt: new Date("2026-08-02T10:00:00.000Z"),
       unsubscribedAt: new Date("2026-08-01T10:00:00.000Z"),
+      unsubscribeCredentialVersion: 3,
     });
-    const unsubscribeToken = rawToken(2);
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => unsubscribeToken,
-    })(token, backendNow);
+    const result = await confirmSubscription(token, backendNow);
 
-    expect(result.outcome).toBe("confirmed");
-    expect(result.subscriberId).toBe(String(id));
-    expect(result.rawUnsubscribeToken).toBe(unsubscribeToken);
+    expect(result).toEqual({ outcome: "confirmed", subscriberId: String(id) });
     const stored = await Subscriber.collection.findOne({ _id: id });
     expect(stored?.status).toBe("confirmed");
     expect(stored).not.toHaveProperty("confirmationTokenDigest");
@@ -96,16 +93,17 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     expect(stored?.bounced).toBe(false);
     expect(stored?.dailyCount).toBe(0);
     expect(stored?.lastSentAt).toBeNull();
-    expect(stored?.unsubscribeTokenDigest).toBe(
-      digestSubscriptionToken(unsubscribeToken)
-    );
+    // No stored unsubscribe credential of any kind, and the revocation counter
+    // is untouched: an unsubscribe link emailed before this confirmation still
+    // verifies afterwards.
+    expect(stored).not.toHaveProperty("unsubscribeTokenDigest");
+    expect(stored?.unsubscribeCredentialVersion).toBe(3);
     // The receipt of the spent link keeps the expiry the document already had.
     expect(stored?.lastConfirmedTokenDigest).toBe(
       digestSubscriptionToken(token)
     );
     expect(stored?.lastConfirmedTokenExpiresAt).toEqual(confirmationExpiresAt);
     expect(JSON.stringify(stored)).not.toContain(token);
-    expect(JSON.stringify(stored)).not.toContain(unsubscribeToken);
   });
 
   it("strips legacy raw credentials carried by the pending row it confirms", async () => {
@@ -115,11 +113,8 @@ describeMongo("confirmation redemption against real MongoDB", () => {
       confirmToken: "legacy-raw-confirm-token",
       unsubToken: "legacy-raw-unsubscribe-token",
     });
-    const unsubscribeToken = rawToken(31);
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => unsubscribeToken,
-    })(token, backendNow);
+    const result = await confirmSubscription(token, backendNow);
 
     expect(result.outcome).toBe("confirmed");
     const stored = await Subscriber.collection.findOne({ _id: id });
@@ -130,9 +125,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     expect(stored).not.toHaveProperty("unsubToken");
     expect(JSON.stringify(stored)).not.toContain("legacy-raw-confirm-token");
     expect(JSON.stringify(stored)).not.toContain("legacy-raw-unsubscribe-token");
-    expect(stored?.unsubscribeTokenDigest).toBe(
-      digestSubscriptionToken(unsubscribeToken)
-    );
+    expect(stored).not.toHaveProperty("unsubscribeTokenDigest");
     expect(stored?.lastConfirmedTokenDigest).toBe(
       digestSubscriptionToken(token)
     );
@@ -142,50 +135,40 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     expect(stored?.lastSentAt).toBeNull();
   });
 
-  it("keeps exactly one mutation and one unsubscribe digest under concurrency", async () => {
+  it("keeps exactly one lifecycle mutation under concurrency", async () => {
     const token = rawToken(3);
-    const id = await insertPending(token);
-    let issued = 0;
-    const confirm = createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(20 + issued++),
-    });
+    const id = await insertPending(token, { unsubscribeCredentialVersion: 2 });
 
     const [first, second] = await Promise.all([
-      confirm(token, backendNow),
-      confirm(token, backendNow),
+      confirmSubscription(token, backendNow),
+      confirmSubscription(token, backendNow),
     ]);
 
     const outcomes = [first.outcome, second.outcome].sort();
     expect(outcomes).toEqual(["alreadyConfirmed", "confirmed"]);
-    const winner = first.outcome === "confirmed" ? first : second;
     const loser = first.outcome === "confirmed" ? second : first;
-    expect(loser.rawUnsubscribeToken).toBeUndefined();
     expect(loser.subscriberId).toBe(String(id));
-    expect(issued).toBe(2);
     const stored = await Subscriber.collection.findOne({ _id: id });
     expect(stored?.status).toBe("confirmed");
-    // Only the winner's credential exists: the loser's generated token was
-    // discarded rather than overwriting a live unsubscribe digest.
-    expect(stored?.unsubscribeTokenDigest).toBe(
-      digestSubscriptionToken(winner.rawUnsubscribeToken!)
-    );
+    // Neither attempt writes an unsubscribe credential, so a concurrent
+    // redemption cannot revoke a link the other attempt just made valid.
+    expect(stored).not.toHaveProperty("unsubscribeTokenDigest");
+    expect(stored?.unsubscribeCredentialVersion).toBe(2);
     expect(
-      await Subscriber.countDocuments({ unsubscribeTokenDigest: { $exists: true } })
-    ).toBe(1);
+      await Subscriber.countDocuments({
+        unsubscribeTokenDigest: { $exists: true },
+      })
+    ).toBe(0);
   });
 
   it("returns alreadyConfirmed and rotates nothing when the same link is reopened", async () => {
     const token = rawToken(4);
     const id = await insertPending(token);
-    const confirm = createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(5),
-    });
+    const confirm = confirmSubscription;
     await confirm(token, backendNow);
     const afterFirst = await Subscriber.collection.findOne({ _id: id });
 
-    const repeated = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(6),
-    })(token, new Date(backendNow.getTime() + 30_000));
+    const repeated = await confirmSubscription(token, new Date(backendNow.getTime() + 30_000));
 
     expect(repeated).toEqual({
       outcome: "alreadyConfirmed",
@@ -198,14 +181,10 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     const token = rawToken(7);
     const confirmationExpiresAt = new Date(backendNow.getTime() + 60_000);
     const id = await insertPending(token, { confirmationExpiresAt });
-    await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(8),
-    })(token, backendNow);
+    await confirmSubscription(token, backendNow);
     const afterFirst = await Subscriber.collection.findOne({ _id: id });
 
-    const repeated = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(9),
-    })(token, new Date(confirmationExpiresAt.getTime() + 1));
+    const repeated = await confirmSubscription(token, new Date(confirmationExpiresAt.getTime() + 1));
 
     expect(repeated).toEqual({ outcome: "invalid" });
     expect(await Subscriber.collection.findOne({ _id: id })).toEqual(afterFirst);
@@ -218,9 +197,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     });
     const before = await Subscriber.collection.findOne({ _id: id });
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(11),
-    })(token, backendNow);
+    const result = await confirmSubscription(token, backendNow);
 
     expect(result).toEqual({ outcome: "expired" });
     expect(await Subscriber.collection.findOne({ _id: id })).toEqual(before);
@@ -230,9 +207,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     const id = await insertPending(rawToken(12));
     const before = await Subscriber.collection.findOne({ _id: id });
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(13),
-    })(rawToken(14), backendNow);
+    const result = await confirmSubscription(rawToken(14), backendNow);
 
     expect(result).toEqual({ outcome: "invalid" });
     expect(await Subscriber.collection.findOne({ _id: id })).toEqual(before);
@@ -254,9 +229,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
       confirmationSendAttemptAt: attemptAt,
     });
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(16),
-    })(token, backendNow);
+    const result = await confirmSubscription(token, backendNow);
 
     expect(result.outcome).toBe("confirmed");
     const stored = await Subscriber.collection.findOne({ _id: id });
@@ -274,9 +247,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
         confirmationSendAttemptId: attemptId,
         confirmationSendAttemptAt: backendNow,
       });
-      const result = await createConfirmSubscription({
-        generateRawUnsubscribeToken: () => rawToken(18),
-      })(token, backendNow);
+      const result = await confirmSubscription(token, backendNow);
       expect(result.outcome).toBe("confirmed");
       return { id, confirmed: await Subscriber.collection.findOne({ _id: id }) };
     }
@@ -309,7 +280,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
             status: "pending",
             confirmationTokenDigest: digestSubscriptionToken(token),
             confirmationExpiresAt: new Date(backendNow.getTime() + 60_000),
-            unsubscribeTokenDigest: "f".repeat(64),
+            unsubscribeCredentialVersion: 99,
           },
         }
       );
@@ -317,8 +288,8 @@ describeMongo("confirmation redemption against real MongoDB", () => {
       const stored = await Subscriber.collection.findOne({ _id: id });
       expect(stored).toEqual(confirmed);
       expect(stored?.status).toBe("confirmed");
-      expect(stored?.unsubscribeTokenDigest).toBe(
-        confirmed?.unsubscribeTokenDigest
+      expect(stored?.unsubscribeCredentialVersion).toBe(
+        confirmed?.unsubscribeCredentialVersion
       );
     });
 
@@ -357,9 +328,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     });
     const before = await Subscriber.collection.findOne({ _id: id });
 
-    const result = await createConfirmSubscription({
-      generateRawUnsubscribeToken: () => rawToken(19),
-    })(rawToken(21), backendNow);
+    const result = await confirmSubscription(rawToken(21), backendNow);
 
     expect(result).toEqual({ outcome: "invalid" });
     const stored = await Subscriber.collection.findOne({ _id: id });
@@ -367,6 +336,7 @@ describeMongo("confirmation redemption against real MongoDB", () => {
     expect(stored).not.toHaveProperty("lastConfirmedTokenDigest");
     expect(stored).not.toHaveProperty("lastConfirmedTokenExpiresAt");
     expect(stored).not.toHaveProperty("unsubscribeTokenDigest");
+    expect(stored).not.toHaveProperty("unsubscribeCredentialVersion");
     expect(stored?.unsubToken).toBe("legacy-raw-unsubscribe-token");
   });
 });

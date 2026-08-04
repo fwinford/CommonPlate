@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { IRequest, ISubscriber } from "../models/db.js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { resendSend } = vi.hoisted(() => ({
   resendSend: vi.fn(),
@@ -19,6 +19,16 @@ import {
   sendNewRequestAlert,
   sendSubscriptionConfirmationEmail,
 } from "./emailHelpers.js";
+import {
+  UNSUBSCRIBE_CREDENTIAL_PARAMETER,
+  UNSUBSCRIBE_ROUTE_PATH,
+  verifyUnsubscribeCredential,
+} from "./unsubscribeCredential.js";
+
+// A fixed injected secret rather than a stubbed environment variable, so these
+// cases do not depend on process-wide state another suite could change.
+const SIGNING_SECRET = Buffer.alloc(32, 5);
+const SUBSCRIBER_ID = "64b000000000000000000002";
 
 const requesterEmail = "requester-private@example.edu";
 const requesterPhone = "555-0100";
@@ -43,15 +53,29 @@ function request(overrides: Record<string, unknown> = {}): IRequest {
   } as unknown as IRequest;
 }
 
-function subscriber(): ISubscriber {
+function subscriber(overrides: Record<string, unknown> = {}): ISubscriber {
   return {
-    _id: "64b000000000000000000002",
+    _id: SUBSCRIBER_ID,
     email: "helper@example.edu",
     status: "confirmed",
-    unsubToken: "unsubscribe-token",
+    unsubscribeCredentialVersion: 1,
     dailyCount: 0,
     bounced: false,
+    ...overrides,
   } as unknown as ISubscriber;
+}
+
+/** The single `credential` query parameter carried by an emailed link. */
+function credentialFrom(url: string): string | null {
+  return new URL(url).searchParams.get(UNSUBSCRIBE_CREDENTIAL_PARAMETER);
+}
+
+function unsubscribeUrlIn(text: string): string {
+  const match = text.match(
+    new RegExp(`https?://[^\\s"'<>]*${UNSUBSCRIBE_ROUTE_PATH}\\?credential=[^\\s"'<>]+`)
+  );
+  expect(match).not.toBeNull();
+  return match![0];
 }
 
 afterEach(() => {
@@ -63,7 +87,9 @@ describe("helper new-request alert email", () => {
   it("uses only public request fields and links to safe browsing", async () => {
     resendSend.mockResolvedValue({});
 
-    await sendNewRequestAlert(subscriber(), request());
+    await sendNewRequestAlert(subscriber(), request(), {
+      unsubscribeSigningSecret: SIGNING_SECRET,
+    });
 
     const email = resendSend.mock.calls[0][0] as {
       subject: string;
@@ -109,7 +135,8 @@ describe("helper new-request alert email", () => {
         vendor: injectedVendor,
         food: injectedFood,
         pickupWindowText: injectedPickupWindow,
-      })
+      }),
+      { unsubscribeSigningSecret: SIGNING_SECRET }
     );
 
     const email = resendSend.mock.calls[0][0] as { html: string };
@@ -125,6 +152,91 @@ describe("helper new-request alert email", () => {
     expect(email.html).not.toContain(injectedPickupWindow);
     expect(email.html).not.toContain("&amp;amp;");
     expect(email.html).not.toContain("&amp;lt;");
+  });
+});
+
+describe("helper alert unsubscribe link", () => {
+  // Vitest supplies its own `BASE_URL`, so the configured origin is stated
+  // here rather than inherited from whatever the runner happens to set.
+  beforeEach(() => {
+    vi.stubEnv("BASE_URL", "https://commonplate.test/");
+  });
+
+  it("carries a correctly formed unsubscribe URL in both bodies", async () => {
+    resendSend.mockResolvedValue({});
+
+    await sendNewRequestAlert(subscriber(), request(), {
+      unsubscribeSigningSecret: SIGNING_SECRET,
+    });
+
+    const email = resendSend.mock.calls[0][0] as {
+      html: string;
+      text: string;
+    };
+    const htmlUrl = unsubscribeUrlIn(email.html);
+    const textUrl = unsubscribeUrlIn(email.text);
+
+    expect(htmlUrl).toBe(textUrl);
+    // Configured origin, accepted path, one `credential` parameter, and no
+    // doubled separator from the trailing slash in `BASE_URL`.
+    expect(htmlUrl.startsWith(`https://commonplate.test${UNSUBSCRIBE_ROUTE_PATH}?`)).toBe(true);
+    expect([...new URL(htmlUrl).searchParams.keys()]).toEqual([
+      UNSUBSCRIBE_CREDENTIAL_PARAMETER,
+    ]);
+  });
+
+  it("emails a credential that verifies for exactly this subscriber", async () => {
+    resendSend.mockResolvedValue({});
+
+    await sendNewRequestAlert(subscriber(), request(), {
+      unsubscribeSigningSecret: SIGNING_SECRET,
+    });
+
+    const email = resendSend.mock.calls[0][0] as { html: string };
+    const credential = credentialFrom(unsubscribeUrlIn(email.html));
+
+    expect(
+      verifyUnsubscribeCredential(credential, SIGNING_SECRET)
+    ).toEqual({ subscriberId: SUBSCRIBER_ID, credentialVersion: 1 });
+  });
+
+  it("needs no stored raw unsubscribe token to build the link", async () => {
+    resendSend.mockResolvedValue({});
+    // Neither a raw token nor a stored digest exists on this document, and a
+    // subscriber written before the version field carries no version either.
+    const withoutStoredCredential = subscriber({
+      unsubscribeCredentialVersion: undefined,
+    });
+
+    await sendNewRequestAlert(withoutStoredCredential, request(), {
+      unsubscribeSigningSecret: SIGNING_SECRET,
+    });
+
+    const email = resendSend.mock.calls[0][0] as { html: string };
+    expect(
+      verifyUnsubscribeCredential(
+        credentialFrom(unsubscribeUrlIn(email.html)),
+        SIGNING_SECRET
+      )
+    ).toEqual({ subscriberId: SUBSCRIBER_ID, credentialVersion: 1 });
+  });
+
+  it("reflects a raised credential version in the emailed link", async () => {
+    resendSend.mockResolvedValue({});
+
+    await sendNewRequestAlert(
+      subscriber({ unsubscribeCredentialVersion: 4 }),
+      request(),
+      { unsubscribeSigningSecret: SIGNING_SECRET }
+    );
+
+    const email = resendSend.mock.calls[0][0] as { html: string };
+    expect(
+      verifyUnsubscribeCredential(
+        credentialFrom(unsubscribeUrlIn(email.html)),
+        SIGNING_SECRET
+      )
+    ).toEqual({ subscriberId: SUBSCRIBER_ID, credentialVersion: 4 });
   });
 });
 

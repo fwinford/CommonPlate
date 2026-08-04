@@ -1,12 +1,19 @@
 import { IRequest, ISubscriber } from "../models/db.js";
+import type { UnsubscribeLinkOptions } from "./emailHelpers.js";
 import { sendEmailSafe } from "./emailHelpers.js";
 import { escapeHtml } from "./htmlEscape.js";
 import {
   PUBLIC_ACTIONS_PAUSED_ENV,
   isPublicActionsPaused,
 } from "./publicActionsPause.js";
+import { publicBaseOrigin } from "./publicBaseUrl.js";
+import { buildUnsubscribeUrl } from "./unsubscribeCredential.js";
 
-export async function sendDigestEmail(subscriber: ISubscriber, requests: IRequest[]) {
+export async function sendDigestEmail(
+  subscriber: ISubscriber,
+  requests: IRequest[],
+  options: UnsubscribeLinkOptions = {}
+) {
   // The hourly cron already returns before reaching this function while
   // paused. This throws rather than returning quietly so that any other
   // caller fails loudly instead of recording a digest that was never sent.
@@ -16,10 +23,13 @@ export async function sendDigestEmail(subscriber: ISubscriber, requests: IReques
     );
   }
 
-  if (!subscriber.unsubToken) throw new Error("Missing unsubToken");
-  const BASE_URL = process.env.BASE_URL || "https://commonplatenyu.org";
-  const requestListUrl = `${BASE_URL.replace(/\/+$/, "")}/`;
-  const unsubUrl = `${BASE_URL}/api/unsubscribe?token=${encodeURIComponent(subscriber.unsubToken)}`;
+  const requestListUrl = `${publicBaseOrigin()}/`;
+  // Signed on demand from the subscriber's own identity: the digest performs
+  // no database work to build its unsubscribe link and stores nothing.
+  const unsubUrl = buildUnsubscribeUrl(
+    subscriber,
+    options.unsubscribeSigningSecret
+  );
   const htmlList = requests.map(req => `
     <li>
       <strong>${escapeHtml(req.vendor)}</strong> — ${escapeHtml(req.food)}<br>
@@ -31,7 +41,7 @@ export async function sendDigestEmail(subscriber: ISubscriber, requests: IReques
     <h2>${requests.length} new meal requests in the last hour</h2>
     <ul>${htmlList}</ul>
     <hr>
-    <p style="font-size:0.9em;">To unsubscribe from these alerts, <a href="${unsubUrl}">click here</a>.</p>
+    <p style="font-size:0.9em;">To unsubscribe from these alerts, <a href="${escapeHtml(unsubUrl)}">click here</a>.</p>
   `;
   const textList = requests.map(req => `- ${req.vendor} — ${req.food}\n  ${req.pickupWindowText}\n  View meal request: ${requestListUrl}`).join("\n\n");
   const text = `${requests.length} new meal requests in the last hour\n\n${textList}\n\nTo unsubscribe: ${unsubUrl}`;

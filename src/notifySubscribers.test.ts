@@ -52,7 +52,7 @@ function subscriber(): ISubscriber {
     _id: "64b000000000000000000002",
     email: "helper@example.edu",
     status: "confirmed",
-    unsubToken: "unsubscribe-token",
+    unsubscribeCredentialVersion: 1,
     dailyCount: 0,
     bounced: false,
   } as unknown as ISubscriber;

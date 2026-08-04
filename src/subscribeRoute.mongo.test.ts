@@ -236,6 +236,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       lastSentAt,
       unsubToken: "existing-unsubscribe-token",
       unsubscribedAt,
+      unsubscribeCredentialVersion: 3,
       deliveryHistoryMarker: { provider: "preserved" },
     });
     const token = rawToken(4);
@@ -261,6 +262,58 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     expect(stored?.unsubToken).toBe("existing-unsubscribe-token");
     expect(stored?.unsubscribedAt).toEqual(unsubscribedAt);
     expect(stored?.deliveryHistoryMarker).toEqual({ provider: "preserved" });
+    // The revocation counter is what every emailed unsubscribe link is signed
+    // against. Re-signup preserving it is what keeps an old link working.
+    expect(stored?.unsubscribeCredentialVersion).toBe(3);
+  });
+
+  it("gives a brand-new subscriber the initial credential version", async () => {
+    const token = rawToken(40);
+    const context = routeContext("brand-new-version@example.edu");
+
+    await createSubscribeHandler({
+      now: () => backendNow,
+      generateRawToken: () => token,
+      generateAttemptId: () => "brand-new-version-attempt",
+      sendConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+    })(context.req, context.res);
+
+    expectAccepted(context);
+    const stored = await Subscriber.collection.findOne({
+      email: "brand-new-version@example.edu",
+    });
+    // Nothing in the route names this field: the schema default supplies it.
+    expect(stored?.unsubscribeCredentialVersion).toBe(1);
+    expect(stored).not.toHaveProperty("unsubscribeTokenDigest");
+  });
+
+  it("leaves a legacy document with no credential version untouched", async () => {
+    const id = new mongoose.Types.ObjectId();
+    await Subscriber.collection.insertOne({
+      _id: id,
+      email: "legacy-version@example.edu",
+      status: "unsubscribed",
+      bounced: false,
+      dailyCount: 2,
+      lastSentAt: new Date("2026-07-30T12:00:00.000Z"),
+    });
+    const token = rawToken(41);
+    const context = routeContext("legacy-version@example.edu");
+
+    await createSubscribeHandler({
+      now: () => backendNow,
+      generateRawToken: () => token,
+      generateAttemptId: () => "legacy-version-attempt",
+      sendConfirmationEmail: vi.fn().mockResolvedValue(undefined),
+    })(context.req, context.res);
+
+    expectAccepted(context);
+    const stored = await Subscriber.collection.findOne({ _id: id });
+    expect(stored?.status).toBe("pending");
+    // Re-signup writes no version onto an older document either; such a
+    // document is treated as the initial version when a link is signed.
+    expect(stored).not.toHaveProperty("unsubscribeCredentialVersion");
+    expect(stored?.dailyCount).toBe(2);
   });
 
   it("returns the same accepted response for confirmed without a write or email", async () => {
