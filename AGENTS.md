@@ -83,7 +83,7 @@ Faith's decision and the Week 3 spec.
 
 - TypeScript/backend: `npm run typecheck` plus focused tests.
 - Complete non-Mongo backend: `npm test`.
-- Mongo persistence, transactions, uniqueness, or index work: `npm run test:mongo` in addition to `npm test`. `npm test` skips the real Mongo suite (currently 65 Mongo-gated tests).
+- Mongo persistence, transactions, uniqueness, or index work: `npm run test:mongo` in addition to `npm test`. `npm test` skips the real Mongo suite (currently 67 Mongo-gated tests).
 - Browser client: focused tests, `npm run typecheck`, and `npm run build:client`.
 - iOS or cross-stack: focused iOS tests and the complete `CommonPlateiosTests` target.
 - Every change: `git diff --check`.

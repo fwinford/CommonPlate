@@ -43,7 +43,7 @@ Run:
 npm test
 ```
 
-The current accepted baseline is **322 passed, 65 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
+The current accepted baseline is **381 passed, 67 Mongo-gated skipped**, across **25 files passed, 7 files skipped, 32 files total**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
 
 Representative coverage includes validation, route logic, error envelopes, browser behavior, copy guards, and source-wiring assertions. Some tests read source text instead of importing `app.ts`, because `app.ts` connects to MongoDB and starts listening at module scope. These assertions are not end-to-end route tests.
 
@@ -53,6 +53,18 @@ Consequences:
 - README and web-copy changes can be pinned by tests.
 - A repository-wide production-source guard rejects the phrase `within the next hour`.
 
+### Confirmation coverage
+
+The confirmation flow adds, relative to the previous baseline:
+
+- 53 focused unit/HTTP cases in `src/confirmSubscriptionRoute.test.ts`;
+- 2 real-Mongo HTTP cases in `src/confirmSubscriptionRoute.mongo.test.ts`;
+- 6 additional public-route wiring/order assertions.
+
+Slice 3A (`src/confirmSubscription*.test.ts`) proves the atomic pending-to-confirmed transition, concurrency and idempotent loser behavior, field cleanup, the bounded used-token receipt, unsubscribe-digest creation, send-lease interactions, and outcome classification.
+
+Slice 3B (`src/confirmSubscriptionRoute*.test.ts`) proves the safe non-mutating GET, the explicit form POST, actual URL-encoded body handling, that the pause runs before parsing and limiter work, that malformed JSON cannot bypass the route, sanitized parser-error behavior, the POST-only 5-per-60-second limiter, the required HTML security headers, the absence of raw-token and internal-detail leakage, the browser outcome mapping, real HTTP-to-Mongo confirmation, and that a repeated HTTP POST leaves the unsubscribe digest unchanged.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -61,13 +73,23 @@ Run:
 npm run test:mongo
 ```
 
-The current accepted baseline is **65 passed across 6 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
+The current accepted baseline is **67 passed across 7 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
 
 A replica set is required because placement verification exercises MongoDB transactions; standalone MongoDB cannot provide that behavior. Mongo verification remains incomplete until this command passes. `npm test` reporting the Mongo suites as skipped does not replace this run.
 
 `MONGO_INTEGRATION_URI` is an integration-test environment input. Do not set it to a real shared or production URI.
 
-Mongo test files execute concurrently against one temporary replica set, and suites that clear a whole collection between cases can therefore delete another file's fixtures. Suites sharing a collection must not share a database: the confirmation Mongo suite connects with its own `dbName`, separate from the Day 2 subscription Mongo suite, so neither can remove the other's Subscriber fixtures. Apply the same isolation to any new suite that clears a shared collection.
+Mongo test files execute concurrently against one temporary replica set, and suites that clear a whole collection between cases can therefore delete another file's fixtures. Suites sharing a collection must not share a database. Three suites currently touch `Subscriber`, each in its own database:
+
+| Suite | Database |
+| --- | --- |
+| `src/subscribeRoute.mongo.test.ts` (Day 2 signup) | The runner URI's default database |
+| `src/confirmSubscription.mongo.test.ts` (Slice 3A) | `commonplate_confirmation_test` |
+| `src/confirmSubscriptionRoute.mongo.test.ts` (Slice 3B) | `commonplate_confirmation_route_test` |
+
+Each of these suites clears state with `Subscriber.deleteMany({})`. The distinct databases are what prevent one suite's cleanup from deleting a concurrently executing suite's fixtures. Apply the same isolation to any new suite that clears a shared collection.
+
+`scripts/run-mongo-integration.mjs` runs all `.mongo.test.ts` files and does not currently support forwarding a single test-file argument. A requested focused Mongo verification therefore necessarily executes the complete Mongo-gated suite.
 
 ## 6. Browser-client bundles
 
@@ -149,13 +171,13 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend rows were last recorded at the Week 3 confirmation-primitive slice closeout; the iOS row remains the Week 2 closeout result and was not re-run for that backend-only slice.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend rows were last recorded at the Week 3 browser-confirmation slice closeout; the iOS row remains the Week 2 closeout result and was not re-run for these backend-only slices.
 
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Passed |
-| `npm test` | 322 passed; 65 Mongo-gated skipped |
-| `npm run test:mongo` | 65 passed across 6 files |
+| `npm test` | 381 passed; 67 Mongo-gated skipped (25 files passed, 7 skipped, 32 total) |
+| `npm run test:mongo` | 67 passed across 7 files |
 | `npm run ci-check` | Not re-run at this closeout; changed production files passed lint |
 | `CommonPlateiosTests` | 258 passed; 0 failed; 0 skipped (Week 2 closeout) |
 | `npm run build:client` | Not re-run at this closeout; no browser-client source changed |

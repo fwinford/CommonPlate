@@ -66,7 +66,7 @@ Provider acceptance means only that CommonPlate submitted an email to the provid
 
 The lifecycle is `signup → pending → confirmed → unsubscribed`. Only `confirmed` subscribers are eligible for real-time helper alerts and the hourly digest; `pending` and `unsubscribed` subscribers are excluded by both the alert query and the recent-request path. Signing up again never silently reactivates alerts.
 
-Signup is implemented. Confirmation exists only as an internal backend primitive (section 9.4): no confirmation page, browser copy, or registered route reaches it, so no public action can move an address to `confirmed` today. Unsubscribe redemption is not implemented at all. Rows already marked `confirmed` by the removed auto-confirm handler stay `confirmed` and alert-eligible; neither slice migrated or modified legacy confirmed rows. Signup therefore remains paused (section 10), and alert delivery remains paused with it.
+Signup is implemented. Confirmation is implemented as an internal backend primitive (section 9.4) reached by a public browser flow (section 9.5). Unsubscribe redemption is not implemented at all. Rows already marked `confirmed` by the removed auto-confirm handler stay `confirmed` and alert-eligible; no slice migrated or modified legacy confirmed rows. Signup, confirmation, and alert delivery all remain paused (section 10).
 
 A `confirmed` Subscriber must hold a revocable unsubscribe credential: either a supported legacy raw `unsubToken`, or an `unsubscribeTokenDigest` of exactly 64 lowercase hexadecimal characters. A malformed digest does not satisfy the invariant on its own. Rows confirmed by the current lifecycle retain the digest only and never persist a raw unsubscribe token.
 
@@ -124,7 +124,9 @@ A successful transition sets `status` to `confirmed`; clears the active `confirm
 
 Reopening the same valid confirmation link before its original expiry mutates nothing, issues no second unsubscribe token, and yields the internal `alreadyConfirmed` result. After the original expiry the used token no longer needs to be recognised.
 
-The primitive distinguishes four internal outcomes — `confirmed`, `alreadyConfirmed`, `expired`, and `invalid`. Expired and invalid tokens mutate no state. These are internal results, not a response shape: no caller has yet decided what a browser or API surface may learn from them.
+The primitive distinguishes four internal outcomes — `confirmed`, `alreadyConfirmed`, `expired`, and `invalid`. Expired and invalid tokens mutate no state. These remain internal results rather than a response shape; section 9.5 defines the only surface that currently maps them, and how much of each outcome a browser is allowed to learn.
+
+Malformed tokens are rejected on shape alone, before any hashing or database work.
 
 Concurrency and interaction with signup send ownership:
 
@@ -134,16 +136,97 @@ Concurrency and interaction with signup send ownership:
 
 Confirmation-token generation, shape validation, and SHA-256 digest calculation are shared with signup through `src/subscriptionTokens.ts`; signup behaviour is otherwise unchanged.
 
+### 9.5 Browser confirmation routes
+
+The emailed link is redeemed through two public routes in `src/confirmSubscriptionRoute.ts`:
+
+```text
+GET  /api/subscribe/confirm?token=...
+POST /api/subscribe/confirm
+```
+
+Every response from both routes is HTML, including every refusal. A person reading email is the only intended caller, so the shared structured JSON error envelope is deliberately not used here.
+
+#### GET: safe by construction
+
+Opening the link never confirms anything. Inbox scanners, link previewers, and prefetchers fetch links without a person acting, so the mutation belongs to the explicit button press instead.
+
+The public-action pause is checked before any token work. A paused GET returns an HTML `503` page carrying no form. A missing or malformed token returns HTML `400`. A well-formed token returns HTML `200` with a no-JavaScript confirmation form.
+
+GET performs token-shape validation only. It does not hash the token, query Subscriber, call the confirmation primitive, or mutate anything. Because it answers from shape alone, the page cannot be used to probe whether a token belongs to a real Subscriber.
+
+GET is not rate-limited.
+
+#### POST: middleware and handler order
+
+```text
+confirmation security headers
+→ HTML public-action pause guard
+→ POST-only confirmation limiter
+→ route-local URL-encoded parser
+→ confirmation handler
+→ sanitized route-local parser-error boundary
+```
+
+Both routes are registered in `app.ts` **before** the global JSON and URL-encoded parsers. A global parser runs ahead of route middleware, so a body it rejected would be answered by the global JSON error handler — outside this route's security headers, outside its HTML contract, and logging a parser error that can quote the raw token. Route-local parsing keeps every malformed-body outcome inside the confirmation route.
+
+POST accepts the confirmation token through `application/x-www-form-urlencoded`, the only encoding the accepted form submits. JSON bodies are not parsed for this route; an unparsed body reaches the handler with no usable token and produces the invalid-link HTML response. Malformed or oversized URL-encoded input is handled by the route-local parser-error boundary and never reaches the global JSON error handler.
+
+The public-action pause runs before rate-limit capacity consumption, route-local parsing, validation, hashing, lookup, and mutation, so a paused confirmation performs no lifecycle work and spends no throttle capacity. The confirmation limiter is IP-based, POST-only, and allows 5 requests per 60 seconds in its own bucket, so confirming cannot spend the signup allowance.
+
+#### POST outcome mapping
+
+| Condition | Browser response |
+| --- | --- |
+| `confirmed` | HTML `200` |
+| `alreadyConfirmed` | HTML `200` |
+| `expired` | HTML `410` |
+| `invalid` | HTML `400` |
+| Rate-limited | HTML `429` |
+| Public actions paused | HTML `503` |
+| Unexpected internal failure | Sanitized HTML `500` |
+
+The raw unsubscribe token returned by a winning internal `confirmSubscription` call is discarded by the route. It is never rendered, logged, or exposed in any form; the raw unsubscribe credential ends at this boundary until the unsubscribe slice decides how a usable link is issued.
+
+#### Browser security and privacy
+
+Every confirmation HTML response — including the pause, invalid, expired, rate-limit, and error pages — carries route-owned headers:
+
+- `Cache-Control: no-store`
+- `Referrer-Policy: no-referrer`
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- a route Content-Security-Policy enforcing at least `default-src 'none'`, `script-src 'none'`, `style-src 'self' 'unsafe-inline'`, `form-action 'self'`, `base-uri 'none'`, and `frame-ancestors 'none'`.
+
+The pages load no JavaScript and no third-party resources. The form submits to the same origin, and the hidden token is HTML-escaped. Result pages never repeat the token, and no page displays the subscriber email or internal lifecycle detail.
+
+Caught request, parser, and database details are never logged, because each can carry the body and therefore the raw token. The only permitted unexpected-failure log is a fixed sanitized event.
+
+#### Accepted browser behavior
+
+- The initial page states explicitly that opening the link alone does not confirm alerts; the user must select `Confirm alerts`.
+- Success and already-confirmed pages state that no further action is needed.
+- Expired and invalid pages offer the same privacy-preserving link back to `/` to sign up again, so neither page can be read as evidence about a Subscriber.
+- Paused and unexpected-error pages read identically and tell the user to reopen the link later; the distinction survives only in the status code.
+- The rate-limit page tells the user to wait about a minute and reopen the confirmation link.
+- Page titles identify CommonPlate.
+
+#### Activation boundary
+
+Signup, confirmation activation, and alert delivery all remain publicly paused. The existence of these routes does not mean the alert flow is activated: `pauseConfirmationPage` refuses both halves while `PUBLIC_ACTIONS_PAUSED` holds, and the unsubscribe-link credential blocker in section 11 must be resolved before any of it is unpaused.
+
+No unsubscribe, iOS, APNs, or push behavior was added with these routes.
+
 ## 10. Public-actions pause and scheduled jobs
 
-`PUBLIC_ACTIONS_PAUSED` fails closed unless explicitly set to `false` or `0`. It blocks public request creation, subscription signup, claim and claim-extension mutations, real-time helper alerts, and hourly subscriber digests. It does not block fulfillment: a valid active claim token is already the authorization to record an order, and blocking that path could strand a helper who has already placed one.
+`PUBLIC_ACTIONS_PAUSED` fails closed unless explicitly set to `false` or `0`. It blocks public request creation, subscription signup, both halves of the browser confirmation flow (section 9.5), claim and claim-extension mutations, real-time helper alerts, and hourly subscriber digests. The API mutations answer a paused request in JSON through `pausePublicAction`; the confirmation routes answer in HTML through `pauseConfirmationPage`. It does not block fulfillment: a valid active claim token is already the authorization to record an order, and blocking that path could strand a helper who has already placed one.
 
 `CRON_ENABLED=true` controls only the hourly expired-request cleanup backup to TTL deletion. The hourly digest, daily confirmed-subscriber `dailyCount` reset, and ten-minute SendLog failure monitor are registered independently of `CRON_ENABLED`; the digest additionally exits when public actions are paused.
 
 ## 11. Durable deferrals that constrain current behavior
 
-- Confirmation routes, pages, and browser copy, and the whole unsubscribe redemption path. The confirmation mutation exists internally only, so no public action can make an address alert-eligible today.
-- Unsubscribe-link credential generation. Alert and digest email code still builds unsubscribe URLs from a raw `subscriber.unsubToken`, while Subscribers confirmed by the current lifecycle retain only `unsubscribeTokenDigest`. This must be resolved before signup or alert delivery is unpaused.
+- The whole unsubscribe redemption path: unsubscribe-token redemption, the unsubscribe mutation, and the unsubscribe page. The confirmation flow now has a browser surface, but it stays paused, so no public action can make an address alert-eligible today.
+- Unsubscribe-link credential generation, which currently blocks activation. Newly confirmed Subscribers retain only `unsubscribeTokenDigest`, while the existing real-time and digest send paths still require a raw `subscriber.unsubToken` to construct unsubscribe links. Every newly confirmed subscriber would therefore currently fail both alert-delivery paths, and this also makes the confirmation success-page capability untrue if the flow were activated now. The confirmation route, signup, and alert delivery must not be unpaused before this is resolved. The solution belongs to the unsubscribe contract, not to the confirmation lifecycle or the browser-confirmation slice.
 - Cleanup of expired pending Subscribers; they stay notification-ineligible, so the current consequence is storage growth.
 - Physical cleanup of expired confirmation receipts (`lastConfirmedTokenDigest`, `lastConfirmedTokenExpiresAt`). The expiry comparison already prevents recognition after the original window, so the remaining consequence is stored data, not behaviour.
 - Provider timeouts outside the confirmation email, and durable email-outcome persistence. Only `sendSubscriptionConfirmationEmail` currently carries an abort deadline.
