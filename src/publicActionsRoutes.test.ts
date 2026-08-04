@@ -160,20 +160,91 @@ describe("public action routes are mounted behind the pause", () => {
     expect(appSource).not.toContain("createConfirmationRateLimiter");
   });
 
-  it("exposes no unsubscribe redemption surface yet", () => {
-    // The credential slice delivers generation and emailed links only. The
-    // redemption route is a later slice, and nothing may serve `/unsubscribe`
-    // until it exists — otherwise a delivered link would reach a 404 or, worse,
-    // a handler nobody accepted.
-    expect(appSource).not.toMatch(/app\.(get|post)\(\s*["'`]\/unsubscribe/);
-    expect(appSource).not.toContain("UNSUBSCRIBE_ROUTE_PATH");
-    expect(appSource).not.toContain("unsubscribeCredential");
+  it("renders the unsubscribe GET behind headers and the HTML pause guard", () => {
+    const registration = appSource.match(
+      /app\.get\(\s*UNSUBSCRIBE_ROUTE_PATH,[\s\S]*?\);/
+    );
+
+    expect(registration).not.toBeNull();
+    const line = registration![0];
+    const order = [
+      "unsubscribeSecurityHeaders",
+      "pauseUnsubscribePage",
+      "showUnsubscribePage",
+    ];
+    const positions = order.map((name) => line.indexOf(name));
+    expect(positions.every((index) => index > -1)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+
+    // Opening an emailed link must not be throttled: mail clients prefetch,
+    // and the GET renders a form rather than mutating anything.
+    expect(line).not.toContain("unsubscribeRateLimiter");
+    // The JSON guard would answer an emailed link with an error envelope.
+    expect(line).not.toContain("pausePublicAction");
+    expect(line).not.toContain("unsubscribePage,");
   });
 
-  it("keeps alert delivery and signup paused while unsubscribe is unimplemented", () => {
-    // Every emailed unsubscribe link is built by an alert or digest send, and
-    // both of those remain behind the pause, so no unredeemable link can reach
-    // a subscriber before the redemption slice lands.
+  it("guards the unsubscribe POST before its own limiter, parser, and mutation", () => {
+    const registration = appSource.match(
+      /app\.post\(\s*UNSUBSCRIBE_ROUTE_PATH,[\s\S]*?\);/
+    );
+
+    expect(registration).not.toBeNull();
+    const line = registration![0];
+    const order = [
+      "unsubscribeSecurityHeaders",
+      "pauseUnsubscribePage",
+      "unsubscribeRateLimiter",
+      "unsubscribeBodyParser",
+      "unsubscribePage",
+      "unsubscribeParserError",
+    ];
+    const positions = order.map((name) => line.indexOf(name));
+    expect(positions.every((index) => index > -1)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+
+    expect(line).not.toContain("pausePublicAction");
+    // Its own bucket: unsubscribing must not spend the signup allowance.
+    expect(line).not.toMatch(/[^a-zA-Z]limiter[^a-zA-Z]/);
+    expect(line).not.toContain("express.json");
+  });
+
+  it("registers the unsubscribe routes ahead of the global body parsers", () => {
+    const unsubscribePost = appSource.indexOf(
+      "app.post(\n  UNSUBSCRIBE_ROUTE_PATH"
+    );
+    const globalJson = appSource.indexOf("app.use(express.json(");
+    const globalUrlencoded = appSource.indexOf("app.use(express.urlencoded(");
+
+    expect(unsubscribePost).toBeGreaterThan(-1);
+    // Same reason as the confirmation POST: a body a global parser rejected
+    // would be answered outside this route's headers, pause guard, and HTML
+    // contract, and logged by a handler that prints the error — and this
+    // route's body carries the unsubscribe credential.
+    expect(unsubscribePost).toBeLessThan(globalJson);
+    expect(unsubscribePost).toBeLessThan(globalUrlencoded);
+  });
+
+  it("registers the unsubscribe flow from its own route module on one locked path", () => {
+    expect(appSource).toContain('from "./src/unsubscribeRoute.js"');
+    // Both halves share the constant the emailed link is built from, so a page
+    // and a link can never drift onto different paths.
+    expect(appSource).not.toContain('"/unsubscribe"');
+    expect(
+      appSource.match(/UNSUBSCRIBE_ROUTE_PATH,/g)?.length
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("registers the one persistent unsubscribe limiter, not a fresh instance", () => {
+    expect(appSource).toContain("unsubscribeRateLimiter,");
+    expect(appSource).not.toContain("createUnsubscribeRateLimiter");
+  });
+
+  it("keeps alert delivery and signup paused now that unsubscribe is implemented", () => {
+    // Redemption existing is not activation. Signup, confirmation, and both
+    // send paths stay behind the pause until they are unpaused deliberately,
+    // and the unsubscribe routes refuse while it holds like every other
+    // emailed-link surface.
     const subscribeLine = registrationLine(
       /app\.post\('\/api\/subscribe',[^\n]*/
     );
@@ -184,6 +255,16 @@ describe("public action routes are mounted behind the pause", () => {
     );
     expect(appSource).toContain('cron.schedule("5 * * * *"');
     expect(appSource).not.toContain("PUBLIC_ACTIONS_PAUSED=false");
+
+    for (const registration of [
+      appSource.match(/app\.get\(\s*UNSUBSCRIBE_ROUTE_PATH,[\s\S]*?\);/),
+      appSource.match(/app\.post\(\s*UNSUBSCRIBE_ROUTE_PATH,[\s\S]*?\);/),
+      appSource.match(/app\.get\(\s*CONFIRMATION_ROUTE_PATH,[\s\S]*?\);/),
+      appSource.match(/app\.post\(\s*CONFIRMATION_ROUTE_PATH,[\s\S]*?\);/),
+    ]) {
+      expect(registration).not.toBeNull();
+      expect(registration![0]).toMatch(/pause(Confirmation|Unsubscribe)Page/);
+    }
   });
 
   it("keeps signup focused on pending confirmation without notification dispatch", () => {

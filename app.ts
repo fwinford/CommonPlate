@@ -151,6 +151,16 @@ import {
   pauseConfirmationPage,
   showConfirmationPage,
 } from "./src/confirmSubscriptionRoute.js";
+import {
+  UNSUBSCRIBE_ROUTE_PATH,
+  pauseUnsubscribePage,
+  showUnsubscribePage,
+  unsubscribeBodyParser,
+  unsubscribePage,
+  unsubscribeParserError,
+  unsubscribeRateLimiter,
+  unsubscribeSecurityHeaders,
+} from "./src/unsubscribeRoute.js";
 
 // --- Environment validation (fail fast with clear message) ---
 const { MONGO_URI, RESEND_API_KEY } = process.env;
@@ -217,6 +227,28 @@ app.post(
   confirmationBodyParser,
   confirmSubscriptionPage,
   confirmationParserError
+);
+
+// Browser unsubscribe flow for the emailed link, registered alongside the
+// confirmation flow, ahead of the global parsers, and for the same reasons.
+// Opening the link only renders a form: inbox scanners and prefetchers fetch
+// emailed links with nobody acting, so unsubscribing anyone on a GET would
+// silence people who merely received an alert. The explicit POST owns the
+// mutation and carries its own limiter bucket.
+app.get(
+  UNSUBSCRIBE_ROUTE_PATH,
+  unsubscribeSecurityHeaders,
+  pauseUnsubscribePage,
+  showUnsubscribePage
+);
+app.post(
+  UNSUBSCRIBE_ROUTE_PATH,
+  unsubscribeSecurityHeaders,
+  pauseUnsubscribePage,
+  unsubscribeRateLimiter,
+  unsubscribeBodyParser,
+  unsubscribePage,
+  unsubscribeParserError
 );
 
 // middleware to parse JSON and serve static files

@@ -92,12 +92,18 @@ export function isValidUnsubscribeCredentialVersion(
 }
 
 /**
- * A document written before this field existed has never been revoked, so it
- * is at the initial version. Anything else out of range is a real defect and
- * must not be signed as if it were version 1.
+ * A document written before this field existed carries no version at all and
+ * has never been revoked, so it is at the initial version.
+ *
+ * That physical absence is the only legacy case. A persisted `null` is
+ * malformed state rather than an old row — nothing in the schema or in any
+ * write path produces one — so resolving it to version 1 would let a version-1
+ * credential redeem against a document whose real revocation state nobody
+ * knows. It is rejected like any other out-of-range value, which must not be
+ * signed or matched as if it were version 1 either.
  */
 export function resolveUnsubscribeCredentialVersion(value: unknown): number {
-  if (value === undefined || value === null) {
+  if (value === undefined) {
     return INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION;
   }
   if (!isValidUnsubscribeCredentialVersion(value)) {

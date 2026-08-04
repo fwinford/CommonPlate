@@ -38,6 +38,43 @@ const CONFIRMATION_CLEARED_FIELDS = [
 ] as const;
 
 /**
+ * The same definition minus the unsubscribe timestamp, which is lifecycle
+ * history rather than confirmation state: the unsubscribe path writes its own
+ * timestamp and must not clear it.
+ *
+ * Derived rather than written out again, so a field added to the confirmation
+ * clear list cannot be left behind by unsubscribe.
+ */
+export const ACTIVE_CONFIRMATION_FIELDS = CONFIRMATION_CLEARED_FIELDS.filter(
+  (field) => field !== "unsubscribedAt"
+);
+
+/**
+ * The bounded receipt a successful confirmation writes: the digest of the token
+ * that was spent and the expiry it stays recognisable until. Confirmation
+ * writes it, so it is not part of the clear list above — but it is still
+ * confirmation credential state, and it decides the `alreadyConfirmed` answer.
+ */
+export const CONFIRMATION_RECEIPT_FIELDS = [
+  "lastConfirmedTokenDigest",
+  "lastConfirmedTokenExpiresAt",
+] as const;
+
+/**
+ * Everything unsubscribe clears: the active credential and send-lease fields,
+ * plus the receipt.
+ *
+ * A confirmed address that unsubscribes must keep no confirmation credential of
+ * any kind, live or spent. While the receipt survived, reopening the original
+ * confirmation link inside its window still answered *already confirmed* to a
+ * reader who had just asked to stop — an answer the row no longer supports.
+ */
+export const UNSUBSCRIBE_CLEARED_CONFIRMATION_FIELDS = [
+  ...ACTIVE_CONFIRMATION_FIELDS,
+  ...CONFIRMATION_RECEIPT_FIELDS,
+];
+
+/**
  * Redeems a raw confirmation token against backend `now`.
  *
  * The transition is one conditional atomic mutation. Reading the subscriber
