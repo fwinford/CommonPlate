@@ -144,6 +144,20 @@ A future UI-test target would be what actually pins those four. Until then, chan
 
 No Mongo suite drives `POST /api/request`, so no Mongo fixture changed and `npm run test:mongo` is unchanged at 127. No browser-client source changed; `src/client/new-request.ts` already decodes `error` as a string or `{code, message}` and renders the message, which `src/client/new-request.test.ts` already proves, so the new envelope cannot render as `[object Object]`.
 
+### Cross-launch check-email presentation coverage
+
+Week 3 Day 5 Slice 5C makes the iOS `Check your email` screen survive relaunch. It changes no backend file, so no backend or Mongo suite was rerun and both remain at their Slice 5B totals. It adds **21 cases in `ios/CommonPlateios/CommonPlateiosTests/AlertSignupPresentationTests.swift`**, and `AlertSignupTests.swift` is unchanged at 26 cases with every assertion preserved — only its store factory now passes an in-memory presentation storage.
+
+The new cases prove that a generic 202 persists the normalized submitted address and the response time; that a store rebuilt over the same stored value — which is what launch does — restores the `checkEmail` phase, the remembered address, an empty draft, and no error state; that the restored screen is the existing accepted copy and that no observable property, record field, or storage key is named `subscriptionStatus`, `isSubscribed`, `isConfirmed`, `activeSubscriber`, or `pendingSubscriber`; that `Use a different email` removes the stored value, empties the draft, forgets the remembered address, and sends nothing; that a store rebuilt after clearing returns to editing; that a later accepted address replaces the earlier record with exactly one record remaining; and that `Done` — which dismisses the screen and calls nothing on the store — leaves the record for the next launch.
+
+Seven cases cover the failure boundary. A locally rejected address, a backend `INVALID_EMAIL`, the paused bare 503, HTTP 429, `CONFIRMATION_EMAIL_UNAVAILABLE`, a transport-loss ambiguity, and a definitive unknown failure each perform **zero writes and zero deletes**, asserted as counts on an in-memory storage double rather than by inspecting the record — a preserved record and a destroyed-then-rewritten one are otherwise indistinguishable. One further case proves a failing attempt cannot destroy an existing accepted record at all: submission is refused outside `editing`, so a store holding a restored record sends nothing and writes nothing, and only the explicit `Use a different email` removes it.
+
+Four cases cover unusable stored data, driven through a real `UserDefaults` suite: unparseable JSON, an incomplete record, an array in place of the record, and a value of the wrong type entirely; a stored address that no longer satisfies the NYU rule; and a missing, empty, unparseable, `null`, or numeric timestamp. Each is removed rather than left to be re-rejected, each leaves the editable form, and none crashes initialization. Restoring and rejecting are both proved to issue no HTTP request, since no endpoint reports subscription status.
+
+Every store in the new file is given isolated persistence — either the in-memory double or a `UserDefaults` suite named per test and removed in `tearDown` — and one case asserts directly that the run leaves nothing in `UserDefaults.standard`. `AlertSubscriptionStore`'s storage argument has no default value, so a test cannot reach real preferences by omitting it.
+
+"Relaunch" here means reconstructing `AlertSubscriptionStore` over the same persisted value, exactly as `ContentView` builds one at launch — no manual kill-and-relaunch walkthrough on a simulator or device was performed for this slice. The repository has no UI-test target, so these cases do not exercise the real `NavigationStack` → `AlertSignupView` rendering path; they prove store state only, not on-screen layout, navigation, or accessibility presentation.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -222,7 +236,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted baseline is **305 passed, 0 failed, 0 skipped, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
+The current accepted baseline is **326 passed, 0 failed, 0 skipped, TEST SUCCEEDED** — `ClaimFlowTests` 153, `RequestCreationViewTests` 76, `RequestFetchingTests` 29, `AlertSignupTests` 26, `AlertSignupPresentationTests` 21, `RequestEmailAllowlistTests` 21. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
 
 ## 10. Test-file organization
 
@@ -255,7 +269,7 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. Every row was last recorded at the Week 3 Day 5 Slice 5B NYU food-request allowlist slice, including the iOS row, which was re-run for that slice because it changed shared request-form validation.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. Every backend and browser row was last recorded at the Week 3 Day 5 Slice 5B NYU food-request allowlist slice. The iOS row was re-recorded at Slice 5C (cross-launch check-email presentation), which changed `AlertSubscriptionStore` and app initialization; that slice changed no backend or browser-client file, so the other rows were not rerun and still stand as recorded.
 
 | Check | Result |
 | --- | --- |
@@ -263,6 +277,6 @@ These results are a reference baseline, not a substitute for rerunning affected 
 | `npm test` | 634 passed; 127 Mongo-gated skipped (30 files passed, 10 skipped, 40 total) |
 | `npm run test:mongo` | 127 passed across 10 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | 305 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
+| `CommonPlateiosTests` | 326 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
 | `npm run build:client` | Ran as part of `ci-check`; regenerated bundles are byte-identical, and no browser-client source changed |
 | `git diff --check` | Passed |
