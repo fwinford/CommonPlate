@@ -630,8 +630,15 @@ final class AlertSignupTests: XCTestCase {
         return AlertSubscriptionService(client: client)
     }
 
+    /// Every store here gets its own in-memory presentation storage, so these
+    /// cases keep testing exactly what they tested before and none of them can
+    /// touch the developer's real preferences. Cross-launch behavior is covered
+    /// in `AlertSignupPresentationTests`.
     private func makeStore() -> AlertSubscriptionStore {
-        AlertSubscriptionStore(service: makeService())
+        AlertSubscriptionStore(
+            service: makeService(),
+            presentationStorage: InMemoryAlertSignupPresentationStorage()
+        )
     }
 
     private func waitUntil(

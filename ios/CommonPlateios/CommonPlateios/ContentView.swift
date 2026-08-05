@@ -14,9 +14,10 @@ struct ContentView: View {
     @StateObject private var requestStore: RequestStore
     /// Alert signup keeps its own state owner. Its lifecycle, responses, and
     /// failures have nothing in common with the request flow's, and holding it
-    /// here — rather than inside the screen — lets the transient accepted state
-    /// survive leaving and reopening the screen within this session. Nothing
-    /// about it survives relaunch.
+    /// here — rather than inside the screen — lets the accepted state survive
+    /// leaving and reopening the screen. Across launches it survives instead
+    /// through the store's own presentation storage, which remembers that the
+    /// accepted response was seen and nothing about subscription status.
     @StateObject private var alertSubscriptionStore: AlertSubscriptionStore
     @Environment(\.scenePhase) private var scenePhase
 
@@ -31,7 +32,11 @@ struct ContentView: View {
         _requestStore = StateObject(wrappedValue: RequestStore(service: service))
         _alertSubscriptionStore = StateObject(
             wrappedValue: AlertSubscriptionStore(
-                service: AlertSubscriptionService(client: client)
+                service: AlertSubscriptionService(client: client),
+                // The app's real preferences. Tests inject an isolated suite or
+                // an in-memory double instead, which is why this argument has
+                // no default.
+                presentationStorage: UserDefaultsAlertSignupPresentationStorage(defaults: .standard)
             )
         )
     }

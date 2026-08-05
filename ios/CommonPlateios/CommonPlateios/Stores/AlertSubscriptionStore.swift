@@ -11,14 +11,18 @@
 // must never inherit request-shaped error recovery. There is exactly one owner
 // here — no separate view model sits beside it.
 //
-// Nothing here is persisted. The accepted state lasts for this session only;
-// surviving relaunch is a separate, later slice with its own contract.
+// One thing here outlives the process: the `Check your email` presentation, so
+// reopening the app does not silently forget that a signup was submitted. What
+// is written is presentation history — the address submitted and when the
+// generic accepted response arrived — and never subscription truth. See
+// AlertSignupPresentationStorage.swift. Everything else, including the draft
+// field and every failure state, is session-only.
 import Combine
 import Foundation
 
-/// Where the signup screen is in the flow. `checkEmail` is the transient
-/// presentation of the backend's generic accepted response and asserts nothing
-/// about subscription status.
+/// Where the signup screen is in the flow. `checkEmail` is the presentation of
+/// the backend's generic accepted response and asserts nothing about
+/// subscription status.
 enum AlertSignupPhase: Equatable {
     case editing
     case submitting
@@ -55,14 +59,39 @@ final class AlertSubscriptionStore: ObservableObject {
     @Published private(set) var failure: AlertSignupFailure?
     /// The address as typed. Owned here rather than by the screen so that
     /// changing addresses is one state transition instead of two that can
-    /// drift apart. It is draft text only and asserts nothing about any
-    /// subscription; like the rest of this store it is never persisted.
+    /// drift apart. It is draft text only, is never persisted, and asserts
+    /// nothing about any subscription. A restored launch starts it empty:
+    /// nothing has been typed this launch, and the field is not on screen.
     @Published private(set) var email: String = ""
+    /// The normalized address this installation last submitted and received the
+    /// generic accepted response for, restored across launches.
+    ///
+    /// It is what was shown, not what is true: it proves only that the response
+    /// came back, never that a subscriber exists, is pending, is confirmed, is
+    /// still subscribed, or that any email was sent.
+    @Published private(set) var rememberedEmail: String?
 
     private let service: AlertSubscriptionService
+    private let presentationStorage: AlertSignupPresentationStorage
 
-    init(service: AlertSubscriptionService) {
+    /// Storage is injected with no default so no caller — and no test — can
+    /// reach process-wide preferences by omitting it.
+    ///
+    /// Restoration happens here, synchronously and without a network request.
+    /// The record is local presentation history; the backend has no endpoint
+    /// that would confirm it and asking for one would be a subscription-status
+    /// lookup, which does not exist.
+    init(service: AlertSubscriptionService, presentationStorage: AlertSignupPresentationStorage) {
         self.service = service
+        self.presentationStorage = presentationStorage
+
+        // An unreadable or no-longer-eligible record yields nil and is
+        // discarded by the storage, so a corrupt value falls back to the
+        // editable form instead of failing the launch.
+        if let restored = presentationStorage.loadValidPresentation() {
+            rememberedEmail = restored.email
+            phase = .checkEmail
+        }
     }
 
     var isSubmitting: Bool {
@@ -83,6 +112,13 @@ final class AlertSubscriptionStore: ObservableObject {
     /// started. The accepted phase is entered only on the backend's confirmed
     /// generic acceptance, and even then records nothing about the subscriber's
     /// actual status, because that response cannot report one.
+    ///
+    /// The generic accepted response is also the only thing that writes to
+    /// local storage. Every failure below — local refusal, backend refusal,
+    /// paused, throttled, provider-unavailable, ambiguous, and unknown — leaves
+    /// any existing record exactly as it was: it neither replaces one nor
+    /// destroys one, because none of them learned anything about the address
+    /// that an earlier accepted response did not already establish.
     func submit(email: String) async {
         // A repeated tap while a signup is in flight, or after one has been
         // accepted, must not start a second POST: signup is a mutation, and
@@ -105,8 +141,16 @@ final class AlertSubscriptionStore: ObservableObject {
         fieldError = nil
         failure = nil
 
+        let normalized = AlertSignupEmailValidator.normalize(email)
+
         do {
-            try await service.subscribe(email: AlertSignupEmailValidator.normalize(email))
+            try await service.subscribe(email: normalized)
+            // Exactly the address that was sent is what gets remembered, so the
+            // restored screen can never name an address the backend never saw.
+            rememberedEmail = normalized
+            presentationStorage.save(
+                AlertSignupPresentationRecord(email: normalized, acceptedResponseAt: Date())
+            )
             phase = .checkEmail
         } catch {
             phase = .editing
@@ -114,20 +158,28 @@ final class AlertSubscriptionStore: ObservableObject {
         }
     }
 
-    /// Returns to the editable form for this session with an empty field.
+    /// Returns to the editable form with an empty field, and forgets the
+    /// remembered address on this device.
     ///
-    /// It clears presentation only: there is no local subscription truth to
-    /// discard, because none was ever recorded. The previous address is not
-    /// unsubscribed, cancelled, or altered on the backend — nothing is sent —
-    /// and whatever the backend already did with it stands.
+    /// It clears presentation only. What is discarded is this installation's
+    /// memory of having seen the accepted response — not subscription truth,
+    /// which was never recorded. The previous address is not unsubscribed,
+    /// cancelled, or altered on the backend: nothing is sent, and whatever the
+    /// backend already did with it stands.
     ///
     /// The field is emptied because entering a different address is the whole
     /// point of the action; leaving the previous one in place invites
     /// resubmitting the address the person just chose to move on from.
+    ///
+    /// This is the only deliberate way to remove the local record. It is also
+    /// what makes a later failing attempt safe: submitting is refused outside
+    /// `editing`, so no failure can reach a store that still holds a record.
     func useDifferentEmail() {
         guard phase == .checkEmail else { return }
         phase = .editing
         email = ""
+        rememberedEmail = nil
+        presentationStorage.clear()
         fieldError = nil
         failure = nil
     }
