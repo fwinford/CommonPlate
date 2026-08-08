@@ -1,9 +1,9 @@
-import { Subscriber, System, SendLog, IRequest, ISubscriber, Request as MealRequest } from "../models/db.js";
+import { Subscriber, SendLog, IRequest, ISubscriber, Request as MealRequest } from "../models/db.js";
 import { sendNewRequestAlert } from "./emailHelpers.js";
 import { isPublicActionsPaused, logPausedSkip } from "./publicActionsPause.js";
 import { buildEffectiveAvailabilityFilter } from "./requestAvailability.js";
 
-// Helper to select and notify up to 2 eligible subscribers in round-robin fashion
+// Notify every confirmed, non-bounced subscriber about a new eligible request.
 export async function notifySubscribersForRequest(request: IRequest) {
   // Guarded here rather than only at the create route because this function is
   // also called directly (scripts/trigger-notify.ts). Returning before the
@@ -40,13 +40,15 @@ export async function notifySubscribersForRequest(request: IRequest) {
     console.log(`[notify] no successful SendLog for request ${request._id}, proceeding`);
   }
 
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  // V1 real-time policy: every confirmed, non-bounced subscriber is notified
+  // for every eligible request — no cooldown, no daily cap, no round-robin
+  // selection. `dailyCount`/`lastSentAt` are still written below because the
+  // hourly digest still reads them; only the real-time eligibility filter
+  // stops checking them.
   const eligible = await Subscriber.find({
     $and: [
       { status: "confirmed" },
       { bounced: false },
-      { $or: [ { dailyCount: { $lt: 4 } }, { dailyCount: { $exists: false } } ] },
-      { $or: [ { lastSentAt: { $lt: oneHourAgo } }, { lastSentAt: null }, { lastSentAt: { $exists: false } } ] },
     ]
   }).sort({ _id: 1 });
 
@@ -57,15 +59,8 @@ export async function notifySubscribersForRequest(request: IRequest) {
     return;
   }
 
-  const cursorDoc = await System.findOne({ key: "notify_cursor" });
-  const cursor = (cursorDoc?.value?.index ?? 0) % eligible.length;
-
-  const picks = [eligible[cursor]];
-  if (eligible.length > 1) picks.push(eligible[(cursor + 1) % eligible.length]);
-  const actualPicks = picks.filter(Boolean);
-
   let notified = 0;
-  for (const sub of actualPicks) {
+  for (const sub of eligible) {
     console.log(`[notify] processing subscriber ${String(sub._id)} <${sub.email}> for request ${request._id}`);
     // Atomic claim: try to insert a pending SendLog to claim this (request,subscriber).
     // If another process already claimed it, skip to avoid duplicate sends.
@@ -118,13 +113,7 @@ export async function notifySubscribersForRequest(request: IRequest) {
   }
 
   if (notified) {
-    const newCursor = (cursor + notified) % eligible.length;
-    await System.updateOne(
-      { key: "notify_cursor" },
-      { $set: { value: { index: newCursor } } },
-      { upsert: true }
-    );
-    console.log(`[notify] advanced notify_cursor to ${newCursor}`);
+    console.log(`[notify] sent to ${notified} of ${eligible.length} eligible subscribers for request ${request._id}`);
   }
 }
 

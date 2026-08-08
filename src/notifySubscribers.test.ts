@@ -121,7 +121,7 @@ describe("notification dispatch when public actions are resumed", () => {
     expect(sendNewRequestAlert).not.toHaveBeenCalled();
   });
 
-  it("queries only confirmed subscribers for real-time alerts", async () => {
+  it("queries only confirmed, non-bounced subscribers for real-time alerts, with no cooldown or daily-cap restriction", async () => {
     models.Request.exists.mockResolvedValue({ _id: request()._id });
     models.SendLog.exists.mockResolvedValue(null);
     models.Subscriber.find.mockReturnValue({
@@ -131,9 +131,135 @@ describe("notification dispatch when public actions are resumed", () => {
     await notifySubscribersForRequest(request());
 
     expect(models.Subscriber.find).toHaveBeenCalledWith({
-      $and: expect.arrayContaining([{ status: "confirmed" }]),
+      $and: [{ status: "confirmed" }, { bounced: false }],
     });
     expect(sendNewRequestAlert).not.toHaveBeenCalled();
+  });
+
+  function subscriberWithId(id: string, overrides: Partial<ISubscriber> = {}): ISubscriber {
+    return { ...subscriber(), _id: id, email: `${id}@example.edu`, ...overrides } as ISubscriber;
+  }
+
+  function setUpEligible(subs: ISubscriber[]) {
+    models.Request.exists.mockResolvedValue({ _id: request()._id });
+    models.SendLog.exists.mockResolvedValue(null);
+    models.Subscriber.find.mockReturnValue({
+      sort: vi.fn().mockResolvedValue(subs),
+    });
+    models.SendLog.create.mockResolvedValue({ _id: "claim" });
+    models.SendLog.updateOne.mockResolvedValue({});
+    models.Subscriber.updateOne.mockResolvedValue({});
+  }
+
+  it("notifies every eligible subscriber for a request, not a bounded subset", async () => {
+    const subs = [
+      subscriberWithId("64b000000000000000000010"),
+      subscriberWithId("64b000000000000000000011"),
+      subscriberWithId("64b000000000000000000012"),
+    ];
+    setUpEligible(subs);
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledTimes(3);
+    for (const sub of subs) {
+      expect(sendNewRequestAlert).toHaveBeenCalledWith(sub, request());
+    }
+  });
+
+  it("still attempts a subscriber with a fresh lastSentAt", async () => {
+    const fresh = subscriberWithId("64b000000000000000000013", {
+      lastSentAt: new Date(),
+    });
+    setUpEligible([fresh]);
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledWith(fresh, request());
+  });
+
+  it("still attempts a subscriber who already reached the old daily cap", async () => {
+    const capped = subscriberWithId("64b000000000000000000014", {
+      dailyCount: 4,
+    });
+    setUpEligible([capped]);
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledWith(capped, request());
+  });
+
+  it("does not let one subscriber's provider failure block the remaining eligible subscribers", async () => {
+    const subs = [
+      subscriberWithId("64b000000000000000000015"),
+      subscriberWithId("64b000000000000000000016"),
+    ];
+    setUpEligible(subs);
+    sendNewRequestAlert
+      .mockRejectedValueOnce(new Error("provider outage"))
+      .mockResolvedValueOnce(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledTimes(2);
+    expect(models.SendLog.updateOne).toHaveBeenCalledWith(
+      { requestId: request()._id, subscriberId: subs[0]._id },
+      expect.objectContaining({ $set: expect.objectContaining({ status: "fail" }) })
+    );
+    expect(models.SendLog.updateOne).toHaveBeenCalledWith(
+      { requestId: request()._id, subscriberId: subs[1]._id },
+      expect.objectContaining({ $set: expect.objectContaining({ status: "sent" }) })
+    );
+  });
+
+  it("still skips a subscriber whose SendLog claim was already taken by another process", async () => {
+    const subs = [
+      subscriberWithId("64b000000000000000000017"),
+      subscriberWithId("64b000000000000000000018"),
+    ];
+    setUpEligible(subs);
+    const duplicateKeyError = Object.assign(new Error("E11000 duplicate key"), {
+      code: 11000,
+    });
+    models.SendLog.create
+      .mockRejectedValueOnce(duplicateKeyError)
+      .mockResolvedValueOnce({ _id: "claim" });
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledTimes(1);
+    expect(sendNewRequestAlert).toHaveBeenCalledWith(subs[1], request());
+  });
+
+  it("still updates dailyCount and lastSentAt on a successful real-time send, because digest still reads them", async () => {
+    const sub = subscriberWithId("64b000000000000000000019");
+    setUpEligible([sub]);
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(models.Subscriber.updateOne).toHaveBeenCalledWith(
+      { _id: sub._id },
+      { $set: { lastSentAt: expect.any(Date) }, $inc: { dailyCount: 1 } }
+    );
+  });
+
+  it("does not read or write the notify_cursor System document on the real-time path", async () => {
+    const subs = [
+      subscriberWithId("64b00000000000000000001a"),
+      subscriberWithId("64b00000000000000000001b"),
+    ];
+    setUpEligible(subs);
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(models.System.findOne).not.toHaveBeenCalled();
+    expect(models.System.updateOne).not.toHaveBeenCalled();
   });
 
   it.each(["pending", "unsubscribed"] as const)(

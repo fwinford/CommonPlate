@@ -204,7 +204,10 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     ).lean();
     expect(active).toHaveLength(0);
 
-    const publicDetail = buildPublicRequestDetailResponse(stored as any);
+    const publicDetail = buildPublicRequestDetailResponse(
+      stored as any,
+      new Date()
+    );
     expect(publicDetail.request.status).toBe("placed");
     expect(JSON.stringify(publicDetail)).not.toMatch(
       /pickupName|email|orderNumber|etaText|placedAt|contactMessage|notification|claim/i
@@ -523,5 +526,39 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(stored?.notificationStatus).toBe("failed");
     expect(stored?.notificationAttemptedAt).toBeInstanceOf(Date);
     expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+  });
+
+  // Week 3 Day 6 Slice 6E: the requester-fulfillment push dispatcher reads
+  // `installationId` off the placed document the transaction returns.
+  // `installationId` is `select: false`, so this proves the placement query
+  // actually requests it rather than silently carrying `undefined` through.
+  it("carries the request's installationId through the placement transaction", async () => {
+    const installationId = new mongoose.Types.ObjectId();
+    const { request, rawToken } = await createClaimedRequest({ installationId });
+    const context = routeContext(String(request._id), fulfillmentBody(rawToken));
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.statusCode).toBe(200);
+    const stored = await MealRequest.findById(request._id)
+      .select("+installationId")
+      .lean();
+    expect(String(stored?.installationId)).toBe(String(installationId));
+    // Never exposed through the public response.
+    expect(JSON.stringify(context.body)).not.toContain(String(installationId));
+  });
+
+  it("places normally for a request with no installation association", async () => {
+    const { request, rawToken } = await createClaimedRequest();
+    const context = routeContext(String(request._id), fulfillmentBody(rawToken));
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.statusCode).toBe(200);
+    expect(context.body.request.status).toBe("placed");
+    const stored = await MealRequest.findById(request._id)
+      .select("+installationId")
+      .lean();
+    expect(stored?.installationId).toBeUndefined();
   });
 });

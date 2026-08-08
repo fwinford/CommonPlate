@@ -43,7 +43,7 @@ Run:
 npm test
 ```
 
-The current accepted baseline is **634 passed, 127 Mongo-gated skipped**, across **30 files passed, 10 files skipped, 40 files total**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
+The current accepted baseline is **942 passed, 169 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
 
 Representative coverage includes validation, route logic, error envelopes, browser behavior, copy guards, and source-wiring assertions. Some tests read source text instead of importing `app.ts`, because `app.ts` connects to MongoDB and starts listening at module scope. These assertions are not end-to-end route tests.
 
@@ -158,6 +158,25 @@ Every store in the new file is given isolated persistence — either the in-memo
 
 "Relaunch" here means reconstructing `AlertSubscriptionStore` over the same persisted value, exactly as `ContentView` builds one at launch — no manual kill-and-relaunch walkthrough on a simulator or device was performed for this slice. The repository has no UI-test target, so these cases do not exercise the real `NavigationStack` → `AlertSignupView` rendering path; they prove store state only, not on-screen layout, navigation, or accessibility presentation.
 
+### Supported-vendor integrity coverage
+
+Week 3 Day 7 Slice 7A adds, relative to the cross-launch check-email presentation baseline:
+
+- 3 cases in `src/supportedVendors.test.ts` for the catalog helper: exact-match acceptance of every entry in `shared/vendors.json`, and rejection of a near-match (different case or punctuation);
+- 23 cases in `src/createRequestRoute.test.ts`, in a dedicated `POST /api/request supported-vendor allowlist` describe block: acceptance of each of the 11 catalog vendors by name, refusal of unsupported, case-variant, and near-match vendors with the `INVALID_VENDOR` envelope and no side effect (`Request.create`, the Resend send, and `notifySubscribersForRequest` each never called), a blank vendor keeping the generic `INVALID_REQUEST` structural message rather than `INVALID_VENDOR`, the same catalog applied to both the canonical scheduled and legacy web create shapes, vendor precedence over the email allowlist so an unsupported vendor is reported even when the email is also invalid, an earlier structural error still reported ahead of `INVALID_VENDOR`, and a source-inspection case proving `RequestFoodView.swift` reads `SupportedVendorCatalog.diningSpots` rather than a second hand-maintained vendor list;
+- 2 cases in `ios/CommonPlateios/CommonPlateiosTests/SupportedVendorCatalogTests.swift` proving the iOS Picker's data source decodes the exact accepted 11 entries, in order, from the bundled shared catalog, and that every entry carries a non-empty address.
+
+No Mongo suite reads or writes vendor state, so `npm run test:mongo` was not rerun for this slice and stands at its Slice 5B baseline below.
+
+### Real-time helper-alert selection and response-isolation coverage
+
+Week 3 Day 7 Slices 7B and 7C add, relative to the supported-vendor integrity baseline:
+
+- In `src/notifySubscribers.test.ts`: the real-time eligibility query is asserted exact — `{ status: "confirmed" }` and `{ bounced: false }` only, no cooldown or daily-cap clause; every eligible subscriber in a multi-subscriber set is notified, not a bounded subset; a subscriber with a fresh `lastSentAt` and a subscriber already at the old daily cap are each still attempted; one subscriber's provider failure does not block the remaining eligible subscribers; `SendLog`'s claim-before-send dedup still skips a subscriber another process already claimed; a successful send still updates `dailyCount` and `lastSentAt`; and the real-time path never reads or writes the now-removed `notify_cursor` `System` document.
+- In `src/createRequestRoute.test.ts`: the side-effect-ordering case now proves requester email is still awaited before the `201`, while helper-alert fan-out starts only after it. A dedicated `POST /api/request helper email isolation (Slice 7C)` describe block mirrors the existing helper-push isolation suite: `201` returns while a deliberately never-settling helper-alert dispatch is still outstanding; a rejecting dispatch does not alter the `201` result and produces no unhandled rejection (asserted against the process's rejection handling); and a synchronously throwing dispatch start does not reach the outer `catch` to attempt a second response.
+
+No Mongo suite reads or writes `Subscriber`, `SendLog`, or `System` selection logic differently under these slices — the change is a query-shape and dispatch-timing change, not new persistence, transaction, or index behavior — so `npm run test:mongo` was not rerun and stands at its Slice 5B baseline below.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -166,7 +185,7 @@ Run:
 npm run test:mongo
 ```
 
-The current accepted baseline is **127 passed across 10 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
+The current accepted baseline is **169 passed**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
 
 A replica set is required because placement verification exercises MongoDB transactions; standalone MongoDB cannot provide that behavior. Mongo verification remains incomplete until this command passes. `npm test` reporting the Mongo suites as skipped does not replace this run.
 
@@ -236,7 +255,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted baseline is **326 passed, 0 failed, 0 skipped, TEST SUCCEEDED** — `ClaimFlowTests` 153, `RequestCreationViewTests` 76, `RequestFetchingTests` 29, `AlertSignupTests` 26, `AlertSignupPresentationTests` 21, `RequestEmailAllowlistTests` 21. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
+The current accepted baseline is **461 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
 
 ## 10. Test-file organization
 
@@ -269,14 +288,14 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. Every backend and browser row was last recorded at the Week 3 Day 5 Slice 5B NYU food-request allowlist slice. The iOS row was re-recorded at Slice 5C (cross-launch check-email presentation), which changed `AlertSubscriptionStore` and app initialization; that slice changed no backend or browser-client file, so the other rows were not rerun and still stand as recorded.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. All rows were last recorded at Week 3 Day 6 Slice 6E (requester fulfillment push), whose accepted implementation and independent-review fixes touched backend, Mongo persistence, and iOS.
 
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Passed |
-| `npm test` | 634 passed; 127 Mongo-gated skipped (30 files passed, 10 skipped, 40 total) |
-| `npm run test:mongo` | 127 passed across 10 files |
+| `npm test` | 942 passed; 169 Mongo-gated skipped |
+| `npm run test:mongo` | 169 passed |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | 326 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
-| `npm run build:client` | Ran as part of `ci-check`; regenerated bundles are byte-identical, and no browser-client source changed |
+| `CommonPlateiosTests` | 461 passed; 0 failed; TEST SUCCEEDED |
+| `npm run build:client` | Not part of Slice 6E's recorded verification; row still stands as recorded at Week 3 Day 7 Slice 7A |
 | `git diff --check` | Passed |

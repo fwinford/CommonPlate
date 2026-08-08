@@ -1,8 +1,18 @@
+import { generateKeyPairSync } from "node:crypto";
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateClaimToken } from "./claimToken.js";
-import { Fulfillment, Request as MealRequest } from "../models/db.js";
+import { Fulfillment, Installation, Request as MealRequest } from "../models/db.js";
+import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
+
+/** A real, disposable EC key — the dispatcher's default configuration reader
+ * validates that this parses as an EC private key, matching `apnsConfig.test.ts`. */
+const { privateKey: apnsAuthKeyPem } = generateKeyPairSync("ec", {
+  namedCurve: "prime256v1",
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+});
 
 const sendFulfillmentEmail = vi.hoisted(() => vi.fn());
 vi.mock("./emailHelpers.js", () => ({ sendFulfillmentEmail }));
@@ -318,7 +328,9 @@ describe("POST /api/request/:id/fulfill validation", () => {
     };
     const update = vi.fn().mockReturnValue({ exec: vi.fn().mockResolvedValue({}) });
     const placement = vi.fn().mockReturnValue({
-      exec: vi.fn().mockResolvedValue(placedRequest),
+      select: vi.fn().mockReturnValue({
+        exec: vi.fn().mockResolvedValue(placedRequest),
+      }),
     });
     const ledger = vi.spyOn(Fulfillment, "create").mockResolvedValue([] as never);
     vi.spyOn(MealRequest, "findOneAndUpdate").mockImplementation(placement as never);
@@ -347,5 +359,145 @@ describe("POST /api/request/:id/fulfill validation", () => {
     );
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain("helper@example.edu");
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain("70154321");
+  });
+});
+
+describe("POST /api/request/:id/fulfill requester push isolation (Slice 6E)", () => {
+  /**
+   * Mirrors `POST /api/request helper push isolation` in
+   * `createRequestRoute.test.ts`. Push dispatch is started after the response
+   * is sent and is never awaited, so these cases prove the response is
+   * unaffected, that dispatch was started, and that no push failure can reach
+   * the requester — dispatch behavior itself is tested directly against
+   * `dispatchRequesterFulfillmentPush`.
+   *
+   * The real `startRequesterFulfillmentPush` runs here rather than a mock:
+   * its totality is precisely what keeps an escaping throw out of
+   * `fulfillRequest`'s response path, which would otherwise attempt a second
+   * response on a request whose headers are already flushed.
+   */
+  let pausedBefore: string | undefined;
+  let installationFindOne: ReturnType<typeof vi.spyOn>;
+
+  function stubbedPlacementPipeline(
+    installationId?: mongoose.Types.ObjectId
+  ) {
+    const placedRequest = {
+      _id: new mongoose.Types.ObjectId(requestId),
+      vendor: "Campus Market",
+      food: "Vegetable rice bowl",
+      pickupWindowText: "ASAP",
+      status: "placed",
+      createdAt: new Date("2026-08-02T12:00:00.000Z"),
+      expiresAt: new Date("2026-08-02T17:00:00.000Z"),
+      ...(installationId ? { installationId } : {}),
+    };
+    vi.spyOn(MealRequest, "findOneAndUpdate").mockReturnValue({
+      select: () => ({ exec: async () => placedRequest }),
+    } as never);
+    vi.spyOn(MealRequest, "updateOne").mockReturnValue({
+      exec: async () => ({}),
+    } as never);
+    vi.spyOn(Fulfillment, "create").mockResolvedValue([] as never);
+    vi.spyOn(mongoose, "startSession").mockResolvedValue({
+      withTransaction: async (operation: () => Promise<void>) => operation(),
+      endSession: async () => {},
+    } as any);
+    return placedRequest;
+  }
+
+  beforeEach(() => {
+    // Fulfillment is not gated by `pauseDay4Mutation`, but the dispatcher
+    // carries its own public-actions guard, and it must be off for these
+    // cases to reach dispatch at all.
+    pausedBefore = process.env[PUBLIC_ACTIONS_PAUSED_ENV];
+    process.env[PUBLIC_ACTIONS_PAUSED_ENV] = "false";
+    // The dispatcher reads real APNs configuration before it ever reaches
+    // `Installation.findOne`; a real (disposable) EC key lets it get there
+    // without a network dependency.
+    vi.stubEnv("APNS_TEAM_ID", "ABCDE12345");
+    vi.stubEnv("APNS_KEY_ID", "KEY1234567");
+    vi.stubEnv("APNS_BUNDLE_ID", "org.commonplatenyu.CommonPlateios");
+    vi.stubEnv("APNS_AUTH_KEY_P8", apnsAuthKeyPem);
+    // Nothing may reach a real APNs submission from a route test.
+    installationFindOne = vi
+      .spyOn(Installation, "findOne")
+      .mockReturnValue({
+        select: () => ({ lean: () => ({ exec: async () => null }) }),
+      } as never) as ReturnType<typeof vi.spyOn>;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    // The file-level `afterEach` above already calls `vi.unstubAllEnvs()`.
+    if (pausedBefore === undefined) {
+      delete process.env[PUBLIC_ACTIONS_PAUSED_ENV];
+    } else {
+      process.env[PUBLIC_ACTIONS_PAUSED_ENV] = pausedBefore;
+    }
+  });
+
+  it("starts requester push after the response, with the committed placed request", async () => {
+    const installationId = new mongoose.Types.ObjectId();
+    stubbedPlacementPipeline(installationId);
+    const context = routeContext(validBody());
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.json).toHaveBeenCalledOnce();
+    expect(installationFindOne).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: installationId })
+    );
+    // The response was built and sent before dispatch was started.
+    expect(context.json.mock.invocationCallOrder[0]).toBeLessThan(
+      installationFindOne.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("starts no push, with no fallback recipient, when the placed request has no association", async () => {
+    stubbedPlacementPipeline();
+    const context = routeContext(validBody());
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.json).toHaveBeenCalledOnce();
+    expect(installationFindOne).not.toHaveBeenCalled();
+  });
+
+  it("returns 200 without waiting on a dispatch that never settles", async () => {
+    const installationId = new mongoose.Types.ObjectId();
+    stubbedPlacementPipeline(installationId);
+    installationFindOne.mockReturnValue({
+      select: () => ({ lean: () => ({ exec: () => new Promise(() => {}) }) }),
+    } as never);
+    const context = routeContext(validBody());
+
+    const started = Date.now();
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.json).toHaveBeenCalledOnce();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("returns 200 and answers once when the dispatcher throws synchronously", async () => {
+    const installationId = new mongoose.Types.ObjectId();
+    stubbedPlacementPipeline(installationId);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    installationFindOne.mockImplementation(() => {
+      throw new Error("selection exploded");
+    });
+    const context = routeContext(validBody());
+
+    try {
+      await fulfillRequest(context.req, context.res);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(context.json).toHaveBeenCalledOnce();
+    expect(rejections).toEqual([]);
   });
 });

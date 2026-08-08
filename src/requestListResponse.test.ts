@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { CLAIM_MINIMUM_REMAINING_MS } from "./requestAvailability.js";
-import { buildPublicRequestListResponse } from "./requestListResponse.js";
+import {
+  buildPublicRequestDetailResponse,
+  buildPublicRequestListResponse,
+} from "./requestListResponse.js";
 
 const serverNow = new Date("2026-07-26T19:00:00.000Z");
 const exactlyClaimable = new Date(
@@ -265,5 +268,52 @@ describe("buildPublicRequestListResponse", () => {
     expect(serializedRequest).not.toHaveProperty("notificationStatus");
     expect(serializedRequest).not.toHaveProperty("_id");
     expect(serializedRequest).not.toHaveProperty("__v");
+  });
+});
+
+describe("buildPublicRequestDetailResponse", () => {
+  it("reports the persisted status when it is effectively available", () => {
+    const response = buildPublicRequestDetailResponse(
+      requestDocument({ status: "open" }) as never,
+      serverNow
+    );
+
+    expect(response.request.status).toBe("open");
+  });
+
+  it("reports a claim-expired request as effectively open", () => {
+    const response = buildPublicRequestDetailResponse(
+      requestDocument({
+        status: "claimed",
+        claimExpiresAt: new Date(serverNow.getTime() - 1),
+      }) as never,
+      serverNow
+    );
+
+    expect(response.request.status).toBe("open");
+  });
+
+  it("keeps a claimed request with an unexpired claim as claimed", () => {
+    const response = buildPublicRequestDetailResponse(
+      requestDocument({
+        status: "claimed",
+        claimExpiresAt: new Date(serverNow.getTime() + 1),
+      }) as never,
+      serverNow
+    );
+
+    expect(response.request.status).toBe("claimed");
+  });
+
+  it("reports a placed request as placed regardless of expiration", () => {
+    const response = buildPublicRequestDetailResponse(
+      requestDocument({
+        status: "placed",
+        expiresAt: new Date("2020-01-01T00:00:00.000Z"),
+      }) as never,
+      serverNow
+    );
+
+    expect(response.request.status).toBe("placed");
   });
 });

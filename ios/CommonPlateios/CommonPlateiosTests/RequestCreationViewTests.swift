@@ -2224,7 +2224,10 @@ final class RequestCreationViewTests: XCTestCase {
             configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
             session: session
         )
-        return RequestStore(service: RequestService(client: client))
+        return RequestStore(
+            service: RequestService(client: client),
+            installationCredentialProvider: { "test-installation-credential" }
+        )
     }
 
     private func makeAvailabilityStore() -> RequestStore {

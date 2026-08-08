@@ -71,4 +71,22 @@ extension AppRoute {
             }
         }
     }
+
+    /// The path a helper new-request notification tap replaces the current
+    /// one with, once `RequestStore.resolveHelperNotificationRequest(id:)`
+    /// has answered from backend truth. A tap is a fresh navigation intent —
+    /// whatever the helper was doing before is discarded, matching "opens
+    /// CommonPlate and routes toward the specific request" — and Active
+    /// Requests always sits underneath, so Back and any later completed-flow
+    /// truncation (`returningToActiveRequests`) land somewhere real.
+    static func afterNotificationResolution(
+        _ resolution: HelperNotificationResolution
+    ) -> [AppRoute] {
+        switch resolution {
+        case .available(let request):
+            return [.activeRequests, .requestDetail(request)]
+        case .unavailable, .temporarilyUnavailable:
+            return [.activeRequests]
+        }
+    }
 }

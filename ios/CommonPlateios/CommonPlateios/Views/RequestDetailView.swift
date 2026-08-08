@@ -121,6 +121,12 @@ struct RequestDetailView: View {
     /// and missing requests. Matches the backend's own `REQUEST_EXPIRED` message.
     static let noLongerAvailableNotice = "This request is no longer available."
 
+    /// Shown when a helper new-request notification tap could not be
+    /// resolved against current backend truth (transport, timeout, server,
+    /// or decoding failure). Never used when the backend has confirmed the
+    /// request is actually gone — that is `noLongerAvailableNotice`.
+    static let temporarilyUnavailableNotice = "This request is temporarily unavailable. Try again."
+
     let request: FoodRequest
     @ObservedObject var store: RequestStore
     @Binding var path: [AppRoute]

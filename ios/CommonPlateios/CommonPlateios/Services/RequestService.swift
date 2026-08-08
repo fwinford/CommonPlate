@@ -117,9 +117,12 @@ struct RequestService {
         }
     }
 
-    /// Privacy-safe `GET /api/request/:id`. This read reports persisted status
-    /// only; it never authorizes fulfillment and is used once after an
-    /// ambiguous fulfillment POST to see whether placement can be confirmed.
+    /// Privacy-safe `GET /api/request/:id`. The backend reports effective
+    /// availability here (a claim-expired request reads back as `open`), not
+    /// raw persisted status; it never authorizes fulfillment. Used once after
+    /// an ambiguous fulfillment POST to see whether placement can be
+    /// confirmed, and by helper new-request notification tap-routing to
+    /// resolve whether the tapped request is still available.
     func fetchRequest(id: String) async throws -> FoodRequest {
         do {
             let response: RequestDetailResponseDTO = try await client.send(

@@ -6,7 +6,7 @@
 //
 import Foundation
 
-struct DiningSpot: Identifiable, Hashable {
+struct DiningSpot: Identifiable, Hashable, Codable {
     var id: String { name }
     let name: String
     /// Nil when the address is unavailable, e.g. a backend-sourced request whose

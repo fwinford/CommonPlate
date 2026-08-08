@@ -27,11 +27,13 @@ vi.mock("./notifySubscribers.js", () => ({
   notifySubscribersForRequest,
 }));
 
-import { Request as MealRequest } from "../models/db.js";
+import { Installation, Request as MealRequest } from "../models/db.js";
 import {
   createRequest,
   createRequestRateLimiter,
 } from "./createRequestRoute.js";
+import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
+import { SUPPORTED_VENDORS } from "./supportedVendors.js";
 
 const requestId = new mongoose.Types.ObjectId("64b000000000000000000001");
 /** Frozen backend creation time; the route's `new Date()` resolves to this. */
@@ -41,7 +43,7 @@ const asapExpiresAt = new Date("2026-07-28T21:00:00.000Z");
 
 function canonicalAsap(overrides: Record<string, unknown> = {}) {
   return {
-    vendor: "  Campus Market  ",
+    vendor: "  Palladium  ",
     food: "  Vegetable rice bowl  ",
     pickupName: "  Requester Private Name  ",
     email: "  REQUESTER@NYU.EDU  ",
@@ -52,7 +54,7 @@ function canonicalAsap(overrides: Record<string, unknown> = {}) {
 
 function canonicalScheduled(overrides: Record<string, unknown> = {}) {
   return {
-    vendor: "Campus Market",
+    vendor: "Palladium",
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
     email: "requester@nyu.edu",
@@ -132,7 +134,7 @@ describe("POST /api/request validation and persistence", () => {
     await createRequest(context.req, context.res);
 
     expect(createDocument).toHaveBeenCalledWith({
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
@@ -331,7 +333,7 @@ describe("POST /api/request validation and persistence", () => {
     expect(Object.keys(body)).toEqual(["request"]);
     expect(body.request).toEqual({
       id: requestId.toString(),
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupWindowText: "Jul 28, 1:00 PM – 2:00 PM",
       windowStart: "2026-07-28T17:00:00.000Z",
@@ -379,7 +381,7 @@ describe("POST /api/request NYU requester-email allowlist", () => {
 
   function legacyWeb(email: string) {
     return {
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email,
@@ -533,6 +535,160 @@ describe("POST /api/request NYU requester-email allowlist", () => {
   });
 });
 
+describe("POST /api/request supported-vendor allowlist", () => {
+  const UNSUPPORTED_VENDOR_MESSAGE =
+    "Choose a supported CommonPlate dining location.";
+
+  it.each(SUPPORTED_VENDORS.map((vendor) => [vendor.name]))(
+    "accepts the supported vendor %s",
+    async (name) => {
+      const context = routeContext(canonicalAsap({ vendor: name }));
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(201);
+      expect(createDocument).toHaveBeenCalledWith(
+        expect.objectContaining({ vendor: name })
+      );
+    }
+  );
+
+  it.each([
+    "Off-Campus Diner",
+    "Crave Nyu",
+    "PALLADIUM",
+    "palladium",
+    "Cafe181",
+    "Palladium Hall",
+    "",
+  ])("refuses unsupported vendor %j with INVALID_VENDOR and no side effect", async (vendor) => {
+    const context = routeContext(canonicalAsap({ vendor }));
+
+    await createRequest(context.req, context.res);
+
+    if (vendor.trim().length === 0) {
+      // A blank vendor is a structural failure, not a catalog mismatch: it
+      // keeps the generic payload error rather than a vendor-specific one.
+      expect(context.json).toHaveBeenCalledWith({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "Invalid request payload",
+        },
+      });
+    } else {
+      expect(context.json).toHaveBeenCalledWith({
+        error: { code: "INVALID_VENDOR", message: UNSUPPORTED_VENDOR_MESSAGE },
+      });
+    }
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("does not silently canonicalize a near-match variant", async () => {
+    // "palladium" and "Palladium" are different strings; accepting one for
+    // the other would be a case-fold the accepted contract explicitly rules
+    // out, so the trimmed value must match a catalog entry exactly.
+    const context = routeContext(canonicalAsap({ vendor: "palladium" }));
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: { code: "INVALID_VENDOR", message: UNSUPPORTED_VENDOR_MESSAGE },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("applies the same catalog to the canonical scheduled and legacy web shapes", async () => {
+    const scheduled = routeContext(
+      canonicalScheduled({ vendor: "Off-Campus Diner" })
+    );
+    await createRequest(scheduled.req, scheduled.res);
+
+    const legacy = routeContext({
+      vendor: "Off-Campus Diner",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email: "requester@nyu.edu",
+      pickupWindowText: "Legacy display",
+    });
+    await createRequest(legacy.req, legacy.res);
+
+    for (const context of [scheduled, legacy]) {
+      expect(context.status).toHaveBeenCalledWith(400);
+      expect(context.json).toHaveBeenCalledWith({
+        error: { code: "INVALID_VENDOR", message: UNSUPPORTED_VENDOR_MESSAGE },
+      });
+    }
+    expect(createDocument).not.toHaveBeenCalled();
+
+    const allowedLegacy = routeContext({
+      vendor: "Palladium",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email: "requester@nyu.edu",
+      pickupWindowText: "Legacy display",
+    });
+    await createRequest(allowedLegacy.req, allowedLegacy.res);
+
+    expect(allowedLegacy.status).toHaveBeenCalledWith(201);
+  });
+
+  it("takes precedence over the email allowlist so it does not mask an unsupported vendor", async () => {
+    // Both fields are wrong; the vendor check runs first, so this is the
+    // envelope the requester sees rather than INVALID_EMAIL.
+    const context = routeContext(
+      canonicalAsap({ vendor: "Off-Campus Diner", email: "requester@gmail.com" })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: { code: "INVALID_VENDOR", message: UNSUPPORTED_VENDOR_MESSAGE },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("still reports an earlier structural error instead of INVALID_VENDOR", async () => {
+    // Precedence is unchanged: an otherwise-malformed payload keeps the
+    // generic message even when the vendor is also unsupported.
+    const context = routeContext(
+      canonicalAsap({ vendor: "Off-Campus Diner", timing: "soon" })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: "INVALID_REQUEST",
+        message: "Invalid request payload",
+      },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("keeps iOS's Picker sourced from the shared catalog instead of a second hardcoded list", () => {
+    // The catalog used to be a Swift literal duplicated by hand; this proves
+    // it now reads from the same `shared/vendors.json` the backend reads
+    // (via a symlink at Resources/SupportedVendors.json), so there is one
+    // vendor source, not two that can drift apart.
+    const viewSource = readFileSync(
+      new URL(
+        "../ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift",
+        import.meta.url
+      ),
+      "utf8"
+    );
+
+    expect(viewSource).not.toContain("Crave NYU");
+    expect(viewSource).toContain("SupportedVendorCatalog.diningSpots");
+  });
+});
+
 describe("POST /api/request backend-owned expiration", () => {
   it("expires an ASAP request five hours after the backend creation time", async () => {
     const context = routeContext(canonicalAsap());
@@ -596,7 +752,7 @@ describe("POST /api/request backend-owned expiration", () => {
     await createRequest(canonical.req, canonical.res);
 
     const legacy = routeContext({
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
@@ -715,7 +871,7 @@ describe("POST /api/request backend-owned expiration", () => {
   it("applies the same window rule to the legacy compatibility path", async () => {
     function legacy(windowStart: string, windowEnd: string) {
       return {
-        vendor: "Campus Market",
+        vendor: "Palladium",
         food: "Vegetable rice bowl",
         pickupName: "Requester Private Name",
         email: "requester@nyu.edu",
@@ -772,7 +928,7 @@ describe("POST /api/request backend-owned expiration", () => {
 describe("POST /api/request narrow legacy web compatibility", () => {
   it("infers ASAP only when both window fields are absent and ignores legacy display text", async () => {
     const context = routeContext({
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
@@ -793,7 +949,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
 
   it("infers scheduled only from two valid legacy timestamps and generates canonical text", async () => {
     const context = routeContext({
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
@@ -832,7 +988,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
     },
   ])("rejects an invalid legacy window pair", async (window) => {
     const context = routeContext({
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
@@ -848,7 +1004,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
 
   it("requires pickupWindowText when timing is absent and rejects extra fields", async () => {
     const missingCompatibilityMarker = routeContext({
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
@@ -859,7 +1015,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
     );
 
     const broadenedLegacyPayload = routeContext({
-      vendor: "Campus Market",
+      vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
@@ -875,7 +1031,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
 });
 
 describe("POST /api/request side-effect ordering and errors", () => {
-  it("persists and shapes before requester email and helper notification", async () => {
+  it("persists and shapes before requester email; helper notification starts after the response", async () => {
     const context = routeContext(canonicalAsap());
 
     await createRequest(context.req, context.res);
@@ -883,7 +1039,12 @@ describe("POST /api/request side-effect ordering and errors", () => {
     expect(createDocument.mock.invocationCallOrder[0]).toBeLessThan(
       resendSend.mock.invocationCallOrder[0]
     );
+    // Requester email is still awaited before the response; helper email
+    // fan-out is started only after the response is sent (Slice 7C).
     expect(resendSend.mock.invocationCallOrder[0]).toBeLessThan(
+      context.json.mock.invocationCallOrder[0]
+    );
+    expect(context.json.mock.invocationCallOrder[0]).toBeLessThan(
       notifySubscribersForRequest.mock.invocationCallOrder[0]
     );
     expect(context.status).toHaveBeenCalledWith(201);
@@ -953,11 +1114,15 @@ describe("POST /api/request side-effect ordering and errors", () => {
     const context = routeContext(canonicalAsap());
 
     await createRequest(context.req, context.res);
+    // Helper email is detached (Slice 7C): the rejection settles on a
+    // microtask after the response has already gone out.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(createDocument).toHaveBeenCalledOnce();
     expect(context.status).toHaveBeenCalledWith(201);
     expect(consoleError).toHaveBeenCalledWith(
-      `[route] Helper notification failed after persistence for request ${requestId}`
+      `[notify] Helper email dispatch failed for request ${requestId}`,
+      expect.any(Error)
     );
   });
 
@@ -1024,6 +1189,430 @@ describe("POST /api/request side-effect ordering and errors", () => {
     expect(resendSend).not.toHaveBeenCalled();
     expect(notifySubscribersForRequest).not.toHaveBeenCalled();
   });
+});
+
+describe("POST /api/request helper push isolation", () => {
+  /**
+   * Push dispatch is started after the `201` is sent and is never awaited, so
+   * the route cannot observe a dispatch outcome and these cases do not try to.
+   * They prove the response is unaffected, that dispatch was started, and that
+   * no push failure can reach the requester — dispatch behavior itself is
+   * tested directly against `dispatchHelperNewRequestPush`.
+   *
+   * The real `startHelperNewRequestPush` runs here rather than a mock: its
+   * totality is precisely what keeps an escaping throw out of `createRequest`'s
+   * outer `catch`, which would otherwise attempt a second response on a
+   * request whose headers are already flushed.
+   */
+  let pausedBefore: string | undefined;
+  let requestExists: ReturnType<typeof vi.spyOn>;
+  let installationFind: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // The create route is guarded by `pausePublicAction` middleware in
+    // `app.ts`; the dispatcher carries its own guard, and it must be off for
+    // these cases to reach dispatch at all.
+    pausedBefore = process.env[PUBLIC_ACTIONS_PAUSED_ENV];
+    process.env[PUBLIC_ACTIONS_PAUSED_ENV] = "false";
+    requestExists = vi
+      .spyOn(MealRequest, "exists")
+      .mockResolvedValue(null as never) as ReturnType<typeof vi.spyOn>;
+    // Nothing may reach a real APNs submission from a route test.
+    installationFind = vi
+      .spyOn(Installation, "find")
+      .mockReturnValue({
+        select: () => ({ lean: () => ({ exec: async () => [] }) }),
+      } as never) as ReturnType<typeof vi.spyOn>;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    if (pausedBefore === undefined) {
+      delete process.env[PUBLIC_ACTIONS_PAUSED_ENV];
+    } else {
+      process.env[PUBLIC_ACTIONS_PAUSED_ENV] = pausedBefore;
+    }
+  });
+
+  it("starts helper push after the response, with the persisted document", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(requestExists).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: requestId })
+    );
+    // The response was built and sent before dispatch was started.
+    expect(context.json.mock.invocationCallOrder[0]).toBeLessThan(
+      requestExists.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("returns 201 without waiting on a dispatch that never settles", async () => {
+    vi.useRealTimers();
+    requestExists.mockReturnValue(new Promise(() => {}) as never);
+    const context = routeContext(canonicalAsap());
+
+    const started = Date.now();
+    await createRequest(context.req, context.res);
+
+    // The outstanding dispatch is still in flight; creation did not depend on
+    // it, so the response is already sent.
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(context.json).toHaveBeenCalledOnce();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("returns 201 and answers once when the dispatcher's promise rejects", async () => {
+    vi.useRealTimers();
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    requestExists.mockRejectedValue(new Error("push selection failed") as never);
+    const context = routeContext(canonicalAsap());
+
+    try {
+      await createRequest(context.req, context.res);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(context.status).toHaveBeenCalledExactlyOnceWith(201);
+    expect(context.json).toHaveBeenCalledOnce();
+    // A rejecting dispatch must not reach the outer catch and attempt a
+    // second response after the headers are flushed.
+    expect(context.status).not.toHaveBeenCalledWith(500);
+    expect(rejections).toEqual([]);
+  });
+
+  it("returns 201 when the start call itself throws synchronously", async () => {
+    // A persisted document that stops being able to describe itself once the
+    // response is out: every read the route needs succeeds, and only the start
+    // call fails. Without a total start function this throw would land in the
+    // outer `catch` and answer `500` on an already-sent response.
+    const context = routeContext(canonicalAsap());
+    createDocument.mockImplementation(async () => ({
+      ...persistedDocument(canonicalAsap()),
+      get _id() {
+        if (context.json.mock.calls.length > 0) {
+          throw new Error("identity unavailable");
+        }
+        return requestId;
+      },
+    }));
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledExactlyOnceWith(201);
+    expect(context.status).not.toHaveBeenCalledWith(500);
+    expect(context.json).toHaveBeenCalledOnce();
+  });
+
+  it("starts push even when the helper email path throws", async () => {
+    // Email and push are independent channels; neither suppresses the other.
+    notifySubscribersForRequest.mockRejectedValue(new Error("alert failed"));
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(requestExists).toHaveBeenCalled();
+  });
+
+  it("starts helper email fan-out after the response, detached (Slice 7C)", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(resendSend).toHaveBeenCalledOnce();
+    expect(notifySubscribersForRequest).toHaveBeenCalledOnce();
+    // Requester email is still awaited before the response.
+    expect(resendSend.mock.invocationCallOrder[0]).toBeLessThan(
+      context.json.mock.invocationCallOrder[0]
+    );
+    // Helper email fan-out starts only after the response is sent.
+    expect(context.json.mock.invocationCallOrder[0]).toBeLessThan(
+      notifySubscribersForRequest.mock.invocationCallOrder[0]
+    );
+  });
+
+  it.each([
+    ["a refused payload", () => canonicalAsap({ vendor: "   " })],
+    ["a refused email", () => canonicalAsap({ email: "requester@gmail.com" })],
+  ])("starts no push for %s", async (_label, body) => {
+    const context = routeContext(body());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(requestExists).not.toHaveBeenCalled();
+    expect(installationFind).not.toHaveBeenCalled();
+  });
+
+  it("starts no push when creation fails", async () => {
+    createDocument.mockRejectedValue(new Error("database unavailable"));
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(500);
+    expect(requestExists).not.toHaveBeenCalled();
+    expect(installationFind).not.toHaveBeenCalled();
+  });
+
+  it("starts no push when the daily limit refuses the request", async () => {
+    countDocuments.mockResolvedValue(3);
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(429);
+    expect(requestExists).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/request installation association (Slice 6E)", () => {
+  /**
+   * iOS sends its existing installation credential with request creation so
+   * the backend can resolve/establish the originating installation for a
+   * later best-effort fulfillment push. These cases prove the association is
+   * resolved from the credential's digest (never the raw value), persisted
+   * internally, never exposed publicly, and never allowed to block request
+   * creation.
+   */
+  const validInstallationCredential = Buffer.alloc(32, 9).toString("base64url");
+  const resolvedInstallationId = new mongoose.Types.ObjectId(
+    "64e000000000000000000001"
+  );
+
+  let installationFindOneAndUpdate: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    installationFindOneAndUpdate = vi
+      .spyOn(Installation, "findOneAndUpdate")
+      .mockReturnValue({
+        select: () => ({
+          lean: () => ({
+            exec: async () => ({ _id: resolvedInstallationId }),
+          }),
+        }),
+      } as never) as ReturnType<typeof vi.spyOn>;
+  });
+
+  it("resolves the association and persists installationId when a valid credential is supplied", async () => {
+    const context = routeContext(
+      canonicalAsap({ installationCredential: validInstallationCredential })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(installationFindOneAndUpdate).toHaveBeenCalledOnce();
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ installationId: resolvedInstallationId })
+    );
+  });
+
+  it("digests the raw credential and never persists or logs it", async () => {
+    const context = routeContext(
+      canonicalAsap({ installationCredential: validInstallationCredential })
+    );
+
+    await createRequest(context.req, context.res);
+
+    const filter = installationFindOneAndUpdate.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(filter).not.toHaveProperty("installationCredential");
+    expect(JSON.stringify(filter)).not.toContain(validInstallationCredential);
+    expect(
+      JSON.stringify(createDocument.mock.calls[0][0])
+    ).not.toContain(validInstallationCredential);
+  });
+
+  it("resolves no association, and persists no installationId, when no credential is supplied", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(installationFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.not.objectContaining({ installationId: expect.anything() })
+    );
+  });
+
+  it.each([
+    ["too short", "a".repeat(20)],
+    ["too long", "a".repeat(60)],
+    ["invalid characters", "!".repeat(43)],
+    ["empty", ""],
+    ["not a string", 12345],
+  ])("rejects a malformed installationCredential (%s) as a structural failure", async (_name, value) => {
+    const context = routeContext(
+      canonicalAsap({ installationCredential: value })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: { code: "INVALID_REQUEST", message: "Invalid request payload" },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(installationFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it("accepts a scheduled canonical request with an installation credential too", async () => {
+    const context = routeContext(
+      canonicalScheduled({ installationCredential: validInstallationCredential })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ installationId: resolvedInstallationId })
+    );
+  });
+
+  it("never exposes the association through the public create response", async () => {
+    const context = routeContext(
+      canonicalAsap({ installationCredential: validInstallationCredential })
+    );
+
+    await createRequest(context.req, context.res);
+
+    const body = JSON.parse(JSON.stringify(context.json.mock.calls[0][0]));
+    expect(JSON.stringify(body)).not.toMatch(
+      /installationId|installationCredential/i
+    );
+  });
+
+  it("still creates the request when resolving the association fails, with no installationId", async () => {
+    installationFindOneAndUpdate.mockReturnValue({
+      select: () => ({
+        lean: () => ({
+          exec: async () => {
+            throw new Error("database unavailable");
+          },
+        }),
+      }),
+    } as never);
+    const context = routeContext(
+      canonicalAsap({ installationCredential: validInstallationCredential })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.not.objectContaining({ installationId: expect.anything() })
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      "[route] Could not resolve the request-installation association"
+    );
+  });
+
+  it("legacy web requests remain valid without an installation credential", async () => {
+    const context = routeContext({
+      vendor: "Palladium",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email: "requester@nyu.edu",
+      pickupWindowText: "ASAP",
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(installationFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/request helper email isolation (Slice 7C)", () => {
+  /**
+   * Mirrors the push isolation suite above. Helper-email fan-out is started
+   * after the `201` is sent and is never awaited, so these cases prove the
+   * response is unaffected and that dispatch was started — not what the
+   * dispatch itself does, which `notifySubscribers.test.ts` already covers.
+   * `startNotifySubscribersForRequest` runs for real here (only the
+   * `notifySubscribersForRequest` it wraps is mocked), because its totality is
+   * exactly what keeps an escaping throw or rejection out of `createRequest`'s
+   * outer `catch`.
+   */
+  it("starts helper email after the response, with the persisted document", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(notifySubscribersForRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: requestId })
+    );
+    expect(context.json.mock.invocationCallOrder[0]).toBeLessThan(
+      notifySubscribersForRequest.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("returns 201 without waiting on a helper-email dispatch that never settles", async () => {
+    vi.useRealTimers();
+    notifySubscribersForRequest.mockReturnValue(new Promise(() => {}));
+    const context = routeContext(canonicalAsap());
+
+    const started = Date.now();
+    await createRequest(context.req, context.res);
+
+    // The outstanding dispatch is still in flight; creation did not depend on
+    // it, so the response is already sent.
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(context.json).toHaveBeenCalledOnce();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("returns 201 and answers once when the helper-email dispatch's promise rejects", async () => {
+    vi.useRealTimers();
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    notifySubscribersForRequest.mockRejectedValue(
+      new Error("subscriber delivery failed")
+    );
+    const context = routeContext(canonicalAsap());
+
+    try {
+      await createRequest(context.req, context.res);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(context.status).toHaveBeenCalledExactlyOnceWith(201);
+    expect(context.json).toHaveBeenCalledOnce();
+    // A rejecting dispatch must not reach the outer catch and attempt a
+    // second response after the headers are flushed.
+    expect(context.status).not.toHaveBeenCalledWith(500);
+    expect(rejections).toEqual([]);
+  });
+
+  it("returns 201 when starting helper-email dispatch itself throws synchronously", async () => {
+    // Without a total start function this throw would land in the outer
+    // `catch` and answer `500` on an already-sent response.
+    notifySubscribersForRequest.mockImplementation(() => {
+      throw new Error("dispatch setup failed");
+    });
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledExactlyOnceWith(201);
+    expect(context.status).not.toHaveBeenCalledWith(500);
+    expect(context.json).toHaveBeenCalledOnce();
+  });
+
 });
 
 describe("ASAP window text states the real five-hour lifetime", () => {

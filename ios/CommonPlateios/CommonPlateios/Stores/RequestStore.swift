@@ -150,6 +150,11 @@ enum ClaimUnavailableReason: Equatable {
     /// The request could not be found. This is terminal for the local claim but
     /// must not imply that another external order is safe.
     case fulfillmentRequestNotFound
+    /// A helper new-request notification tap could not be resolved against
+    /// current backend truth (transport, timeout, server, or decoding
+    /// failure). Kept distinct from `noLongerAvailable`: the request may
+    /// still be open, so this must read as "try again", never as "gone".
+    case temporarilyUnavailable
 }
 
 struct ClaimErrorEvent: Identifiable {
@@ -166,6 +171,22 @@ struct ClaimUnavailableNotice: Identifiable, Equatable {
     let operationID: UUID
     let backendCode: String?
     let reason: ClaimUnavailableReason
+}
+
+/// The outcome of resolving a helper new-request notification tap against
+/// backend truth. `requestId` in the push payload is routing context, never
+/// lifecycle truth, so this is the only way a tap may reach a detail screen.
+enum HelperNotificationResolution: Equatable {
+    case available(FoodRequest)
+    /// The backend has current lifecycle truth and it is not open: an
+    /// authoritative 404 (the request no longer exists), or a decoded
+    /// non-open status. Never used for a failure that leaves truth unknown.
+    case unavailable
+    /// Current backend truth could not be established — transport, timeout,
+    /// a server failure, or a response that could not be decoded. This is
+    /// deliberately distinct from `.unavailable`: it must never be presented
+    /// as "this request is gone", only as "try again".
+    case temporarilyUnavailable
 }
 
 /// Stable backend claim and extension error codes, centralized so handling
@@ -294,6 +315,15 @@ final class RequestStore: ObservableObject {
     @Published private(set) var activeClaim: ActiveClaimPresentation?
 
     private let service: RequestService
+    /// The app's existing installation credential (Week 3 Day 6 Slice 6E),
+    /// read from the same storage `PushSubscriptionStore` uses. Reading it
+    /// here has no default: an omitted provider must be a compile error, not
+    /// a silently disconnected one, the same reasoning `ContentView` already
+    /// applies to `remoteNotificationRegistrar` and `notificationRouter`. This
+    /// is the only thing `RequestStore` knows about installations — no push
+    /// preference, no APNs registration state, matching the accepted
+    /// boundary that push state stays separate from this store.
+    private let installationCredentialProvider: () -> String
     private var fetchGeneration = 0
     private var collectionRevision = 0
     private var activeClaimAuthorization: ActiveClaimAuthorization?
@@ -322,8 +352,9 @@ final class RequestStore: ObservableObject {
     /// backend re-checks this and remains authoritative.
     static let claimExtensionDuration: TimeInterval = 5 * 60
 
-    init(service: RequestService) {
+    init(service: RequestService, installationCredentialProvider: @escaping () -> String) {
         self.service = service
+        self.installationCredentialProvider = installationCredentialProvider
     }
 
     var isFetching: Bool {
@@ -386,6 +417,34 @@ final class RequestStore: ObservableObject {
         }
     }
 
+    /// Resolves a helper new-request notification tap's `requestId` against
+    /// backend truth (`GET /api/request/:id`), per the accepted
+    /// notification-tap contract: a `requestId` in the push payload is
+    /// routing context only, and only current backend truth may decide the
+    /// result. A decoded response settles it — `.open` is `.available`,
+    /// anything else is an authoritative `.unavailable` — and an
+    /// authoritative 404 (`RequestServiceError.notFound`, the document does
+    /// not exist) is `.unavailable` too. Every other failure — transport,
+    /// timeout, a non-404 server status, or a decoding failure — means
+    /// current truth could not be established, which resolves to
+    /// `.temporarilyUnavailable` rather than being guessed as "gone".
+    /// Rethrows only cancellation, so a caller whose screen went away before
+    /// this finished can tell "no answer yet" apart from either resolved
+    /// outcome.
+    func resolveHelperNotificationRequest(id: String) async throws -> HelperNotificationResolution {
+        try Task.checkCancellation()
+        do {
+            let request = try await service.fetchRequest(id: id)
+            return request.status == .open ? .available(request) : .unavailable
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch RequestServiceError.notFound {
+            return .unavailable
+        } catch {
+            return .temporarilyUnavailable
+        }
+    }
+
     /// Runs one fail-closed availability probe. Cancellation returns to
     /// `.unknown`; other failures become `.unavailable`. Concurrent calls are
     /// dropped, and recovery is always requester-initiated.
@@ -426,8 +485,15 @@ final class RequestStore: ObservableObject {
         isCreating = true
         createError = nil
         defer { isCreating = false }
+        // Filled in here, immediately before sending, rather than by
+        // `RequestFoodView.makePayload`: the credential is store-owned
+        // installation identity, not a form field, and this keeps every
+        // existing call that builds a `CreateRequestPayload` directly
+        // (including `RequestFoodView`'s own tests) unaware of it.
+        var submittedPayload = payload
+        submittedPayload.installationCredential = installationCredentialProvider()
         do {
-            let created = try await service.createRequest(payload)
+            let created = try await service.createRequest(submittedPayload)
             advanceCollectionRevision()
             applyConfirmed(created)
         } catch is CancellationError {
@@ -1080,6 +1146,34 @@ final class RequestStore: ObservableObject {
         default:
             return nil
         }
+    }
+
+    /// Reports a helper new-request notification's tapped request as
+    /// unavailable, reusing the same Active Requests recovery presentation a
+    /// rejected claim attempt gets. There is no claim attempt behind a
+    /// notification tap, so `operationID` is a fresh identity scoped only to
+    /// this one notice rather than one correlated to an in-flight operation.
+    func reportRequestUnavailableFromNotification(requestID: String) {
+        reportClaimUnavailable(
+            .noLongerAvailable,
+            requestID: requestID,
+            operationID: UUID(),
+            backendCode: nil
+        )
+    }
+
+    /// Reports a helper new-request notification's tapped request as
+    /// resolvable-truth-unknown right now, using the same Active Requests
+    /// recovery presentation as a confirmed-unavailable tap. Distinct from
+    /// `reportRequestUnavailableFromNotification`: this must never claim the
+    /// request is gone, since backend truth could not be established.
+    func reportRequestTemporarilyUnavailableFromNotification(requestID: String) {
+        reportClaimUnavailable(
+            .temporarilyUnavailable,
+            requestID: requestID,
+            operationID: UUID(),
+            backendCode: nil
+        )
     }
 
     private func reportClaimUnavailable(

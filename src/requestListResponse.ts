@@ -12,6 +12,7 @@ export interface PublicRequestDocument {
   status: string;
   createdAt: RequestResponseDate;
   expiresAt: RequestResponseDate;
+  claimExpiresAt?: RequestResponseDate | null;
 }
 
 export interface RequestListDocument
@@ -76,11 +77,24 @@ export function mapPublicRequestFields<Status extends string>(
   };
 }
 
+/**
+ * Unlike the list, the detail response advertises a real, individually
+ * fetched request, so an unavailable one still needs a truthful status
+ * rather than being dropped. A claim-expired request is effectively
+ * available again; every other status is reported as persisted.
+ */
 export function buildPublicRequestDetailResponse(
-  document: PublicRequestDocument
+  document: PublicRequestDocument,
+  serverNow: Date
 ): PublicRequestDetailResponse {
+  const mapped = mapPublicRequestFields(document);
   return {
-    request: mapPublicRequestFields(document),
+    request: {
+      ...mapped,
+      status: isEffectivelyAvailable(document, serverNow)
+        ? "open"
+        : mapped.status,
+    },
   };
 }
 

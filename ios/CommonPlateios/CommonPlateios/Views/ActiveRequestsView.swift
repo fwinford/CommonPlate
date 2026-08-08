@@ -360,6 +360,8 @@ struct ActiveRequestsView: View {
             return "We couldn’t find this request."
         case .noLongerAvailable, nil:
             return RequestDetailView.noLongerAvailableNotice
+        case .temporarilyUnavailable:
+            return RequestDetailView.temporarilyUnavailableNotice
         }
     }
 
@@ -385,7 +387,7 @@ struct ActiveRequestsView: View {
             return "Don’t place another Grubhub order. We couldn’t confirm whether the student’s email was sent, so they may not know the order is ready."
         case .fulfillmentRequestNotFound:
             return "It may already have been recorded or removed. Don’t place another Grubhub order."
-        case .alreadyClaimed, .noLongerAvailable, nil:
+        case .alreadyClaimed, .noLongerAvailable, .temporarilyUnavailable, nil:
             return nil
         }
     }

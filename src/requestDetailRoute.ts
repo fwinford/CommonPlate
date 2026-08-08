@@ -24,7 +24,8 @@ export async function getPublicRequestDetail(
 
     return res.json(
       buildPublicRequestDetailResponse(
-        document as unknown as PublicRequestDocument
+        document as unknown as PublicRequestDocument,
+        new Date()
       )
     );
   } catch (err) {

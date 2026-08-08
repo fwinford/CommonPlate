@@ -122,6 +122,68 @@ SendLogSchema.index({ requestId: 1, subscriberId: 1 }, { unique: true });
 export const SendLog = mongoose.models.SendLog || mongoose.model<ISendLog>("SendLog", SendLogSchema);
 
 
+// ========================== Installation ============================
+// One record per app installation that has ever synchronized push state
+// (Week 3 Day 6 Slice 6A.1). Deliberately separate from Subscriber: an
+// installation identity is not a person, account, or email address, and
+// email delivery must stay wholly independent of push delivery.
+export interface IInstallation extends Document {
+  installationCredentialDigest: string;
+  pushEnabled: boolean;
+  apnsToken?: string | null;
+  apnsEnvironment?: "development" | "production" | null;
+  tokenUpdatedAt?: Date | null;
+  invalidatedAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const InstallationSchema = new Schema<IInstallation>(
+  {
+    // SHA-256 digest of the opaque credential the app generates for itself.
+    // Only the digest is ever persisted; the raw credential is never stored
+    // or logged.
+    installationCredentialDigest: {
+      type: String,
+      required: true,
+      unique: true,
+      select: false,
+    },
+    pushEnabled: { type: Boolean, required: true, default: false },
+    // Left set (not cleared) when push is turned off, so a later
+    // provider-invalidation notice for this exact token can still recognize
+    // it as this installation's current token. See the Slice 6A APNs
+    // invalidation boundary in the Week 3 spec.
+    apnsToken: { type: String, select: false },
+    apnsEnvironment: { type: String, enum: ["development", "production"] },
+    tokenUpdatedAt: { type: Date },
+    invalidatedAt: { type: Date },
+  },
+  { timestamps: true }
+);
+
+// At most one installation may be the eligible current owner of a given APNs
+// token in a given environment. Enforced with a partial unique index, not a
+// read-then-write check, so two installations registering the same token at
+// once cannot both end up eligible: MongoDB itself rejects the second write,
+// and the route demotes the prior owner and retries.
+InstallationSchema.index(
+  { apnsToken: 1, apnsEnvironment: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      pushEnabled: true,
+      apnsToken: { $type: "string" },
+    },
+    name: "installation_push_eligible_token_unique",
+  }
+);
+
+export const Installation =
+  (mongoose.models.Installation as mongoose.Model<IInstallation>) ||
+  mongoose.model<IInstallation>("Installation", InstallationSchema);
+
+
 // ============================ Request =============================
 export interface IRequest extends Document {
   vendor: string;
@@ -146,6 +208,7 @@ export interface IRequest extends Document {
   claimExpiresAt?: Date;
   claimExtendedAt?: Date | null;
   claimTokenDigest?: string;
+  installationId?: Types.ObjectId | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -186,6 +249,12 @@ const RequestSchema = new Schema<IRequest>({
   claimExpiresAt: { type: Date },
   claimExtendedAt: { type: Date, default: null },
   claimTokenDigest: { type: String, select: false },
+  // The originating app installation, when the request was created from iOS
+  // with an installation credential (Week 3 Day 6 Slice 6E). Notification-
+  // routing identity only — never a person, account, or auth identity — and
+  // never exposed through any public projection, so it stays out of ordinary
+  // reads like every other private lifecycle field.
+  installationId: { type: Schema.Types.ObjectId, ref: "Installation", select: false },
 }, { timestamps: true });
 
 // `expiresAt` is the availability deadline; `deleteAt` owns physical retention.
@@ -248,3 +317,85 @@ export const Request =
 export const Fulfillment = 
   (mongoose.models.Fulfillment as mongoose.Model<IFulfillment>) || 
   mongoose.model<IFulfillment>("Fulfillment", FulfillmentSchema);
+
+
+/* =========================== PushDelivery ============================ */
+// One row per intentional APNs submission for a (request, installation,
+// purpose) triple (Week 3 Day 6 Slice 6D). Deliberately not `SendLog`: that
+// collection requires a `subscriberId` and is uniquely indexed on
+// (requestId, subscriberId), so push rows would need a subscriber that does
+// not exist, and it would entangle the two channels this contract requires to
+// fail independently.
+//
+// `"requester-fulfillment"` (Slice 6E) shares this same collection and unique
+// index rather than widening it — the collection was shaped for exactly this
+// from the start (see `purpose` below).
+export type PushDeliveryPurpose = "helper-new-request" | "requester-fulfillment";
+export type PushDeliveryStatus = "claimed" | "accepted" | "rejected" | "failed";
+
+export interface IPushDelivery extends Document {
+  installationId: Types.ObjectId;
+  requestId: Types.ObjectId;
+  purpose: PushDeliveryPurpose;
+  status: PushDeliveryStatus;
+  submittedAt?: Date | null;
+  apnsId?: string | null;
+  deleteAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const PushDeliverySchema = new Schema<IPushDelivery>(
+  {
+    installationId: {
+      type: Schema.Types.ObjectId,
+      ref: "Installation",
+      required: true,
+    },
+    requestId: { type: Schema.Types.ObjectId, ref: "Request", required: true },
+    // Present from the start so a later requester-fulfillment purpose shares
+    // this collection without widening the uniqueness key afterwards.
+    purpose: {
+      type: String,
+      enum: ["helper-new-request", "requester-fulfillment"],
+      required: true,
+    },
+    // `status: "accepted"` means exactly "APNs returned 200 for this
+    // submission". It is never delivery, display, opening, or reading.
+    status: {
+      type: String,
+      enum: ["claimed", "accepted", "rejected", "failed"],
+      required: true,
+      default: "claimed",
+    },
+    submittedAt: { type: Date },
+    apnsId: { type: String },
+    // TTL. Set to the request's expiration plus a day, so the duplicate guard
+    // outlives every window in which a second dispatch is plausible and
+    // nothing accumulates indefinitely.
+    deleteAt: {
+      type: Date,
+      required: true,
+      index: {
+        expireAfterSeconds: 0,
+        name: "push_delivery_deleteAt_ttl",
+      },
+    },
+  },
+  { timestamps: true }
+);
+
+// Claim-before-submit: the dispatcher inserts a `claimed` row and treats a
+// duplicate-key error as "another dispatch owns this triple". A row in ANY
+// state blocks a second submission — unlike SendLog, which permits a retry
+// after a failure — because V1 has no push retry path, so a `failed` or
+// `rejected` row is terminal and re-submitting would be a duplicate rather
+// than a recovery.
+PushDeliverySchema.index(
+  { requestId: 1, installationId: 1, purpose: 1 },
+  { unique: true, name: "push_delivery_identity_unique" }
+);
+
+export const PushDelivery =
+  (mongoose.models.PushDelivery as mongoose.Model<IPushDelivery>) ||
+  mongoose.model<IPushDelivery>("PushDelivery", PushDeliverySchema);

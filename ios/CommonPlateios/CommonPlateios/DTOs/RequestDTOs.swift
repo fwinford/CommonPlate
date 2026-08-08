@@ -72,6 +72,16 @@ struct PublicActionsStateDTO: Decodable {
 
 /// Payload for `POST /api/request`. Must never include backend-owned
 /// lifecycle fields (id, status, createdAt, expiresAt, claim/fulfillment fields).
+///
+/// `installationCredential` (Week 3 Day 6 Slice 6E) is the app's existing,
+/// stable installation credential — the same value `InstallationPushService`
+/// sends — carried so the backend can resolve/establish the originating
+/// installation for a later best-effort requester-fulfillment push. It is
+/// notification-routing identity only, never push permission or push state,
+/// and `RequestFoodView.makePayload` never sets it: `RequestStore.createRequest`
+/// fills it in from the store's own installation-credential provider
+/// immediately before sending, so this field defaults to absent for every
+/// existing caller and test that constructs a payload directly.
 struct CreateRequestPayload: Encodable {
     let vendor: String
     let food: String
@@ -80,6 +90,7 @@ struct CreateRequestPayload: Encodable {
     let timing: RequestTimingWire
     let windowStart: Date?
     let windowEnd: Date?
+    var installationCredential: String? = nil
 }
 
 // MARK: - Claim

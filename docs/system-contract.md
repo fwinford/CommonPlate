@@ -4,7 +4,7 @@
 
 CommonPlate currently supports one journey: **create → list → claim → fulfill → placed**. The iOS client and backend are for internal simulator/testing use; they are not ready for student distribution or TestFlight.
 
-Current scope excludes authentication, chat, maps, push, payments, cancellation, pickup confirmation, and any no-show lifecycle. The legacy web fulfillment page remains disabled and cannot place an order.
+Current scope excludes authentication, chat, maps, payments, cancellation, pickup confirmation, and any no-show lifecycle. The legacy web fulfillment page remains disabled and cannot place an order.
 
 ## 2. Request lifecycle and availability
 
@@ -46,7 +46,9 @@ Fulfillment `INTERNAL_FAILURE` is ambiguous. iOS performs one read-only request-
 
 ## 6. Request-creation contract
 
-Creation uses strict backend validation for canonical and legacy request shapes, email, required text, scheduling bounds, and a still-usable scheduled end time. Where iOS can know an error locally, it validates before submission (including required fields, email, and scheduling/form constraints).
+Creation uses strict backend validation for canonical and legacy request shapes, vendor, email, required text, scheduling bounds, and a still-usable scheduled end time. Where iOS can know an error locally, it validates before submission (including required fields, email, and scheduling/form constraints).
+
+CommonPlate has one canonical supported-vendor catalog, `shared/vendors.json`, currently the accepted 11 dining locations. Backend request creation is authoritative over it. Both supported create payload shapes require `vendor` to match a catalog entry exactly, after the same trimming already applied to that field; case variants and other near-matches are refused rather than silently canonicalized. Structural shape validation still runs first, and vendor validation runs immediately after it, before the email allowlist below. A vendor that is present and non-blank but not in the catalog returns HTTP 400 with code `INVALID_VENDOR` and message `Choose a supported CommonPlate dining location.` Enforcement applies only to new request creation: existing persisted requests are neither migrated nor rejected on read. iOS consumes the same shared catalog for its vendor picker; the website form remains free-text, with backend enforcement still applying to it.
 
 The requester email must be an allowed NYU address. Both alert signup and food-request creation require one, enforced by the same `src/allowedEmailDomains.ts` helper with the same exact allowlist, normalization, and refusal of lookalikes and unlisted subdomains described in section 9.1. This verifies control of an eligible NYU-domain address; it is not authentication and does not prove enrollment. Existing requests created on other domains are unaffected — the allowlist gates creation only.
 
@@ -61,6 +63,12 @@ The iOS form also states the rule before anything is typed. `Use your @nyu.edu o
 
 Creation has no operation identity. If iOS cannot confirm a create outcome, it blocks further creation for the lifetime of that `RequestStore`/app process to avoid duplicates. Durable reconciliation and backend idempotency do not exist. `REQUEST_CREATION_FAILED` therefore remains a Week 3 reconciliation concern rather than proof that no request was created.
 
+### 6.1 Request → installation association
+
+An iOS request-creation payload may carry the installation's existing `installationCredential`. A structurally malformed supplied credential is a structural failure: HTTP 400 `INVALID_REQUEST`, the same envelope as any other malformed payload. A structurally valid credential is used to establish or resolve installation identity through the existing installation-credential mechanism; only an opaque internal association is persisted on the Request, never the raw credential. This association is notification-routing metadata only — it is not authentication, not NYU participant identity, and not proof of a person. Reinstall creates a new installation and does not relink requests created by a prior installation; no email, APNs token, or other heuristic re-links them either. Web-created requests remain valid without any installation association. Request creation never depends on Apple notification permission or push-enabled state.
+
+Association is best-effort against unexpected backend persistence failure: if establishing or persisting the association unexpectedly fails, request creation still proceeds and the request persists without an installation association. `installationId` is therefore optional persisted metadata; a downstream flow may not assume every iOS-created Request carries one, and its presence or absence carries no authentication or identity meaning.
+
 ## 7. Daily request abuse control
 
 CommonPlate attempts to limit each email to three requests per day. The backend counts before creating, serially in the handler; this is best-effort abuse control, not an atomic quota transaction. A failed count read fails closed. Concurrent create requests can exceed the limit. Atomic enforcement is deferred to Week 5 if usage requires it.
@@ -73,6 +81,24 @@ Provider acceptance means only that CommonPlate submitted an email to the provid
 | --- | --- |
 | `Request.notificationStatus` (`pending`, `sent`, `failed`) | Requester placement-email submission state only, recorded after committed placement. |
 | `SendLog` (`sent`, `fail`) | Helper-alert and digest send ledger / duplicate-send guard. It is not requester placement-email state. |
+
+### 8.1 Real-time helper-alert selection and dispatch
+
+For each new eligible request, every `confirmed`, non-bounced Subscriber is considered for a real-time email alert — not a bounded or round-robin-selected subset. There is no 1-hour per-subscriber cooldown, no per-subscriber daily send cap, and no ordinary round-robin selection gating which confirmed subscribers receive an alert. A subscriber enrolled in both email and push may receive both for the same request; the two channels are independent.
+
+`SendLog`'s unique `(requestId, subscriberId)` claim-before-send index still provides per-pair duplicate-send prevention, and one subscriber's provider failure does not stop the remaining eligible subscribers from being attempted. A successful real-time send still sets `lastSentAt` and increments `dailyCount` on the Subscriber, because the hourly digest still reads both fields for its own eligibility; digest behavior is unchanged by real-time selection. Provider acceptance for a real-time alert carries the same meaning as elsewhere in this section: submission only, never delivery, reading, or pickup.
+
+CommonPlate has no internal provider-wide send-volume ceiling. A provider quota or rate-limit refusal surfaces through the existing per-subscriber `SendLog` `fail` outcome and per-subscriber failure isolation above; it is not pre-empted by silently skipping subscribers. Introducing an application-level ceiling is deferred until Week 5 production email configuration, and only if actual provider rate or quota evidence requires one.
+
+`POST /api/request` never waits on real-time helper-alert fan-out. The `201` response is built and sent from the persisted document first; helper-alert dispatch is started only afterward, detached, through a total entry point that cannot throw and cannot leave an unhandled promise rejection. A slow, large, or failing fan-out cannot delay the requester's response, cannot turn a successful creation into `REQUEST_CREATION_FAILED`, and cannot produce a second response on a request whose headers are already sent. The requester confirmation email remains awaited before the response, unchanged.
+
+### 8.2 Requester-fulfillment push
+
+After a request's placement has durably committed, CommonPlate may best-effort submit a requester-fulfillment push to the originating associated installation only (the Request's stored association from section 6.1). If that installation is missing, disabled, invalidated, or lacks a usable APNs registration, no push is sent; there is no fallback or heuristic recipient. Requester-fulfillment push is independent of placement success and of the existing fulfillment email — neither affects the other. At most one requester-fulfillment provider submission is claimed for the same request + installation, matching the existing dedup discipline used for helper push. Provider acceptance means submission only, never delivery, display, opening, or reading.
+
+Notification title: `"Your order was placed"`. Body: `"A helper placed the order for your request."` The payload carries only privacy-safe routing data; it never carries pickup name, requester or helper email, order number, claim token or claim state, the installation credential, or any other private fulfillment field. The requester-fulfillment notification intent and the helper new-request notification intent remain distinct; a requester notification tap is implemented as opening Home and presenting a one-time "Your order was placed." notice.
+
+Physical APNs delivery, OS notification tap handoff, Home navigation, and visible presentation of the requester notice are implemented runtime behavior, not yet physically verified on a device; see section 11.
 
 ## 9. Subscriber lifecycle
 
@@ -341,6 +367,7 @@ The same variable is the activation switch for the unsubscribe signing secret: u
 
 ## 11. Durable deferrals that constrain current behavior
 
+- An application-level provider-wide send-volume ceiling for real-time helper-alert email. None exists today; a provider quota or rate-limit refusal is handled through the existing per-subscriber `SendLog` failure path rather than by pre-emptively skipping subscribers. Revisit during Week 5 production email configuration, and only if actual provider rate or quota evidence requires one.
 - Cleanup of expired pending Subscribers; they stay notification-ineligible, so the current consequence is storage growth.
 - Physical cleanup of expired confirmation receipts (`lastConfirmedTokenDigest`, `lastConfirmedTokenExpiresAt`) on rows that stay confirmed. Unsubscribing now clears the receipt outright, and the expiry comparison already prevents recognition after the original window, so the remaining consequence is stored data, not behaviour.
 - Provider timeouts outside the confirmation email, and durable email-outcome persistence. Only `sendSubscriptionConfirmationEmail` currently carries an abort deadline.
@@ -349,3 +376,4 @@ The same variable is the activation switch for the unsubscribe signing secret: u
 - Paid-but-unrecorded recovery beyond the in-memory, one-resend fulfillment safeguard.
 - Physical-device and release backend configuration.
 - Full privacy and accessibility review.
+- Physical-device proof of requester-fulfillment push: real APNs delivery, OS notification tap handoff, Home navigation, and visible presentation of the "Your order was placed." requester notice. Deferred to the pre-TestFlight / Week 3 release-device acceptance gate.

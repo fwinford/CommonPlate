@@ -15,6 +15,7 @@ import {
 import { createDay4MutationRateLimiter } from "./claimRoute.js";
 import { sendDay4Error } from "./day4Errors.js";
 import { sendFulfillmentEmail } from "./emailHelpers.js";
+import { startRequesterFulfillmentPush } from "./requesterFulfillmentPush.js";
 import {
   buildPublicRequestDetailResponse,
   type PublicRequestDocument,
@@ -200,7 +201,12 @@ async function persistCorePlacement(
           $unset: unsetFields,
         },
         { new: true, runValidators: true, session }
-      ).exec();
+      )
+        // `installationId` is `select: false`; the requester-fulfillment push
+        // dispatched after this transaction commits needs it to find the
+        // originating installation, so it must be requested explicitly here.
+        .select("+installationId")
+        .exec();
 
       if (!placedRequest) {
         throw new ConditionalPlacementFailure();
@@ -368,10 +374,20 @@ export async function fulfillRequest(
 
   await recordNotificationOutcome(id, placedAt, notificationStatus);
   const publicResponse = buildPublicRequestDetailResponse(
-    placedRequest as unknown as PublicRequestDocument
+    placedRequest as unknown as PublicRequestDocument,
+    placedAt
   );
-  return res.json({
+  res.json({
     request: publicResponse.request,
     notification: { status: notificationStatus },
   });
+  // Started after the response is sent and deliberately not awaited, matching
+  // `startHelperNewRequestPush`: a slow, timed-out, or misconfigured APNs
+  // submission must not delay this response, and placement has already
+  // durably committed by this point regardless of what push does next. The
+  // start function is total — it neither throws nor returns anything to
+  // await — so nothing here can reach a `catch` after the headers are
+  // flushed.
+  startRequesterFulfillmentPush(placedRequest);
+  return res;
 }

@@ -14,6 +14,7 @@ import Foundation
 enum HTTPMethod: String {
     case get = "GET"
     case post = "POST"
+    case put = "PUT"
 }
 
 /// Client-side representation of a failed request. Preserves the backend's

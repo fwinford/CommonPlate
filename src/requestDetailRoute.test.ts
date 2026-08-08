@@ -167,6 +167,64 @@ describe("GET /api/request/:id", () => {
     expect(context.status).not.toHaveBeenCalled();
   });
 
+  it("reports a claim-expired request as effectively open", async () => {
+    const now = Date.now();
+    mockFindById(
+      requestDocument({
+        status: "claimed",
+        expiresAt: new Date(now + 60 * 60 * 1000),
+        claimExpiresAt: new Date(now - 60 * 1000),
+      })
+    );
+    const context = routeContext();
+
+    await getPublicRequestDetail(context.req, context.res, context.next);
+
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ status: "open" }),
+      })
+    );
+  });
+
+  it("keeps a claimed request with an unexpired claim as claimed", async () => {
+    const now = Date.now();
+    mockFindById(
+      requestDocument({
+        status: "claimed",
+        expiresAt: new Date(now + 60 * 60 * 1000),
+        claimExpiresAt: new Date(now + 30 * 60 * 1000),
+      })
+    );
+    const context = routeContext();
+
+    await getPublicRequestDetail(context.req, context.res, context.next);
+
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ status: "claimed" }),
+      })
+    );
+  });
+
+  it("keeps an open request whose expiration has passed as open, not effectively available", async () => {
+    mockFindById(
+      requestDocument({
+        status: "open",
+        expiresAt: new Date("2020-01-01T00:00:00.000Z"),
+      })
+    );
+    const context = routeContext();
+
+    await getPublicRequestDetail(context.req, context.res, context.next);
+
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ status: "open" }),
+      })
+    );
+  });
+
   it("preserves the existing invalid-id response", async () => {
     const context = routeContext("not-an-object-id");
 

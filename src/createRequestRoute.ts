@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import type { Types } from "mongoose";
 import { Resend } from "resend";
 import { z } from "zod";
 import { Request as MealRequest } from "../models/db.js";
@@ -7,6 +8,14 @@ import {
   hasAllowedEmailDomain,
 } from "./allowedEmailDomains.js";
 import { escapeHtml } from "./htmlEscape.js";
+import { startHelperNewRequestPush } from "./helperNewRequestPush.js";
+import { isValidRawInstallationCredential } from "./installationCredential.js";
+import { notifySubscribersForRequest } from "./notifySubscribers.js";
+import { resolveRequestInstallationAssociation } from "./requestInstallationAssociation.js";
+import {
+  isSupportedVendor,
+  UNSUPPORTED_VENDOR_MESSAGE,
+} from "./supportedVendors.js";
 import {
   buildPublicRequestDetailResponse,
   type PublicRequestDocument,
@@ -41,6 +50,20 @@ const eligibleRequesterEmail = z
   .refine(hasAllowedEmailDomain);
 const isoTimestamp = z.iso.datetime({ offset: true });
 
+/**
+ * iOS sends its existing installation credential with request creation
+ * (Week 3 Day 6 Slice 6E) so the backend can resolve/establish the
+ * originating installation for a later best-effort fulfillment push. Web
+ * requests carry none, and stay valid without one — this is optional on
+ * every schema that has it, never required. A present-but-malformed value is
+ * a structural failure, exactly like every other malformed field on this
+ * route, rather than a dedicated error code of its own.
+ */
+const optionalInstallationCredential = z
+  .string()
+  .refine(isValidRawInstallationCredential)
+  .optional();
+
 const requesterFields = {
   vendor: requesterString,
   food: requesterString,
@@ -52,6 +75,7 @@ const canonicalAsapSchema = z
   .object({
     ...requesterFields,
     timing: z.literal("asap"),
+    installationCredential: optionalInstallationCredential,
   })
   .strict();
 
@@ -61,6 +85,7 @@ const canonicalScheduledSchema = z
     timing: z.literal("scheduled"),
     windowStart: isoTimestamp,
     windowEnd: isoTimestamp,
+    installationCredential: optionalInstallationCredential,
   })
   .strict()
   .refine(
@@ -117,6 +142,8 @@ interface ValidatedCreateRequest {
   windowStart?: Date;
   windowEnd?: Date;
   pickupWindowText: string;
+  /** Present only on the canonical iOS shapes; the legacy web shape has none. */
+  installationCredential?: string;
 }
 
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -192,6 +219,7 @@ function validateCreateShape(
         email: result.data.email,
         timing: "asap",
         pickupWindowText: "ASAP (within the next 5 hours)",
+        installationCredential: result.data.installationCredential,
       };
     }
 
@@ -208,6 +236,7 @@ function validateCreateShape(
       windowStart,
       windowEnd,
       pickupWindowText: formatMealRequestWindow(windowStart, windowEnd),
+      installationCredential: result.data.installationCredential,
     };
   }
 
@@ -251,9 +280,10 @@ function validateCreateShape(
  * generic message: a missing, blank, or wrongly typed field, an unexpected key,
  * a bad `timing`, a mismatched or already-ended window, on either create shape.
  * `email` is reserved for an address that is present and non-blank but fails
- * syntax or the NYU allowlist.
+ * syntax or the NYU allowlist. `vendor` is reserved for a vendor that is
+ * present and non-blank but is not one of the supported catalog entries.
  */
-type CreateRefusal = "payload" | "email";
+type CreateRefusal = "payload" | "vendor" | "email";
 
 type CreateValidation =
   | { ok: true; request: ValidatedCreateRequest }
@@ -264,18 +294,22 @@ function isEligibleRequesterEmail(email: string): boolean {
 }
 
 /**
- * The allowlist is strictly additive and runs last, so it can only refuse a
- * payload that would otherwise have been created. Every existing failure — and
- * every case where another field is also invalid — keeps the exact generic
- * error it has always returned, and the address-specific message is reserved
- * for the one case where the address is the only thing wrong.
+ * The vendor and email allowlists are strictly additive and run after shape
+ * validation, so they can only refuse a payload that would otherwise have
+ * been created. Every existing structural failure — and every case where
+ * another field is also invalid — keeps the exact generic error it has
+ * always returned; the vendor- and address-specific messages are each
+ * reserved for the one case where that field alone is what's wrong.
  *
- * Both refusals happen here, before the daily-limit read, the write, the
- * requester confirmation email, and helper notification.
+ * All three refusals happen here, before the daily-limit read, the write,
+ * the requester confirmation email, and helper notification.
  */
 function validateCreateRequest(body: unknown, now: Date): CreateValidation {
   const request = validateCreateShape(body, now);
   if (!request) return { ok: false, refusal: "payload" };
+  if (!isSupportedVendor(request.vendor)) {
+    return { ok: false, refusal: "vendor" };
+  }
   if (!isEligibleRequesterEmail(request.email)) {
     return { ok: false, refusal: "email" };
   }
@@ -321,12 +355,52 @@ async function attemptRequesterConfirmation(
 }
 
 /**
+ * The route-facing entry point for real-time helper-email fan-out, and a
+ * **total** function: an ordinary non-`async` function that never throws and
+ * returns nothing the route can await. Mirrors `startHelperNewRequestPush`.
+ *
+ * Both guards are load-bearing. The attached `.catch` contains every
+ * asynchronous rejection from `notifySubscribersForRequest` — a query
+ * failure, a provider error escaping its own per-subscriber isolation. The
+ * synchronous `try`/`catch` contains a setup error thrown before any promise
+ * exists.
+ *
+ * This matters because `createRequest` calls it *after* the `201` has been
+ * sent. Full-fanout selection makes this call's duration unbounded with
+ * confirmed-subscriber count, so it must never be awaited, and an escaping
+ * throw or unhandled rejection here would attempt a second response on a
+ * request whose headers are already flushed.
+ */
+function startNotifySubscribersForRequest(
+  request: Parameters<typeof notifySubscribersForRequest>[0]
+): void {
+  let requestId = "unknown";
+  try {
+    requestId = String(request._id);
+    void notifySubscribersForRequest(request).catch((error: unknown) => {
+      console.error(
+        `[notify] Helper email dispatch failed for request ${requestId}`,
+        error
+      );
+    });
+  } catch (error) {
+    console.error(
+      `[notify] Helper email dispatch could not start for request ${requestId}`,
+      error
+    );
+  }
+}
+
+/**
  * Focused handler for POST /api/request.
  *
- * Validation and persistence are core. Requester confirmation and existing
- * helper notification delivery happen only after the canonical response has
- * been built from the persisted document, and neither side effect can change
- * the creation result.
+ * Validation and persistence are core. Requester confirmation happens only
+ * after the canonical response has been built from the persisted document,
+ * and cannot change the creation result. Helper email and helper push
+ * dispatch are both started after the response is sent and neither is
+ * awaited, so email and push fail independently of each other, of requester
+ * confirmation, and of creation — and neither can delay the requester's
+ * `201`, regardless of confirmed-subscriber count.
  */
 export async function createRequest(
   req: Request,
@@ -339,16 +413,23 @@ export async function createRequest(
 
   const validation = validateCreateRequest(req.body, now);
   if (!validation.ok) {
-    // `INVALID_EMAIL` is the code `POST /api/subscribe` already returns for
-    // this exact condition, rather than a second meaning loaded onto
-    // `INVALID_REQUEST`. Clients that do not know it still render the message.
-    return validation.refusal === "email"
-      ? res
-          .status(400)
-          .json(errorEnvelope("INVALID_EMAIL", NYU_EMAIL_REQUIRED_MESSAGE))
-      : res
-          .status(400)
-          .json(errorEnvelope("INVALID_REQUEST", "Invalid request payload"));
+    // `INVALID_EMAIL` and `INVALID_VENDOR` are each a distinct code for one
+    // specific, otherwise-valid field, rather than a second and third meaning
+    // loaded onto `INVALID_REQUEST`. Clients that do not know either code
+    // still render the message.
+    if (validation.refusal === "email") {
+      return res
+        .status(400)
+        .json(errorEnvelope("INVALID_EMAIL", NYU_EMAIL_REQUIRED_MESSAGE));
+    }
+    if (validation.refusal === "vendor") {
+      return res
+        .status(400)
+        .json(errorEnvelope("INVALID_VENDOR", UNSUPPORTED_VENDOR_MESSAGE));
+    }
+    return res
+      .status(400)
+      .json(errorEnvelope("INVALID_REQUEST", "Invalid request payload"));
   }
   const validated = validation.request;
 
@@ -379,6 +460,20 @@ export async function createRequest(
     }
 
     const expiresAt = requestExpiration(validated, now);
+
+    // Notification-routing identity only, and strictly best-effort: a failure
+    // to resolve it must never block the core act of creating a food request.
+    let installationId: Types.ObjectId | undefined;
+    try {
+      installationId = await resolveRequestInstallationAssociation(
+        validated.installationCredential
+      );
+    } catch {
+      console.error(
+        "[route] Could not resolve the request-installation association"
+      );
+    }
+
     const document = await MealRequest.create({
       vendor: validated.vendor,
       food: validated.food,
@@ -390,27 +485,28 @@ export async function createRequest(
       status: "open",
       expiresAt,
       deleteAt: expiresAt,
+      ...(installationId ? { installationId } : {}),
     });
 
     const response = buildPublicRequestDetailResponse(
-      document as unknown as PublicRequestDocument
+      document as unknown as PublicRequestDocument,
+      now
     );
     const requestId = String(document._id);
 
     await attemptRequesterConfirmation(validated, requestId);
 
-    try {
-      const { notifySubscribersForRequest } = await import(
-        "./notifySubscribers.js"
-      );
-      await notifySubscribersForRequest(document);
-    } catch {
-      console.error(
-        `[route] Helper notification failed after persistence for request ${requestId}`
-      );
-    }
-
-    return res.status(201).json(response);
+    res.status(201).json(response);
+    // Both started after the response is sent and deliberately not awaited: a
+    // slow, timed-out, or misconfigured APNs submission, or a large or slow
+    // confirmed-subscriber email fan-out, must not delay the requester's
+    // `201`, turn a successful creation into `REQUEST_CREATION_FAILED`, or
+    // alter the created request. Both start functions are total — neither
+    // throws, and neither returns anything to await — so nothing here can
+    // reach the outer `catch` after the headers are flushed.
+    startHelperNewRequestPush(document);
+    startNotifySubscribersForRequest(document);
+    return res;
   } catch {
     console.error("[route] Request creation failed");
     return res.status(500).json(

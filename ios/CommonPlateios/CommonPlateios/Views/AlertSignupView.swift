@@ -61,6 +61,10 @@ struct AlertSignupView: View {
     // MARK: - View
 
     @ObservedObject var store: AlertSubscriptionStore
+    /// Push keeps its own state owner and its own small section below the
+    /// email form (Week 3 Day 6 Slice 6A.2). It shares no state with `store`:
+    /// email and push are independent controls.
+    @ObservedObject var pushStore: PushSubscriptionStore
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isEmailFocused: Bool
 
@@ -81,6 +85,11 @@ struct AlertSignupView: View {
             } else {
                 form
             }
+
+            Divider()
+
+            PushNotificationSection(store: pushStore)
+
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -249,19 +249,7 @@ struct RequestFoodView: View {
         )
     }
 
-    let diningSpots = [
-        DiningSpot(name: "Crave NYU", address: "John A. Paulson Center, 6th Floor"),
-        DiningSpot(name: "Dunkin' at U-Hall", address: "U-Hall, 108 E 14th St"),
-        DiningSpot(name: "Jasper Kane Cafe", address: "BROOKLYN, Rogers Hall"),
-        DiningSpot(name: "Peet's Coffee at Kimmel", address: "Kimmel Center, 60 Washington Sq S, 2nd Floor"),
-        DiningSpot(name: "Cafe 370", address: "BROOKLYN - 370 Jay St"),
-        DiningSpot(name: "Flavor Lab by NYU Eats", address: "Jasper Kane Cafe"),
-        DiningSpot(name: "Cafe 181", address: "John A. Paulson Center, 6th Floor"),
-        DiningSpot(name: "Upstein - Vedge Craft & Smoothie Lab", address: "Weinstein Hall, 5 University Pl #11"),
-        DiningSpot(name: "Upstein - Shareables, Cluckstein, Slidestein & Taqueria", address: "Weinstein Hall, 5 University Pl #11"),
-        DiningSpot(name: "True Burger at UHall", address: "U-Hall, 110 E. 14th"),
-        DiningSpot(name: "Palladium", address: "Palladium Hall, 140 E 14th St")
-    ]
+    let diningSpots = SupportedVendorCatalog.diningSpots
 
     var body: some View {
         Group {

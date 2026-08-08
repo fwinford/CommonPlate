@@ -923,7 +923,7 @@ final class RequestFetchingTests: XCTestCase {
     }
 
     private func makeStore() -> RequestStore {
-        RequestStore(service: makeService())
+        RequestStore(service: makeService(), installationCredentialProvider: { "test-installation-credential" })
     }
 
     private func makeService() -> RequestService {

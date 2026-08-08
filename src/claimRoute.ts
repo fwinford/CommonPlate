@@ -172,7 +172,8 @@ export async function claimRequest(
     }
 
     const publicResponse = buildPublicRequestDetailResponse(
-      document as unknown as PublicRequestDocument
+      document as unknown as PublicRequestDocument,
+      now
     );
     return res.json({
       request: publicResponse.request,

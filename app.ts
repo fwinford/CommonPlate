@@ -101,6 +101,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import {
   Fulfillment,
+  Installation,
+  PushDelivery,
   Request as MealRequest,
   Subscriber,
 } from "./models/db.js";
@@ -134,6 +136,7 @@ import {
 } from "./src/claimRoute.js";
 import { readClaimTokenHmacSecret } from "./src/claimToken.js";
 import { assertUnsubscribeSigningSecretForActivation } from "./src/unsubscribeCredential.js";
+import { assertApnsConfigurationForActivation } from "./src/apnsConfig.js";
 import { buildEffectiveAvailabilityFilter } from "./src/requestAvailability.js";
 import {
   CREATE_UNAVAILABLE_MESSAGE,
@@ -142,6 +145,12 @@ import {
   pausePublicAction,
 } from "./src/publicActionsPause.js";
 import { subscribe } from "./src/subscribeRoute.js";
+import {
+  INSTALLATION_PUSH_ROUTE_PATH,
+  INSTALLATION_PUSH_UNAVAILABLE_MESSAGE,
+  installationPushRateLimiter,
+  synchronizeInstallationPush,
+} from "./src/installationPushRoute.js";
 import {
   CONFIRMATION_ROUTE_PATH,
   confirmSubscriptionPage,
@@ -196,6 +205,22 @@ try {
     error instanceof Error
       ? error.message
       : "Invalid unsubscribe signing secret"
+  );
+  process.exit(1);
+}
+// Also required only once public actions are unpaused, and checked in the same
+// place for the same reason: an installation can already turn push on, and
+// "push alerts are on" means this deployment is configured to submit through
+// APNs. Without provider configuration that on-state would be true for nobody,
+// so provider configuration gates activation instead of being discovered at
+// the first send. Paused startup reads none of the four variables.
+try {
+  assertApnsConfigurationForActivation();
+} catch (error) {
+  console.error(
+    error instanceof Error
+      ? error.message
+      : "Invalid APNs provider configuration"
   );
   process.exit(1);
 }
@@ -306,6 +331,18 @@ app.get("/api/public-actions", (req: Request, res: Response) => {
 // no confirmation email is sent, and no recent-request alerts are dispatched.
 app.post('/api/subscribe', pausePublicAction(SUBSCRIBE_UNAVAILABLE_MESSAGE), limiter, subscribe);
 
+// api: synchronize one app installation's complete current push state
+// (Week 3 Day 6 Slice 6A.1). This declares on/off and, when on, the current
+// APNs token; it sends no notification. The pause runs ahead of the limiter
+// and the handler so a paused request performs no credential hashing,
+// installation lookup, or mutation.
+app.put(
+  INSTALLATION_PUSH_ROUTE_PATH,
+  pausePublicAction(INSTALLATION_PUSH_UNAVAILABLE_MESSAGE, "PUBLIC_ACTIONS_PAUSED"),
+  installationPushRateLimiter,
+  synchronizeInstallationPush
+);
+
 // serve fulfill page for a specific request
 app.get("/request/:id/fulfill", (req: Request, res: Response) => {
   res.sendFile(path.join(process.cwd(), "public", "fulfill.html"));
@@ -415,6 +452,15 @@ await assertMongoTransactionsSupported(mongoose.connection);
 // one-request/one-ledger-record uniqueness guarantee. Existing duplicates make
 // this fail visibly at startup instead of weakening the contract.
 await Fulfillment.createIndexes();
+// Do not accept installation push-state traffic until the database has
+// established the single-eligible-owner-per-token guarantee that the
+// installation push route relies on instead of a race-prone read-then-write.
+await Installation.createIndexes();
+// Do not submit a push notification until the database has established the
+// (requestId, installationId, purpose) uniqueness the dispatcher claims
+// against: without it, two concurrent dispatches would both submit for the
+// same installation, and V1 has no retry path that could repair a duplicate.
+await PushDelivery.createIndexes();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   const PUBLIC_BASE = process.env.BASE_URL || `http://localhost:${PORT}`;
