@@ -546,10 +546,10 @@ final class RequestFetchingTests: XCTestCase {
                 id: "created-asap",
                 vendor: "Palladium",
                 food: "Chicken bowl",
-                pickupWindowText: "ASAP (within the next 5 hours)",
+                pickupWindowText: "ASAP (available for the next 3 hours)",
                 status: "open",
                 createdAt: "2026-07-28T16:00:00.123Z",
-                expiresAt: "2026-07-28T21:00:00.000Z"
+                expiresAt: "2026-07-28T19:00:00.123Z"
             ))
         ))
 
@@ -559,11 +559,11 @@ final class RequestFetchingTests: XCTestCase {
         XCTAssertEqual(created.status, .open)
         XCTAssertEqual(created.diningSpot.name, "Palladium")
         XCTAssertEqual(created.foodDescription, "Chicken bowl")
-        XCTAssertEqual(created.pickupWindowText, "ASAP (within the next 5 hours)")
+        XCTAssertEqual(created.pickupWindowText, "ASAP (available for the next 3 hours)")
         XCTAssertNil(created.windowStart)
         XCTAssertNil(created.windowEnd)
         XCTAssertEqual(created.createdAt, try iso8601Date("2026-07-28T16:00:00.123Z"))
-        XCTAssertEqual(created.expiresAt, try iso8601Date("2026-07-28T21:00:00.000Z"))
+        XCTAssertEqual(created.expiresAt, try iso8601Date("2026-07-28T19:00:00.123Z"))
     }
 
     func testCreatePreservesStructuredBackendErrorCodes() async {
@@ -973,8 +973,7 @@ final class RequestFetchingTests: XCTestCase {
             pickupName: "Taylor",
             email: "taylor@nyu.edu",
             timing: .asap,
-            windowStart: nil,
-            windowEnd: nil
+            windowStart: nil
         )
     }
 

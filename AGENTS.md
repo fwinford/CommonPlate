@@ -34,7 +34,9 @@ When sources conflict, identify the conflict. Do not silently choose one.
 Inspect current code, tests, Git state, and the applicable contract before
 editing.
 
-Deliver one accepted endpoint or user-flow slice at a time. Preserve accepted
+Deliver one coherent behavioral slice at a time. A slice may cross backend and
+iOS boundaries when those changes jointly establish one accepted behavior. Follow
+the current weekly technical spec for active slice boundaries. Preserve accepted
 architecture unless repository evidence requires revisiting it.
 
 Do not silently resolve product questions. If the accepted behavior is
@@ -208,7 +210,9 @@ Claude-specific instructions added beneath the import.
 
 ## AI Agent Workflow
 
-Work within one accepted endpoint or user-flow slice at a time.
+Work within one coherent behavioral slice at a time. A slice may cross backend
+and iOS boundaries when those changes jointly establish one accepted behavior.
+Follow the current weekly technical spec for active slice boundaries.
 
 Use only the relevant section of the current weekly technical spec and the
 files required for the slice. Do not load or restate the full roadmap, product

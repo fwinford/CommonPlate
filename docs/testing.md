@@ -51,7 +51,7 @@ Consequences:
 
 - Broad `app.ts` formatting or route-registration changes can break source-text assertions.
 - README and web-copy changes can be pinned by tests.
-- A repository-wide production-source guard rejects the phrase `within the next hour`.
+- A repository-wide production-source guard rejects the superseded ASAP phrasings `within the next hour` and `within the next 5 hours`, and rejects any production sentence that names an expiration in hours other than three. It scans `src`, `public`, and `ios/CommonPlateios/CommonPlateios`, skipping test files and sourcemaps, so a stale generated bundle fails it until `npm run build:client` is rerun.
 - Vitest sets `process.env.BASE_URL` to `/`. A test that asserts an absolute emailed link must stub `BASE_URL` itself rather than relying on the production default.
 
 ### Confirmation coverage

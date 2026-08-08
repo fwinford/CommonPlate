@@ -78,13 +78,14 @@ function routeContext(body: unknown) {
 async function createOpenRequest(
   overrides: Record<string, unknown> = {}
 ): Promise<IRequest> {
-  const expiresAt = new Date(Date.now() + 5 * 60 * 60 * 1000);
+  // Three hours, matching the W3-R1 ASAP lifetime this row's window text states.
+  const expiresAt = new Date(Date.now() + 3 * 60 * 60 * 1000);
   return MealRequest.create({
     vendor: "Campus Market",
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
     email: "requester@nyu.edu",
-    pickupWindowText: "ASAP (within the next 5 hours)",
+    pickupWindowText: "ASAP (available for the next 3 hours)",
     status: "open",
     expiresAt,
     deleteAt: expiresAt,

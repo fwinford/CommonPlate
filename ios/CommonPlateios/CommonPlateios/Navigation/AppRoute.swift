@@ -85,7 +85,10 @@ extension AppRoute {
         switch resolution {
         case .available(let request):
             return [.activeRequests, .requestDetail(request)]
-        case .unavailable, .temporarilyUnavailable:
+        // Including `.notYetAvailable`: there is no detail screen to show for a
+        // request the backend is still withholding, so the tap lands on Active
+        // Requests and the reason is carried by the recovery notice there.
+        case .unavailable, .notYetAvailable, .temporarilyUnavailable:
             return [.activeRequests]
         }
     }

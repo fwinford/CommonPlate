@@ -16,6 +16,10 @@ enum ClaimPresentationError: Equatable {
     /// Expired, out of claimable time, already placed, or missing — one calm
     /// "no longer available" register rather than four error states.
     case noLongerAvailable
+    /// `REQUEST_NOT_YET_AVAILABLE`. Deliberately not folded into
+    /// `noLongerAvailable`: a scheduled request that has not started yet is the
+    /// opposite situation, and the helper can come back for this one.
+    case notYetAvailable
     /// `PUBLIC_ACTIONS_PAUSED`.
     case publicActionsPaused
     /// `RATE_LIMITED`.
@@ -44,6 +48,8 @@ enum ClaimPresentationError: Equatable {
             return RequestDetailView.alreadyClaimedNotice
         case .noLongerAvailable:
             return RequestDetailView.noLongerAvailableNotice
+        case .notYetAvailable:
+            return RequestDetailView.notYetAvailableNotice
         case .publicActionsPaused:
             // Single source for the backend-confirmed helper-pause sentence.
             return RequestDetailView.helperPauseNotice
@@ -83,6 +89,8 @@ enum ClaimPresentationError: Equatable {
                  ClaimErrorCode.requestAlreadyPlaced,
                  ClaimErrorCode.requestNotFound:
                 return .noLongerAvailable
+            case ClaimErrorCode.requestNotYetAvailable:
+                return .notYetAvailable
             case ClaimErrorCode.publicActionsPaused:
                 return .publicActionsPaused
             case ClaimErrorCode.rateLimited:
@@ -120,6 +128,12 @@ struct RequestDetailView: View {
     /// Shared "unavailable" register for expired, out-of-time, already-placed,
     /// and missing requests. Matches the backend's own `REQUEST_EXPIRED` message.
     static let noLongerAvailableNotice = "This request is no longer available."
+
+    /// Matches the backend's own `REQUEST_NOT_YET_AVAILABLE` message. Reachable
+    /// only for a scheduled request opened before its start — the public list
+    /// does not carry one — so it says what to do rather than treating it as a
+    /// failure.
+    static let notYetAvailableNotice = "This request is not available to help with yet."
 
     /// Shown when a helper new-request notification tap could not be
     /// resolved against current backend truth (transport, timeout, server,

@@ -150,8 +150,7 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             pickupName: "Requester Private Name",
             email: "requester@nyu.edu",
             timing: .asap,
-            windowStart: nil,
-            windowEnd: nil
+            windowStart: nil
         )
     }
 
@@ -177,12 +176,12 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             "id": "\(id ?? requestID)",
             "vendor": "Palladium",
             "food": "Vegetable rice bowl",
-            "pickupWindowText": "ASAP (within the next 5 hours)",
+            "pickupWindowText": "ASAP (available for the next 3 hours)",
             "windowStart": null,
             "windowEnd": null,
             "status": "open",
             "createdAt": "2026-07-20T18:30:00.000Z",
-            "expiresAt": "\(iso8601String(Date().addingTimeInterval(5 * 60 * 60)))"
+            "expiresAt": "\(iso8601String(Date().addingTimeInterval(3 * 60 * 60)))"
           }
         }
         """.utf8)

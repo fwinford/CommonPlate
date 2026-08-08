@@ -11,6 +11,13 @@ export interface PublicRequestDocument {
   windowEnd?: RequestResponseDate | null;
   status: string;
   createdAt: RequestResponseDate;
+  /**
+   * When helpers begin seeing this request. Read for availability only; it is
+   * deliberately not projected onto the public response, which already carries
+   * the same instant as `windowStart` for a scheduled request and as
+   * `createdAt` for an ASAP one.
+   */
+  visibleFrom?: RequestResponseDate | null;
   expiresAt: RequestResponseDate;
   claimExpiresAt?: RequestResponseDate | null;
 }
@@ -98,6 +105,17 @@ export function buildPublicRequestDetailResponse(
   };
 }
 
+/**
+ * Ordering only; membership is decided by `isEffectivelyAvailable` above.
+ *
+ * The imminent-versus-later split predates the W3-R1 visibility rule. Now that
+ * a request is withheld until its own start, every document reaching this sort
+ * has already begun, so the split no longer separates anything and the result
+ * is creation order. It is left in place because it still orders correctly for
+ * rows persisted before `visibleFrom` existed, which carry a future
+ * `windowStart` and are advertised immediately. Retiring it is an ordering
+ * decision, not part of the timing contract.
+ */
 export function buildPublicRequestListResponse(
   documents: RequestListDocument[],
   serverNow: Date

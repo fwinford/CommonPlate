@@ -35,7 +35,7 @@ enum RequestFoodFormError: Error, Equatable {
             // in either case.
             return NYUEmailPolicy.requiredMessage
         case .invalidScheduledTime:
-            return "Choose a pickup time that leaves a full 30-minute window today."
+            return "Choose a pickup time later today."
         case .scheduledTimingUnavailable:
             return RequestFoodView.lapsedScheduledTimingNotice
         }
@@ -67,7 +67,12 @@ enum RequestCreatePresentationError: Equatable {
         case .invalidEmail:
             return RequestFoodFormError.invalidEmail.message
         case .requestLimitReached:
-            return "CommonPlate attempts to limit each email to three meal requests a day. Please try again tomorrow."
+            // The limit-state sentence only. The standing policy it enforces is
+            // its own sentence on the form
+            // (`RequestFoodView.postingLimitPolicyNotice`), shown before
+            // anything is typed, so the refusal does not have to teach the rule
+            // and explain the reset in one breath.
+            return RequestFoodView.postingLimitReachedNotice
         case .rateLimited:
             // Same sentence the helper sees for a throttled claim, since the
             // situation and the next step are identical.
@@ -175,25 +180,47 @@ struct RequestFoodView: View {
     static let emailPurposeNotice =
         "We use your email to coordinate updates about your request. Helpers never see it."
 
-    /// Requester-facing expiration copy. These two sentences must stay equal to
-    /// the backend contract in `src/createRequestRoute.ts`, which writes
-    /// `expiresAt` explicitly at creation: an ASAP request expires five hours
-    /// after the backend creation time, and a scheduled request expires at its
-    /// validated `windowEnd`. Neither sentence promises fulfillment.
+    /// The standing posting-limit policy, shown before anything is submitted so
+    /// the rule is not something a student discovers only by being refused.
+    ///
+    /// "attempts to" is exact and deliberate: the backend counts today's
+    /// requests for this address before writing, which is best-effort abuse
+    /// control rather than a transactional guarantee, so the copy must not
+    /// promise an enforcement the runtime does not make. "(New York time)"
+    /// names the calendar day the count actually resets on
+    /// (`startOfCampusDay` in `src/utils/date.ts`), which is not the device's.
+    static let postingLimitPolicyNotice =
+        "CommonPlate attempts to limit each email to 3 meal requests per day (New York time)."
+
+    /// Shown when the backend answers `REQUEST_LIMIT_REACHED`. Names the reset
+    /// the requester is actually waiting for — campus midnight, not the
+    /// device's — rather than a vague "tomorrow", and never describes the
+    /// refusal in API terms, which is not what happened and not something a
+    /// student can act on.
+    static let postingLimitReachedNotice =
+        "Daily request limit reached. Try again after midnight Eastern Time."
+
+    /// Requester-facing timing copy. These two sentences must stay equal to the
+    /// backend contract in `src/requestTiming.ts`, which writes `visibleFrom`
+    /// and `expiresAt` explicitly at creation: an ASAP request becomes visible
+    /// at the backend creation instant, a scheduled one at its accepted start,
+    /// and both stay available for three hours from there. Neither sentence
+    /// promises fulfillment, and the scheduled one deliberately does not claim
+    /// the request is visible yet.
     static let asapExpirationNotice =
-        "Your request is now visible to helpers. It will expire in 5 hours if it is not fulfilled."
+        "Your request is now visible to helpers. It will expire in 3 hours if it is not fulfilled."
     static let scheduledExpirationNotice =
-        "Your request is now visible to helpers. It will expire when the pickup window ends if it is not fulfilled."
+        "Helpers will start seeing your request at the time you chose. It stays up for 3 hours after that, then expires if it is not fulfilled."
 
     /// Shown beneath the single scheduled-time control, which collects only a
-    /// start; the end is derived. The student would otherwise have no way to
-    /// know what helpers actually see.
+    /// start; the end is derived by the backend. The student would otherwise
+    /// have no way to know when helpers actually see this, or for how long.
     static let scheduledWindowNotice =
-        "Helpers will see a 30-minute pickup window starting at this time."
+        "Helpers will start seeing this request at this time, and for 3 hours after it."
 
-    /// Shown when no full 30-minute window fits before the next calendar-day
-    /// boundary. Scheduling is withheld rather than offered as an unusable
-    /// picker; tomorrow scheduling is not part of this flow.
+    /// Shown once no start is left inside the current campus day. Scheduling is
+    /// withheld rather than offered as an unusable picker; tomorrow scheduling
+    /// is not part of this flow.
     static let scheduledUnavailableNotice = "Scheduled pickups reopen tomorrow."
 
     /// The same fact plus the only move left, for a requester who selected
@@ -228,8 +255,11 @@ struct RequestFoodView: View {
     @State private var confirmedTiming: RequestTiming = .asap
     @FocusState private var focusedField: RequestFoodFormField?
 
+    /// Campus time, not device time. Every day boundary, every clamp, and the
+    /// picker itself are computed here, so the same selection means the same
+    /// New York instant on a phone in Brooklyn and one in Berkeley.
     private var calendar: Calendar {
-        Calendar.current
+        NYUCampusTime.calendar
     }
 
     /// The store-owned create ambiguity outlives this view and takes precedence
@@ -273,6 +303,13 @@ struct RequestFoodView: View {
             }
         }
         .navigationTitle("Request Food")
+        // Campus time for everything this screen draws and reads, including the
+        // scheduled-start picker. Without these, a phone left on another
+        // timezone would offer and display its own wall clock while the backend
+        // interpreted the resulting instant as New York — the requester would
+        // pick 6 PM and helpers would see a different hour.
+        .environment(\.timeZone, NYUCampusTime.timeZone)
+        .environment(\.calendar, NYUCampusTime.calendar)
         // Runs before anything is rendered, and the pre-probe state is
         // `.unknown`, so the form cannot flash while the answer is pending.
         // Skipped entirely while blocked: the answer could not change this
@@ -460,8 +497,8 @@ struct RequestFoodView: View {
                     identifier: "request-pickup-name-error"
                 )
 
-                // Only the timings a full 30-minute window can still fit into
-                // are offered, so "Later" cannot be selected when it is
+                // Only the timings that still have a selectable start are
+                // offered, so "Later" cannot be selected when it is
                 // impossible.
                 Picker("When do you need it?", selection: $draft.timing) {
                     ForEach(timingOptions) { option in
@@ -592,6 +629,16 @@ struct RequestFoodView: View {
                         .accessibilityIdentifier("request-ambiguous-dismiss")
                     }
                 }
+
+                // Unconditional, beside the action it constrains, and never
+                // swapped for the refusal below it: the same arrangement the
+                // email eligibility rule uses. A standing policy that only
+                // appears once it has been broken is not a policy the student
+                // could have planned around.
+                Text(Self.postingLimitPolicyNotice)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("request-posting-limit-policy")
 
                 Button {
                     Task {
@@ -768,9 +815,9 @@ struct RequestFoodView: View {
     static func formExpirationNotice(for timing: RequestTiming) -> String {
         switch timing {
         case .asap:
-            return "An ASAP request expires 5 hours after you post it."
+            return "An ASAP request expires 3 hours after you post it."
         case .later:
-            return "A scheduled request expires when the pickup window ends."
+            return "A scheduled request expires 3 hours after the time you choose."
         }
     }
 
@@ -865,9 +912,10 @@ struct RequestFoodView: View {
         return RequestFoodFormValidator.hasRequiredInput(draft)
     }
 
-    /// Scheduling is possible only while a full 30-minute window still fits
-    /// before the next calendar-day boundary. Both the boundary and the
-    /// 30-minute addition come from `Calendar`, never raw second arithmetic.
+    /// Scheduling is possible only while a selectable start remains inside the
+    /// current campus day. Both the day boundary and the cutoff come from
+    /// `Calendar`, never raw second arithmetic, so the rule stays correct
+    /// across a DST transition instead of being 23 or 25 hours wrong.
     static func isScheduledTimingAvailable(now: Date, calendar: Calendar) -> Bool {
         isValidScheduledWindow(startingAt: now, now: now, calendar: calendar)
     }
@@ -930,29 +978,35 @@ struct RequestFoodView: View {
                 pickupName: trimmedPickupName,
                 email: trimmedEmail,
                 timing: .asap,
-                windowStart: nil,
-                windowEnd: nil
+                windowStart: nil
             )
         case .later:
-            guard let windowEnd = calendar.date(
-                byAdding: .minute,
-                value: 30,
-                to: preferredPickupTime
-            ) else {
-                throw RequestFoodFormError.invalidScheduledTime
-            }
-
+            // Only the start. The end of a request's availability is derived
+            // from it by the backend (`src/requestTiming.ts`), and the create
+            // shape is strict, so sending an end would both be refused and
+            // claim authority this app does not have.
             return CreateRequestPayload(
                 vendor: trimmedVendor,
                 food: trimmedFood,
                 pickupName: trimmedPickupName,
                 email: trimmedEmail,
                 timing: .scheduled,
-                windowStart: preferredPickupTime,
-                windowEnd: windowEnd
+                windowStart: preferredPickupTime
             )
         }
     }
+
+    /// How far before the next campus-day boundary the last selectable start
+    /// sits.
+    ///
+    /// Deliberately unchanged from the value accepted before W3-R1, when a
+    /// selection meant a 30-minute pickup window, so `scheduledTimingUnavailable`
+    /// and its recovery path still open and close at exactly the instants they
+    /// always have. Under the current contract this is a same-day scheduling
+    /// horizon and not a window length: availability runs three hours from the
+    /// chosen start and may cross midnight. Moving it is a product decision,
+    /// not a consequence of the timing change.
+    static let scheduledStartCutoffMinutesBeforeDayEnd = 30
 
     static func endOfDay(containing date: Date, calendar: Calendar) -> Date? {
         calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
@@ -962,21 +1016,29 @@ struct RequestFoodView: View {
         guard let endOfDay = endOfDay(containing: date, calendar: calendar) else {
             return nil
         }
-        return calendar.date(byAdding: .minute, value: -30, to: endOfDay)
+        return calendar.date(
+            byAdding: .minute,
+            value: -scheduledStartCutoffMinutesBeforeDayEnd,
+            to: endOfDay
+        )
     }
 
+    /// Whether this start may still be selected: it has not already passed, and
+    /// it falls on or before the last start of the current campus day.
+    ///
+    /// This decides what the picker offers and what Submit accepts. It is not a
+    /// lifecycle rule — the backend decides when a request is actually visible
+    /// and when it expires, from its own clock.
     static func isValidScheduledWindow(
         startingAt start: Date,
         now: Date,
         calendar: Calendar
     ) -> Bool {
         guard start >= now,
-              let end = calendar.date(byAdding: .minute, value: 30, to: start),
-              end > start,
-              let dayEnd = endOfDay(containing: now, calendar: calendar) else {
+              let latestStart = latestScheduledStart(on: now, calendar: calendar) else {
             return false
         }
-        return end <= dayEnd
+        return start <= latestStart
     }
 
     static func isAllowedRequesterEmail(_ value: String) -> Bool {

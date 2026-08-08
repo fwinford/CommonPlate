@@ -63,10 +63,12 @@ async function createPlacedRequest(
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
     email: "requester@nyu.edu",
-    pickupWindowText: "ASAP (within the next 5 hours)",
+    pickupWindowText: "ASAP (available for the next 3 hours)",
     status: "placed",
     placedAt: now,
-    expiresAt: new Date(now.getTime() + 5 * 60 * 60 * 1000),
+    // Three hours, matching the W3-R1 ASAP lifetime this row's window text
+    // states. `deleteAt` below is the separate placed-request retention.
+    expiresAt: new Date(now.getTime() + 3 * 60 * 60 * 1000),
     deleteAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
     ...overrides,
   });
@@ -213,7 +215,7 @@ describeMongo("requester fulfillment push against real MongoDB", () => {
         food: "Vegetable rice bowl",
         pickupName: "Requester Private Name",
         email: "requester@nyu.edu",
-        pickupWindowText: "ASAP (within the next 5 hours)",
+        pickupWindowText: "ASAP (available for the next 3 hours)",
         status: "open",
         expiresAt: new Date(Date.now() + 60 * 60 * 1000),
         deleteAt: new Date(Date.now() + 60 * 60 * 1000),

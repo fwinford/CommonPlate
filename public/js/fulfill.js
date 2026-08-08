@@ -3,6 +3,7 @@
 // Edit the TypeScript source; edits here are overwritten by the next build.
 
 // src/utils/date.ts
+var NYU_TIME_ZONE = "America/New_York";
 function formatMealRequestWindow(start, end, fallback) {
   if (fallback && /\b(AM|PM)\b|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(fallback)) {
     return fallback;
@@ -14,11 +15,11 @@ function formatMealRequestWindow(start, end, fallback) {
     const optsDate = {
       month: "short",
       day: "numeric",
-      timeZone: "America/New_York"
+      timeZone: NYU_TIME_ZONE
     };
-    const optsTime = { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York" };
+    const optsTime = { hour: "numeric", minute: "2-digit", hour12: true, timeZone: NYU_TIME_ZONE };
     if (s && e) {
-      const sameDay = s.toLocaleDateString("en-US", { timeZone: "America/New_York" }) === e.toLocaleDateString("en-US", { timeZone: "America/New_York" });
+      const sameDay = s.toLocaleDateString("en-US", { timeZone: NYU_TIME_ZONE }) === e.toLocaleDateString("en-US", { timeZone: NYU_TIME_ZONE });
       if (sameDay) {
         return `${s.toLocaleDateString("en-US", optsDate)}, ${s.toLocaleTimeString("en-US", optsTime)} \u2013 ${e.toLocaleTimeString("en-US", optsTime)}`;
       }
@@ -28,8 +29,8 @@ function formatMealRequestWindow(start, end, fallback) {
     if (e) return `Until ${e.toLocaleString("en-US", { ...optsDate, ...optsTime })}`;
     return fallback || "Time window not specified";
   } catch {
-    if (start) return new Date(start).toLocaleString("en-US", { timeZone: "America/New_York" });
-    if (end) return new Date(end).toLocaleString("en-US", { timeZone: "America/New_York" });
+    if (start) return new Date(start).toLocaleString("en-US", { timeZone: NYU_TIME_ZONE });
+    if (end) return new Date(end).toLocaleString("en-US", { timeZone: NYU_TIME_ZONE });
     return fallback || "Time window not specified";
   }
 }
@@ -92,7 +93,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (detailsFood) detailsFood.textContent = req.food || "";
       if (detailsWindow) {
         if (req.isAsap) {
-          detailsWindow.textContent = "ASAP (within the next 5 hours)";
+          detailsWindow.textContent = req.pickupWindowText || "Time window not specified";
         } else if (req.windowStart || req.windowEnd) {
           detailsWindow.textContent = formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
         } else {
@@ -108,7 +109,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (elVendor) elVendor.textContent = req.vendor ? `at ${req.vendor}` : "";
       if (elFoodDetails) elFoodDetails.textContent = req.details || req.foodDetails || "";
       if (elPickup) elPickup.textContent = req.pickupName ? `Pickup Name: ${req.pickupName}` : "";
-      if (elWindow) elWindow.textContent = req.isAsap ? "ASAP (within the next 5 hours)" : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
+      if (elWindow) elWindow.textContent = req.isAsap ? req.pickupWindowText || "Time window not specified" : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
     } catch (err) {
       errorMsg.textContent = "Unable to load request details.";
       errorMsg.style.display = "block";

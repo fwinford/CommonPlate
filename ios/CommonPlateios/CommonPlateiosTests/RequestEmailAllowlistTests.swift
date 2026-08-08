@@ -466,8 +466,7 @@ final class RequestEmailAllowlistTests: XCTestCase {
             pickupName: "Taylor",
             email: email,
             timing: .asap,
-            windowStart: nil,
-            windowEnd: nil
+            windowStart: nil
         )
     }
 
@@ -477,12 +476,12 @@ final class RequestEmailAllowlistTests: XCTestCase {
           "id": "64b000000000000000000001",
           "vendor": "Palladium",
           "food": "Chicken bowl",
-          "pickupWindowText": "ASAP (within the next 5 hours)",
+          "pickupWindowText": "ASAP (available for the next 3 hours)",
           "windowStart": null,
           "windowEnd": null,
           "status": "open",
           "createdAt": "2026-07-28T16:00:00.000Z",
-          "expiresAt": "2026-07-28T21:00:00.000Z"
+          "expiresAt": "2026-07-28T19:00:00.000Z"
         }}
         """#.utf8)
     }

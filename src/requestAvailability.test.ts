@@ -3,8 +3,10 @@ import {
   CLAIM_MINIMUM_REMAINING_MS,
   buildEffectiveAvailabilityFilter,
   buildMinimumRemainingTimeFilter,
+  buildVisibleNowFilter,
   hasMinimumRemainingTime,
   isEffectivelyAvailable,
+  isVisibleNow,
 } from "./requestAvailability.js";
 
 // One captured instant, as every caller supplies. Nothing here reads the clock,
@@ -50,15 +52,52 @@ describe("the shared minimum-remaining-time rule", () => {
   });
 });
 
+describe("the shared start-of-visibility rule", () => {
+  it("is an inclusive bound written so a missing start still matches", () => {
+    // `$not: { $gt: now }` and not `$lte: now`. Requests written before
+    // `visibleFrom` existed carry no value at all, and `$lte` would hide every
+    // one of them the moment this clause was added.
+    expect(buildVisibleNowFilter(now)).toEqual({ $not: { $gt: now } });
+  });
+
+  it("shows a request exactly at its start and not one millisecond before", () => {
+    expect(isVisibleNow(now, now)).toBe(true);
+    expect(isVisibleNow(new Date(now.getTime() + 1), now)).toBe(false);
+    expect(isVisibleNow(new Date(now.getTime() - 1), now)).toBe(true);
+  });
+
+  it("treats a request with no recorded start as visible from creation", () => {
+    // The legacy allowance, and the only one: these rows were visible before
+    // the field existed and no slice migrates them.
+    expect(isVisibleNow(null, now)).toBe(true);
+    expect(isVisibleNow(undefined, now)).toBe(true);
+  });
+
+  it("fails closed on an unparseable start", () => {
+    // Not a legacy absence — a value that cannot be read is not evidence the
+    // request may be shown.
+    expect(isVisibleNow("not a date", now)).toBe(false);
+  });
+});
+
 describe("buildEffectiveAvailabilityFilter", () => {
   it("advertises only what a claim could still win", () => {
     expect(buildEffectiveAvailabilityFilter(now)).toEqual({
+      visibleFrom: { $not: { $gt: now } },
       expiresAt: { $gt: now, $gte: exactlyFiveMinutesLeft },
       $or: [
         { status: "open" },
         { status: "claimed", claimExpiresAt: { $lte: now } },
       ],
     });
+  });
+
+  it("derives the start bound from the same captured instant", () => {
+    const other = new Date("2026-07-30T18:30:00.000Z");
+
+    expect(buildEffectiveAvailabilityFilter(other).visibleFrom).toEqual(
+      buildVisibleNowFilter(other)
+    );
   });
 
   it("derives both bounds from the instant the caller captured", () => {
@@ -112,6 +151,91 @@ describe("isEffectivelyAvailable", () => {
         {
           status: "claimed",
           expiresAt: oneMillisecondShort,
+          claimExpiresAt: new Date(now.getTime() - 1),
+        },
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("withholds a scheduled request until its start arrives", () => {
+    const startsInAnHour = new Date(now.getTime() + 60 * 60 * 1000);
+
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "open",
+          visibleFrom: startsInAnHour,
+          expiresAt: new Date(startsInAnHour.getTime() + 3 * 60 * 60 * 1000),
+        },
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("advertises a scheduled request at exactly its start", () => {
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "open",
+          visibleFrom: now,
+          expiresAt: new Date(now.getTime() + 3 * 60 * 60 * 1000),
+        },
+        now
+      )
+    ).toBe(true);
+  });
+
+  it("withholds a scheduled request one millisecond before its start", () => {
+    const start = new Date(now.getTime() + 1);
+
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "open",
+          visibleFrom: start,
+          expiresAt: new Date(start.getTime() + 3 * 60 * 60 * 1000),
+        },
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("still applies the five-minute threshold inside a started window", () => {
+    // The two rules compose: having begun is not the same as having time left.
+    const startedAnHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "open",
+          visibleFrom: startedAnHourAgo,
+          expiresAt: oneMillisecondShort,
+        },
+        now
+      )
+    ).toBe(false);
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "open",
+          visibleFrom: startedAnHourAgo,
+          expiresAt: exactlyFiveMinutesLeft,
+        },
+        now
+      )
+    ).toBe(true);
+  });
+
+  it("does not reopen an expired claim on a request that has not started", () => {
+    const startsInAnHour = new Date(now.getTime() + 60 * 60 * 1000);
+
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "claimed",
+          visibleFrom: startsInAnHour,
+          expiresAt: new Date(startsInAnHour.getTime() + 3 * 60 * 60 * 1000),
           claimExpiresAt: new Date(now.getTime() - 1),
         },
         now

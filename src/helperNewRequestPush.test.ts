@@ -26,7 +26,8 @@ import {
  */
 const requestId = new mongoose.Types.ObjectId("64b000000000000000000001");
 const now = new Date("2026-07-28T16:00:00.000Z");
-const expiresAt = new Date("2026-07-28T21:00:00.000Z");
+/** Three hours after `now`: the W3-R1 ASAP lifetime the window text states. */
+const expiresAt = new Date("2026-07-28T19:00:00.000Z");
 
 const configuration: ApnsConfiguration = {
   teamId: "ABCDE12345",
@@ -42,7 +43,7 @@ function requestDocument(overrides: Record<string, unknown> = {}): IRequest {
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
     email: "requester@nyu.edu",
-    pickupWindowText: "ASAP (within the next 5 hours)",
+    pickupWindowText: "ASAP (available for the next 3 hours)",
     status: "open",
     expiresAt,
     ...overrides,

@@ -43,7 +43,7 @@ function document(overrides: Record<string, unknown> = {}) {
     vendor: "Campus Market",
     food: "Vegetable rice bowl",
     pickupName: "Private Pickup Name",
-    pickupWindowText: "ASAP (within the next 5 hours)",
+    pickupWindowText: "ASAP (available for the next 3 hours)",
     windowStart: null,
     windowEnd: null,
     status: "claimed",
@@ -128,6 +128,9 @@ describe("POST /api/request/:id/claim", () => {
     expect(filter).toEqual({
       _id: requestId.toString(),
       status: { $ne: "placed" },
+      // The same start-of-visibility clause the list and alert paths apply, so
+      // a scheduled request cannot be claimed before helpers can see it.
+      visibleFrom: { $not: { $gt: now } },
       expiresAt: {
         $gt: now,
         $gte: new Date(now.getTime() + 5 * 60 * 1000),
@@ -157,7 +160,7 @@ describe("POST /api/request/:id/claim", () => {
       id: requestId.toString(),
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
-      pickupWindowText: "ASAP (within the next 5 hours)",
+      pickupWindowText: "ASAP (available for the next 3 hours)",
       windowStart: null,
       windowEnd: null,
       status: "claimed",
@@ -258,6 +261,19 @@ describe("POST /api/request/:id/claim", () => {
       }),
       status: 409,
       code: "REQUEST_INSUFFICIENT_TIME",
+    },
+    {
+      // Classified ahead of expiration, and deliberately its own code: this
+      // request has not run out, it has not started. A legacy row with no
+      // recorded start is unaffected — it has always been visible.
+      name: "not started yet",
+      diagnostic: document({
+        status: "open",
+        visibleFrom: new Date(now.getTime() + 1),
+        expiresAt: new Date(now.getTime() + 3 * 60 * 60 * 1000),
+      }),
+      status: 409,
+      code: "REQUEST_NOT_YET_AVAILABLE",
     },
   ])("distinguishes $name after the atomic update loses", async (scenario) => {
     mockAtomicResult(null);

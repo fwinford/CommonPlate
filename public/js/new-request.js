@@ -70,7 +70,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const windowType = formData.get("windowType");
     let pickupWindowText = "";
     if (windowType === "asap") {
-      pickupWindowText = "ASAP (within the next 5 hours)";
+      pickupWindowText = "ASAP";
     } else {
       const start = formData.get("windowStart");
       const end = formData.get("windowEnd");

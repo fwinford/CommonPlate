@@ -137,6 +137,11 @@ enum ClaimUnavailableReason: Equatable {
     /// identical and the distinction is not theirs to act on. The backend code
     /// stays available on the request-scoped event for diagnosis.
     case noLongerAvailable
+    /// `REQUEST_NOT_YET_AVAILABLE`: a scheduled request opened before its
+    /// start. Deliberately not folded into `noLongerAvailable` — that reason
+    /// exists for requests there is no point returning to, and this one is the
+    /// opposite situation.
+    case notYetAvailable
     /// The reservation ran out while the helper was in the fulfillment flow.
     case claimExpired
     /// Fulfillment-specific expiration warning. The helper may already have
@@ -182,6 +187,13 @@ enum HelperNotificationResolution: Equatable {
     /// authoritative 404 (the request no longer exists), or a decoded
     /// non-open status. Never used for a failure that leaves truth unknown.
     case unavailable
+    /// The backend answered `REQUEST_NOT_YET_AVAILABLE`: a scheduled request
+    /// whose start has not arrived. Distinct from both neighbours, and it has
+    /// to be. `.unavailable` would say a request that is still coming is gone;
+    /// `.temporarilyUnavailable` would blame the network for an answer the
+    /// backend gave clearly. This is settled truth about the request, and the
+    /// only one of the three worth coming back for.
+    case notYetAvailable
     /// Current backend truth could not be established — transport, timeout,
     /// a server failure, or a response that could not be decoded. This is
     /// deliberately distinct from `.unavailable`: it must never be presented
@@ -197,6 +209,9 @@ enum ClaimErrorCode {
     static let requestAlreadyClaimed = "REQUEST_ALREADY_CLAIMED"
     static let requestAlreadyPlaced = "REQUEST_ALREADY_PLACED"
     static let requestExpired = "REQUEST_EXPIRED"
+    /// A scheduled request whose start has not arrived. Distinct from
+    /// `requestExpired`: nothing has run out, it has not begun.
+    static let requestNotYetAvailable = "REQUEST_NOT_YET_AVAILABLE"
     static let requestInsufficientTime = "REQUEST_INSUFFICIENT_TIME"
     static let requestNotClaimed = "REQUEST_NOT_CLAIMED"
     static let invalidClaimToken = "INVALID_CLAIM_TOKEN"
@@ -424,10 +439,14 @@ final class RequestStore: ObservableObject {
     /// result. A decoded response settles it — `.open` is `.available`,
     /// anything else is an authoritative `.unavailable` — and an
     /// authoritative 404 (`RequestServiceError.notFound`, the document does
-    /// not exist) is `.unavailable` too. Every other failure — transport,
-    /// timeout, a non-404 server status, or a decoding failure — means
-    /// current truth could not be established, which resolves to
-    /// `.temporarilyUnavailable` rather than being guessed as "gone".
+    /// not exist) is `.unavailable` too. A decoded `REQUEST_NOT_YET_AVAILABLE`
+    /// is settled truth as well, and resolves to `.notYetAvailable`: the
+    /// backend answered, it simply answered "not yet", which must not be
+    /// reported as a transient failure the helper should retry into. Every
+    /// other failure — transport, timeout, any other server status, or a
+    /// decoding failure — means current truth could not be established, which
+    /// resolves to `.temporarilyUnavailable` rather than being guessed as
+    /// "gone".
     /// Rethrows only cancellation, so a caller whose screen went away before
     /// this finished can tell "no answer yet" apart from either resolved
     /// outcome.
@@ -440,6 +459,12 @@ final class RequestStore: ObservableObject {
             throw CancellationError()
         } catch RequestServiceError.notFound {
             return .unavailable
+        } catch let error as RequestServiceError {
+            if case .serverError(let code, _) = error,
+               code == ClaimErrorCode.requestNotYetAvailable {
+                return .notYetAvailable
+            }
+            return .temporarilyUnavailable
         } catch {
             return .temporarilyUnavailable
         }
@@ -1158,6 +1183,25 @@ final class RequestStore: ObservableObject {
             .noLongerAvailable,
             requestID: requestID,
             operationID: UUID(),
+            backendCode: nil
+        )
+    }
+
+    /// Reports a helper new-request notification's tapped request as not yet
+    /// started, using the same Active Requests recovery presentation. Distinct
+    /// from both neighbours: the backend gave settled truth, so this is not
+    /// `reportRequestTemporarilyUnavailableFromNotification`, and the truth it
+    /// gave was "not yet", so it is not
+    /// `reportRequestUnavailableFromNotification` either.
+    func reportRequestNotYetAvailableFromNotification(requestID: String) {
+        reportClaimUnavailable(
+            .notYetAvailable,
+            requestID: requestID,
+            operationID: UUID(),
+            // `nil`, like both sibling notification reporters: the reason
+            // already carries everything the recovery notice presents, and a
+            // notification tap is not a claim attempt whose backend code
+            // anything downstream correlates against.
             backendCode: nil
         )
     }

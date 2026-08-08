@@ -47,8 +47,41 @@ function fixtures(now: Date) {
   const justShort = new Date(exactMinimum.getTime() - 1);
   const farFuture = new Date(now.getTime() + 60 * 60 * 1000);
 
+  const scheduledStart = new Date(now.getTime() + 60 * 60 * 1000);
+
   return [
     { food: "exact-minimum", status: "open", expiresAt: exactMinimum },
+    {
+      // A Later request whose start has not arrived. It has hours of runway,
+      // so only the visibility clause can withhold it.
+      food: "not-started",
+      status: "open",
+      visibleFrom: scheduledStart,
+      expiresAt: new Date(scheduledStart.getTime() + 3 * 60 * 60 * 1000),
+    },
+    {
+      // The inclusive boundary: a start exactly at the captured instant.
+      food: "starting-now",
+      status: "open",
+      visibleFrom: now,
+      expiresAt: new Date(now.getTime() + 3 * 60 * 60 * 1000),
+    },
+    {
+      // One millisecond before its start, and nothing else wrong with it.
+      food: "starting-in-one-millisecond",
+      status: "open",
+      visibleFrom: new Date(now.getTime() + 1),
+      expiresAt: new Date(now.getTime() + 3 * 60 * 60 * 1000),
+    },
+    {
+      // An expired claim on a request that has not started cannot reopen: the
+      // two rules compose rather than one overriding the other.
+      food: "not-started-expired-claim",
+      status: "claimed",
+      visibleFrom: scheduledStart,
+      expiresAt: new Date(scheduledStart.getTime() + 3 * 60 * 60 * 1000),
+      claimExpiresAt: new Date(now.getTime() - 1),
+    },
     { food: "just-short", status: "open", expiresAt: justShort },
     {
       food: "expired-claim-with-runway",
@@ -131,14 +164,16 @@ describeMongo("advertised availability against a real database", () => {
     expect(foods(documents as unknown as { food: string }[])).toEqual([
       "exact-minimum",
       "expired-claim-with-runway",
+      "starting-now",
     ]);
     expect(foods(response.requests)).toEqual([
       "exact-minimum",
       "expired-claim-with-runway",
+      "starting-now",
     ]);
     expect(
       response.requests.map((request) => request.status)
-    ).toEqual(["open", "open"]);
+    ).toEqual(["open", "open", "open"]);
   });
 
   it("leaves every record untouched while reading", async () => {
@@ -171,6 +206,7 @@ describeMongo("advertised availability against a real database", () => {
     expect(foods(recentRequests as unknown as { food: string }[])).toEqual([
       "exact-minimum",
       "expired-claim-with-runway",
+      "starting-now",
     ]);
   });
 
@@ -190,6 +226,7 @@ describeMongo("advertised availability against a real database", () => {
     expect(foods(recentRequests as unknown as { food: string }[])).toEqual([
       "exact-minimum",
       "expired-claim-with-runway",
+      "starting-now",
     ]);
   });
 
@@ -232,5 +269,87 @@ describeMongo("advertised availability against a real database", () => {
 
     expect(statusCode).toBe(409);
     expect(body.error.code).toBe("REQUEST_INSUFFICIENT_TIME");
+  });
+
+  it("advertises a request at exactly its start and not one millisecond before", async () => {
+    const now = new Date();
+    await seed(now);
+
+    const documents = await MealRequest.find(
+      buildEffectiveAvailabilityFilter(now)
+    )
+      .lean()
+      .exec();
+    const advertised = foods(documents as unknown as { food: string }[]);
+
+    expect(advertised).toContain("starting-now");
+    expect(advertised).not.toContain("starting-in-one-millisecond");
+    expect(advertised).not.toContain("not-started");
+    expect(advertised).not.toContain("not-started-expired-claim");
+  });
+
+  it("still advertises rows written before visibleFrom existed", async () => {
+    const now = new Date();
+    // `$unset` rather than a null: this is the shape of a row persisted by an
+    // earlier build, which no slice migrates.
+    await MealRequest.create({
+      vendor: "Boundary Cafe",
+      food: "legacy-no-visible-from",
+      pickupName: "Boundary Requester",
+      pickupWindowText: "ASAP",
+      email: "requester@example.edu",
+      status: "open",
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+      deleteAt: new Date(now.getTime() + 60 * 60 * 1000),
+    });
+    await MealRequest.collection.updateOne(
+      { food: "legacy-no-visible-from" },
+      { $unset: { visibleFrom: "" } }
+    );
+
+    const stored = await MealRequest.collection.findOne({
+      food: "legacy-no-visible-from",
+    });
+    expect(stored).not.toHaveProperty("visibleFrom");
+
+    const documents = await MealRequest.find(
+      buildEffectiveAvailabilityFilter(now)
+    )
+      .lean()
+      .exec();
+
+    expect(foods(documents as unknown as { food: string }[])).toContain(
+      "legacy-no-visible-from"
+    );
+  });
+
+  it("refuses to claim a request it refuses to advertise for not having started", async () => {
+    const now = new Date();
+    await seed(now);
+    const notStarted = await MealRequest.findOne({ food: "not-started" }).lean();
+    const req = {
+      params: { id: String(notStarted!._id) },
+    } as unknown as Request;
+    const res = {} as Response;
+    let statusCode = 200;
+    let body: any;
+    res.status = vi.fn((value: number) => {
+      statusCode = value;
+      return res;
+    }) as any;
+    res.json = vi.fn((value: unknown) => {
+      body = value;
+      return res;
+    }) as any;
+
+    await claimRequest(req, res);
+
+    expect(statusCode).toBe(409);
+    // Not "expired" and not "insufficient time": nothing has run out.
+    expect(body.error.code).toBe("REQUEST_NOT_YET_AVAILABLE");
+
+    const untouched = await MealRequest.findById(notStarted!._id).lean();
+    expect(untouched?.status).toBe("open");
+    expect(untouched?.claimedAt).toBeFalsy();
   });
 });

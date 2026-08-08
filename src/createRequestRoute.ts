@@ -20,7 +20,13 @@ import {
   buildPublicRequestDetailResponse,
   type PublicRequestDocument,
 } from "./requestListResponse.js";
-import { formatMealRequestWindow } from "./utils/date.js";
+import { formatMealRequestWindow, startOfCampusDay } from "./utils/date.js";
+import {
+  isAcceptableScheduledStart,
+  resolveAsapTiming,
+  resolveScheduledTiming,
+  type RequestTimingWindow,
+} from "./requestTiming.js";
 import { createDay4MutationRateLimiter } from "./claimRoute.js";
 
 /**
@@ -79,29 +85,41 @@ const canonicalAsapSchema = z
   })
   .strict();
 
+/**
+ * The requester selects one instant, and only one. Under the W3-R1 timing
+ * contract the end of a request's availability is derived from its start
+ * (`src/requestTiming.ts`), so `windowEnd` is deliberately absent from this
+ * shape rather than accepted and discarded: taking an end the backend cannot
+ * honour would let the requester believe they chose something they did not.
+ * `.strict()` therefore refuses a payload that still carries one.
+ */
 const canonicalScheduledSchema = z
   .object({
     ...requesterFields,
     timing: z.literal("scheduled"),
     windowStart: isoTimestamp,
-    windowEnd: isoTimestamp,
     installationCredential: optionalInstallationCredential,
   })
-  .strict()
-  .refine(
-    ({ windowStart, windowEnd }) =>
-      new Date(windowEnd).getTime() > new Date(windowStart).getTime(),
-    {
-      path: ["windowEnd"],
-      message: "windowEnd must be after windowStart",
-    }
-  );
+  .strict();
 
 const canonicalSchema = z.union([
   canonicalAsapSchema,
   canonicalScheduledSchema,
 ]);
 
+/**
+ * The website form's shape, kept accepting exactly the keys it has always
+ * sent. Two of them are now shape-only:
+ *
+ * - `pickupWindowText` is still required, because a payload missing it has
+ *   always been `INVALID_REQUEST`, but the persisted display text is derived
+ *   from the backend's timing decision rather than taken from here. A client
+ *   cannot describe a window the backend did not grant.
+ * - `windowEnd` is still validated as a well-formed timestamp after
+ *   `windowStart`, but no longer decides expiration: the start alone does.
+ *   The web form's second time input is consequently vestigial and is left for
+ *   the separate web pass rather than removed here.
+ */
 const legacyWebSchema = z
   .object({
     ...requesterFields,
@@ -139,9 +157,12 @@ interface ValidatedCreateRequest {
   pickupName: string;
   email: string;
   timing: "asap" | "scheduled";
+  /**
+   * The accepted scheduled start, on scheduled requests only. It is the sole
+   * requester-supplied timing input: `visibleFrom`, `expiresAt`, `windowEnd`,
+   * and the display text are all derived from it plus the backend clock.
+   */
   windowStart?: Date;
-  windowEnd?: Date;
-  pickupWindowText: string;
   /** Present only on the canonical iOS shapes; the legacy web shape has none. */
   installationCredential?: string;
 }
@@ -149,32 +170,24 @@ interface ValidatedCreateRequest {
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 /**
- * How long an ASAP request stays available after backend creation.
+ * Backend-owned visibility and expiration. The client supplies neither — both
+ * create schemas are `.strict()` — and both are written explicitly rather than
+ * left to the schema's 24-hour `pre("save")` fallback, so what is persisted
+ * always matches what the requester is told.
  *
- * This is an absolute duration between two instants, not a calendar offset,
- * so it is unaffected by day boundaries or DST transitions.
- */
-const ASAP_LIFETIME_MS = 5 * 60 * 60 * 1000;
-
-/**
- * Backend-owned expiration. The client never supplies it — both create
- * schemas are `.strict()`, and this value is written explicitly rather than
- * left to the schema's 24-hour `pre("save")` fallback, so the persisted
- * expiration always matches what the requester is told.
+ * ASAP: visible from the backend creation instant, for three hours.
+ * Scheduled: visible from the accepted start, for three hours after it.
  *
- * ASAP: five hours after the backend creation time.
- * Scheduled: the validated canonical `windowEnd`, so a request cannot outlive
- * the pickup window it was posted for. Validation guarantees that end is still
- * in the future, so a created request is never already expired.
+ * `src/requestTiming.ts` owns both durations; nothing here recomputes them.
  */
-function requestExpiration(
+function requestTimingWindow(
   validated: ValidatedCreateRequest,
   createdAt: Date
-): Date {
-  if (validated.timing === "scheduled" && validated.windowEnd) {
-    return validated.windowEnd;
+): RequestTimingWindow {
+  if (validated.timing === "scheduled" && validated.windowStart) {
+    return resolveScheduledTiming(validated.windowStart);
   }
-  return new Date(createdAt.getTime() + ASAP_LIFETIME_MS);
+  return resolveAsapTiming(createdAt);
 }
 
 function errorEnvelope(code: string, message: string) {
@@ -190,17 +203,41 @@ function hasTiming(value: unknown): boolean {
 }
 
 /**
- * A scheduled window must still have time left on it. Since `expiresAt` is the
- * validated `windowEnd`, a window that has already ended would create a request
- * that is expired the moment it is written — invisible to every helper.
+ * A scheduled start must not already have passed, judged against this
+ * handler's own `now` rather than any client clock.
  *
- * Only the end is checked against server time. A window that has already
- * started but has not ended is still usable, so `windowStart` is deliberately
- * allowed to be in the past; `windowEnd > windowStart` is enforced separately
- * by the schemas.
+ * `src/requestTiming.ts` owns the rule and its boundary. Applying it here, in
+ * shape validation, keeps the refusal ahead of the daily-limit read, the write,
+ * the requester confirmation email, and both notification dispatches, so an
+ * elapsed start produces no side effect of any kind.
  */
-function isUsableScheduledWindow(windowEnd: Date, now: Date): boolean {
-  return windowEnd.getTime() > now.getTime();
+function isUsableScheduledStart(windowStart: Date, now: Date): boolean {
+  return isAcceptableScheduledStart(windowStart, now);
+}
+
+/**
+ * States the real three-hour lifetime. Helpers read this on every ASAP
+ * request, so it has to name the same duration `REQUEST_VISIBLE_DURATION_MS`
+ * enforces.
+ */
+export const ASAP_WINDOW_TEXT = "ASAP (available for the next 3 hours)";
+
+/**
+ * What helpers read on every surface that renders a request. Derived here from
+ * the backend's own timing decision, for both create shapes, so no client can
+ * post display text that contradicts the availability it describes.
+ *
+ * The scheduled text is formatted in NYU campus time
+ * (`formatMealRequestWindow`), so it reads the same to a helper in New York
+ * and to one whose device is not.
+ */
+function requestWindowText(
+  timing: "asap" | "scheduled",
+  window: RequestTimingWindow
+): string {
+  return timing === "asap"
+    ? ASAP_WINDOW_TEXT
+    : formatMealRequestWindow(window.visibleFrom, window.expiresAt);
 }
 
 function validateCreateShape(
@@ -218,14 +255,12 @@ function validateCreateShape(
         pickupName: result.data.pickupName,
         email: result.data.email,
         timing: "asap",
-        pickupWindowText: "ASAP (within the next 5 hours)",
         installationCredential: result.data.installationCredential,
       };
     }
 
     const windowStart = new Date(result.data.windowStart);
-    const windowEnd = new Date(result.data.windowEnd);
-    if (!isUsableScheduledWindow(windowEnd, now)) return null;
+    if (!isUsableScheduledStart(windowStart, now)) return null;
 
     return {
       vendor: result.data.vendor,
@@ -234,8 +269,6 @@ function validateCreateShape(
       email: result.data.email,
       timing: "scheduled",
       windowStart,
-      windowEnd,
-      pickupWindowText: formatMealRequestWindow(windowStart, windowEnd),
       installationCredential: result.data.installationCredential,
     };
   }
@@ -253,13 +286,11 @@ function validateCreateShape(
       pickupName: result.data.pickupName,
       email: result.data.email,
       timing: "asap",
-      pickupWindowText: "ASAP (within the next 5 hours)",
     };
   }
 
   const windowStart = new Date(result.data.windowStart!);
-  const windowEnd = new Date(result.data.windowEnd!);
-  if (!isUsableScheduledWindow(windowEnd, now)) return null;
+  if (!isUsableScheduledStart(windowStart, now)) return null;
 
   return {
     vendor: result.data.vendor,
@@ -268,8 +299,6 @@ function validateCreateShape(
     email: result.data.email,
     timing: "scheduled",
     windowStart,
-    windowEnd,
-    pickupWindowText: formatMealRequestWindow(windowStart, windowEnd),
   };
 }
 
@@ -278,7 +307,8 @@ function validateCreateShape(
  *
  * `payload` is every structural failure this route has always answered with one
  * generic message: a missing, blank, or wrongly typed field, an unexpected key,
- * a bad `timing`, a mismatched or already-ended window, on either create shape.
+ * a bad `timing`, a mismatched window, or a scheduled start that has already
+ * passed, on either create shape.
  * `email` is reserved for an address that is present and non-blank but fails
  * syntax or the NYU allowlist. `vendor` is reserved for a vendor that is
  * present and non-blank but is not one of the supported catalog entries.
@@ -318,12 +348,15 @@ function validateCreateRequest(body: unknown, now: Date): CreateValidation {
 
 async function attemptRequesterConfirmation(
   request: ValidatedCreateRequest,
+  pickupWindowText: string,
   requestId: string
 ): Promise<void> {
   const htmlVendor = escapeHtml(request.vendor);
   const htmlFood = escapeHtml(request.food);
   const htmlPickupName = escapeHtml(request.pickupName);
-  const htmlPickupWindow = escapeHtml(request.pickupWindowText);
+  // The same backend-derived, NYU-campus-time text helpers see, so the
+  // requester's confirmation cannot state a window the request does not have.
+  const htmlPickupWindow = escapeHtml(pickupWindowText);
 
   try {
     const result = await resend.emails.send({
@@ -339,7 +372,7 @@ async function attemptRequesterConfirmation(
         <p>When someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.</p>
         <p>Request ID: ${requestId}</p>
       `,
-      text: `Your meal request has been submitted!\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Name: ${request.pickupName}\nPickup Window: ${request.pickupWindowText}\nWhen someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.\nRequest ID: ${requestId}`,
+      text: `Your meal request has been submitted!\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Name: ${request.pickupName}\nPickup Window: ${pickupWindowText}\nWhen someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.\nRequest ID: ${requestId}`,
     });
 
     if (result.error) {
@@ -406,8 +439,8 @@ export async function createRequest(
   req: Request,
   res: Response
 ): Promise<Response> {
-  // One backend creation-time value for the whole handler: scheduled-window
-  // validation, the daily-limit window, and the ASAP expiration are all
+  // One backend creation-time value for the whole handler: scheduled-start
+  // validation, the daily-limit window, and the ASAP visibility window are all
   // measured from the same instant.
   const now = new Date();
 
@@ -435,9 +468,10 @@ export async function createRequest(
 
   try {
     // This serial read-before-write is intentionally best-effort abuse control,
-    // not a transactional quota guarantee under concurrent requests.
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0);
+    // not a transactional quota guarantee under concurrent requests. The day
+    // boundary is the NYU campus calendar day, not the Node process's local
+    // timezone, so quota reset time does not depend on where this process runs.
+    const startOfDay = startOfCampusDay(now);
 
     try {
       const todaysCount = await MealRequest.countDocuments({
@@ -459,7 +493,11 @@ export async function createRequest(
       );
     }
 
-    const expiresAt = requestExpiration(validated, now);
+    const { visibleFrom, expiresAt } = requestTimingWindow(validated, now);
+    const pickupWindowText = requestWindowText(validated.timing, {
+      visibleFrom,
+      expiresAt,
+    });
 
     // Notification-routing identity only, and strictly best-effort: a failure
     // to resolve it must never block the core act of creating a food request.
@@ -479,10 +517,15 @@ export async function createRequest(
       food: validated.food,
       pickupName: validated.pickupName,
       email: validated.email,
-      pickupWindowText: validated.pickupWindowText,
+      pickupWindowText,
       windowStart: validated.windowStart,
-      windowEnd: validated.windowEnd,
+      // The advertised window is the availability window. Persisting the
+      // derived expiration here — rather than whatever end a client sent —
+      // keeps the public `windowEnd`, the display text, and `expiresAt` from
+      // being three different claims about one request.
+      windowEnd: validated.timing === "scheduled" ? expiresAt : undefined,
       status: "open",
+      visibleFrom,
       expiresAt,
       deleteAt: expiresAt,
       ...(installationId ? { installationId } : {}),
@@ -494,7 +537,7 @@ export async function createRequest(
     );
     const requestId = String(document._id);
 
-    await attemptRequesterConfirmation(validated, requestId);
+    await attemptRequesterConfirmation(validated, pickupWindowText, requestId);
 
     res.status(201).json(response);
     // Both started after the response is sent and deliberately not awaited: a

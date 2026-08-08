@@ -247,6 +247,8 @@ struct ContentView: View {
             break
         case .unavailable:
             requestStore.reportRequestUnavailableFromNotification(requestID: requestID)
+        case .notYetAvailable:
+            requestStore.reportRequestNotYetAvailableFromNotification(requestID: requestID)
         case .temporarilyUnavailable:
             requestStore.reportRequestTemporarilyUnavailableFromNotification(requestID: requestID)
         }

@@ -73,8 +73,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (detailsVendor) detailsVendor.textContent = `${req.vendor} — Pickup: ${req.pickupName}`;
         if (detailsFood) detailsFood.textContent = req.food || '';
         if (detailsWindow) {
+          // The backend derives `pickupWindowText` from the timing it actually
+          // granted, so it is rendered as-is rather than re-described here. A
+          // locally worded ASAP sentence was a second definition of the
+          // request lifetime, and it outlived the lifetime it named.
           if (req.isAsap) {
-            detailsWindow.textContent = 'ASAP (within the next 5 hours)';
+            detailsWindow.textContent = req.pickupWindowText || 'Time window not specified';
           } else if (req.windowStart || req.windowEnd) {
               detailsWindow.textContent = formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
           } else {
@@ -92,7 +96,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (elVendor) elVendor.textContent = req.vendor ? `at ${req.vendor}` : '';
         if (elFoodDetails) elFoodDetails.textContent = req.details || req.foodDetails || '';
         if (elPickup) elPickup.textContent = req.pickupName ? `Pickup Name: ${req.pickupName}` : '';
-        if (elWindow) elWindow.textContent = req.isAsap ? 'ASAP (within the next 5 hours)' : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
+        if (elWindow) elWindow.textContent = req.isAsap
+          ? (req.pickupWindowText || 'Time window not specified')
+          : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
     } catch (err) {
       errorMsg.textContent = 'Unable to load request details.';
       errorMsg.style.display = 'block';

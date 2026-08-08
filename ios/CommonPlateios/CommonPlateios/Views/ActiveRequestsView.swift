@@ -275,14 +275,13 @@ struct ActiveRequestsView: View {
         }
     }
 
-    /// Backend order is authoritative and is rendered as-is. The public list
-    /// response carries no server-evaluated timing category, and the backend's
-    /// ASAP rule ("no `windowStart`, or `windowStart` within an hour of server
-    /// time") cannot be reproduced on device without trusting the device clock.
-    /// Splitting on whether `windowStart`/`windowEnd` merely exist misclassified
-    /// imminent meals as "Later Today", so the requests are shown as one list
-    /// until the API provides a timing category. Per-row timing text still comes
-    /// from the backend's canonical `pickupWindowText`.
+    /// Backend membership and order are authoritative and are rendered as-is.
+    /// Every request in this list is one the backend has already decided is
+    /// available now: a scheduled request is withheld until its `visibleFrom`,
+    /// so nothing here is waiting to begin and there is no imminent-versus-later
+    /// distinction left for the app to draw. Per-row timing text comes from the
+    /// backend's canonical `pickupWindowText`, already formatted in campus time,
+    /// so the app never reads the device clock to describe a request.
     private var requestsList: some View {
         List {
             if store.refreshError != nil {
@@ -360,6 +359,11 @@ struct ActiveRequestsView: View {
             return "We couldn’t find this request."
         case .noLongerAvailable, nil:
             return RequestDetailView.noLongerAvailableNotice
+        case .notYetAvailable:
+            // The same sentence a claim before the start produces, so a helper
+            // who arrives by notification tap and one who presses Claim are
+            // told the same true thing.
+            return RequestDetailView.notYetAvailableNotice
         case .temporarilyUnavailable:
             return RequestDetailView.temporarilyUnavailableNotice
         }
@@ -387,7 +391,11 @@ struct ActiveRequestsView: View {
             return "Don’t place another Grubhub order. We couldn’t confirm whether the student’s email was sent, so they may not know the order is ready."
         case .fulfillmentRequestNotFound:
             return "It may already have been recorded or removed. Don’t place another Grubhub order."
-        case .alreadyClaimed, .noLongerAvailable, .temporarilyUnavailable, nil:
+        // `.notYetAvailable` needs no second sentence either: nothing was
+        // ordered, nothing was lost, and the first sentence already says the
+        // only thing there is to do about it.
+        case .alreadyClaimed, .noLongerAvailable, .notYetAvailable,
+             .temporarilyUnavailable, nil:
             return nil
         }
     }

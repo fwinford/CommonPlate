@@ -1,7 +1,11 @@
 import type { NextFunction, Request, Response } from "express";
 import mongoose from "mongoose";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Request as MealRequest } from "../models/db.js";
+import {
+  REQUEST_NOT_YET_AVAILABLE_CODE,
+  REQUEST_NOT_YET_AVAILABLE_MESSAGE,
+} from "./requestAvailability.js";
 import { getPublicRequestDetail } from "./requestDetailRoute.js";
 
 function requestDocument(overrides: Record<string, unknown> = {}) {
@@ -223,6 +227,202 @@ describe("GET /api/request/:id", () => {
         request: expect.objectContaining({ status: "open" }),
       })
     );
+  });
+
+  /**
+   * The W3-R1 visibility rule applied to the one unauthenticated read that
+   * returns a single named request. A future scheduled request is withheld
+   * from the list, and knowing its id must not be a way around that.
+   */
+  describe("a scheduled request before its visibleFrom", () => {
+    const visibleFrom = new Date("2026-07-26T20:00:00.000Z");
+
+    // Only `Date` is faked, and only here, so each case can name the exact
+    // instant it is asking about while the rest of the file keeps real time.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function futureRequest(overrides: Record<string, unknown> = {}) {
+      return requestDocument({
+        status: "open",
+        visibleFrom,
+        windowStart: visibleFrom,
+        windowEnd: new Date("2026-07-26T23:00:00.000Z"),
+        expiresAt: new Date("2026-07-26T23:00:00.000Z"),
+        claimExpiresAt: null,
+        ...overrides,
+      });
+    }
+
+    it("returns the distinct not-yet-available outcome one millisecond before the start", async () => {
+      vi.setSystemTime(new Date(visibleFrom.getTime() - 1));
+      mockFindById(futureRequest());
+      const context = routeContext();
+
+      await getPublicRequestDetail(context.req, context.res, context.next);
+
+      expect(context.status).toHaveBeenCalledWith(409);
+      const body = (
+        context.status.mock.results[0].value as { json: typeof context.json }
+      ).json.mock.calls[0][0] as Record<string, unknown>;
+      expect(body).toEqual({
+        error: {
+          code: "REQUEST_NOT_YET_AVAILABLE",
+          message: "This request is not available to help with yet.",
+          fields: null,
+        },
+      });
+      expect(context.next).not.toHaveBeenCalled();
+    });
+
+    it("carries no request content in that refusal", async () => {
+      vi.setSystemTime(new Date(visibleFrom.getTime() - 1));
+      mockFindById(futureRequest());
+      const context = routeContext();
+
+      await getPublicRequestDetail(context.req, context.res, context.next);
+
+      const serialized = JSON.stringify(
+        (context.status.mock.results[0].value as { json: typeof context.json })
+          .json.mock.calls[0][0]
+      );
+      // No vendor, no food, no window text, no status, no id, no instants —
+      // the outcome says when, and nothing about what.
+      for (const secret of [
+        "Campus Market",
+        "Vegetable rice bowl",
+        "1:00 PM",
+        "Requester Private Name",
+        "open",
+        "64b000000000000000000001",
+        "2026-07-26",
+      ]) {
+        expect(serialized).not.toContain(secret);
+      }
+      // And it is not the response wrapper a served request produces.
+      expect(context.json).not.toHaveBeenCalledWith(
+        expect.objectContaining({ request: expect.anything() })
+      );
+    });
+
+    it("stays distinct from the not-found outcome for a request that truly does not exist", async () => {
+      vi.setSystemTime(new Date(visibleFrom.getTime() - 1));
+
+      mockFindById(futureRequest());
+      const notYet = routeContext();
+      await getPublicRequestDetail(notYet.req, notYet.res, notYet.next);
+
+      mockFindById(null);
+      const missing = routeContext();
+      await getPublicRequestDetail(missing.req, missing.res, missing.next);
+
+      // "Come back later" and "there is no such request" are different facts,
+      // and a client must be able to tell them apart from the response alone.
+      expect(notYet.status).toHaveBeenCalledWith(409);
+      expect(missing.status).toHaveBeenCalledWith(404);
+
+      const notYetBody = (
+        notYet.status.mock.results[0].value as { json: typeof notYet.json }
+      ).json.mock.calls[0][0];
+      const missingBody = (
+        missing.status.mock.results[0].value as { json: typeof missing.json }
+      ).json.mock.calls[0][0];
+
+      expect(missingBody).toEqual({ error: "Request not found" });
+      expect(notYetBody).not.toEqual(missingBody);
+    });
+
+    it("serves ordinary detail at exactly the start instant", async () => {
+      // The bound is inclusive, matching `isVisibleNow` and the create-time
+      // start rule: visible at its start, not one millisecond after it.
+      vi.setSystemTime(visibleFrom);
+      mockFindById(futureRequest());
+      const context = routeContext();
+
+      await getPublicRequestDetail(context.req, context.res, context.next);
+
+      expect(context.status).not.toHaveBeenCalled();
+      expect(context.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            vendor: "Campus Market",
+            status: "open",
+          }),
+        })
+      );
+    });
+
+    it("keeps the legacy compatibility behavior for a row with no visibleFrom", async () => {
+      // Requests persisted before the field existed were visible from
+      // creation, and nothing migrates them, so they must stay reachable.
+      vi.setSystemTime(new Date("2026-07-26T18:30:00.000Z"));
+      mockFindById(requestDocument({ visibleFrom: undefined }));
+      const context = routeContext();
+
+      await getPublicRequestDetail(context.req, context.res, context.next);
+
+      expect(context.status).not.toHaveBeenCalled();
+      expect(context.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({ vendor: "Campus Market" }),
+        })
+      );
+    });
+
+    it("withholds a future request from notification and deep-link resolution", async () => {
+      // `GET /api/request/:id` is what a helper-notification tap and a shared
+      // link both resolve against. Whatever produced the id, the answer before
+      // the start is the same authoritative nothing.
+      vi.setSystemTime(new Date(visibleFrom.getTime() - 60 * 60 * 1000));
+      mockFindById(futureRequest());
+      const context = routeContext();
+
+      await getPublicRequestDetail(context.req, context.res, context.next);
+
+      expect(context.status).toHaveBeenCalledWith(409);
+      expect(context.json).not.toHaveBeenCalledWith(
+        expect.objectContaining({ request: expect.anything() })
+      );
+    });
+
+    it("withholds it whatever its persisted status is, and never reports it as open", async () => {
+      vi.setSystemTime(new Date(visibleFrom.getTime() - 1));
+
+      for (const status of ["open", "claimed", "placed"]) {
+        mockFindById(futureRequest({ status }));
+        const context = routeContext();
+
+        await getPublicRequestDetail(context.req, context.res, context.next);
+
+        expect(context.status).toHaveBeenCalledWith(409);
+        expect(context.json).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({ status: "open" }),
+          })
+        );
+      }
+    });
+
+    it("uses the same code and sentence the claim route answers with", async () => {
+      // One situation, one answer. A helper who taps through and a helper who
+      // presses Claim must not be told two different things.
+      vi.setSystemTime(new Date(visibleFrom.getTime() - 1));
+      mockFindById(futureRequest());
+      const context = routeContext();
+
+      await getPublicRequestDetail(context.req, context.res, context.next);
+
+      const body = (
+        context.status.mock.results[0].value as { json: typeof context.json }
+      ).json.mock.calls[0][0] as { error: { code: string; message: string } };
+      expect(body.error.code).toBe(REQUEST_NOT_YET_AVAILABLE_CODE);
+      expect(body.error.message).toBe(REQUEST_NOT_YET_AVAILABLE_MESSAGE);
+    });
   });
 
   it("preserves the existing invalid-id response", async () => {

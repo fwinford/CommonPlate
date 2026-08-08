@@ -392,7 +392,6 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(payloads.first?.email, "taylor@nyu.edu")
         XCTAssertEqual(payloads.first?.timing.rawValue, "scheduled")
         XCTAssertEqual(payloads.first?.windowStart, preferredTime)
-        XCTAssertEqual(payloads.first?.windowEnd, try date("2026-07-28T17:30:00.000Z"))
     }
 
     func testRequestBackendFailurePreservesActualDraftAndTimingSelection() async throws {
@@ -525,7 +524,7 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(errors.first?.error, .invalidScheduledTime)
         XCTAssertEqual(
             errors.first?.message,
-            "Choose a pickup time that leaves a full 30-minute window today."
+            "Choose a pickup time later today."
         )
     }
 
@@ -590,7 +589,7 @@ final class RequestCreationViewTests: XCTestCase {
         )
         XCTAssertNotEqual(visible.error, .invalidScheduledTime)
         XCTAssertFalse(
-            visible.message.contains("Choose a pickup time that leaves a full 30-minute window today.")
+            visible.message.contains("Choose a pickup time later today.")
         )
 
         // The completeness gate stays open: the draft is complete, just invalid,
@@ -750,7 +749,6 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(RequestFoodView.showsLocalRejectionPointer(for: accepted))
         XCTAssertEqual(submitted?.timing, .asap)
         XCTAssertNil(submitted?.windowStart)
-        XCTAssertNil(submitted?.windowEnd)
     }
 
     /// The pointer is local-only. Anything the backend decided keeps the
@@ -826,7 +824,6 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(payload.email, "taylor@nyu.edu")
         XCTAssertEqual(payload.timing.rawValue, "asap")
         XCTAssertNil(payload.windowStart)
-        XCTAssertNil(payload.windowEnd)
 
         let json = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any]
@@ -835,7 +832,10 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(json.keys.contains("windowEnd"))
     }
 
-    func testScheduledPayloadUsesOnePreferredTimeAsThirtyMinuteWindow() throws {
+    /// The requester picks a start and nothing else. The backend derives the
+    /// end from it, so the payload must carry no end at all — the create shape
+    /// is strict and refuses one.
+    func testScheduledPayloadSendsOnlyTheSelectedStart() throws {
         let now = try date("2026-07-28T16:00:00.000Z")
         let preferredTime = try date("2026-07-28T17:00:00.000Z")
 
@@ -852,10 +852,15 @@ final class RequestCreationViewTests: XCTestCase {
 
         XCTAssertEqual(payload.timing.rawValue, "scheduled")
         XCTAssertEqual(payload.windowStart, preferredTime)
-        XCTAssertEqual(payload.windowEnd, try date("2026-07-28T17:30:00.000Z"))
+
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any]
+        )
+        XCTAssertTrue(json.keys.contains("windowStart"))
+        XCTAssertFalse(json.keys.contains("windowEnd"))
     }
 
-    func testLatestScheduledStartKeepsDerivedEndAtDayBoundary() throws {
+    func testLatestScheduledStartSitsAtTheDayBoundaryCutoff() throws {
         let now = try date("2026-07-28T16:00:00.000Z")
         let latestStart = try XCTUnwrap(
             RequestFoodView.latestScheduledStart(on: now, calendar: utcCalendar)
@@ -863,12 +868,12 @@ final class RequestCreationViewTests: XCTestCase {
         let dayEnd = try XCTUnwrap(
             RequestFoodView.endOfDay(containing: now, calendar: utcCalendar)
         )
-        let derivedEnd = try XCTUnwrap(
-            utcCalendar.date(byAdding: .minute, value: 30, to: latestStart)
-        )
 
         XCTAssertEqual(latestStart, try date("2026-07-28T23:30:00.000Z"))
-        XCTAssertEqual(derivedEnd, dayEnd)
+        XCTAssertEqual(
+            utcCalendar.dateComponents([.minute], from: latestStart, to: dayEnd).minute,
+            RequestFoodView.scheduledStartCutoffMinutesBeforeDayEnd
+        )
         XCTAssertTrue(
             RequestFoodView.isValidScheduledWindow(
                 startingAt: latestStart,
@@ -1075,19 +1080,26 @@ final class RequestCreationViewTests: XCTestCase {
 
     // MARK: - Expiration copy
 
-    /// The backend writes `expiresAt` explicitly at creation
-    /// (`src/createRequestRoute.ts`): ASAP is five hours after backend
-    /// creation, scheduled is the validated `windowEnd`. The success screen
-    /// must state exactly that.
+    /// The backend writes `visibleFrom` and `expiresAt` explicitly at creation
+    /// (`src/requestTiming.ts`): ASAP is visible immediately, scheduled at its
+    /// chosen start, and both last three hours from there. The success screen
+    /// must state exactly that — including that a scheduled request is not
+    /// visible yet.
     @MainActor
     func testSuccessExpirationCopyMatchesTheBackendContract() {
         XCTAssertEqual(
             RequestFoodView.expirationNotice(for: .asap),
-            "Your request is now visible to helpers. It will expire in 5 hours if it is not fulfilled."
+            "Your request is now visible to helpers. It will expire in 3 hours if it is not fulfilled."
         )
         XCTAssertEqual(
             RequestFoodView.expirationNotice(for: .later),
-            "Your request is now visible to helpers. It will expire when the pickup window ends if it is not fulfilled."
+            "Helpers will start seeing your request at the time you chose. It stays up for 3 hours after that, then expires if it is not fulfilled."
+        )
+        // A scheduled request is not visible at submission, and the copy must
+        // not say it is.
+        XCTAssertFalse(
+            RequestFoodView.expirationNotice(for: .later)
+                .contains("is now visible")
         )
     }
 
@@ -1134,11 +1146,11 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testFormExpirationCopyDistinguishesTheTwoBackendRules() {
         XCTAssertTrue(
-            RequestFoodView.formExpirationNotice(for: .asap).contains("5 hours")
+            RequestFoodView.formExpirationNotice(for: .asap).contains("3 hours")
         )
         XCTAssertTrue(
             RequestFoodView.formExpirationNotice(for: .later)
-                .contains("pickup window ends")
+                .contains("3 hours after the time you choose")
         )
         XCTAssertNotEqual(
             RequestFoodView.formExpirationNotice(for: .asap),
@@ -1203,7 +1215,7 @@ final class RequestCreationViewTests: XCTestCase {
     func testScheduledWindowHelperSentenceIsExact() {
         XCTAssertEqual(
             RequestFoodView.scheduledWindowNotice,
-            "Helpers will see a 30-minute pickup window starting at this time."
+            "Helpers will start seeing this request at this time, and for 3 hours after it."
         )
     }
 
@@ -1223,7 +1235,7 @@ final class RequestCreationViewTests: XCTestCase {
                     now: now,
                     calendar: utcCalendar
                 ),
-                "a full 30-minute window still fits at \(value)"
+                "a start is still selectable at \(value)"
             )
             XCTAssertEqual(
                 RequestFoodView.availableTimingOptions(
@@ -1235,7 +1247,7 @@ final class RequestCreationViewTests: XCTestCase {
         }
     }
 
-    /// Past the latest possible start, no 30-minute window can end before the
+    /// Past the latest possible start, no start remains before the
     /// next calendar day, so "Later" — and the date picker it would reveal —
     /// must be withheld rather than shown in an unusable state.
     @MainActor
@@ -1251,7 +1263,7 @@ final class RequestCreationViewTests: XCTestCase {
                     now: now,
                     calendar: utcCalendar
                 ),
-                "no 30-minute window fits at \(value)"
+                "no start remains at \(value)"
             )
             XCTAssertEqual(
                 RequestFoodView.availableTimingOptions(
@@ -2101,13 +2113,13 @@ final class RequestCreationViewTests: XCTestCase {
 
     // MARK: - ASAP wording
 
-    /// The backend keeps an ASAP request available for five hours, and the
-    /// requester is told so at submission. The window text helpers read said
-    /// "within the next hour", so a request posted at 1pm still advertised an
-    /// expired-sounding window at 5pm.
+    /// The backend keeps an ASAP request available for three hours, and the
+    /// requester is told so at submission. Both superseded phrasings — "within
+    /// the next hour" and "within the next 5 hours" — made the two sides of one
+    /// request disagree, so neither may reappear.
     @MainActor
-    func testASAPWindowTextStatesTheRealFiveHourLifetime() async throws {
-        let asapWindowText = "ASAP (within the next 5 hours)"
+    func testASAPWindowTextStatesTheRealThreeHourLifetime() async throws {
+        let asapWindowText = "ASAP (available for the next 3 hours)"
 
         let request = try await decodedCreatedRequest(
             createResponse(requestObject: createdRequestObject(
@@ -2117,14 +2129,15 @@ final class RequestCreationViewTests: XCTestCase {
         )
         XCTAssertEqual(request.pickupWindowText, asapWindowText)
         XCTAssertFalse(request.pickupWindowText.contains("within the next hour"))
+        XCTAssertFalse(request.pickupWindowText.contains("within the next 5 hours"))
 
         // The two sides of the same request must agree.
         XCTAssertTrue(
-            RequestFoodView.asapExpirationNotice.contains("5 hours"),
-            "The requester is told five hours; helpers must see the same"
+            RequestFoodView.asapExpirationNotice.contains("3 hours"),
+            "The requester is told three hours; helpers must see the same"
         )
         XCTAssertTrue(
-            RequestFoodView.formExpirationNotice(for: .asap).contains("5 hours")
+            RequestFoodView.formExpirationNotice(for: .asap).contains("3 hours")
         )
     }
 
@@ -2168,8 +2181,7 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             email: "taylor@nyu.edu",
             timing: .asap,
-            windowStart: nil,
-            windowEnd: nil
+            windowStart: nil
         )
     }
 
@@ -2179,7 +2191,7 @@ final class RequestCreationViewTests: XCTestCase {
 
     private func createdRequestObject(
         id: String,
-        pickupWindowText: String = "ASAP (within the next 5 hours)"
+        pickupWindowText: String = "ASAP (available for the next 3 hours)"
     ) -> String {
         """
         {
@@ -2191,7 +2203,7 @@ final class RequestCreationViewTests: XCTestCase {
           "windowEnd": null,
           "status": "open",
           "createdAt": "2026-07-28T16:00:00.000Z",
-          "expiresAt": "2026-07-28T21:00:00.000Z"
+          "expiresAt": "2026-07-28T19:00:00.000Z"
         }
         """
     }

@@ -17,7 +17,11 @@ import { day4Error, sendDay4Error } from "./day4Errors.js";
 import { isPublicActionsPaused } from "./publicActionsPause.js";
 import {
   buildMinimumRemainingTimeFilter,
+  buildVisibleNowFilter,
   hasMinimumRemainingTime,
+  isVisibleNow,
+  REQUEST_NOT_YET_AVAILABLE_CODE,
+  REQUEST_NOT_YET_AVAILABLE_MESSAGE,
 } from "./requestAvailability.js";
 
 export const CLAIM_ROUTE_PATH = "/api/request/:id/claim";
@@ -29,6 +33,7 @@ export const CLAIM_UNAVAILABLE_MESSAGE =
 
 interface ClaimDiagnosticDocument {
   status?: string;
+  visibleFrom?: Date | null;
   expiresAt?: Date | null;
   claimExpiresAt?: Date | null;
   claimExtendedAt?: Date | null;
@@ -42,7 +47,7 @@ function isInvalidId(id: unknown): boolean {
 function diagnosticRequest(id: string) {
   return MealRequest.findById(id)
     .select(
-      "status expiresAt claimExpiresAt claimExtendedAt +claimTokenDigest"
+      "status visibleFrom expiresAt claimExpiresAt claimExtendedAt +claimTokenDigest"
     )
     .lean()
     .exec() as Promise<ClaimDiagnosticDocument | null>;
@@ -72,6 +77,18 @@ async function explainClaimFailure(
       409,
       "REQUEST_ALREADY_PLACED",
       "This request has already been placed."
+    );
+  }
+  // Ahead of the expiration checks: a request whose start has not arrived is
+  // not late, and telling a helper it is "no longer available" would be the
+  // opposite of true. Code and sentence are shared with the public-detail
+  // refusal, so one situation has one answer wherever it is met.
+  if (!isVisibleNow(document.visibleFrom, now)) {
+    return sendDay4Error(
+      res,
+      409,
+      REQUEST_NOT_YET_AVAILABLE_CODE,
+      REQUEST_NOT_YET_AVAILABLE_MESSAGE
     );
   }
   if (isExpired(document.expiresAt, now)) {
@@ -139,6 +156,9 @@ export async function claimRequest(
       {
         _id: id,
         status: { $ne: "placed" },
+        // The same start-of-visibility rule the list, digest, and alert paths
+        // apply. A request nobody can see yet must not be claimable either.
+        visibleFrom: buildVisibleNowFilter(now),
         expiresAt: buildMinimumRemainingTimeFilter(now),
         $or: [
           { status: "open" },
@@ -217,6 +237,11 @@ async function explainExtensionFailure(
       "This request has already been placed."
     );
   }
+  // Deliberately no start-of-visibility branch here, unlike the claim
+  // diagnostic. Extension is only reachable by a caller who already holds a
+  // claim, so a not-yet-visible request cannot legitimately arrive — and this
+  // classification runs before token validation, so adding one would answer a
+  // caller who has proved nothing.
   if (isExpired(document.expiresAt, now)) {
     return sendDay4Error(
       res,

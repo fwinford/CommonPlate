@@ -202,6 +202,7 @@ export interface IRequest extends Document {
   contactMessage?: string;
   notificationStatus?: "pending" | "sent" | "failed";
   notificationAttemptedAt?: Date;
+  visibleFrom?: Date;
   expiresAt?: Date;
   deleteAt?: Date;
   claimedAt?: Date;
@@ -237,6 +238,12 @@ const RequestSchema = new Schema<IRequest>({
     enum: ["pending", "sent", "failed"],
   },
   notificationAttemptedAt: { type: Date },
+  // When helpers begin seeing this request: the backend creation instant for
+  // ASAP, the accepted scheduled start for Later. Written explicitly at
+  // creation and never by a client. Requests persisted before this field
+  // existed carry no value, and availability treats that absence as "visible
+  // from creation" rather than migrating them.
+  visibleFrom: { type: Date },
   expiresAt: { type: Date },
   deleteAt: {
     type: Date,

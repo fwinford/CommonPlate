@@ -37,7 +37,7 @@ function placedRequestDocument(overrides: Record<string, unknown> = {}): IReques
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
     email: "requester@nyu.edu",
-    pickupWindowText: "ASAP (within the next 5 hours)",
+    pickupWindowText: "ASAP (available for the next 3 hours)",
     status: "placed",
     installationId,
     ...overrides,

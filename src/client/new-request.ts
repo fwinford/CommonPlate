@@ -118,7 +118,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     let pickupWindowText = '';
     
     if (windowType === 'asap') {
-      pickupWindowText = 'ASAP (within the next 5 hours)';
+      // Structurally required by the legacy create shape, but no longer the
+      // text anyone reads: the backend derives the persisted window text from
+      // the timing it grants (`src/createRequestRoute.ts`). Naming a duration
+      // here would be this form asserting a lifetime it does not own.
+      pickupWindowText = 'ASAP';
     } else {
       const start = formData.get('windowStart') as string;
       const end = formData.get('windowEnd') as string;

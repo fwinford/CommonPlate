@@ -82,6 +82,11 @@ struct PublicActionsStateDTO: Decodable {
 /// fills it in from the store's own installation-credential provider
 /// immediately before sending, so this field defaults to absent for every
 /// existing caller and test that constructs a payload directly.
+/// `windowStart` is the only timing value this app sends, and only on a
+/// scheduled request: it is the instant helpers begin seeing the request, and
+/// the backend derives the expiration from it. There is deliberately no
+/// `windowEnd` — the create shape is strict and would refuse one, because an
+/// end the requester did not choose is not theirs to state.
 struct CreateRequestPayload: Encodable {
     let vendor: String
     let food: String
@@ -89,7 +94,6 @@ struct CreateRequestPayload: Encodable {
     let email: String
     let timing: RequestTimingWire
     let windowStart: Date?
-    let windowEnd: Date?
     var installationCredential: String? = nil
 }
 
