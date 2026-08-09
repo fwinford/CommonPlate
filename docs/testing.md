@@ -255,7 +255,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted baseline is **461 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
+The current accepted baseline is **508 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
+
+Automated routing tests (this target included) prove tap-routing logic against stubbed backend resolution; they do not by themselves prove real APNs terminated-launch handoff on a device. Physical-device proof was required for helper terminated-launch tap routing and for requester-fulfillment push, and both have now passed on a physical iPhone. Release/Archive/TestFlight signing and environment behavior is unrelated evidence and remains a separate, still-open environmental gate (see `docs/system-contract.md` section 11).
 
 ## 10. Test-file organization
 
@@ -288,7 +290,7 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. All rows were last recorded at Week 3 Day 6 Slice 6E (requester fulfillment push), whose accepted implementation and independent-review fixes touched backend, Mongo persistence, and iOS.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend, Mongo, and lint/typecheck/build rows were last recorded at Week 3 Day 6 Slice 6E (requester fulfillment push); the `CommonPlateiosTests` row was last recorded at the Slice 6F terminated-launch helper-notification routing correction, which is iOS-only and did not touch backend or Mongo code.
 
 | Check | Result |
 | --- | --- |
@@ -296,6 +298,8 @@ These results are a reference baseline, not a substitute for rerunning affected 
 | `npm test` | 942 passed; 169 Mongo-gated skipped |
 | `npm run test:mongo` | 169 passed |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | 461 passed; 0 failed; TEST SUCCEEDED |
+| `CommonPlateiosTests` | 508 passed; 0 failed; TEST SUCCEEDED |
 | `npm run build:client` | Not part of Slice 6E's recorded verification; row still stands as recorded at Week 3 Day 7 Slice 7A |
 | `git diff --check` | Passed |
+
+Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).

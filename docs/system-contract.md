@@ -96,9 +96,21 @@ CommonPlate has no internal provider-wide send-volume ceiling. A provider quota 
 
 After a request's placement has durably committed, CommonPlate may best-effort submit a requester-fulfillment push to the originating associated installation only (the Request's stored association from section 6.1). If that installation is missing, disabled, invalidated, or lacks a usable APNs registration, no push is sent; there is no fallback or heuristic recipient. Requester-fulfillment push is independent of placement success and of the existing fulfillment email — neither affects the other. At most one requester-fulfillment provider submission is claimed for the same request + installation, matching the existing dedup discipline used for helper push. Provider acceptance means submission only, never delivery, display, opening, or reading.
 
-Notification title: `"Your order was placed"`. Body: `"A helper placed the order for your request."` The payload carries only privacy-safe routing data; it never carries pickup name, requester or helper email, order number, claim token or claim state, the installation credential, or any other private fulfillment field. The requester-fulfillment notification intent and the helper new-request notification intent remain distinct; a requester notification tap is implemented as opening Home and presenting a one-time "Your order was placed." notice.
+Notification title: `"Your order was placed"`. Body: `"A helper placed the order for your request."` The payload carries only privacy-safe routing data; it never carries pickup name, requester or helper email, order number, claim token or claim state, the installation credential, or any other private fulfillment field. The requester-fulfillment notification intent and the helper new-request notification intent remain distinct; a requester notification tap opens Home and presents a one-time "Your order was placed." notice.
 
-Physical APNs delivery, OS notification tap handoff, Home navigation, and visible presentation of the requester notice are implemented runtime behavior, not yet physically verified on a device; see section 11.
+A physical device has received a real requester-fulfillment push while running, tapped it to open Home, and seen the one-time notice. That device result covers submission-to-tap-to-notice on the observed device; it does not extend provider acceptance beyond submission (see the section header) and does not establish Release/Archive/TestFlight signing or environment behavior, which remains a separate gate (section 11).
+
+### 8.3 Helper new-request push tap routing
+
+A helper new-request notification tap carries a request id as routing context only. Only current backend truth from `GET /api/request/:id`, read at the moment of the tap, decides where the tap goes — the payload itself never establishes availability.
+
+- If the backend confirms the request is currently open, the tap opens that request's detail flow.
+- If the backend confirms the request is no longer available (a non-open status, or an authoritative not-found), the tap shows a "no longer available" notice and returns to the active-requests list.
+- If current backend truth cannot be established (a transport failure, timeout, unexpected server response, or a malformed response), the tap shows a distinct "temporarily unavailable" notice rather than claiming the request is gone, and also returns to the active-requests list. Neither notice discloses an internal error code or any requester-private detail.
+
+Each valid tap is routed exactly once, in the order it was made. A routing attempt that does not reach one of the outcomes above — including one interrupted by app startup ordering, such as a cold launch from a terminated state — does not consume the tap: the tap remains available to a later attempt rather than being silently lost. When more than one attempt is in flight for the same tap, at most one of them may apply a navigation or recovery outcome, and an older tap can never overwrite or retire a newer one.
+
+A physical device has received a real helper new-request push while CommonPlate was terminated, tapped it to launch the app, and been routed to that request's detail flow rather than to Home — including the cold-launch case described above. Background-state tap routing to the specific request has also been physically observed. These device results do not establish Release/Archive/TestFlight signing or environment behavior, which remains a separate gate (section 11).
 
 ## 9. Subscriber lifecycle
 
@@ -376,4 +388,4 @@ The same variable is the activation switch for the unsubscribe signing secret: u
 - Paid-but-unrecorded recovery beyond the in-memory, one-resend fulfillment safeguard.
 - Physical-device and release backend configuration.
 - Full privacy and accessibility review.
-- Physical-device proof of requester-fulfillment push: real APNs delivery, OS notification tap handoff, Home navigation, and visible presentation of the "Your order was placed." requester notice. Deferred to the pre-TestFlight / Week 3 release-device acceptance gate.
+- Release/Archive/TestFlight `aps-environment` signing and build-configuration alignment. Debug and simulator alignment is proven; a signed Release/Archive/TestFlight build has not been verified. This, along with release backend/APNs reachability and configuration and the remaining activation/unpausing decisions in section 10, gates distribution — see section 1. Physical-device push proof for helper new-request routing (section 8.3) and requester-fulfillment push (section 8.2) has passed on a development device, but that is not evidence about a signed Release build.

@@ -209,12 +209,14 @@ final class RequesterFulfillmentNotificationRouterTests: XCTestCase {
 
     /// Consuming one intent must never clear or advance the other's state —
     /// each stays independently correct and exactly-once.
-    func testConsumingOneIntentLeavesTheOtherUntouched() {
+    func testConsumingOneIntentLeavesTheOtherUntouched() throws {
         let router = HelperNotificationRouter()
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
         router.handleUserActedOnNotification(userInfo: ["type": "requester-order-placed"])
 
-        XCTAssertEqual(router.consumePendingRequestID(), "abc")
+        XCTAssertEqual(router.pendingRequestID, "abc")
+        router.markHelperIntentHandled(tapSequence: try XCTUnwrap(router.pendingRequestTapSequence))
+        XCTAssertNil(router.pendingRequestID)
 
         XCTAssertTrue(router.pendingRequesterFulfillmentNotice)
         XCTAssertEqual(router.requesterFulfillmentRoutingGeneration, 1)
@@ -276,7 +278,7 @@ final class RequesterFulfillmentNotificationRouterTests: XCTestCase {
             router.pendingRequestTapSequence,
             "A's own claim must still be readable — a requester tap must never touch the helper slot"
         )
-        XCTAssertEqual(router.consumePendingRequestID(), "a")
+        XCTAssertEqual(router.pendingRequestID, "a")
         XCTAssertFalse(
             TapAuthorityFence.isStillAuthoritative(
                 capturedSequence: capturedByA,
@@ -286,19 +288,20 @@ final class RequesterFulfillmentNotificationRouterTests: XCTestCase {
         )
     }
 
-    /// helper A arrives; its task synchronously peeks and consumes its own
-    /// claim (exactly as `ContentView` does, before any `await`) — then
-    /// helper B arrives, overwriting the single helper slot, before A's
-    /// (now in-flight) resolution is "processed". A's captured claim must
+    /// helper A arrives; its attempt synchronously snapshots its own claim
+    /// (exactly as `HelperNotificationRouteDriver` does, before any `await`)
+    /// — then helper B arrives, overwriting the single helper slot, before
+    /// A's (now in-flight) resolution is "processed". A's captured claim must
     /// still lose the fence, so A cannot overwrite B's navigation.
     func testAnEarlierHelperTapCannotOverwriteALaterHelperTapWhenProcessedAfterIt() throws {
         let router = HelperNotificationRouter()
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "a"]) // A
-        // A's task starting synchronously, before any later tap can land:
+        // A's attempt starting synchronously, before any later tap can land:
         let capturedByA = try XCTUnwrap(router.pendingRequestTapSequence)
-        XCTAssertEqual(router.consumePendingRequestID(), "a")
+        XCTAssertEqual(router.pendingRequestID, "a")
 
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "b"]) // B, while A is in flight
+        XCTAssertEqual(router.pendingRequestID, "b", "B must own the helper slot from here on")
 
         // A's resolution is "processed" (fenced) only now, after B.
         XCTAssertFalse(
@@ -317,7 +320,7 @@ final class RequesterFulfillmentNotificationRouterTests: XCTestCase {
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
 
         let capturedByHelperTap = try XCTUnwrap(router.pendingRequestTapSequence)
-        XCTAssertEqual(router.consumePendingRequestID(), "abc")
+        XCTAssertEqual(router.pendingRequestID, "abc")
 
         XCTAssertTrue(
             TapAuthorityFence.isStillAuthoritative(
@@ -377,7 +380,7 @@ final class RequesterFulfillmentNotificationRouterTests: XCTestCase {
 
         XCTAssertEqual(router.latestTapSequence, sequenceBeforeNoise)
         XCTAssertEqual(router.latestHelperTapSequence, helperSequenceBeforeNoise)
-        XCTAssertEqual(router.consumePendingRequestID(), "abc")
+        XCTAssertEqual(router.pendingRequestID, "abc")
         XCTAssertTrue(
             TapAuthorityFence.isStillAuthoritative(
                 capturedSequence: capturedByHelperTap,

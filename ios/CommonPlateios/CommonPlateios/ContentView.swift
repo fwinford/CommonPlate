@@ -154,32 +154,34 @@ struct ContentView: View {
                 // silently re-registers an installation that was previously
                 // confirmed on. Never shows Apple's permission prompt.
                 Task { await pushSubscriptionStore.refreshAuthorizationStatus() }
+                // The second chance a launch-time tap needs. The `.task`
+                // below is the normal trigger, but on a cold launch the tap
+                // is captured before this view exists and its first routing
+                // attempt can be cancelled while SwiftUI is still building
+                // the scene — the attempt then, correctly, leaves the tap
+                // pending rather than dropping it. The scene actually
+                // becoming active is a real readiness signal (not a guessed
+                // delay) and the point at which retrying is guaranteed to
+                // find a live view, so a tap that survived an unfinished
+                // attempt is routed here. With nothing pending this is an
+                // immediate no-op, and running alongside the `.task` is safe
+                // — see `HelperNotificationRouteDriver.routeIfNeeded`.
+                Task { await routePendingHelperNotification() }
             }
         }
         // Reruns whenever a *new* tap intent is captured, including the
         // first one on the initial run — which is what makes a tap captured
         // before this view existed (a cold launch) reach here the first time
-        // it can. Keyed on `routingGeneration`, not `pendingRequestID`:
-        // `consumePendingRequestID()` clears the pending value as part of
-        // reading it, but that clear does not advance the generation, so it
-        // cannot rewrite this task's own id and cancel the resolution the
-        // task just started. A later unrelated rerun replays nothing because
-        // nothing but a fresh tap advances the generation.
+        // it can — and again whenever this view is rebuilt, which is what
+        // lets a cold launch's cancelled first attempt be retried. Keyed on
+        // `routingGeneration`, not `pendingRequestID`: retiring a routed
+        // intent clears the pending value, but that clear does not advance
+        // the generation, so it cannot rewrite this task's own id and cancel
+        // the resolution the task just started. A later unrelated rerun
+        // replays nothing, because an already-applied tap is no longer
+        // pending and nothing but a fresh tap advances the generation.
         .task(id: notificationRouter.routingGeneration) {
-            // `pendingRequestTapSequence` is read *before* consuming, and
-            // both come from the same still-unconsumed `pendingHelperIntent`
-            // in the router — this tap's own frozen claim on
-            // `latestTapSequence`, assigned the instant the router received
-            // it. It is deliberately not read from `latestTapSequence`
-            // itself here: this closure's *start* can be delayed by
-            // SwiftUI's own task scheduling after `routingGeneration`
-            // changes, and a further tap can advance that counter in the
-            // gap, which would misattribute a later tap's value to this one.
-            guard let tapSequence = notificationRouter.pendingRequestTapSequence,
-                  let requestID = notificationRouter.consumePendingRequestID() else {
-                return
-            }
-            await routeToNotification(requestID: requestID, tapSequence: tapSequence)
+            await routePendingHelperNotification()
         }
         // A requester-fulfillment tap always opens Home (`path = []`) and
         // presents this one-time notice, per its own independently-numbered
@@ -217,42 +219,26 @@ struct ContentView: View {
         }
     }
 
-    /// Resolves a helper new-request notification's `requestId` against
-    /// backend truth and replaces the navigation path with the result.
-    /// Cancellation (the view went away mid-resolution) leaves the path
-    /// untouched rather than guessing. `requestId` is routing context only;
-    /// only backend truth may decide available, unavailable, or that truth
-    /// could not currently be established.
+    /// Applies whatever helper new-request tap is currently pending, if any.
+    /// All of the decision-making — resolving `requestId` against backend
+    /// truth, tap-order fencing, the recovery notices, and when the tap may
+    /// finally be retired — lives in `HelperNotificationRouteDriver`, which
+    /// is testable without SwiftUI; this only owns the one thing that cannot
+    /// leave the view, writing `path`.
     ///
-    /// `tapSequence` is this resolution's own claim on
-    /// `notificationRouter.latestTapSequence`, frozen in the router at the
-    /// moment this tap was captured (see `pendingRequestTapSequence`'s doc
-    /// comment) and passed down unchanged. If a later tap of either kind has
-    /// claimed a newer value by the time backend truth comes back, this
-    /// resolution is stale: tap order is authoritative, so it must not touch
-    /// `path` (or queue an unavailability notice) and silently returns
-    /// instead.
-    private func routeToNotification(requestID: String, tapSequence: Int) async {
-        guard let resolution = try? await requestStore.resolveHelperNotificationRequest(id: requestID) else {
-            return
-        }
-        guard TapAuthorityFence.isStillAuthoritative(
-            capturedSequence: tapSequence,
-            currentSequence: notificationRouter.latestTapSequence
+    /// A `nil` result never means Home. It means this attempt produced no
+    /// navigation outcome — nothing pending, cancelled, or superseded by a
+    /// later tap — and in every one of those cases leaving `path` exactly as
+    /// it is, is the correct answer. A tap that was cancelled mid-attempt is
+    /// still pending afterwards and gets applied by the next attempt.
+    private func routePendingHelperNotification() async {
+        guard let resolvedPath = await HelperNotificationRouteDriver.routeIfNeeded(
+            router: notificationRouter,
+            resolver: requestStore
         ) else {
             return
         }
-        switch resolution {
-        case .available:
-            break
-        case .unavailable:
-            requestStore.reportRequestUnavailableFromNotification(requestID: requestID)
-        case .notYetAvailable:
-            requestStore.reportRequestNotYetAvailableFromNotification(requestID: requestID)
-        case .temporarilyUnavailable:
-            requestStore.reportRequestTemporarilyUnavailableFromNotification(requestID: requestID)
-        }
-        path = AppRoute.afterNotificationResolution(resolution)
+        path = resolvedPath
     }
 
     /// Presents the next presentable queued requester-fulfillment notice, if

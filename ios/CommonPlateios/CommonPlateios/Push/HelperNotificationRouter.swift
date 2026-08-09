@@ -10,12 +10,16 @@
 //    ordinary `UNUserNotificationCenter` foreground presentation is enough,
 //    so nothing here invents a custom in-app notification surface.
 // 2. Capturing a tap (from background, or a cold launch) as one pending
-//    `requestId` that `ContentView` consumes exactly once when it is ready
-//    to navigate. Held in memory only: this object is created in
-//    `PushAppDelegate.init`, before `application(_:willFinishLaunchingWithOptions:)`
-//    runs, so a launch-time tap is captured before `ContentView` exists and
-//    is still there the first time it asks — no persistence beyond the
-//    process's own lifetime is needed.
+//    `requestId` that `HelperNotificationRouteDriver` applies exactly once
+//    when the app is ready to navigate. Held in memory only: this object is
+//    created in `PushAppDelegate.init`, before
+//    `application(_:willFinishLaunchingWithOptions:)` runs, so a launch-time
+//    tap is captured before `ContentView` exists — no persistence beyond the
+//    process's own lifetime is needed. Crucially it also survives *routing
+//    attempts that did not finish*: it is retired only once a navigation
+//    outcome has actually been applied, so a cold launch's first, cancelled
+//    attempt cannot silently discard the tap. See
+//    `markHelperIntentHandled(tapSequence:)`.
 //
 // This delegate never fabricates request availability from the payload —
 // `requestId` is routing context only. Resolving whether the request is
@@ -89,7 +93,12 @@ enum TapAuthorityFence {
 /// A helper new-request tap's captured intent: the routing `requestId`, and
 /// this specific tap's own claim on `latestTapSequence`, frozen the instant
 /// `handleUserActedOnNotification` captures it.
-private struct PendingHelperIntent {
+///
+/// Read without being cleared (`pendingHelperIntent`), and cleared only once
+/// the routing it describes has actually been applied
+/// (`markHelperIntentHandled(tapSequence:)`). See that method for why reading
+/// and clearing must not be the same step.
+struct HelperNotificationIntent: Equatable {
     let requestID: String
     let tapSequence: Int
 }
@@ -104,16 +113,20 @@ private struct PendingRequesterFulfillmentIntent {
 
 @MainActor
 final class HelperNotificationRouter: NSObject, ObservableObject {
-    @Published private var pendingHelperIntent: PendingHelperIntent?
+    /// The one captured, not-yet-applied helper tap. `private(set)`, not
+    /// `private`: reading it is safe and non-destructive by construction, and
+    /// only `handleUserActedOnNotification` and `markHelperIntentHandled` may
+    /// write it.
+    @Published private(set) var pendingHelperIntent: HelperNotificationIntent?
 
     /// Advances only when a *new* tap intent is captured, never when one is
-    /// consumed. `ContentView` keys its resolution `.task(id:)` on this value
-    /// instead of on `pendingRequestID` directly: consuming the pending ID
-    /// clears it (see below), and if that clear were the same value driving
-    /// the task's identity, the task would rewrite its own id mid-flight and
+    /// retired. `ContentView` keys its resolution `.task(id:)` on this value
+    /// instead of on `pendingRequestID` directly: retiring the intent clears
+    /// it (see below), and if that clear were the same value driving the
+    /// task's identity, the task would rewrite its own id mid-flight and
     /// SwiftUI would cancel its own in-flight backend resolution. Keeping
-    /// "a new intent arrived" and "the pending value was read" as two
-    /// separate published facts is what keeps consumption from being able to
+    /// "a new intent arrived" and "the pending intent was retired" as two
+    /// separate published facts is what keeps retirement from being able to
     /// self-cancel the work it started.
     @Published private(set) var routingGeneration = 0
 
@@ -135,13 +148,13 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
     @Published private(set) var latestHelperTapSequence = 0
 
     /// Non-nil exactly while a captured helper tap is waiting to be routed.
-    /// An unconsumed peek — reading it does not clear it, matching how
-    /// `ContentView` needs to read this alongside `pendingRequestTapSequence`
-    /// before choosing to consume both together.
+    /// Reading never clears: the intent is retired only by
+    /// `markHelperIntentHandled(tapSequence:)`, once routing has actually
+    /// been applied.
     var pendingRequestID: String? { pendingHelperIntent?.requestID }
     /// The pending helper tap's own frozen claim on `latestTapSequence` —
     /// see the type header for why this must never be read from
-    /// `latestTapSequence` directly at consumption time instead.
+    /// `latestTapSequence` directly at routing time instead.
     var pendingRequestTapSequence: Int? { pendingHelperIntent?.tapSequence }
 
     /// Whether at least one requester-fulfillment notice is currently
@@ -158,7 +171,7 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
         if let payload = HelperNotificationPayloadParser.parse(userInfo: userInfo) {
             latestTapSequence += 1
             latestHelperTapSequence = latestTapSequence
-            pendingHelperIntent = PendingHelperIntent(requestID: payload.requestID, tapSequence: latestTapSequence)
+            pendingHelperIntent = HelperNotificationIntent(requestID: payload.requestID, tapSequence: latestTapSequence)
             routingGeneration += 1
             return
         }
@@ -171,15 +184,35 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
         }
     }
 
-    /// Reads and clears the pending route together, so a route is applied
-    /// exactly once even if this is called from more than one place (a
-    /// launch-time check and a later state-change observer) for the same tap.
-    /// Deliberately leaves `routingGeneration` untouched — see its doc comment.
-    /// Callers that also need `pendingRequestTapSequence` must read it first:
-    /// this clears the whole intent, sequence included.
-    func consumePendingRequestID() -> String? {
-        defer { pendingHelperIntent = nil }
-        return pendingHelperIntent?.requestID
+    /// Retires the pending helper intent, but only if the intent still
+    /// standing is the very one identified by `tapSequence`. Deliberately
+    /// leaves `routingGeneration` untouched — see its doc comment.
+    ///
+    /// This is the terminated-launch correction. Reading and clearing used to
+    /// be one step (`consumePendingRequestID()`), performed *before* the
+    /// awaited `GET /api/request/:id` that decides where the tap goes. That
+    /// made the intent unrecoverable the moment the resolution did not finish:
+    /// a launch-time routing attempt that SwiftUI cancels — which is exactly
+    /// what a cold launch does while the scene and the `@StateObject`
+    /// hierarchy are still being established — swallowed its own
+    /// `CancellationError`, left `path` untouched, and had already destroyed
+    /// the only record of the tap, so the relaunched attempt found nothing and
+    /// the app simply stayed on Home. Background taps were unaffected because
+    /// that view hierarchy already existed and the attempt was never
+    /// cancelled.
+    ///
+    /// So the intent now survives an attempt that did not reach a navigation
+    /// outcome, and only an attempt that actually applied one retires it. The
+    /// `tapSequence` check is what keeps that from being a way to clobber a
+    /// newer tap: a late attempt for an older tap finds the slot already
+    /// holding a different intent and clears nothing. Retiring is idempotent,
+    /// so a second attempt for the same tap cannot reopen an already-applied
+    /// route.
+    func markHelperIntentHandled(tapSequence: Int) {
+        guard pendingHelperIntent?.tapSequence == tapSequence else {
+            return
+        }
+        pendingHelperIntent = nil
     }
 
     /// Claims and dequeues requester-fulfillment intents in tap order until

@@ -155,48 +155,82 @@ final class HelperNotificationRouterTests: XCTestCase {
     }
 
     /// Proxy for a cold launch: `PushAppDelegate` creates this router in its
-    /// own `init`, before `application(_:didFinishLaunchingWithOptions:)`
+    /// own `init`, before `application(_:willFinishLaunchingWithOptions:)`
     /// runs and long before `ContentView` exists, so a tap captured here
-    /// survives — in memory, within this one process — until `ContentView`
-    /// is ready to consume it. Whether the real launch sequence actually
+    /// survives — in memory, within this one process — until something is
+    /// ready to route it. Whether the real launch sequence actually
     /// delivers the OS callback in time for this is not something a unit
     /// test can prove; that is physical-device acceptance territory.
-    func testAPendingRouteSurvivesUntilSomethingConsumesIt() {
+    func testAPendingRouteSurvivesUntilSomethingRoutesIt() throws {
         let router = HelperNotificationRouter()
 
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
 
         XCTAssertEqual(router.pendingRequestID, "abc")
-        XCTAssertEqual(router.consumePendingRequestID(), "abc")
-    }
-
-    func testConsumingClearsTheRouteSoItCannotBeAppliedTwice() {
-        let router = HelperNotificationRouter()
-        router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
-
-        XCTAssertEqual(router.consumePendingRequestID(), "abc")
-
-        XCTAssertNil(router.consumePendingRequestID(), "a second consume must not reopen the same route")
+        // Reading it, however often, never retires it.
+        XCTAssertEqual(router.pendingRequestID, "abc")
+        router.markHelperIntentHandled(tapSequence: try XCTUnwrap(router.pendingRequestTapSequence))
         XCTAssertNil(router.pendingRequestID)
     }
 
-    func testConsumingWithNothingPendingReturnsNil() {
+    func testRetiringTheIntentClearsTheRouteSoItCannotBeAppliedTwice() throws {
+        let router = HelperNotificationRouter()
+        router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
+        let tapSequence = try XCTUnwrap(router.pendingRequestTapSequence)
+
+        router.markHelperIntentHandled(tapSequence: tapSequence)
+
+        XCTAssertNil(router.pendingRequestID)
+        router.markHelperIntentHandled(tapSequence: tapSequence)
+        XCTAssertNil(router.pendingRequestID, "a second retirement must not reopen the same route")
+    }
+
+    func testRetiringWithNothingPendingIsANoOp() {
         let router = HelperNotificationRouter()
 
-        XCTAssertNil(router.consumePendingRequestID())
+        router.markHelperIntentHandled(tapSequence: 1)
+
+        XCTAssertNil(router.pendingRequestID)
+    }
+
+    /// The terminated-launch guard at the router level: an attempt that never
+    /// reached a navigation outcome retires nothing, so the tap is still
+    /// there for the next attempt.
+    func testAnAttemptThatNeverAppliedARouteLeavesTheIntentPending() {
+        let router = HelperNotificationRouter()
+        router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
+
+        // Whatever an unfinished attempt read, it never called
+        // `markHelperIntentHandled`.
+        XCTAssertEqual(router.pendingRequestID, "abc")
+        XCTAssertNotNil(router.pendingRequestTapSequence)
+    }
+
+    /// A late attempt for an older tap must not clear the newer tap standing
+    /// in the slot.
+    func testRetiringAnOlderTapCannotClearANewerPendingTap() throws {
+        let router = HelperNotificationRouter()
+        router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
+        let olderTapSequence = try XCTUnwrap(router.pendingRequestTapSequence)
+        router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "def"])
+
+        router.markHelperIntentHandled(tapSequence: olderTapSequence)
+
+        XCTAssertEqual(router.pendingRequestID, "def")
     }
 
     // MARK: - Routing-generation trigger semantics
 
     /// This is the self-cancellation correction: `ContentView` keys its
     /// resolution `.task(id:)` on `routingGeneration`, not `pendingRequestID`,
-    /// specifically because consuming must not be able to rewrite that id.
-    func testConsumingThePendingRequestIDDoesNotAdvanceTheGeneration() {
+    /// specifically because retiring a routed intent must not be able to
+    /// rewrite that id.
+    func testRetiringThePendingIntentDoesNotAdvanceTheGeneration() throws {
         let router = HelperNotificationRouter()
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
         let generationAfterTap = router.routingGeneration
 
-        _ = router.consumePendingRequestID()
+        router.markHelperIntentHandled(tapSequence: try XCTUnwrap(router.pendingRequestTapSequence))
 
         XCTAssertEqual(router.routingGeneration, generationAfterTap)
     }
@@ -210,11 +244,11 @@ final class HelperNotificationRouterTests: XCTestCase {
         XCTAssertEqual(router.routingGeneration, startingGeneration + 1)
     }
 
-    func testASecondTapAfterConsumptionCreatesAFreshIntent() {
+    func testASecondTapAfterRetirementCreatesAFreshIntent() throws {
         let router = HelperNotificationRouter()
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "abc"])
         let firstGeneration = router.routingGeneration
-        XCTAssertEqual(router.consumePendingRequestID(), "abc")
+        router.markHelperIntentHandled(tapSequence: try XCTUnwrap(router.pendingRequestTapSequence))
 
         router.handleUserActedOnNotification(userInfo: ["type": "new-request", "requestId": "def"])
 
