@@ -80,12 +80,19 @@ struct APIClient {
     }()
 
     /// Sends a request with an encodable JSON body and decodes a JSON response.
+    ///
+    /// `headers` carries transport-level credentials the backend reads outside
+    /// the payload — today, the participant authority credential (W3-I1). It is
+    /// deliberately a header rather than a body field: two accepted request
+    /// shapes are strict about their keys, and a person-identity credential has
+    /// no business in a payload that can be echoed back in a validation error.
     func send<Body: Encodable, Response: Decodable>(
         path: String,
         method: HTTPMethod,
-        body: Body
+        body: Body,
+        headers: [String: String] = [:]
     ) async throws -> Response {
-        var request = try makeRequest(path: path, method: method)
+        var request = try makeRequest(path: path, method: method, headers: headers)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         do {
             request.httpBody = try encoder.encode(body)
@@ -100,19 +107,27 @@ struct APIClient {
     /// Sends a request with no body and decodes a JSON response.
     func send<Response: Decodable>(
         path: String,
-        method: HTTPMethod
+        method: HTTPMethod,
+        headers: [String: String] = [:]
     ) async throws -> Response {
-        let request = try makeRequest(path: path, method: method)
+        let request = try makeRequest(path: path, method: method, headers: headers)
         return try await execute(request)
     }
 
-    private func makeRequest(path: String, method: HTTPMethod) throws -> URLRequest {
+    private func makeRequest(
+        path: String,
+        method: HTTPMethod,
+        headers: [String: String] = [:]
+    ) throws -> URLRequest {
         guard let url = URL(string: path, relativeTo: configuration.baseURL) else {
             throw APIClientError.invalidURL
         }
         var request = URLRequest(url: url)
         request.httpMethod = method.rawValue
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        for (field, value) in headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
         return request
     }
 

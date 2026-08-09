@@ -14,9 +14,11 @@ vi.mock("resend", () => ({
 
 import {
   EmailProviderTimeoutError,
+  PARTICIPANT_VERIFICATION_SEND_LABEL,
   confirmationBaseUrl,
   sendFulfillmentEmail,
   sendNewRequestAlert,
+  sendParticipantVerificationEmail,
   sendSubscriptionConfirmationEmail,
 } from "./emailHelpers.js";
 import {
@@ -437,6 +439,51 @@ describe("requester email separation", () => {
     expect(resendSend).not.toHaveBeenCalled();
   });
 
+  /**
+   * The grandfathered pre-I1 placement (W3-I1). A claim granted before verified
+   * helper identity existed has no verified principal to offer, and the payload
+   * no longer carries one either, so this email is built with no reply address
+   * at all. Rendered directly rather than through a mocked route seam: what
+   * matters is the message the requester actually receives.
+   */
+  it("omits the reply line entirely when there is no verified helper address", async () => {
+    resendSend.mockResolvedValue({});
+
+    await sendFulfillmentEmail(
+      request(),
+      "70154321",
+      "15 minutes",
+      "Your meal is ready",
+      undefined
+    );
+
+    const email = resendSend.mock.calls[0][0] as {
+      to: string;
+      html: string;
+      text: string;
+      replyTo?: string;
+    };
+
+    // An empty `mailto:` looks like contact the requester has and does not, and
+    // tapping it opens a blank message to nobody.
+    expect(email.html).not.toContain("mailto:");
+    expect(email.html).not.toContain("You can reply to them at");
+    expect(email.text).not.toContain("You can reply to them at");
+    expect(email.replyTo).toBeUndefined();
+
+    // Everything that actually lets the requester collect their food survives.
+    expect(email.to).toBe(requesterEmail);
+    expect(email.html).toContain(`Pickup name:</strong> ${pickupName}`);
+    expect(email.html).toContain("Order number:</strong> 70154321");
+    expect(email.html).toContain("Pickup window:</strong> 1:00 PM – 2:00 PM");
+    expect(email.html).toContain("ETA:</strong> 15 minutes");
+    expect(email.html).toContain("Your meal is ready");
+    expect(email.text).toContain("Order number: 70154321");
+    expect(email.text).toContain("ETA: 15 minutes");
+    expect(email.text).toContain("Your meal is ready");
+    expect(email.text).toContain("Thanks for using CommonPlate!");
+  });
+
   it("keeps requester confirmation pickup information intact", () => {
     const routeSource = readFileSync(
       new URL("./createRequestRoute.ts", import.meta.url),
@@ -462,5 +509,139 @@ describe("requester email separation", () => {
     expect(requesterConfirmation).toContain(
       "Pickup Name: ${request.pickupName}"
     );
+  });
+});
+
+/**
+ * The verification code email (W3-I1).
+ *
+ * This send is unlike every other one in this module: its subject line and both
+ * of its bodies contain a live six-digit credential. A provider error, request
+ * object, response body, or thrown exception can echo any of them back, so
+ * nothing provider-supplied may be logged or re-thrown from here.
+ */
+describe("participant verification code email", () => {
+  const code = "424242";
+  const participantEmail = "student@nyu.edu";
+  let consoleError: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Everything a provider could plausibly hand back that quotes the send. */
+  function leakyProviderValue() {
+    return {
+      message: `422 rejected: to=${participantEmail} subject="${code} is your CommonPlate verification code"`,
+      name: "validation_error",
+      request: { to: participantEmail, text: `code ${code}` },
+      response: { body: `<p>${code}</p>` },
+    };
+  }
+
+  function loggedText() {
+    return JSON.stringify(consoleError.mock.calls);
+  }
+
+  it("carries the code to the recipient and nowhere else on success", async () => {
+    resendSend.mockResolvedValue({});
+
+    await sendParticipantVerificationEmail(participantEmail, code, 10);
+
+    const email = resendSend.mock.calls[0][0] as {
+      to: string;
+      subject: string;
+      html: string;
+      text: string;
+    };
+    expect(email.to).toBe(participantEmail);
+    expect(email.subject).toContain(code);
+    expect(email.html).toContain(code);
+    expect(email.text).toContain(code);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("logs and rethrows nothing provider-supplied when the provider returns an error", async () => {
+    resendSend.mockResolvedValue({ error: leakyProviderValue() });
+
+    await expect(
+      sendParticipantVerificationEmail(participantEmail, code, 10)
+    ).rejects.toThrow(PARTICIPANT_VERIFICATION_SEND_LABEL);
+
+    for (const forbidden of [code, participantEmail, "validation_error"]) {
+      expect(loggedText()).not.toContain(forbidden);
+    }
+    expect(loggedText()).toContain(PARTICIPANT_VERIFICATION_SEND_LABEL);
+  });
+
+  it("logs and rethrows nothing provider-supplied when the provider throws", async () => {
+    resendSend.mockRejectedValue(
+      Object.assign(new Error(leakyProviderValue().message), {
+        response: leakyProviderValue().response,
+      })
+    );
+
+    // The thrown error is a new one, not the provider's: the caller must not be
+    // handed an object whose message quotes the code.
+    const thrown = await sendParticipantVerificationEmail(
+      participantEmail,
+      code,
+      10
+    ).then(
+      () => null,
+      (error: unknown) => error as Error
+    );
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown!.message).toBe(
+      `${PARTICIPANT_VERIFICATION_SEND_LABEL} send failed`
+    );
+    for (const forbidden of [code, participantEmail]) {
+      expect(thrown!.message).not.toContain(forbidden);
+      expect(loggedText()).not.toContain(forbidden);
+    }
+  });
+
+  it("reports its own deadline without quoting the send", async () => {
+    resendSend.mockImplementation(
+      (_opts: unknown, requestOptions: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          requestOptions.signal?.addEventListener("abort", () =>
+            reject(new Error(`aborted while sending ${code}`))
+          );
+        })
+    );
+
+    const thrown = await sendParticipantVerificationEmail(
+      participantEmail,
+      code,
+      10,
+      5
+    ).then(
+      () => null,
+      (error: unknown) => error as Error
+    );
+
+    expect(thrown).toBeInstanceOf(EmailProviderTimeoutError);
+    expect(thrown!.message).not.toContain(code);
+    expect(loggedText()).not.toContain(code);
+    expect(loggedText()).not.toContain(participantEmail);
+  });
+
+  it("leaves the other senders' diagnostics unchanged", async () => {
+    // The redaction is opt-in, so an ordinary alert still reports what the
+    // provider said — that is the diagnostic every other flow depends on.
+    resendSend.mockResolvedValue({ error: { message: "quota exceeded" } });
+
+    await expect(
+      sendNewRequestAlert(subscriber(), request(), {
+        unsubscribeSigningSecret: SIGNING_SECRET,
+      })
+    ).rejects.toThrow("quota exceeded");
+    expect(loggedText()).toContain("quota exceeded");
   });
 });

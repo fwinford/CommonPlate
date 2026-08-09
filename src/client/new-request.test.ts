@@ -21,6 +21,7 @@ afterEach(() => {
 
 function formRoot() {
   const notice = { textContent: "", hidden: true };
+  const fields = { disabled: false };
   const submitBtn = {
     disabled: false,
     attributes: {} as Record<string, string>,
@@ -30,11 +31,13 @@ function formRoot() {
   };
   const elements: Record<string, unknown> = {
     "pause-notice": notice,
+    "request-fields": fields,
     "submit-btn": submitBtn,
   };
 
   return {
     notice,
+    fields,
     submitBtn,
     root: {
       getElementById: (id: string) => elements[id] ?? null,
@@ -42,23 +45,31 @@ function formRoot() {
   };
 }
 
-describe("web request form pause", () => {
-  it("reveals the notice and removes the submit action", () => {
-    const { notice, submitBtn, root } = formRoot();
+/**
+ * W3-I1 cross-client boundary correction: the legacy website must not present
+ * an actionable request form once the backend requires verified participant
+ * authority it cannot supply. Posting is unconditionally non-actionable here
+ * — not tied to `PUBLIC_ACTIONS_PAUSED` — until Week 6 website participant
+ * verification exists.
+ */
+describe("web request form unavailability (W3-I1 cross-client boundary)", () => {
+  it("reveals the notice and disables the whole field set, not only the submit button", () => {
+    const { notice, fields, submitBtn, root } = formRoot();
 
-    newRequest.applyRequestFormPause(root);
+    newRequest.applyRequestFormUnavailable(root);
 
     expect(notice.textContent).toBe(
-      newRequest.REQUEST_POSTING_PAUSED_MESSAGE
+      newRequest.WEBSITE_REQUEST_CREATION_UNAVAILABLE_MESSAGE
     );
     expect(notice.hidden).toBe(false);
+    expect(fields.disabled).toBe(true);
     expect(submitBtn.disabled).toBe(true);
     expect(submitBtn.attributes["aria-disabled"]).toBe("true");
   });
 
-  it("uses the same locked sentence the iOS form shows", () => {
-    expect(newRequest.REQUEST_POSTING_PAUSED_MESSAGE).toBe(
-      "Posting a meal request is temporarily unavailable."
+  it("is scoped to the web, not a repeat of the old pause sentence", () => {
+    expect(newRequest.WEBSITE_REQUEST_CREATION_UNAVAILABLE_MESSAGE).toContain(
+      "web"
     );
   });
 });
@@ -120,6 +131,32 @@ describe("web request form reads the canonical create response", () => {
   it("still reads the legacy flat error string", () => {
     expect(newRequest.errorMessage("missing fields")).toBe("missing fields");
     expect(newRequest.errorMessage(undefined)).toBeUndefined();
+  });
+
+  /**
+   * `POST /api/request` now requires participant authority regardless of
+   * client, so any of these codes is what a direct API caller — never this
+   * page, whose form is unconditionally disabled — would decode. `errorMessage`
+   * is generic decoding shared by every caller of the create endpoint's error
+   * envelope, so it is pinned here too: a raw code or `[object Object]` must
+   * never reach a reader through this path either.
+   */
+  it.each([
+    [
+      "PARTICIPANT_VERIFICATION_REQUIRED",
+      "Verify your NYU email before posting or helping with a request.",
+    ],
+    ["PARTICIPANT_AUTHORITY_INVALID", "Verify your NYU email again to continue."],
+    [
+      "PARTICIPANT_VERIFICATION_UNAVAILABLE",
+      "We couldn’t check your NYU verification right now. Please try again in a moment.",
+    ],
+  ])("renders the participant refusal %s as a readable sentence", (code, message) => {
+    const rendered = newRequest.errorMessage({ code, message });
+
+    expect(rendered).toBe(message);
+    expect(rendered).not.toContain(code);
+    expect(rendered).not.toContain("[object Object]");
   });
 });
 
@@ -187,48 +224,5 @@ describe("web request form privacy disclosure", () => {
     expect(pageSource).not.toContain(
       "We never share your personal information"
     );
-  });
-});
-
-describe("web request form pause probe", () => {
-  it("reports paused when the server says so", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ paused: true }),
-      })
-    );
-
-    await expect(newRequest.fetchPublicActionsPaused()).resolves.toBe(true);
-  });
-
-  it("reports resumed only on an explicit false", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ paused: false }),
-      })
-    );
-
-    await expect(newRequest.fetchPublicActionsPaused()).resolves.toBe(false);
-  });
-
-  it("fails closed on an error status, malformed body, or network failure", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ ok: false, json: () => Promise.resolve({}) })
-    );
-    await expect(newRequest.fetchPublicActionsPaused()).resolves.toBe(true);
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) })
-    );
-    await expect(newRequest.fetchPublicActionsPaused()).resolves.toBe(true);
-
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
-    await expect(newRequest.fetchPublicActionsPaused()).resolves.toBe(true);
   });
 });

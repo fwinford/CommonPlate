@@ -143,6 +143,12 @@ struct RequestDetailView: View {
 
     let request: FoodRequest
     @ObservedObject var store: RequestStore
+    /// Observed, not owned. Browsing this screen needs no identity; reserving
+    /// does, and the gate below has to see the same verified identity every
+    /// other participant action does.
+    @ObservedObject var identityStore: ParticipantIdentityStore
+    @ObservedObject var verificationCoordinator:
+        ParticipantActionVerificationCoordinator
     @Binding var path: [AppRoute]
 
     /// The single rule for entering the claimant-only flow: a confirmed claim
@@ -222,6 +228,38 @@ struct RequestDetailView: View {
         // whole helper flow is unwound, not just this level: the claimant screen
         // this detail opened may still be above it, and the notice belongs on
         // the list the helper lands on.
+        // A sheet, so this screen stays mounted and the helper returns to the
+        // same request they were looking at.
+        .sheet(isPresented: isPresentingVerification) {
+            ParticipantVerificationView(
+                store: identityStore,
+                cancel: { verificationCoordinator.helperCancelled(requestID: request.id) }
+            )
+        }
+        .onChange(of: identityStore.identity) { previous, current in
+            guard case .claim(let requestID)? =
+                    verificationCoordinator.helperIdentityDidChange(
+                        requestID: request.id,
+                        from: previous,
+                        to: current,
+                        path: path,
+                        claimAlreadyActive: Self.opensClaimedFlow(
+                            activeClaim: store.activeClaim,
+                            requestID: request.id
+                        )
+                    ),
+                  requestID == request.id else {
+                return
+            }
+            // The coordinator clears before returning the exact request ID.
+            performClaim()
+        }
+        .onChange(of: path) { _, currentPath in
+            verificationCoordinator.helperNavigationChanged(
+                requestID: request.id,
+                path: currentPath
+            )
+        }
         .onChange(of: matchingClaimUnavailableNotice?.id) { _, noticeID in
             if let noticeID,
                let notice = matchingClaimUnavailableNotice,
@@ -230,6 +268,29 @@ struct RequestDetailView: View {
                 path = AppRoute.returningToActiveRequests(from: path)
             }
         }
+        .onDisappear {
+            verificationCoordinator.helperDisappeared(requestID: request.id)
+        }
+    }
+
+    /// Open exactly while the identity store has a flow running. Dismissing
+    /// goes through `cancelVerification()`, so an abandoned flow is abandoned in
+    /// one place — and abandoning it reserves nothing.
+    private var isPresentingVerification: Binding<Bool> {
+        Binding(
+            get: {
+                verificationCoordinator.isPresentingClaimVerification(
+                    requestID: request.id
+                )
+            },
+            set: { isPresented in
+                if !isPresented {
+                    verificationCoordinator.helperSheetDismissed(
+                        requestID: request.id
+                    )
+                }
+            }
+        )
     }
 
     @ViewBuilder
@@ -306,6 +367,17 @@ struct RequestDetailView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("claim-consequence-notice")
 
+            // Browsing needed no identity, so the first mention of verification
+            // belongs here, beside the action that needs one — before the tap,
+            // not after it.
+            if !identityStore.isVerified {
+                Text(Self.verificationRequiredNotice)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("claim-verification-notice")
+            }
+
             Button {
                 startClaim()
             } label: {
@@ -360,6 +432,10 @@ struct RequestDetailView: View {
 
     static let pauseRecoveryActionTitle = "Check again"
 
+    /// Shown beside the claim action while this installation is unverified.
+    static let verificationRequiredNotice =
+        "You’ll verify your NYU email once before helping. Nothing is reserved until it’s verified."
+
     static func showsPauseRecoveryAction(for error: ClaimPresentationError?) -> Bool {
         error == .publicActionsPaused
     }
@@ -377,6 +453,21 @@ struct RequestDetailView: View {
     }
 
     private func startClaim() {
+        // The helper gate. Nothing is reserved and no request is sent for an
+        // unverified helper: the reservation would be refused by the backend
+        // anyway, and taking a real student's meal out of everyone else's reach
+        // is not something to attempt on an identity that does not exist yet.
+        guard identityStore.isVerified else {
+            _ = verificationCoordinator.beginClaim(
+                requestID: request.id,
+                path: path
+            )
+            return
+        }
+        performClaim()
+    }
+
+    private func performClaim() {
         Task {
             // The store owns duplicate-submit protection and error state; a
             // rejected duplicate never reaches the network.

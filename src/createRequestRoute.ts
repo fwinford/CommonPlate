@@ -3,10 +3,6 @@ import type { Types } from "mongoose";
 import { Resend } from "resend";
 import { z } from "zod";
 import { Request as MealRequest } from "../models/db.js";
-import {
-  NYU_EMAIL_REQUIRED_MESSAGE,
-  hasAllowedEmailDomain,
-} from "./allowedEmailDomains.js";
 import { escapeHtml } from "./htmlEscape.js";
 import { startHelperNewRequestPush } from "./helperNewRequestPush.js";
 import { isValidRawInstallationCredential } from "./installationCredential.js";
@@ -29,6 +25,12 @@ import {
   type RequestTimingWindow,
 } from "./requestTiming.js";
 import { createDay4MutationRateLimiter } from "./claimRoute.js";
+import {
+  PARTICIPANT_PRINCIPAL_MISMATCH_CODE,
+  PARTICIPANT_PRINCIPAL_MISMATCH_MESSAGE,
+  resolveParticipantAuthority,
+  sendParticipantAuthorityRefusal,
+} from "./participantAuthorityGate.js";
 
 /**
  * Per-IP create throttle that returns the structured error envelope. Because
@@ -39,22 +41,15 @@ export const createRequestRateLimiter = createDay4MutationRateLimiter(5);
 
 const requesterString = z.string().trim().min(1);
 /**
- * The shape rule only. A present, non-blank `email` is a well-formed payload;
- * whether the address itself is usable is decided by `isEligibleRequesterEmail`
- * after the whole payload has passed, so a missing or blank address stays the
- * same structural failure as a missing `vendor` rather than becoming an
- * address problem the requester is told to fix.
+ * Shape only, and optional since W3-I1: the requester's identity is the
+ * verified participant principal resolved from participant authority, never a
+ * value from this payload. A client that still sends `email` is not refused for
+ * the field's presence — the legacy web shape has always required it — but the
+ * address it sends must be the one it verified, checked by
+ * `matchesVerifiedPrincipal` below. Nothing here is ever persisted as the
+ * requester.
  */
-const requesterEmail = z.string().trim().toLowerCase().min(1);
-/**
- * Syntax plus the shared exact-domain allowlist, applied to the already
- * trimmed and lowercased value. `.email()` is the same syntax check this route
- * has always used; the allowlist is the one `POST /api/subscribe` enforces.
- */
-const eligibleRequesterEmail = z
-  .string()
-  .email()
-  .refine(hasAllowedEmailDomain);
+const submittedRequesterEmail = z.string().trim().toLowerCase().min(1);
 const isoTimestamp = z.iso.datetime({ offset: true });
 
 /**
@@ -75,7 +70,7 @@ const requesterFields = {
   vendor: requesterString,
   food: requesterString,
   pickupName: requesterString,
-  email: requesterEmail,
+  email: submittedRequesterEmail.optional(),
 };
 
 const canonicalAsapSchema = z
@@ -156,7 +151,12 @@ interface ValidatedCreateRequest {
   vendor: string;
   food: string;
   pickupName: string;
-  email: string;
+  /**
+   * What the caller claimed, when it claimed anything. Compared against the
+   * verified principal and then discarded; the persisted requester is always
+   * the principal.
+   */
+  submittedEmail?: string;
   timing: "asap" | "scheduled";
   /**
    * The accepted scheduled start, on scheduled requests only. It is the sole
@@ -258,7 +258,7 @@ function validateCreateShape(
         vendor: result.data.vendor,
         food: result.data.food,
         pickupName: result.data.pickupName,
-        email: result.data.email,
+        submittedEmail: result.data.email,
         timing: "asap",
         installationCredential: result.data.installationCredential,
       };
@@ -271,7 +271,7 @@ function validateCreateShape(
       vendor: result.data.vendor,
       food: result.data.food,
       pickupName: result.data.pickupName,
-      email: result.data.email,
+      submittedEmail: result.data.email,
       timing: "scheduled",
       windowStart,
       installationCredential: result.data.installationCredential,
@@ -289,7 +289,7 @@ function validateCreateShape(
       vendor: result.data.vendor,
       food: result.data.food,
       pickupName: result.data.pickupName,
-      email: result.data.email,
+      submittedEmail: result.data.email,
       timing: "asap",
     };
   }
@@ -301,7 +301,7 @@ function validateCreateShape(
     vendor: result.data.vendor,
     food: result.data.food,
     pickupName: result.data.pickupName,
-    email: result.data.email,
+    submittedEmail: result.data.email,
     timing: "scheduled",
     windowStart,
   };
@@ -314,45 +314,61 @@ function validateCreateShape(
  * generic message: a missing, blank, or wrongly typed field, an unexpected key,
  * a bad `timing`, a mismatched window, or a scheduled start that has already
  * passed, on either create shape.
- * `email` is reserved for an address that is present and non-blank but fails
- * syntax or the NYU allowlist. `vendor` is reserved for a vendor that is
- * present and non-blank but is not one of the supported catalog entries.
+ * `vendor` is reserved for a vendor that is present and non-blank but is not
+ * one of the supported catalog entries. `principal` is reserved for a payload
+ * that names an address other than the one this caller verified.
+ *
+ * There is deliberately no address refusal left. The NYU allowlist still gates
+ * every request — it decides who may become a participant at all, and
+ * `resolveParticipantAuthority` re-applies it to the stored principal on every
+ * use — but it is no longer something this payload can fail, because this
+ * payload no longer supplies the requester.
  */
-type CreateRefusal = "payload" | "vendor" | "email";
+type CreateRefusal = "payload" | "vendor" | "principal";
 
 type CreateValidation =
   | { ok: true; request: ValidatedCreateRequest }
   | { ok: false; refusal: CreateRefusal };
 
-function isEligibleRequesterEmail(email: string): boolean {
-  return eligibleRequesterEmail.safeParse(email).success;
-}
-
 /**
- * The vendor and email allowlists are strictly additive and run after shape
- * validation, so they can only refuse a payload that would otherwise have
- * been created. Every existing structural failure — and every case where
- * another field is also invalid — keeps the exact generic error it has
- * always returned; the vendor- and address-specific messages are each
- * reserved for the one case where that field alone is what's wrong.
+ * The vendor allowlist and the principal check are strictly additive and run
+ * after shape validation, so they can only refuse a payload that would
+ * otherwise have been created. Every existing structural failure — and every
+ * case where another field is also invalid — keeps the exact generic error it
+ * has always returned.
  *
- * All three refusals happen here, before the daily-limit read, the write,
- * the requester confirmation email, and helper notification.
+ * Both refusals happen here, before the daily-limit read, the write, the
+ * requester confirmation email, and helper notification. The participant gate
+ * itself has already run, further upstream still: an unverified caller is
+ * refused before this function is reached, so it never learns whether its
+ * payload would otherwise have been accepted.
  */
-function validateCreateRequest(body: unknown, now: Date): CreateValidation {
+function validateCreateRequest(
+  body: unknown,
+  now: Date,
+  principal: string
+): CreateValidation {
   const request = validateCreateShape(body, now);
   if (!request) return { ok: false, refusal: "payload" };
   if (!isSupportedVendor(request.vendor)) {
     return { ok: false, refusal: "vendor" };
   }
-  if (!isEligibleRequesterEmail(request.email)) {
-    return { ok: false, refusal: "email" };
+  // A payload may repeat the address it verified; it may not name a different
+  // one. Substituting the principal silently would let a client believe it had
+  // posted as someone else, and refusing generically would hide which of the
+  // two identities the request would actually have carried.
+  if (
+    request.submittedEmail !== undefined &&
+    request.submittedEmail !== principal
+  ) {
+    return { ok: false, refusal: "principal" };
   }
   return { ok: true, request };
 }
 
 async function attemptRequesterConfirmation(
   request: ValidatedCreateRequest,
+  requesterEmail: string,
   pickupWindowText: string,
   requestId: string
 ): Promise<void> {
@@ -366,7 +382,7 @@ async function attemptRequesterConfirmation(
   try {
     const result = await resend.emails.send({
       from: "CommonPlate <noreply@commonplatenyu.org>",
-      to: request.email,
+      to: requesterEmail,
       subject: "Request Confirmed - CommonPlate",
       html: `
         <h2>Your meal request has been submitted!</h2>
@@ -449,21 +465,37 @@ export async function createRequest(
   // measured from the same instant.
   const now = new Date();
 
-  const validation = validateCreateRequest(req.body, now);
+  // The participant gate runs first: before shape validation, before the
+  // daily-limit read, before the write, and before either notification. An
+  // unverified caller therefore produces no side effect and learns nothing
+  // about its payload — including, deliberately, whether the address it sent
+  // would have been accepted.
+  const authority = await resolveParticipantAuthority(req);
+  if (!authority.ok) {
+    return sendParticipantAuthorityRefusal(res, authority.refusal);
+  }
+  const { participantId, principal } = authority.participant;
+
+  const validation = validateCreateRequest(req.body, now, principal);
   if (!validation.ok) {
-    // `INVALID_EMAIL` and `INVALID_VENDOR` are each a distinct code for one
-    // specific, otherwise-valid field, rather than a second and third meaning
-    // loaded onto `INVALID_REQUEST`. Clients that do not know either code
-    // still render the message.
-    if (validation.refusal === "email") {
-      return res
-        .status(400)
-        .json(errorEnvelope("INVALID_EMAIL", NYU_EMAIL_REQUIRED_MESSAGE));
-    }
+    // `INVALID_VENDOR` and `PARTICIPANT_PRINCIPAL_MISMATCH` are each a distinct
+    // code for one specific, otherwise-valid field, rather than extra meanings
+    // loaded onto `INVALID_REQUEST`. Clients that do not know either code still
+    // render the message.
     if (validation.refusal === "vendor") {
       return res
         .status(400)
         .json(errorEnvelope("INVALID_VENDOR", UNSUPPORTED_VENDOR_MESSAGE));
+    }
+    if (validation.refusal === "principal") {
+      return res
+        .status(403)
+        .json(
+          errorEnvelope(
+            PARTICIPANT_PRINCIPAL_MISMATCH_CODE,
+            PARTICIPANT_PRINCIPAL_MISMATCH_MESSAGE
+          )
+        );
     }
     return res
       .status(400)
@@ -479,8 +511,13 @@ export async function createRequest(
     const startOfDay = startOfCampusDay(now);
 
     try {
+      // Counted against the verified principal, so the daily allowance now
+      // belongs to a proved mailbox rather than to whatever address a caller
+      // typed. The exact-principal rule matters here too: `+tag` variants are
+      // separate participants and therefore separate allowances, which is the
+      // accepted consequence of not canonicalizing aliases into one human.
       const todaysCount = await MealRequest.countDocuments({
-        email: validated.email,
+        email: principal,
         createdAt: { $gte: startOfDay },
       });
       if (todaysCount >= 3) {
@@ -521,7 +558,12 @@ export async function createRequest(
       vendor: validated.vendor,
       food: validated.food,
       pickupName: validated.pickupName,
-      email: validated.email,
+      // Both written from the resolved participant, never from the payload.
+      // `email` stays the requester address every downstream path already
+      // reads; `requesterParticipantId` is the durable binding to the identity
+      // that proved it, which is what W3-H1 and W3-M1 can later consume.
+      email: principal,
+      requesterParticipantId: participantId,
       pickupWindowText,
       windowStart: validated.windowStart,
       // The advertised window is the availability window. Persisting the
@@ -552,7 +594,12 @@ export async function createRequest(
     );
     const requestId = String(document._id);
 
-    await attemptRequesterConfirmation(validated, pickupWindowText, requestId);
+    await attemptRequesterConfirmation(
+      validated,
+      principal,
+      pickupWindowText,
+      requestId
+    );
 
     res.status(201).json(response);
     // Both started after the response is sent and deliberately not awaited: a

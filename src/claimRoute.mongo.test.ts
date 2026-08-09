@@ -9,18 +9,59 @@ import {
   it,
   vi,
 } from "vitest";
-import { Request as MealRequest } from "../models/db.js";
+import { Participant, Request as MealRequest } from "../models/db.js";
 import {
   CLAIM_EXTENSION_MS,
   claimRequest,
   extendClaim,
 } from "./claimRoute.js";
+import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
+import {
+  PARTICIPANT_SIGNING_SECRET_ENV,
+  signParticipantAuthority,
+} from "./participantCredentials.js";
 
 const mongoUri = process.env.MONGO_INTEGRATION_URI;
 const describeMongo = mongoUri ? describe : describe.skip;
 
+/**
+ * A real verified helper, in the real collection, presenting a real credential
+ * (W3-I1). The concurrency claims below are about the claim mutation, so the
+ * gate in front of it has to be the production one rather than a stub.
+ *
+ * Its own address and id, and never deleted between cases: this suite shares
+ * the runner's default database with the fulfillment suite, and the unique
+ * address index would otherwise let one suite's cleanup break the other's.
+ */
+const participantSecretText = "claim-mongo-participant-signing-secret-32";
+const participantSecret = Buffer.from(participantSecretText);
+const helperParticipantId = new mongoose.Types.ObjectId(
+  "64d0000000000000000000c1"
+);
+const helperPrincipal = "claim-mongo-helper@nyu.edu";
+const participantAuthority = signParticipantAuthority(
+  helperParticipantId,
+  1,
+  participantSecret
+);
+
+async function ensureVerifiedHelper() {
+  await Participant.updateOne(
+    { _id: helperParticipantId },
+    {
+      $set: { email: helperPrincipal, verifiedAt: new Date() },
+      $setOnInsert: { authorityVersion: 1 },
+    },
+    { upsert: true }
+  ).exec();
+}
+
 function routeContext(id: string, body?: unknown) {
-  const req = { params: { id }, body } as unknown as Request;
+  const req = {
+    params: { id },
+    body,
+    headers: { [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority },
+  } as unknown as Request;
   const res = {} as Response;
   let statusCode = 200;
   let bodyValue: any;
@@ -50,8 +91,11 @@ describeMongo("real MongoDB claim atomicity", () => {
       "CLAIM_TOKEN_HMAC_SECRET",
       "real-mongo-test-secret-material-32-bytes"
     );
+    vi.stubEnv(PARTICIPANT_SIGNING_SECRET_ENV, participantSecretText);
     await mongoose.connect(mongoUri!);
     await MealRequest.syncIndexes();
+    await Participant.createIndexes();
+    await ensureVerifiedHelper();
   });
 
   afterEach(async () => {

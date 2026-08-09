@@ -75,6 +75,10 @@ final class RequestFetchingURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private nonisolated(unsafe) static var stubs: [Stub] = []
     private nonisolated(unsafe) static var requestedPaths: [String] = []
+    // W3-I1: the participant credential travels in a header, and the create
+    // payload must be provably free of an address, so both are captured.
+    private nonisolated(unsafe) static var capturedHeaders: [[String: String]] = []
+    private nonisolated(unsafe) static var capturedBodies: [Data] = []
 
     static func enqueue(_ stub: Stub) {
         lock.lock()
@@ -86,6 +90,8 @@ final class RequestFetchingURLProtocol: URLProtocol {
         lock.lock()
         stubs.removeAll()
         requestedPaths.removeAll()
+        capturedHeaders.removeAll()
+        capturedBodies.removeAll()
         lock.unlock()
     }
 
@@ -93,6 +99,21 @@ final class RequestFetchingURLProtocol: URLProtocol {
         lock.lock()
         defer { lock.unlock() }
         return requestedPaths
+    }
+
+    /// Header field names are matched case-insensitively, because `URLSession`
+    /// is free to normalize them and a case-sensitive lookup would silently
+    /// pass a test that should fail.
+    static var lastCapturedHeaders: [String: String]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedHeaders.last
+    }
+
+    static var lastCapturedBody: Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedBodies.last
     }
 
     private static func dequeue() -> Stub? {
@@ -111,8 +132,33 @@ final class RequestFetchingURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
+        // `URLProtocol` hands the body through `httpBodyStream` for POST
+        // requests built by `URLSession`, not `httpBody`.
+        let body: Data
+        if let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            let bufferSize = 4096
+            var buffer = [UInt8](repeating: 0, count: bufferSize)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: bufferSize)
+                if read <= 0 { break }
+                data.append(buffer, count: read)
+            }
+            body = data
+        } else {
+            body = request.httpBody ?? Data()
+        }
+        var headers: [String: String] = [:]
+        for (field, value) in request.allHTTPHeaderFields ?? [:] {
+            headers[field.lowercased()] = value
+        }
+
         Self.lock.lock()
         Self.requestedPaths.append(request.url?.path ?? "")
+        Self.capturedHeaders.append(headers)
+        Self.capturedBodies.append(body)
         Self.lock.unlock()
 
         guard let stub = Self.dequeue() else {
@@ -923,7 +969,14 @@ final class RequestFetchingTests: XCTestCase {
     }
 
     private func makeStore() -> RequestStore {
-        RequestStore(service: makeService(), installationCredentialProvider: { "test-installation-credential" })
+        RequestStore(
+            service: makeService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            // W3-I1: a verified participant, so the gate is not what these
+            // cases are proving.
+            participantAuthorityProvider: { "64c0000000000000000000a1.1.credential" },
+            participantAuthorityRejected: {}
+        )
     }
 
     private func makeService() -> RequestService {
@@ -971,7 +1024,6 @@ final class RequestFetchingTests: XCTestCase {
             vendor: "Palladium",
             food: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             windowStart: nil
         )

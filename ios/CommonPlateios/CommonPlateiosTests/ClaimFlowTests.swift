@@ -848,7 +848,6 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
         try? await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil,
@@ -1421,7 +1420,6 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertTrue(store.isExtendingClaim)
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: FulfillmentFormDraft(
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: FulfillmentReadyTime.asap.etaValue,
                 readyTime: .asap
@@ -2284,7 +2282,6 @@ final class ClaimFlowTests: XCTestCase {
 
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: "Meet by the entrance"
@@ -2299,9 +2296,8 @@ final class ClaimFlowTests: XCTestCase {
         let fulfillment = try XCTUnwrap(body["fulfillment"] as? [String: Any])
         XCTAssertEqual(
             Set(fulfillment.keys),
-            ["fulfillerEmail", "orderNumber", "eta", "contactMessage"]
+            ["orderNumber", "eta", "contactMessage"]
         )
-        XCTAssertEqual(fulfillment["fulfillerEmail"] as? String, "helper@example.edu")
         XCTAssertEqual(fulfillment["orderNumber"] as? String, "70154321")
         XCTAssertEqual(fulfillment["eta"] as? String, "15 minutes")
         XCTAssertEqual(fulfillment["contactMessage"] as? String, "Meet by the entrance")
@@ -2320,7 +2316,6 @@ final class ClaimFlowTests: XCTestCase {
 
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -2328,7 +2323,7 @@ final class ClaimFlowTests: XCTestCase {
 
         let request = try XCTUnwrap(ClaimFlowURLProtocol.capturedRequests.last)
         let fulfillment = try XCTUnwrap(request.bodyObject?["fulfillment"] as? [String: Any])
-        XCTAssertEqual(Set(fulfillment.keys), ["fulfillerEmail", "orderNumber", "eta"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
     }
 
     func testEmptyClaimTokenNeverCreatesSubmittableClaimState() async {
@@ -2348,7 +2343,6 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: FulfillmentFormDraft(
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: FulfillmentReadyTime.asap.etaValue,
                 readyTime: .asap
@@ -2366,14 +2360,13 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         let complete = FulfillmentFormDraft(
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
             readyTime: .asap,
             contactMessage: ""
         )
         var missingEmail = complete
-        missingEmail.fulfillerEmail = " \n"
+        missingEmail.orderNumber = " \n"
         var missingOrderNumber = complete
         missingOrderNumber.orderNumber = "  "
         var missingETA = complete
@@ -2389,7 +2382,6 @@ final class ClaimFlowTests: XCTestCase {
 
     func testCompleteFulfillmentEnablesSubmissionWithoutAContactMessage() {
         let complete = FulfillmentFormDraft(
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
             readyTime: .fifteenMinutes,
@@ -2404,7 +2396,6 @@ final class ClaimFlowTests: XCTestCase {
 
     func testMalformedButNonemptyFulfillmentValuesDoNotDisableSubmission() {
         let malformed = FulfillmentFormDraft(
-            fulfillerEmail: "helper.example.edu",
             orderNumber: "ORDER-123",
             eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
             readyTime: .thirtyMinutes,
@@ -2412,7 +2403,6 @@ final class ClaimFlowTests: XCTestCase {
         )
 
         XCTAssertFalse(FulfillmentFormValidator.validate(
-            fulfillerEmail: malformed.fulfillerEmail,
             orderNumber: malformed.orderNumber
         ).isEmpty)
         XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(
@@ -2425,7 +2415,6 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(FulfillRequestView.submitTitle, "I placed this order")
 
         let complete = FulfillmentFormDraft(
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
             readyTime: .asap,
@@ -2473,7 +2462,6 @@ final class ClaimFlowTests: XCTestCase {
 
         try? await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -2500,7 +2488,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2523,7 +2510,6 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -2551,7 +2537,6 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
         try await resolved.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -2577,7 +2562,6 @@ final class ClaimFlowTests: XCTestCase {
         let first = Task {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2587,7 +2571,6 @@ final class ClaimFlowTests: XCTestCase {
 
         XCTAssertTrue(store.isFulfilling)
         let completeDraft = FulfillmentFormDraft(
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
             readyTime: .fifteenMinutes
@@ -2601,7 +2584,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2640,7 +2622,6 @@ final class ClaimFlowTests: XCTestCase {
         let fulfillment = Task {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2673,7 +2654,6 @@ final class ClaimFlowTests: XCTestCase {
 
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2690,7 +2670,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(FulfillRequestView.confirmationTitle, "Order recorded")
         XCTAssertEqual(
             FulfillRequestView.confirmationDetail(for: .notificationSent),
-            "CommonPlate submitted the order details for email delivery. We can’t confirm that the student received or read the email, or that they will pick up the food. If they reply, it goes to the address you entered."
+            "CommonPlate submitted the order details for email delivery. We can’t confirm that the student received or read the email, or that they will pick up the food. If they reply, it goes to your verified NYU email."
         )
         XCTAssertEqual(
             FulfillRequestView.confirmationDetail(for: .notificationFailed),
@@ -2747,7 +2727,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil,
@@ -2789,7 +2768,6 @@ final class ClaimFlowTests: XCTestCase {
             do {
                 try await store.fulfill(
                     requestID: requestID,
-                    fulfillerEmail: "helper@example.edu",
                     orderNumber: "70154321",
                     eta: "15 minutes",
                     contactMessage: nil
@@ -2821,7 +2799,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2845,7 +2822,6 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: FulfillmentFormDraft(
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
                 readyTime: .fifteenMinutes
@@ -2873,7 +2849,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2895,7 +2870,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2912,7 +2886,6 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: FulfillmentFormDraft(
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
                 readyTime: .fifteenMinutes
@@ -2928,7 +2901,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -2968,7 +2940,6 @@ final class ClaimFlowTests: XCTestCase {
             do {
                 try await store.fulfill(
                     requestID: requestID,
-                    fulfillerEmail: "helper@example.edu",
                     orderNumber: "70154321",
                     eta: "15 minutes",
                     contactMessage: nil
@@ -2997,7 +2968,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -3046,7 +3016,6 @@ final class ClaimFlowTests: XCTestCase {
 
             try? await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -3069,7 +3038,6 @@ final class ClaimFlowTests: XCTestCase {
 
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -3293,7 +3261,6 @@ final class ClaimFlowTests: XCTestCase {
         let oldFulfillment = Task {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "old@example.edu",
                 orderNumber: "70150001",
                 eta: "10 minutes",
                 contactMessage: nil
@@ -3330,7 +3297,6 @@ final class ClaimFlowTests: XCTestCase {
         let oldFulfillment = Task {
             try? await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "old@example.edu",
                 orderNumber: "70150001",
                 eta: "10 minutes",
                 contactMessage: nil
@@ -3389,7 +3355,6 @@ final class ClaimFlowTests: XCTestCase {
         let submission = Task {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -3430,7 +3395,6 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "failed")))
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -3475,7 +3439,6 @@ final class ClaimFlowTests: XCTestCase {
         )))
         try await store.fulfill(
             requestID: otherRequestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70159876",
             eta: "20 minutes",
             contactMessage: nil
@@ -3515,7 +3478,6 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -3541,7 +3503,6 @@ final class ClaimFlowTests: XCTestCase {
         )))
         try await store.fulfill(
             requestID: otherRequestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70159876",
             eta: "20 minutes",
             contactMessage: nil
@@ -3569,7 +3530,6 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -3602,7 +3562,6 @@ final class ClaimFlowTests: XCTestCase {
 
         try? await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -3648,7 +3607,6 @@ final class ClaimFlowTests: XCTestCase {
         let submission = Task {
             try? await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -3702,7 +3660,6 @@ final class ClaimFlowTests: XCTestCase {
         let ambiguity = try await makeSettledFulfillmentAmbiguity(
             store: store,
             claimToken: "private-recovery-token",
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "00070154321",
             eta: "30 minutes",
             contactMessage: "Meet by the pickup shelf"
@@ -4079,7 +4036,6 @@ final class ClaimFlowTests: XCTestCase {
             do {
                 try await store.fulfill(
                     requestID: requestID,
-                    fulfillerEmail: "helper@example.edu",
                     orderNumber: "70154321",
                     eta: "15 minutes",
                     contactMessage: nil
@@ -4236,7 +4192,6 @@ final class ClaimFlowTests: XCTestCase {
             do {
                 try await store.fulfill(
                     requestID: requestID,
-                    fulfillerEmail: "helper@example.edu",
                     orderNumber: "70154321",
                     eta: "15 minutes",
                     contactMessage: nil
@@ -4390,7 +4345,6 @@ final class ClaimFlowTests: XCTestCase {
         let oldAttempt = Task {
             try? await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "old@example.edu",
                 orderNumber: "70150001",
                 eta: "10 minutes",
                 contactMessage: nil
@@ -4628,7 +4582,6 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -4698,7 +4651,6 @@ final class ClaimFlowTests: XCTestCase {
         ))
         try? await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: "15 minutes",
             contactMessage: nil
@@ -4790,7 +4742,6 @@ final class ClaimFlowTests: XCTestCase {
         store: RequestStore,
         claimToken: String = "claim-token",
         claimExpiresAt: Date = Date().addingTimeInterval(15 * 60),
-        fulfillerEmail: String = "helper@example.edu",
         orderNumber: String = "70154321",
         eta: String = "15 minutes",
         contactMessage: String? = nil
@@ -4806,7 +4757,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: fulfillerEmail,
                 orderNumber: orderNumber,
                 eta: eta,
                 contactMessage: contactMessage
@@ -4863,7 +4813,6 @@ final class ClaimFlowTests: XCTestCase {
         )
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
             contactMessage: nil
@@ -4922,7 +4871,6 @@ final class ClaimFlowTests: XCTestCase {
         )
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
             contactMessage: nil
@@ -5057,7 +5005,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -5091,7 +5038,6 @@ final class ClaimFlowTests: XCTestCase {
         do {
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321",
                 eta: "15 minutes",
                 contactMessage: nil
@@ -5161,7 +5107,6 @@ final class ClaimFlowTests: XCTestCase {
 
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
             contactMessage: nil
@@ -5173,7 +5118,7 @@ final class ClaimFlowTests: XCTestCase {
         let body = try XCTUnwrap(sent.bodyObject)
         XCTAssertEqual(Set(body.keys), ["claimToken", "fulfillment"])
         let fulfillment = try XCTUnwrap(body["fulfillment"] as? [String: Any])
-        XCTAssertEqual(Set(fulfillment.keys), ["fulfillerEmail", "orderNumber", "eta"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
         XCTAssertEqual(fulfillment["eta"] as? String, "ASAP")
         // The control's own vocabulary never reaches the wire.
         XCTAssertNil(fulfillment["readyTime"])
@@ -5190,7 +5135,7 @@ final class ClaimFlowTests: XCTestCase {
         )
         XCTAssertEqual(
             FulfillRequestView.helperEmailNotice,
-            "If the email reaches the student, they can reply to this address."
+            "If the email reaches the student, they can reply to your verified NYU email."
         )
         XCTAssertEqual(
             FulfillRequestView.orderNumberNotice,
@@ -5235,7 +5180,6 @@ final class ClaimFlowTests: XCTestCase {
         )
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
             contactMessage: nil
@@ -5252,25 +5196,23 @@ final class ClaimFlowTests: XCTestCase {
 
     func testInitialInvalidFulfillmentKeystrokesRemainQuiet() {
         let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: "h",
             orderNumber: "ORDER"
         )
         let presentation = FulfillmentValidationPresentation()
 
-        XCTAssertEqual(errors.map(\.field), [.fulfillerEmail, .orderNumber])
+        XCTAssertEqual(errors.map(\.field), [.orderNumber])
         XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
     }
 
     func testProductionFulfillmentFocusTransitionRevealsOnlyExitedInvalidField() {
         let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: "invalid",
             orderNumber: "ORDER"
         )
         var presentation = FulfillmentValidationPresentation()
 
         presentation.handleFocusTransition(
             from: .orderNumber,
-            to: .fulfillerEmail,
+            to: nil,
             errors: errors
         )
 
@@ -5282,7 +5224,6 @@ final class ClaimFlowTests: XCTestCase {
 
     func testFulfillmentSubmitRevealsEveryErrorWithoutInvokingSubmission() async throws {
         let draft = FulfillmentFormDraft(
-            fulfillerEmail: "",
             orderNumber: "",
             eta: FulfillmentReadyTime.asap.etaValue,
             readyTime: .asap,
@@ -5297,20 +5238,18 @@ final class ClaimFlowTests: XCTestCase {
             submissionCount += 1
         }
         let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: draft.fulfillerEmail,
             orderNumber: draft.orderNumber
         )
         let visible = result.presentation.visibleErrors(from: errors)
 
         XCTAssertEqual(submissionCount, 0)
         XCTAssertFalse(result.didSubmit)
-        XCTAssertEqual(visible.map(\.field), [.fulfillerEmail, .orderNumber])
-        XCTAssertEqual(result.firstInvalidTextField, .fulfillerEmail)
+        XCTAssertEqual(visible.map(\.field), [.orderNumber])
+        XCTAssertEqual(result.firstInvalidTextField, .orderNumber)
     }
 
     func testPresentedFulfillmentErrorUpdatesLiveWithoutActivatingSibling() {
         let initial = FulfillmentFormValidator.validate(
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "ORDER"
         )
         var presentation = FulfillmentValidationPresentation()
@@ -5318,7 +5257,6 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(presentation.presentedFields, [.orderNumber])
 
         let corrected = FulfillmentFormValidator.validate(
-            fulfillerEmail: "h",
             orderNumber: "70154321"
         )
         XCTAssertTrue(
@@ -5327,7 +5265,6 @@ final class ClaimFlowTests: XCTestCase {
         )
 
         let invalidAgain = FulfillmentFormValidator.validate(
-            fulfillerEmail: "h",
             orderNumber: "ORDER"
         )
         XCTAssertEqual(
@@ -5336,7 +5273,6 @@ final class ClaimFlowTests: XCTestCase {
         )
 
         let emptied = FulfillmentFormValidator.validate(
-            fulfillerEmail: "h",
             orderNumber: ""
         )
         XCTAssertEqual(
@@ -5347,7 +5283,6 @@ final class ClaimFlowTests: XCTestCase {
 
     func testValidFulfillmentSubmitInvokesSubmissionOnceWithNormalizedValues() async throws {
         let draft = FulfillmentFormDraft(
-            fulfillerEmail: "  helper@example.edu  ",
             orderNumber: "  00070154321  ",
             eta: "  30 minutes  ",
             readyTime: .thirtyMinutes,
@@ -5364,7 +5299,6 @@ final class ClaimFlowTests: XCTestCase {
 
         XCTAssertTrue(result.didSubmit)
         XCTAssertEqual(submissions.count, 1)
-        XCTAssertEqual(submissions.first?.fulfillerEmail, "helper@example.edu")
         XCTAssertEqual(submissions.first?.orderNumber, "00070154321")
         XCTAssertEqual(submissions.first?.eta, "30 minutes")
         XCTAssertEqual(submissions.first?.contactMessage, "Text me at pickup")
@@ -5372,51 +5306,17 @@ final class ClaimFlowTests: XCTestCase {
 
     func testProgrammaticFulfillmentFocusChangesCannotSubmitOrRevealSiblings() {
         let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: "invalid",
             orderNumber: "ORDER"
         )
         var presentation = FulfillmentValidationPresentation()
         let submissionCount = 0
 
-        presentation.handleFocusTransition(from: nil, to: .fulfillerEmail, errors: errors)
+        presentation.handleFocusTransition(from: nil, to: .orderNumber, errors: errors)
         XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
 
-        presentation.handleFocusTransition(from: .fulfillerEmail, to: nil, errors: errors)
-        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.fulfillerEmail])
+        presentation.handleFocusTransition(from: .orderNumber, to: nil, errors: errors)
+        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.orderNumber])
         XCTAssertEqual(submissionCount, 0)
-    }
-
-    func testEmailFailuresAreNamedOnTheEmailField() {
-        XCTAssertEqual(
-            FulfillmentFormValidator.emailError(""),
-            "Enter your email address."
-        )
-        XCTAssertEqual(
-            FulfillmentFormValidator.emailError("   "),
-            "Enter your email address."
-        )
-        // Faith's entry: a plausible-looking address the backend refuses.
-        for invalid in [
-            "helper.example.edu",
-            "helper@",
-            "@example.edu",
-            "helper@example",
-            "helper @example.edu",
-            "helper@exam ple.edu"
-        ] {
-            XCTAssertEqual(
-                FulfillmentFormValidator.emailError(invalid),
-                "Enter a valid email address, like name@example.com.",
-                invalid
-            )
-        }
-        for valid in [
-            "helper@example.edu",
-            "  helper@example.edu  ",
-            "first.last+tag@nyu.edu"
-        ] {
-            XCTAssertNil(FulfillmentFormValidator.emailError(valid), valid)
-        }
     }
 
     func testEmptyOrderNumberIsNamedOnItsOwnField() {
@@ -5522,36 +5422,33 @@ final class ClaimFlowTests: XCTestCase {
         )
         // Ready time is a fixed-choice picker, so it has no local failure mode
         // and therefore no message of its own.
-        XCTAssertEqual(FulfillmentFormField.allCases, [.fulfillerEmail, .orderNumber])
+        XCTAssertEqual(FulfillmentFormField.allCases, [.orderNumber])
     }
 
-    /// Both fields report at once, in screen order, so the first invalid one is
-    /// also the one focused.
+    /// Every invalid field reports at once, in screen order, so the first one
+    /// is also the one focused. Since W3-I1 the order number is the only
+    /// locally validated field the reservation form has.
     func testValidationReportsEveryInvalidFieldInScreenOrder() {
         let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: "not-an-email",
             orderNumber: "7015 4321"
         )
-        XCTAssertEqual(errors.map(\.field), [.fulfillerEmail, .orderNumber])
-        XCTAssertEqual(errors.first?.field, .fulfillerEmail)
+        XCTAssertEqual(errors.map(\.field), [.orderNumber])
+        XCTAssertEqual(errors.first?.field, .orderNumber)
         XCTAssertEqual(
             errors.map(\.message),
             [
-                "Enter a valid email address, like name@example.com.",
                 "Use numbers only."
             ]
         )
 
         XCTAssertEqual(
             FulfillmentFormValidator.validate(
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "7015 4321"
             ).map(\.field),
             [.orderNumber]
         )
         XCTAssertTrue(
             FulfillmentFormValidator.validate(
-                fulfillerEmail: "helper@example.edu",
                 orderNumber: "70154321"
             ).isEmpty
         )
@@ -5565,7 +5462,6 @@ final class ClaimFlowTests: XCTestCase {
         try await store.claim(requestID: requestID)
 
         let draft = FulfillmentFormDraft(
-            fulfillerEmail: "helper.example.edu",
             orderNumber: "ORDER-123",
             eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
             readyTime: .thirtyMinutes,
@@ -5581,25 +5477,19 @@ final class ClaimFlowTests: XCTestCase {
         ) { values in
             try await store.fulfill(
                 requestID: requestID,
-                fulfillerEmail: values.fulfillerEmail,
                 orderNumber: values.orderNumber,
                 eta: values.eta,
                 contactMessage: values.contactMessage
             )
         }
         XCTAssertFalse(result.didSubmit)
-        XCTAssertEqual(result.firstInvalidTextField, .fulfillerEmail)
+        XCTAssertEqual(result.firstInvalidTextField, .orderNumber)
         let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: draft.fulfillerEmail,
             orderNumber: draft.orderNumber
         )
         XCTAssertEqual(
             result.presentation.visibleErrors(from: errors),
             [
-                FulfillmentFieldError(
-                    field: .fulfillerEmail,
-                    message: FulfillmentFormValidator.invalidEmailMessage
-                ),
                 FulfillmentFieldError(
                     field: .orderNumber,
                     message: FulfillmentFormValidator.nonNumericOrderNumberMessage
@@ -5635,7 +5525,6 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         let draft = FulfillmentFormDraft(
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "00070154321",
             eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
             readyTime: .thirtyMinutes,
@@ -5650,7 +5539,6 @@ final class ClaimFlowTests: XCTestCase {
             ) { values in
                 try await store.fulfill(
                     requestID: requestID,
-                    fulfillerEmail: values.fulfillerEmail,
                     orderNumber: values.orderNumber,
                     eta: values.eta,
                     contactMessage: values.contactMessage
@@ -5693,7 +5581,6 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         let draft = FulfillmentFormDraft(
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "00070154321",
             eta: FulfillmentReadyTime.fortyFiveMinutes.etaValue,
             readyTime: .fortyFiveMinutes,
@@ -5712,7 +5599,6 @@ final class ClaimFlowTests: XCTestCase {
             ) { values in
                 try await store.fulfill(
                     requestID: requestID,
-                    fulfillerEmail: values.fulfillerEmail,
                     orderNumber: values.orderNumber,
                     eta: values.eta,
                     contactMessage: values.contactMessage
@@ -5732,13 +5618,12 @@ final class ClaimFlowTests: XCTestCase {
         )
         XCTAssertEqual(
             FulfillmentPresentationError.invalidDetails.message,
-            "We couldn’t save these details. Check your email address and order number, then tap “I placed this order” again. Don’t place another Grubhub order."
+            "We couldn’t save these details. Check the order number, then tap “I placed this order” again. Don’t place another Grubhub order."
         )
 
         // Nothing local failed, so nothing local may be named: the values are
         // still valid and no field error exists for this rejection to reveal.
         let fieldErrors = FulfillmentFormValidator.validate(
-            fulfillerEmail: draft.fulfillerEmail,
             orderNumber: draft.orderNumber
         )
         XCTAssertTrue(fieldErrors.isEmpty)
@@ -5753,7 +5638,6 @@ final class ClaimFlowTests: XCTestCase {
 
         // The submission the helper would repeat is the one still on screen.
         XCTAssertEqual(draft, originalDraft)
-        XCTAssertEqual(draft.fulfillerEmail, "helper@example.edu")
         XCTAssertEqual(draft.orderNumber, "00070154321")
         XCTAssertEqual(draft.eta, "45 minutes")
         XCTAssertEqual(draft.readyTime, .fortyFiveMinutes)
@@ -5796,7 +5680,7 @@ final class ClaimFlowTests: XCTestCase {
     func testGenericFallbackIsReservedAndTheOldBlanketSentenceIsRetired() {
         XCTAssertEqual(
             FulfillmentPresentationError.invalidDetails.message,
-            "We couldn’t save these details. Check your email address and order number, then tap “I placed this order” again. Don’t place another Grubhub order."
+            "We couldn’t save these details. Check the order number, then tap “I placed this order” again. Don’t place another Grubhub order."
         )
         // The locked safety sentence still applies to this state.
         XCTAssertTrue(
@@ -5808,8 +5692,6 @@ final class ClaimFlowTests: XCTestCase {
             FulfillmentPresentationError.rateLimited.message,
             FulfillmentPresentationError.temporarilyUnavailable.message,
             FulfillmentPresentationError.couldNotRecord.message,
-            FulfillmentFormValidator.emptyEmailMessage,
-            FulfillmentFormValidator.invalidEmailMessage,
             FulfillmentFormValidator.emptyOrderNumberMessage,
             FulfillmentFormValidator.nonNumericOrderNumberMessage,
             FulfillmentFormValidator.longOrderNumberMessage,
@@ -5833,8 +5715,6 @@ final class ClaimFlowTests: XCTestCase {
 
         // Each field message names its own field's rule rather than deferring.
         for message in [
-            FulfillmentFormValidator.emptyEmailMessage,
-            FulfillmentFormValidator.invalidEmailMessage,
             FulfillmentFormValidator.emptyOrderNumberMessage,
             FulfillmentFormValidator.nonNumericOrderNumberMessage,
             FulfillmentFormValidator.longOrderNumberMessage
@@ -5859,7 +5739,6 @@ final class ClaimFlowTests: XCTestCase {
 
         try await store.fulfill(
             requestID: requestID,
-            fulfillerEmail: "helper@example.edu",
             orderNumber: "00070154321",
             eta: FulfillmentReadyTime.asap.etaValue,
             contactMessage: nil
@@ -5882,7 +5761,7 @@ final class ClaimFlowTests: XCTestCase {
 
         // The structure itself is untouched by the format change.
         XCTAssertEqual(Set(body.keys), ["claimToken", "fulfillment"])
-        XCTAssertEqual(Set(fulfillment.keys), ["fulfillerEmail", "orderNumber", "eta"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
     }
 
     /// A non-numeric order number is refused locally, so a helper who has
@@ -5895,7 +5774,6 @@ final class ClaimFlowTests: XCTestCase {
         for rejected in ["7015-4321", "ORDER123", String(repeating: "7", count: 51)] {
             XCTAssertFalse(
                 FulfillmentFormValidator.validate(
-                    fulfillerEmail: "helper@example.edu",
                     orderNumber: rejected
                 ).isEmpty,
                 rejected
@@ -5931,7 +5809,14 @@ final class ClaimFlowTests: XCTestCase {
     }
 
     private func makeStore() -> RequestStore {
-        RequestStore(service: makeService(), installationCredentialProvider: { "test-installation-credential" })
+        RequestStore(
+            service: makeService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            // W3-I1: a verified participant, so the gate is not what these
+            // cases are proving.
+            participantAuthorityProvider: { "64c0000000000000000000a1.1.credential" },
+            participantAuthorityRejected: {}
+        )
     }
 
     private func makeService() -> RequestService {

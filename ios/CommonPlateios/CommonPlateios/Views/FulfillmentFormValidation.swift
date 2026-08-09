@@ -8,20 +8,17 @@ import Foundation
 /// The helper form's editable values. It remains private to the fulfillment
 /// screen's workflow and is never shared with request creation or the store.
 struct FulfillmentFormDraft: Equatable {
-    var fulfillerEmail: String
     var orderNumber: String
     var eta: String
     var readyTime: FulfillmentReadyTime
     var contactMessage: String
 
     init(
-        fulfillerEmail: String = "",
         orderNumber: String = "",
         eta: String = "",
         readyTime: FulfillmentReadyTime = .asap,
         contactMessage: String = ""
     ) {
-        self.fulfillerEmail = fulfillerEmail
         self.orderNumber = orderNumber
         self.eta = eta
         self.readyTime = readyTime
@@ -35,8 +32,10 @@ struct FulfillmentFormDraft: Equatable {
 ///
 /// Ready time is deliberately absent: it is a picker over a fixed set of
 /// choices, so it cannot hold an invalid value and has nothing to say about one.
+/// The helper's email is absent for a different reason (W3-I1): it is no longer
+/// a field at all, because the helper is the verified participant the
+/// reservation is already bound to.
 enum FulfillmentFormField: Hashable, CaseIterable {
-    case fulfillerEmail
     case orderNumber
 }
 
@@ -85,7 +84,6 @@ struct FulfillmentValidationPresentation: Equatable {
 }
 
 struct FulfillmentSubmissionValues: Equatable {
-    let fulfillerEmail: String
     let orderNumber: String
     let eta: String
     let contactMessage: String?
@@ -97,13 +95,9 @@ struct FulfillmentSubmissionResult: Equatable {
     let didSubmit: Bool
 }
 
-/// Mirrors the backend's order-number rule and performs a client-side email
-/// format check so locally knowable errors can be attached to fields. The
-/// backend remains authoritative.
+/// Mirrors the backend's order-number rule so locally knowable errors can be
+/// attached to fields. The backend remains authoritative.
 enum FulfillmentFormValidator {
-    static let emptyEmailMessage = "Enter your email address."
-    static let invalidEmailMessage =
-        "Enter a valid email address, like name@example.com."
     static let emptyOrderNumberMessage = "Enter the Grubhub order number."
     static let nonNumericOrderNumberMessage = "Use numbers only."
     static let longOrderNumberMessage = "Use 50 digits or fewer."
@@ -115,36 +109,23 @@ enum FulfillmentFormValidator {
     private static let orderNumberDigitsPattern = "^[0-9]+$"
     static let orderNumberMaximumLength = 50
 
-    /// Rejects common malformed addresses before submission; the backend
-    /// remains authoritative.
+    /// The app's one email shape rule, kept here because `NYUEmailPolicy` and
+    /// the participant verification form both use it. It is no longer applied
+    /// to a fulfillment field — there is none — but it remains the single
+    /// definition of a well-formed address, and a second copy would be a second
+    /// idea of one.
     private static let emailPattern = "^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$"
 
     /// Every local failure, in field order. Empty means the submit may proceed
     /// as far as the network; the store's own gates still decide from there.
-    static func validate(
-        fulfillerEmail: String,
-        orderNumber: String
-    ) -> [FulfillmentFieldError] {
+    static func validate(orderNumber: String) -> [FulfillmentFieldError] {
         var errors: [FulfillmentFieldError] = []
-        if let message = emailError(fulfillerEmail) {
-            errors.append(
-                FulfillmentFieldError(field: .fulfillerEmail, message: message)
-            )
-        }
         if let message = orderNumberError(orderNumber) {
             errors.append(
                 FulfillmentFieldError(field: .orderNumber, message: message)
             )
         }
         return errors
-    }
-
-    static func emailError(_ value: String) -> String? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return emptyEmailMessage
-        }
-        return isValidEmail(trimmed) ? nil : invalidEmailMessage
     }
 
     static func isValidEmail(_ value: String) -> Bool {

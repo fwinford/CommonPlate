@@ -14,6 +14,10 @@ import {
   readClaimTokenHmacSecret,
 } from "./claimToken.js";
 import { day4Error, sendDay4Error } from "./day4Errors.js";
+import {
+  resolveParticipantAuthority,
+  sendParticipantAuthorityRefusal,
+} from "./participantAuthorityGate.js";
 import { isPublicActionsPaused } from "./publicActionsPause.js";
 import {
   buildMinimumRemainingTimeFilter,
@@ -142,6 +146,16 @@ export async function claimRequest(
     );
   }
 
+  // The helper gate (W3-I1). Browsing requests stays open to anyone, but
+  // reserving one is a participant action: it takes a real student's meal out
+  // of everyone else's reach and commits a person to placing an order. Checked
+  // before token generation and before the conditional mutation, so an
+  // unverified caller reserves nothing and is told nothing about the request.
+  const authority = await resolveParticipantAuthority(req);
+  if (!authority.ok) {
+    return sendParticipantAuthorityRefusal(res, authority.refusal);
+  }
+
   // This one captured instant drives the eligibility filter, all persisted
   // claim timestamps, failure classification, and the returned expiration.
   const now = new Date();
@@ -178,6 +192,14 @@ export async function claimRequest(
             },
             claimExtendedAt: null,
             claimTokenDigest: tokenDigest,
+            // The reservation's owner, written in the same conditional
+            // mutation that grants it, so a claim never exists without the
+            // verified helper it belongs to. A request re-claimed after an
+            // expired reservation is rebound to whoever won it this time.
+            // Fulfillment reads this instead of accepting a helper address.
+            helperParticipantId: new mongoose.Types.ObjectId(
+              authority.participant.participantId
+            ),
             updatedAt: now,
           },
         },

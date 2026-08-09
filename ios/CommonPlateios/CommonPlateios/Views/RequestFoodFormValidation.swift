@@ -12,7 +12,6 @@ struct RequestFoodFormDraft: Equatable {
     var selectedDiningSpot: DiningSpot?
     var foodRequest: String
     var pickupName: String
-    var email: String
     var timing: RequestTiming
     var preferredPickupTime: Date
 
@@ -20,14 +19,12 @@ struct RequestFoodFormDraft: Equatable {
         selectedDiningSpot: DiningSpot? = nil,
         foodRequest: String = "",
         pickupName: String = "",
-        email: String = "",
         timing: RequestTiming = .asap,
         preferredPickupTime: Date = Date()
     ) {
         self.selectedDiningSpot = selectedDiningSpot
         self.foodRequest = foodRequest
         self.pickupName = pickupName
-        self.email = email
         self.timing = timing
         self.preferredPickupTime = preferredPickupTime
     }
@@ -36,16 +33,19 @@ struct RequestFoodFormDraft: Equatable {
 /// Request-form fields in screen order. Only text fields can receive focus;
 /// pickers still participate in submit-time validation and live correction
 /// after their error has been presented.
+///
+/// The requester's email is deliberately absent (W3-I1): it is no longer a
+/// field, because the requester is the verified participant this installation
+/// remembers and the backend binds the request to that principal.
 enum RequestFoodFormField: Hashable, CaseIterable {
     case diningSpot
     case foodDescription
     case pickupName
     case pickupSchedule
-    case requesterEmail
 
     var isTextField: Bool {
         switch self {
-        case .foodDescription, .pickupName, .requesterEmail:
+        case .foodDescription, .pickupName:
             return true
         case .diningSpot, .pickupSchedule:
             return false
@@ -73,8 +73,7 @@ enum RequestFoodFormValidator {
         guard let diningSpot = draft.selectedDiningSpot,
               !diningSpot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !draft.foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !draft.pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !draft.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              !draft.pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }
 
@@ -94,7 +93,6 @@ enum RequestFoodFormValidator {
         selectedDiningSpot: DiningSpot?,
         foodRequest: String,
         pickupName: String,
-        email: String,
         timing: RequestTiming,
         isScheduledWindowValid: Bool,
         isScheduledTimingAvailable: Bool
@@ -124,26 +122,7 @@ enum RequestFoodFormValidator {
             ))
         }
 
-        // Empty stays its own failure: an address that has not been typed yet
-        // is not an ineligible address, and telling someone their blank field
-        // is not an NYU address answers a question they have not asked. Any
-        // non-empty value is judged by the one shared rule, so a malformed
-        // address and a Gmail address get the same correction — the backend
-        // refuses both identically.
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedEmail.isEmpty {
-            errors.append(RequestFoodFieldError(field: .requesterEmail, error: .missingEmail))
-        } else if !isAllowedRequesterEmail(trimmedEmail) {
-            errors.append(RequestFoodFieldError(field: .requesterEmail, error: .invalidEmail))
-        }
-
         return errors
-    }
-
-    /// Requester addresses are held to the same exact NYU allowlist as alert
-    /// signup, enforced independently by `POST /api/request`.
-    static func isAllowedRequesterEmail(_ value: String) -> Bool {
-        NYUEmailPolicy.isAllowed(value)
     }
 }
 

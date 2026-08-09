@@ -10,7 +10,11 @@ import {
   it,
   vi,
 } from "vitest";
-import { Fulfillment, Request as MealRequest } from "../models/db.js";
+import {
+  Fulfillment,
+  Participant,
+  Request as MealRequest,
+} from "../models/db.js";
 import {
   digestClaimToken,
   generateClaimToken,
@@ -65,11 +69,21 @@ function routeContext(id: string, body: unknown) {
   };
 }
 
+/**
+ * The verified helper every reservation below is bound to (W3-I1). Fulfillment
+ * derives the helper address from this binding, so it is the only place the
+ * placed request's `fulfillerEmail` and the requester email's Reply-To can come
+ * from — nothing in the payload supplies one.
+ */
+const helperParticipantId = new mongoose.Types.ObjectId(
+  "64d0000000000000000000c3"
+);
+const boundHelperEmail = "fulfillment-mongo-helper@nyu.edu";
+
 function fulfillmentBody(rawToken: string) {
   return {
     claimToken: rawToken,
     fulfillment: {
-      fulfillerEmail: "Helper@Example.edu",
       orderNumber: "70154321",
       eta: "15 minutes",
       contactMessage: "Your meal is ready",
@@ -99,6 +113,7 @@ async function createClaimedRequest(
       rawToken,
       readClaimTokenHmacSecret()
     ),
+    helperParticipantId,
     ...overrides,
   });
   return { request, rawToken };
@@ -113,6 +128,15 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     await mongoose.connect(mongoUri!);
     await MealRequest.syncIndexes();
     await Fulfillment.syncIndexes();
+    await Participant.createIndexes();
+    await Participant.updateOne(
+      { _id: helperParticipantId },
+      {
+        $set: { email: boundHelperEmail, verifiedAt: new Date() },
+        $setOnInsert: { authorityVersion: 1 },
+      },
+      { upsert: true }
+    ).exec();
   });
 
   beforeEach(() => {
@@ -173,7 +197,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(stored?.expiresAt).toEqual(originalExpiresAt);
     expect(stored?.orderNumber).toBe("70154321");
     expect(stored?.etaText).toBe("15 minutes");
-    expect(stored?.fulfillerEmail).toBe("helper@example.edu");
+    expect(stored?.fulfillerEmail).toBe(boundHelperEmail);
     expect(stored?.contactMessage).toBe("Your meal is ready");
     expect(stored?.notificationStatus).toBe("sent");
     expect(stored?.notificationAttemptedAt).toBeInstanceOf(Date);
@@ -196,7 +220,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       "70154321",
       "15 minutes",
       "Your meal is ready",
-      "helper@example.edu"
+      boundHelperEmail
     );
 
     const active = await MealRequest.find(
@@ -214,6 +238,49 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     );
   });
 
+  // W3-I1 pre-I1 active-claim compatibility: a claim granted before
+  // `helperParticipantId` existed carries no binding at all, and the accepted
+  // fulfillment-safety contract requires it to remain recordable on the
+  // existing valid-token authorization alone rather than becoming refusable.
+  it("records placement for a claim with no helperParticipantId binding (pre-I1 compatibility)", async () => {
+    const { request, rawToken } = await createClaimedRequest({
+      helperParticipantId: undefined,
+    });
+    const preexisting = await MealRequest.findById(request._id)
+      .select("+helperParticipantId")
+      .lean();
+    expect(preexisting).not.toHaveProperty("helperParticipantId");
+
+    const context = routeContext(
+      String(request._id),
+      fulfillmentBody(rawToken)
+    );
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.statusCode).toBe(200);
+    expect(context.body.request.status).toBe("placed");
+    expect(context.body.notification).toEqual({ status: "sent" });
+
+    const stored = await MealRequest.findById(request._id).lean();
+    expect(stored?.status).toBe("placed");
+    expect(stored?.orderNumber).toBe("70154321");
+    // No verified helper to derive an address from, and the payload carries
+    // none either, so the field is left unset rather than fabricated.
+    expect(stored?.fulfillerEmail).toBeUndefined();
+
+    expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(
+      1
+    );
+    expect(sendFulfillmentEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: request._id }),
+      "70154321",
+      "15 minutes",
+      "Your meal is ready",
+      undefined
+    );
+  });
+
   // The order number is a digits-only *string*, and stays one through the
   // transaction, the ledger, the response, and the student's email. A leading
   // zero is the value that proves it: any numeric conversion anywhere along
@@ -224,7 +291,6 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     const context = routeContext(String(request._id), {
       claimToken: rawToken,
       fulfillment: {
-        fulfillerEmail: "Helper@Example.edu",
         orderNumber: "00070154321",
         eta: "ASAP",
       },
@@ -247,7 +313,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       "00070154321",
       "ASAP",
       undefined,
-      "helper@example.edu"
+      boundHelperEmail
     );
 
     // The response is still the same two-key shape; the order number is private
@@ -264,7 +330,6 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     const context = routeContext(String(request._id), {
       claimToken: rawToken,
       fulfillment: {
-        fulfillerEmail: "Helper@Example.edu",
         orderNumber: "7015-4321",
         eta: "ASAP",
       },
@@ -293,7 +358,6 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     const context = routeContext(String(request._id), {
       claimToken: rawToken,
       fulfillment: {
-        fulfillerEmail: "Helper@Example.edu",
         orderNumber: "70154321",
         eta: "15 minutes",
       },
@@ -321,7 +385,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       "70154321",
       "15 minutes",
       undefined,
-      "helper@example.edu"
+      boundHelperEmail
     );
   });
 
@@ -493,8 +557,10 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(orderNumber).toBe("70154321");
     expect(eta).toBe("15 minutes");
     expect(contactMessage).toBe("Your meal is ready");
-    // Normalised by the payload schema, and never the recipient.
-    expect(replyTo).toBe("helper@example.edu");
+    // The claim-bound verified helper, and never the recipient. No payload
+    // supplied it, so the Reply-To the requester sees is an address CommonPlate
+    // has actually proved control of.
+    expect(replyTo).toBe(boundHelperEmail);
     expect(notified.email).not.toBe(replyTo);
     expect(context.body.notification).toEqual({ status: "sent" });
   });

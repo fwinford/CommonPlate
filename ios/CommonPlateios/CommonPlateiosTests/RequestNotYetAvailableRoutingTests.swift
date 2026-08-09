@@ -264,7 +264,10 @@ final class RequestNotYetAvailableRoutingTests: XCTestCase {
     private func makeStore() -> RequestStore {
         RequestStore(
             service: makeService(),
-            installationCredentialProvider: { "test-installation-credential" }
+            installationCredentialProvider: { "test-installation-credential" },
+            // W3-I1: a verified participant, unless a case says otherwise.
+            participantAuthorityProvider: { "64c0000000000000000000a1.1.test-credential" },
+            participantAuthorityRejected: {}
         )
     }
 

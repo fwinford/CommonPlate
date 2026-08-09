@@ -1,0 +1,390 @@
+import Foundation
+import XCTest
+@testable import CommonPlateios
+
+/// W3-I1 gates: what the requester and helper paths do about an unverified
+/// installation, what they send when it is verified, and what survives the gate.
+@MainActor
+final class ParticipantGateTests: XCTestCase {
+    private let authorityHeader = "x-commonplate-participant"
+    private let credential = canonicalParticipantAuthorityFixture
+
+    override func tearDown() {
+        RequestFetchingURLProtocol.reset()
+        super.tearDown()
+    }
+
+    // MARK: - The credential travels with the participant actions
+
+    func testCreateCarriesTheParticipantCredentialAndNoAddress() async throws {
+        let store = makeRequestStore(authority: credential)
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 201, data: createdResponse()))
+
+        try await store.createRequest(payload())
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.lastCapturedHeaders?[authorityHeader],
+            credential
+        )
+        let body = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedBody)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        // The requester is the credential, not the payload.
+        XCTAssertNil(json["email"])
+        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("@"))
+    }
+
+    func testClaimCarriesTheParticipantCredential() async throws {
+        let store = makeRequestStore(authority: credential)
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: claimedResponse()))
+
+        try await store.claim(requestID: "64b000000000000000000001")
+
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.lastCapturedHeaders?[authorityHeader],
+            credential
+        )
+    }
+
+    /// An unverified installation sends no header at all rather than an empty
+    /// one: "has not verified" and "presented something unusable" are different
+    /// backend answers, and only the first is true.
+    func testAnUnverifiedInstallationSendsNoCredentialHeader() async throws {
+        let store = makeRequestStore(authority: nil)
+        RequestFetchingURLProtocol.enqueue(
+            .response(statusCode: 401, data: errorResponse(code: ParticipantErrorCode.verificationRequired))
+        )
+
+        do {
+            try await store.createRequest(payload())
+            XCTFail("an unverified create must be refused")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertNil(RequestFetchingURLProtocol.lastCapturedHeaders?[authorityHeader])
+    }
+
+    func testFulfillmentSendsNoHelperAddress() async throws {
+        let store = makeRequestStore(authority: credential)
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: claimedResponse()))
+        try await store.claim(requestID: "64b000000000000000000001")
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: placedResponse()))
+
+        try await store.fulfill(
+            requestID: "64b000000000000000000001",
+            orderNumber: "70154321",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+
+        let body = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedBody)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        let fulfillment = try XCTUnwrap(json["fulfillment"] as? [String: Any])
+        // The helper is whoever the claim is bound to. Sending an address would
+        // be refused, and it is exactly how the requester's coordination email
+        // could otherwise name someone else.
+        XCTAssertNil(fulfillment["fulfillerEmail"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
+    }
+
+    // MARK: - Applying the backend's verdict on a stored credential
+
+    func testARefusedCredentialDiscardsTheStoredIdentity() async throws {
+        var rejections = 0
+        let store = makeRequestStore(authority: credential) { rejections += 1 }
+        RequestFetchingURLProtocol.enqueue(
+            .response(statusCode: 401, data: errorResponse(code: ParticipantErrorCode.authorityInvalid))
+        )
+
+        do {
+            try await store.createRequest(payload())
+            XCTFail("a refused credential must not create a request")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertEqual(rejections, 1)
+        // A definitive refusal, so the process-lifetime create block stays off:
+        // nothing was written and re-verifying is the recovery.
+        XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
+    }
+
+    /// "You have not verified" is not "your identity was revoked". Treating the
+    /// first as the second would let an unrelated call wipe a valid identity.
+    func testVerificationRequiredDoesNotDiscardAnything() async throws {
+        var rejections = 0
+        let store = makeRequestStore(authority: credential) { rejections += 1 }
+        RequestFetchingURLProtocol.enqueue(
+            .response(statusCode: 401, data: errorResponse(code: ParticipantErrorCode.verificationRequired))
+        )
+
+        do {
+            try await store.createRequest(payload())
+            XCTFail("the refusal must propagate")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertEqual(rejections, 0)
+    }
+
+    func testAnUnavailableGateDiscardsNothing() async throws {
+        var rejections = 0
+        let store = makeRequestStore(authority: credential) { rejections += 1 }
+        RequestFetchingURLProtocol.enqueue(
+            .response(
+                statusCode: 503,
+                data: errorResponse(code: ParticipantErrorCode.verificationUnavailable)
+            )
+        )
+
+        do {
+            try await store.createRequest(payload())
+            XCTFail("the refusal must propagate")
+        } catch {
+            // Expected.
+        }
+
+        // The backend could not check. That is not a verdict about the
+        // credential, so nothing local may be thrown away over it.
+        XCTAssertEqual(rejections, 0)
+        XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
+    }
+
+    func testARefusedClaimCredentialDiscardsTheStoredIdentityAndReservesNothing() async throws {
+        var rejections = 0
+        let store = makeRequestStore(authority: credential) { rejections += 1 }
+        RequestFetchingURLProtocol.enqueue(
+            .response(statusCode: 401, data: errorResponse(code: ParticipantErrorCode.authorityInvalid))
+        )
+
+        try? await store.claim(requestID: "64b000000000000000000001")
+
+        XCTAssertEqual(rejections, 1)
+        XCTAssertNil(store.activeClaim)
+    }
+
+    // MARK: - The requester draft survives the gate
+
+    /// The draft is `@State` on a screen that stays mounted behind the
+    /// verification sheet, so this proves the property that makes that work:
+    /// nothing in the submission path mutates or consumes the draft, on any
+    /// outcome. A form that was complete before verification is complete after.
+    func testTheCompletedDraftIsUnchangedByEveryRefusedSubmission() async throws {
+        let outcomes: [(Int, String)] = [
+            (401, ParticipantErrorCode.verificationRequired),
+            (401, ParticipantErrorCode.authorityInvalid),
+            (503, ParticipantErrorCode.verificationUnavailable),
+            (403, ParticipantErrorCode.principalMismatch)
+        ]
+
+        for (status, code) in outcomes {
+            RequestFetchingURLProtocol.reset()
+            let store = makeRequestStore(authority: credential)
+            RequestFetchingURLProtocol.enqueue(
+                .response(statusCode: status, data: errorResponse(code: code))
+            )
+            let draft = completedDraft()
+            let original = draft
+
+            let result = try? await RequestFoodView.orchestrateSubmission(
+                draft: draft,
+                now: try date("2026-07-28T16:00:00.000Z"),
+                calendar: utcCalendar,
+                presentation: RequestFoodValidationPresentation()
+            ) { payload in
+                try await store.createRequest(payload)
+            }
+
+            XCTAssertNil(result, code)
+            XCTAssertEqual(draft, original, code)
+            XCTAssertEqual(draft.selectedDiningSpot?.name, "Palladium", code)
+            XCTAssertEqual(draft.foodRequest, "Chicken bowl", code)
+            XCTAssertEqual(draft.pickupName, "Taylor", code)
+            XCTAssertEqual(draft.timing, .later, code)
+            XCTAssertEqual(draft.preferredPickupTime, original.preferredPickupTime, code)
+            // Nothing was created, so resuming after verification is safe.
+            XCTAssertTrue(store.requests.isEmpty, code)
+            XCTAssertFalse(store.hasUnresolvedCreateAmbiguity, code)
+        }
+    }
+
+    /// The same completed draft, submitted again after verification, still
+    /// produces the same payload — the resumed submission asks for nothing.
+    func testTheSameDraftSubmitsUnchangedOnceVerified() async throws {
+        let store = makeRequestStore(authority: credential)
+        RequestFetchingURLProtocol.enqueue(
+            .response(statusCode: 401, data: errorResponse(code: ParticipantErrorCode.verificationRequired))
+        )
+        let draft = completedDraft()
+        let now = try date("2026-07-28T16:00:00.000Z")
+
+        _ = try? await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: now,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { payload in
+            try await store.createRequest(payload)
+        }
+
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 201, data: createdResponse()))
+        var submitted: CreateRequestPayload?
+        let result = try await RequestFoodView.orchestrateSubmission(
+            draft: draft,
+            now: now,
+            calendar: utcCalendar,
+            presentation: RequestFoodValidationPresentation()
+        ) { payload in
+            submitted = payload
+            try await store.createRequest(payload)
+        }
+
+        XCTAssertTrue(result.didSubmit)
+        XCTAssertEqual(submitted?.vendor, "Palladium")
+        XCTAssertEqual(submitted?.food, "Chicken bowl")
+        XCTAssertEqual(submitted?.pickupName, "Taylor")
+        XCTAssertEqual(submitted?.windowStart, draft.preferredPickupTime)
+    }
+
+    // MARK: - Copy
+
+    func testTheGateIsAnnouncedBeforeTheFirstSubmit() {
+        // Not a surprise: the requirement is stated on the form, before Submit.
+        let notice = RequestFoodView.verificationRequiredNotice.lowercased()
+        XCTAssertTrue(notice.contains("verify"))
+        XCTAssertTrue(notice.contains("draft"))
+
+        let helperNotice = RequestDetailView.verificationRequiredNotice.lowercased()
+        XCTAssertTrue(helperNotice.contains("verify"))
+        // And it says nothing is reserved yet, which is the helper's actual
+        // question at that moment.
+        XCTAssertTrue(helperNotice.contains("nothing is reserved"))
+    }
+
+    func testHomeStatesTheRequirementWithoutAskingForAnAddress() {
+        let notice = ContentView.verificationRequirementNotice.lowercased()
+        XCTAssertTrue(notice.contains("verify"))
+        XCTAssertFalse(notice.contains("enter"))
+        XCTAssertFalse(notice.contains("@"))
+    }
+
+    // MARK: - Fixtures
+
+    private func completedDraft() -> RequestFoodFormDraft {
+        RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            timing: .later,
+            preferredPickupTime: try! date("2026-07-28T17:00:00.000Z")
+        )
+    }
+
+    private func payload() -> CreateRequestPayload {
+        CreateRequestPayload(
+            vendor: "Palladium",
+            food: "Chicken bowl",
+            pickupName: "Taylor",
+            timing: .asap,
+            windowStart: nil
+        )
+    }
+
+    private func makeRequestStore(
+        authority: String?,
+        onRejection: @escaping () -> Void = {}
+    ) -> RequestStore {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestFetchingURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let client = APIClient(
+            configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
+            session: session
+        )
+        return RequestStore(
+            service: RequestService(client: client),
+            installationCredentialProvider: { "test-installation-credential" },
+            participantAuthorityProvider: { authority },
+            participantAuthorityRejected: onRejection
+        )
+    }
+
+    private func createdResponse() -> Data {
+        Data(#"""
+        {"request":{
+          "id": "64b000000000000000000001",
+          "vendor": "Palladium",
+          "food": "Chicken bowl",
+          "pickupWindowText": "ASAP",
+          "windowStart": null,
+          "windowEnd": null,
+          "status": "open",
+          "createdAt": "2026-07-28T16:00:00.000Z",
+          "expiresAt": "2026-07-28T19:00:00.000Z"
+        }}
+        """#.utf8)
+    }
+
+    private func claimedResponse() -> Data {
+        Data(#"""
+        {
+          "request": {
+            "id": "64b000000000000000000001",
+            "vendor": "Palladium",
+            "food": "Chicken bowl",
+            "pickupWindowText": "ASAP",
+            "windowStart": null,
+            "windowEnd": null,
+            "status": "claimed",
+            "createdAt": "2026-07-28T16:00:00.000Z",
+            "expiresAt": "2036-07-28T19:00:00.000Z"
+          },
+          "claim": {
+            "pickupName": "Taylor",
+            "claimToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "claimExpiresAt": "2036-07-28T16:15:00.000Z"
+          }
+        }
+        """#.utf8)
+    }
+
+    private func placedResponse() -> Data {
+        Data(#"""
+        {
+          "request": {
+            "id": "64b000000000000000000001",
+            "vendor": "Palladium",
+            "food": "Chicken bowl",
+            "pickupWindowText": "ASAP",
+            "windowStart": null,
+            "windowEnd": null,
+            "status": "placed",
+            "createdAt": "2026-07-28T16:00:00.000Z",
+            "expiresAt": "2036-07-28T19:00:00.000Z"
+          },
+          "notification": { "status": "sent" }
+        }
+        """#.utf8)
+    }
+
+    private func errorResponse(code: String) -> Data {
+        Data(#"{"error":{"code":"\#(code)","message":"detail","fields":null}}"#.utf8)
+    }
+
+    private var utcCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
+    private func date(_ value: String) throws -> Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return try XCTUnwrap(formatter.date(from: value))
+    }
+}

@@ -512,7 +512,14 @@ final class HelperNotificationTerminatedLaunchRoutingTests: XCTestCase {
     }
 
     private func makeStore() -> RequestStore {
-        RequestStore(service: makeService(), installationCredentialProvider: { "test-installation-credential" })
+        RequestStore(
+            service: makeService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            // W3-I1: a verified participant, so the gate is not what these
+            // cases are proving.
+            participantAuthorityProvider: { "64c0000000000000000000a1.1.credential" },
+            participantAuthorityRejected: {}
+        )
     }
 
     private func makeService() -> RequestService {

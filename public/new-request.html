@@ -20,13 +20,16 @@
     <section class="form-section">
       <h2>Request a Meal</h2>
 
-      <!-- Shown before any data entry while public actions are paused.
-           Copy and visibility are owned by src/client/new-request.ts. -->
+      <!-- Shown before any data entry whenever posting is not actionable
+           (currently always: the backend requires verified participant
+           identity, which the website cannot yet supply — Week 6). Copy and
+           visibility are owned by src/client/new-request.ts. -->
       <div id="pause-notice" class="pause-message" role="status" hidden></div>
 
       <p>We're here to help. Be sure to look at the meal exchange menu on Grubhub.</p>
 
       <form id="request-form" class="meal-form">
+        <fieldset id="request-fields">
         <div class="form-group">
           <label for="vendor">Where do you want food from?</label>
           <input type="text" id="vendor" name="vendor" required placeholder="e.g., Crave NYU, Upstein', Dunkin'">
@@ -65,7 +68,7 @@
         <div id="time-range-fields" class="form-group" style="display: none;">
           <label for="windowStart">From</label>
           <input type="datetime-local" id="windowStart" name="windowStart">
-          
+
           <label for="windowEnd">To</label>
           <input type="datetime-local" id="windowEnd" name="windowEnd">
         </div>
@@ -75,6 +78,7 @@
         <div id="success-message" class="success-message" style="display: none;"></div>
 
         <button type="submit" class="btn btn-primary" id="submit-btn">Submit Request</button>
+        </fieldset>
       </form>
     </section>
   </main>

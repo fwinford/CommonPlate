@@ -71,7 +71,6 @@ private struct ClaimExtensionAttempt: Equatable {
 /// recovery can repeat the same CommonPlate write without asking a recreated
 /// view to reconstruct or retain claimant-entered details.
 private struct FulfillmentSubmissionSnapshot: Equatable {
-    let fulfillerEmail: String
     let orderNumber: String
     let eta: String
     let contactMessage: String?
@@ -339,6 +338,18 @@ final class RequestStore: ObservableObject {
     /// preference, no APNs registration state, matching the accepted
     /// boundary that push state stays separate from this store.
     private let installationCredentialProvider: () -> String
+    /// The verified participant credential this installation holds, or `nil`
+    /// (W3-I1). Read from `ParticipantIdentityStore`, which owns the whole
+    /// verification lifecycle; this store knows nothing else about identity —
+    /// no address, no flow state, no storage — so the request flow cannot
+    /// fabricate verification it was never granted. No default, matching
+    /// `installationCredentialProvider`: an omitted provider must be a compile
+    /// error rather than a silently unverified app.
+    private let participantAuthorityProvider: () -> String?
+    /// Invoked when the backend refuses the credential this store presented.
+    /// The identity store owns discarding it; publishing the refusal back
+    /// through a closure keeps this store from reaching into that lifecycle.
+    private let participantAuthorityRejected: () -> Void
     private var fetchGeneration = 0
     private var collectionRevision = 0
     private var activeClaimAuthorization: ActiveClaimAuthorization?
@@ -367,9 +378,31 @@ final class RequestStore: ObservableObject {
     /// backend re-checks this and remains authoritative.
     static let claimExtensionDuration: TimeInterval = 5 * 60
 
-    init(service: RequestService, installationCredentialProvider: @escaping () -> String) {
+    init(
+        service: RequestService,
+        installationCredentialProvider: @escaping () -> String,
+        participantAuthorityProvider: @escaping () -> String?,
+        participantAuthorityRejected: @escaping () -> Void
+    ) {
         self.service = service
         self.installationCredentialProvider = installationCredentialProvider
+        self.participantAuthorityProvider = participantAuthorityProvider
+        self.participantAuthorityRejected = participantAuthorityRejected
+    }
+
+    /// Applies a backend verdict on the credential just presented.
+    ///
+    /// Only `PARTICIPANT_AUTHORITY_INVALID` discards a stored identity: it is
+    /// the backend saying the credential names nothing it will accept.
+    /// `PARTICIPANT_VERIFICATION_REQUIRED` deliberately does not — that answer
+    /// is what an unverified caller gets, and treating it as revocation would
+    /// let an unrelated request wipe an identity that is perfectly valid.
+    private func applyParticipantVerdict(_ error: RequestServiceError) {
+        guard case .serverError(let code, _) = error,
+              code == ParticipantErrorCode.authorityInvalid else {
+            return
+        }
+        participantAuthorityRejected()
     }
 
     var isFetching: Bool {
@@ -518,7 +551,13 @@ final class RequestStore: ObservableObject {
         var submittedPayload = payload
         submittedPayload.installationCredential = installationCredentialProvider()
         do {
-            let created = try await service.createRequest(submittedPayload)
+            let created = try await service.createRequest(
+                submittedPayload,
+                // Read here, immediately before sending, rather than captured
+                // at init: an identity replaced by Change Email mid-session
+                // must bind the request to the principal that is current now.
+                participantAuthority: participantAuthorityProvider()
+            )
             advanceCollectionRevision()
             applyConfirmed(created)
         } catch is CancellationError {
@@ -526,6 +565,7 @@ final class RequestStore: ObservableObject {
         } catch {
             let serviceError = Self.asServiceError(error)
             createError = serviceError
+            applyParticipantVerdict(serviceError)
             if case .ambiguousCreateOutcome = serviceError {
                 unresolvedCreateError = serviceError
             }
@@ -600,7 +640,10 @@ final class RequestStore: ObservableObject {
             }
         }
         do {
-            let outcome = try await service.claimRequest(id: requestID)
+            let outcome = try await service.claimRequest(
+                id: requestID,
+                participantAuthority: participantAuthorityProvider()
+            )
             guard activeClaimAttempt == attempt else {
                 return
             }
@@ -630,6 +673,7 @@ final class RequestStore: ObservableObject {
                 return
             }
             let serviceError = Self.asServiceError(error)
+            applyParticipantVerdict(serviceError)
             let backendCode = Self.backendCode(for: serviceError)
             claimErrorEvent = ClaimErrorEvent(
                 id: UUID(),
@@ -1250,7 +1294,6 @@ final class RequestStore: ObservableObject {
     /// Returns normally only after confirmed request/notification state is applied.
     func fulfill(
         requestID: String,
-        fulfillerEmail: String,
         orderNumber: String,
         eta: String,
         contactMessage: String?,
@@ -1291,7 +1334,6 @@ final class RequestStore: ObservableObject {
         }
 
         let submission = FulfillmentSubmissionSnapshot(
-            fulfillerEmail: fulfillerEmail,
             orderNumber: orderNumber,
             eta: eta,
             contactMessage: contactMessage
@@ -1390,7 +1432,6 @@ final class RequestStore: ObservableObject {
             let outcome = try await service.fulfillRequest(
                 id: attempt.requestID,
                 claimToken: claimToken,
-                fulfillerEmail: attempt.submission.fulfillerEmail,
                 orderNumber: attempt.submission.orderNumber,
                 eta: attempt.submission.eta,
                 contactMessage: attempt.submission.contactMessage

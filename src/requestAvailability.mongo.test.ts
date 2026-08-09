@@ -9,8 +9,13 @@ import {
   it,
   vi,
 } from "vitest";
-import { Request as MealRequest } from "../models/db.js";
+import { Participant, Request as MealRequest } from "../models/db.js";
 import { claimRequest } from "./claimRoute.js";
+import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
+import {
+  PARTICIPANT_SIGNING_SECRET_ENV,
+  signParticipantAuthority,
+} from "./participantCredentials.js";
 import {
   CLAIM_MINIMUM_REMAINING_MS,
   buildEffectiveAvailabilityFilter,
@@ -19,6 +24,18 @@ import {
   buildPublicRequestListResponse,
   type RequestListDocument,
 } from "./requestListResponse.js";
+
+const participantSecretText = "availability-mongo-participant-secret-32b";
+const participantSecret = Buffer.from(participantSecretText);
+const helperParticipantId = new mongoose.Types.ObjectId(
+  "64d0000000000000000000c2"
+);
+const helperPrincipal = "availability-mongo-helper@nyu.edu";
+const participantAuthority = signParticipantAuthority(
+  helperParticipantId,
+  1,
+  participantSecret
+);
 
 /**
  * Integration files run in parallel against the same mongod, and this suite
@@ -131,8 +148,18 @@ describeMongo("advertised availability against a real database", () => {
       "CLAIM_TOKEN_HMAC_SECRET",
       "real-mongo-test-secret-material-32-bytes"
     );
+    vi.stubEnv(PARTICIPANT_SIGNING_SECRET_ENV, participantSecretText);
     await mongoose.connect(mongoUri!);
     await MealRequest.syncIndexes();
+    await Participant.createIndexes();
+    await Participant.updateOne(
+      { _id: helperParticipantId },
+      {
+        $set: { email: helperPrincipal, verifiedAt: new Date() },
+        $setOnInsert: { authorityVersion: 1 },
+      },
+      { upsert: true }
+    ).exec();
   });
 
   afterEach(async () => {
@@ -250,8 +277,11 @@ describeMongo("advertised availability against a real database", () => {
     // The claim route captures its own instant, which can only be later than
     // `now` — so a request already inside the final five minutes is refused
     // regardless of how long this test takes.
+    // A real verified helper, so the availability refusal below is the reason
+    // the claim fails rather than the participant gate in front of it (W3-I1).
     const req = {
       params: { id: String(shortLived!._id) },
+      headers: { [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority },
     } as unknown as Request;
     const res = {} as Response;
     let statusCode = 200;
@@ -329,6 +359,7 @@ describeMongo("advertised availability against a real database", () => {
     const notStarted = await MealRequest.findOne({ food: "not-started" }).lean();
     const req = {
       params: { id: String(notStarted!._id) },
+      headers: { [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority },
     } as unknown as Request;
     const res = {} as Response;
     let statusCode = 200;

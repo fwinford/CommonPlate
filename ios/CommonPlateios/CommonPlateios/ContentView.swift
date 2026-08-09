@@ -24,6 +24,18 @@ struct ContentView: View {
     /// email alerts and push notifications are separate controls with no
     /// shared state or error semantics.
     @StateObject private var pushSubscriptionStore: PushSubscriptionStore
+    /// Participant identity keeps its own state owner (W3-I1). It is not
+    /// subscription state and not installation state: it is the one thing in
+    /// the app that represents a person, every participant action reads it, and
+    /// holding it here is what lets a verified identity survive leaving and
+    /// reopening any screen.
+    @StateObject private var participantIdentityStore: ParticipantIdentityStore
+    /// The one operation-scoped verification continuation owner (W3-I1).
+    /// Request and helper views report their lifecycle signals to this same
+    /// production object, so a competing screen cannot manufacture or consume
+    /// a continuation by observing global identity publication.
+    @StateObject private var participantActionVerificationCoordinator:
+        ParticipantActionVerificationCoordinator
     /// Shared with `PushAppDelegate`, which wires it as
     /// `UNUserNotificationCenter`'s delegate before this view exists — see
     /// `CommonPlateiosApp.swift`. Observed here, not owned, so a tap captured
@@ -63,10 +75,30 @@ struct ContentView: View {
         // lifecycle). One instance so both read the same credential a fresh
         // one per store could not guarantee.
         let installationStorage = UserDefaultsPushInstallationStorage(defaults: .standard)
+        // Built before `RequestStore`, which reads its credential on every
+        // participant action. `identityStore` is captured by the two closures
+        // below rather than by the store itself, so `RequestStore` still knows
+        // nothing about verification beyond "here is a credential, and here is
+        // what to do when the backend refuses it".
+        let identityStore = ParticipantIdentityStore(
+            service: ParticipantVerificationService(client: client),
+            // The app's real preferences. Tests inject an isolated suite or an
+            // in-memory double instead, which is why this argument has no
+            // default.
+            storage: UserDefaultsParticipantIdentityStorage(defaults: .standard)
+        )
+        _participantIdentityStore = StateObject(wrappedValue: identityStore)
+        _participantActionVerificationCoordinator = StateObject(
+            wrappedValue: ParticipantActionVerificationCoordinator(
+                identityStore: identityStore
+            )
+        )
         _requestStore = StateObject(
             wrappedValue: RequestStore(
                 service: service,
-                installationCredentialProvider: installationStorage.installationCredential
+                installationCredentialProvider: installationStorage.installationCredential,
+                participantAuthorityProvider: { identityStore.currentAuthority() },
+                participantAuthorityRejected: { identityStore.discardRejectedIdentity() }
             )
         )
         _alertSubscriptionStore = StateObject(
@@ -134,6 +166,8 @@ struct ContentView: View {
                 Divider()
                     .padding(.top, 12)
 
+                participantIdentitySection
+
                 NavigationLink("Privacy & Safety", value: AppRoute.privacySafety)
                     .frame(maxWidth: 280)
                     .buttonStyle(.plain)
@@ -197,6 +231,9 @@ struct ContentView: View {
         .task(id: notificationRouter.requesterFulfillmentRoutingGeneration) {
             presentNextRequesterFulfillmentNoticeIfPossible()
         }
+        .sheet(isPresented: isPresentingIdentityFlow) {
+            ParticipantVerificationView(store: participantIdentityStore)
+        }
         .alert("Your order was placed.", isPresented: $isShowingOrderPlacedNotice) {
             Button("OK", role: .cancel) {}
         }
@@ -217,6 +254,66 @@ struct ContentView: View {
             guard !isVisible else { return }
             presentNextRequesterFulfillmentNoticeIfPossible()
         }
+    }
+
+    /// The remembered verified identity, and the way to replace it (W3-I1).
+    ///
+    /// Shown masked: enough for the student to confirm which of their addresses
+    /// this device is acting as, without printing a full address onto a screen
+    /// someone may be reading over their shoulder. When there is no identity
+    /// this states the requirement instead, so the first gate on a request or a
+    /// reservation is not the first time anyone hears about it.
+    @ViewBuilder
+    private var participantIdentitySection: some View {
+        if let identity = participantIdentityStore.identity {
+            VStack(spacing: 4) {
+                Text("Verified as \(identity.masked)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("home-verified-identity")
+
+                Button(Self.changeEmailTitle) {
+                    participantIdentityStore.beginEmailReplacement()
+                }
+                .buttonStyle(.plain)
+                .font(.footnote)
+                .accessibilityIdentifier("home-change-email")
+            }
+            .padding(.top, 4)
+        } else {
+            Text(Self.verificationRequirementNotice)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 4)
+                .accessibilityIdentifier("home-verification-requirement")
+        }
+    }
+
+    static let changeEmailTitle = "Change email"
+
+    /// The standing statement of the requirement. Deliberately not a call to
+    /// verify: there is nothing to verify *for* yet, and asking someone to
+    /// prove an address before they have decided to use the app would be the
+    /// account signup this product does not have.
+    static let verificationRequirementNotice =
+        "You’ll verify an NYU email once before posting or helping with a request."
+
+    /// Open while a flow is running and Home is the surface presenting it. The
+    /// request and reservation screens present their own gates, so this is
+    /// scoped to the replacement flow Home actually started — otherwise a gate
+    /// opened deeper in the stack would also raise a sheet here.
+    private var isPresentingIdentityFlow: Binding<Bool> {
+        Binding(
+            get: {
+                participantIdentityStore.flow?.purpose == .emailReplacement
+                    && path.isEmpty
+            },
+            set: { isPresented in
+                if !isPresented { participantIdentityStore.cancelVerification() }
+            }
+        )
     }
 
     /// Applies whatever helper new-request tap is currently pending, if any.
@@ -266,7 +363,12 @@ struct ContentView: View {
     private func destination(for route: AppRoute) -> some View {
         switch route {
         case .requestFood:
-            RequestFoodView(store: requestStore)
+            RequestFoodView(
+                store: requestStore,
+                identityStore: participantIdentityStore,
+                verificationCoordinator: participantActionVerificationCoordinator,
+                path: $path
+            )
         case .activeRequests:
             ActiveRequestsView(store: requestStore)
         case .alerts:
@@ -274,7 +376,13 @@ struct ContentView: View {
         case .privacySafety:
             PrivacySafetyView()
         case .requestDetail(let request):
-            RequestDetailView(request: request, store: requestStore, path: $path)
+            RequestDetailView(
+                request: request,
+                store: requestStore,
+                identityStore: participantIdentityStore,
+                verificationCoordinator: participantActionVerificationCoordinator,
+                path: $path
+            )
         case .fulfillment(let request):
             FulfillRequestView(request: request, store: requestStore, path: $path)
         }

@@ -27,14 +27,56 @@ vi.mock("./notifySubscribers.js", () => ({
   notifySubscribersForRequest,
 }));
 
-import { Installation, Request as MealRequest } from "../models/db.js";
+import {
+  Installation,
+  Request as MealRequest,
+  Participant,
+} from "../models/db.js";
 import {
   ASAP_WINDOW_TEXT,
   createRequest,
   createRequestRateLimiter,
 } from "./createRequestRoute.js";
+import {
+  PARTICIPANT_AUTHORITY_HEADER,
+  PARTICIPANT_AUTHORITY_INVALID_CODE,
+  PARTICIPANT_VERIFICATION_REQUIRED_CODE,
+} from "./participantAuthorityGate.js";
+import {
+  PARTICIPANT_SIGNING_SECRET_ENV,
+  signParticipantAuthority,
+} from "./participantCredentials.js";
 import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
 import { SUPPORTED_VENDORS } from "./supportedVendors.js";
+
+/**
+ * The verified requester every case in this file acts as (W3-I1).
+ *
+ * Deliberately a real signed credential in the real header, resolved by the
+ * real gate against a stubbed Participant row — nothing between the request and
+ * the principal is mocked. That is what lets the assertions below prove the
+ * persisted requester comes from the gate rather than from the payload: the
+ * fixtures still send `email`, and it still has to be ignored.
+ */
+const participantId = new mongoose.Types.ObjectId("64c0000000000000000000a1");
+const participantPrincipal = "requester@nyu.edu";
+const participantSecretText = "participant-create-route-unit-test-secret";
+const participantSecret = Buffer.from(participantSecretText);
+const participantAuthority = signParticipantAuthority(
+  participantId,
+  1,
+  participantSecret
+);
+
+function stubVerifiedParticipant(email: string = participantPrincipal) {
+  return vi.spyOn(Participant, "findOne").mockReturnValue({
+    select: () => ({
+      lean: () => ({
+        exec: vi.fn().mockResolvedValue({ _id: participantId, email }),
+      }),
+    }),
+  } as unknown as ReturnType<typeof Participant.findOne>);
+}
 
 const requestId = new mongoose.Types.ObjectId("64b000000000000000000001");
 /** Frozen backend creation time; the route's `new Date()` resolves to this. */
@@ -69,8 +111,13 @@ function canonicalScheduled(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function routeContext(body: unknown) {
-  const req = { body } as Request;
+function routeContext(
+  body: unknown,
+  headers: Record<string, string | string[]> = {
+    [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority,
+  }
+) {
+  const req = { body, headers } as unknown as Request;
   const res = {} as Response;
   const status = vi.fn().mockReturnValue(res);
   const json = vi.fn().mockReturnValue(res);
@@ -108,6 +155,9 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(createdAt);
 
+  process.env[PARTICIPANT_SIGNING_SECRET_ENV] = participantSecretText;
+  stubVerifiedParticipant();
+
   resendSend.mockReset();
   resendSend.mockResolvedValue({ data: { id: "email-id" }, error: null });
   notifySubscribersForRequest.mockReset();
@@ -127,6 +177,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env[PARTICIPANT_SIGNING_SECRET_ENV];
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -141,7 +192,9 @@ describe("POST /api/request validation and persistence", () => {
       vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
-      email: "requester@nyu.edu",
+      // Both written from the verified participant, never from the payload.
+      email: participantPrincipal,
+      requesterParticipantId: participantId.toString(),
       pickupWindowText: ASAP_WINDOW_TEXT,
       windowStart: undefined,
       windowEnd: undefined,
@@ -223,7 +276,7 @@ describe("POST /api/request validation and persistence", () => {
     expect(createDocument).not.toHaveBeenCalled();
   });
 
-  it.each(["vendor", "food", "pickupName", "email"])(
+  it.each(["vendor", "food", "pickupName"])(
     "rejects a missing or blank required %s",
     async (field) => {
       const context = routeContext(
@@ -245,33 +298,38 @@ describe("POST /api/request validation and persistence", () => {
     }
   );
 
-  it("rejects an invalid email", async () => {
-    const context = routeContext(canonicalAsap({ email: "not-an-email" }));
+  it("keeps the generic payload message for a blank email", async () => {
+    // A present-but-empty field is still a malformed payload, so it stays with
+    // `vendor`, `food`, and `pickupName` rather than being answered about
+    // identity. An *absent* one is no longer a failure at all — see below.
+    const context = routeContext(canonicalAsap({ email: "   " }));
 
     await createRequest(context.req, context.res);
 
     expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: "INVALID_REQUEST",
+        message: "Invalid request payload",
+      },
+    });
     expect(createDocument).not.toHaveBeenCalled();
   });
 
-  it("keeps the generic payload message for a missing or blank email", async () => {
-    // A field that is absent or empty is a malformed payload, not an address
-    // problem, so it stays with `vendor`, `food`, and `pickupName` rather than
-    // being answered with advice about NYU domains.
-    for (const email of [undefined, "   "]) {
-      const context = routeContext(canonicalAsap({ email }));
+  it("accepts a payload with no email at all", async () => {
+    // Since W3-I1 the requester is the verified participant, so there is
+    // nothing for this field to supply. Left optional rather than forbidden
+    // because the legacy web shape has always required it.
+    const body = canonicalAsap();
+    delete (body as Record<string, unknown>).email;
+    const context = routeContext(body);
 
-      await createRequest(context.req, context.res);
+    await createRequest(context.req, context.res);
 
-      expect(context.json).toHaveBeenCalledWith({
-        error: {
-          code: "INVALID_REQUEST",
-          message: "Invalid request payload",
-        },
-      });
-    }
-
-    expect(createDocument).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ email: participantPrincipal })
+    );
   });
 
   it.each(["soon", "", 7, null])(
@@ -377,14 +435,186 @@ describe("POST /api/request validation and persistence", () => {
   });
 });
 
-describe("POST /api/request NYU requester-email allowlist", () => {
+describe("POST /api/request requester gate (W3-I1)", () => {
+  function expectNoSideEffect() {
+    // The gate runs ahead of shape validation, the daily-limit read, the
+    // write, the requester confirmation email, and helper notification, so an
+    // unverified attempt leaves nothing behind at all.
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  }
+
+  it("refuses a caller with no participant credential", async () => {
+    const context = routeContext(canonicalAsap(), {});
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          code: PARTICIPANT_VERIFICATION_REQUIRED_CODE,
+        }),
+      })
+    );
+    expectNoSideEffect();
+  });
+
+  it("refuses an allowed NYU address that has not verified", async () => {
+    // The whole point of the slice: eligibility is not ownership. A perfectly
+    // valid `@nyu.edu` address with no proof behind it creates nothing.
+    const context = routeContext(
+      canonicalAsap({ email: "unverified@nyu.edu" }),
+      {}
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expectNoSideEffect();
+  });
+
+  it.each([
+    ["a malformed credential", "not-a-credential"],
+    ["a credential with no signature", `${participantId.toString()}.1`],
+    [
+      "a credential signed with another secret",
+      signParticipantAuthority(
+        participantId,
+        1,
+        Buffer.from("some-other-deployment-signing-secret-value")
+      ),
+    ],
+    [
+      "a credential naming a different participant",
+      signParticipantAuthority(
+        new mongoose.Types.ObjectId("64c0000000000000000000ff"),
+        1,
+        participantSecret
+      ),
+    ],
+    [
+      "a credential signed at a revoked version",
+      signParticipantAuthority(participantId, 2, participantSecret),
+    ],
+  ])("refuses %s and creates nothing", async (_label, credential) => {
+    // The stub answers only for `_id` + version 1, so the last two cases fail
+    // the database check rather than the signature check — which is the point:
+    // a well-formed signature is not authority on its own.
+    const context = routeContext(canonicalAsap(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: credential,
+    });
+    vi.spyOn(Participant, "findOne").mockReturnValue({
+      select: () => ({ lean: () => ({ exec: vi.fn().mockResolvedValue(null) }) }),
+    } as unknown as ReturnType<typeof Participant.findOne>);
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          code: PARTICIPANT_AUTHORITY_INVALID_CODE,
+        }),
+      })
+    );
+    expectNoSideEffect();
+  });
+
+  it("applies to the legacy web shape, which is the browser's only create path", async () => {
+    // The cross-client boundary: the gate is on the route, not on a client, so
+    // the website's own payload shape — complete, well-formed, and carrying an
+    // allowlisted address — creates nothing without a verified participant.
+    const context = routeContext(
+      {
+        vendor: "Palladium",
+        food: "Vegetable rice bowl",
+        pickupName: "Requester Private Name",
+        email: participantPrincipal,
+        pickupWindowText: "Legacy display",
+      },
+      {}
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          code: PARTICIPANT_VERIFICATION_REQUIRED_CODE,
+          // A readable sentence, because the website renders `error.message`
+          // from this envelope and has no verification screen of its own.
+          message: expect.stringContaining("Verify your NYU email"),
+        }),
+      })
+    );
+    expectNoSideEffect();
+  });
+
+  it("refuses two credentials in one header rather than choosing one", async () => {
+    const context = routeContext(canonicalAsap(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: [participantAuthority, participantAuthority],
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expectNoSideEffect();
+  });
+
+  it("answers 503 and creates nothing when the gate itself cannot decide", async () => {
+    // A definitive no-write outcome, deliberately not a 401: refusing a caller
+    // who may well be verified must not read as "you are not verified", and on
+    // a non-idempotent POST it must not be an unreadable response either.
+    delete process.env[PARTICIPANT_SIGNING_SECRET_ENV];
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(503);
+    expectNoSideEffect();
+  });
+
+  it("never echoes the presented credential into an error body or the log", async () => {
+    const context = routeContext(canonicalAsap(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority,
+    });
+    vi.spyOn(Participant, "findOne").mockReturnValue({
+      select: () => ({
+        lean: () => ({
+          exec: vi.fn().mockRejectedValue(new Error("database unavailable")),
+        }),
+      }),
+    } as unknown as ReturnType<typeof Participant.findOne>);
+
+    await createRequest(context.req, context.res);
+
+    expect(JSON.stringify(context.json.mock.calls)).not.toContain(
+      participantAuthority
+    );
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      participantAuthority
+    );
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      participantSecretText
+    );
+  });
+});
+
+describe("POST /api/request requester identity comes from participant authority (W3-I1)", () => {
   /**
-   * The helper matrix itself is proved once in `allowedEmailDomains.test.ts`.
-   * These cases prove the route reaches that decision, on both create shapes,
-   * with the accepted envelope, and strictly before any side effect.
+   * The NYU allowlist matrix itself is proved once in
+   * `allowedEmailDomains.test.ts`, and the point at which it now gates a person
+   * — participant verification — is proved in
+   * `participantVerificationRoute.test.ts`. What is left to prove here is the
+   * thing this route is responsible for: the requester it persists is the
+   * verified principal, and a payload cannot name anyone else.
    */
-  const NYU_MESSAGE =
-    "Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu.";
+  const MISMATCH_MESSAGE =
+    "This action can only use the NYU email you verified.";
 
   function legacyWeb(email: string) {
     return {
@@ -397,26 +627,62 @@ describe("POST /api/request NYU requester-email allowlist", () => {
   }
 
   it.each([
-    ["  REQUESTER@NYU.EDU  ", "requester@nyu.edu"],
-    ["student@stern.nyu.edu", "student@stern.nyu.edu"],
-    ["\tStudent@Stern.NYU.EDU\n", "student@stern.nyu.edu"],
-    ["requester+food@nyu.edu", "requester+food@nyu.edu"],
-  ])("accepts and normalizes %s", async (email, stored) => {
-    const context = routeContext(canonicalAsap({ email }));
+    ["student@stern.nyu.edu"],
+    ["requester+food@nyu.edu"],
+  ])("persists %s because that is the verified principal", async (principal) => {
+    stubVerifiedParticipant(principal);
+    // The payload still carries the old fixture address. It is ignored — this
+    // is a mismatch only if a client *claims* an address, and here it claims
+    // the same one it verified.
+    const context = routeContext(canonicalAsap({ email: principal }));
 
     await createRequest(context.req, context.res);
 
     expect(context.status).toHaveBeenCalledWith(201);
     expect(createDocument).toHaveBeenCalledWith(
-      expect.objectContaining({ email: stored })
+      expect.objectContaining({
+        email: principal,
+        requesterParticipantId: participantId.toString(),
+      })
     );
-    // The normalized address is also what the daily abuse-control count and
-    // the requester confirmation email use.
+    // The principal is also what the daily abuse-control count and the
+    // requester confirmation email use.
     expect(countDocuments).toHaveBeenCalledWith(
-      expect.objectContaining({ email: stored })
+      expect.objectContaining({ email: principal })
     );
     expect(resendSend).toHaveBeenCalledWith(
-      expect.objectContaining({ to: stored })
+      expect.objectContaining({ to: principal })
+    );
+  });
+
+  it("persists the principal, not the payload, when a client omits the address entirely", async () => {
+    const body = canonicalAsap();
+    delete (body as Record<string, unknown>).email;
+    const context = routeContext(body);
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: participantPrincipal,
+        requesterParticipantId: participantId.toString(),
+      })
+    );
+  });
+
+  it("accepts a payload address that differs only by case and whitespace", async () => {
+    // Normalization is what decides sameness, so the exact-principal rule does
+    // not turn a capitalized retype into someone else's identity.
+    const context = routeContext(
+      canonicalAsap({ email: "  REQUESTER@NYU.EDU  " })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ email: participantPrincipal })
     );
   });
 
@@ -435,14 +701,21 @@ describe("POST /api/request NYU requester-email allowlist", () => {
     "requester@nyu.edu.example.com",
     "requester@notnyu.edu",
     "requester@nyu.education",
-  ])("refuses %s with the NYU envelope and no side effect", async (email) => {
+    // Allowlisted, and still refused: eligibility was never the question here.
+    // Acting as another verified address is acting as another person.
+    "someone-else@nyu.edu",
+    "someone-else@stern.nyu.edu",
+  ])("refuses the payload address %s with no side effect", async (email) => {
     const context = routeContext(canonicalAsap({ email }));
 
     await createRequest(context.req, context.res);
 
-    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.status).toHaveBeenCalledWith(403);
     expect(context.json).toHaveBeenCalledWith({
-      error: { code: "INVALID_EMAIL", message: NYU_MESSAGE },
+      error: {
+        code: "PARTICIPANT_PRINCIPAL_MISMATCH",
+        message: MISMATCH_MESSAGE,
+      },
     });
     // The refusal precedes every side effect: no daily-limit read, no
     // document, no requester email, no helper alert.
@@ -462,44 +735,63 @@ describe("POST /api/request NYU requester-email allowlist", () => {
     await createRequest(legacy.req, legacy.res);
 
     for (const context of [scheduled, legacy]) {
-      expect(context.status).toHaveBeenCalledWith(400);
+      expect(context.status).toHaveBeenCalledWith(403);
       expect(context.json).toHaveBeenCalledWith({
-        error: { code: "INVALID_EMAIL", message: NYU_MESSAGE },
+        error: {
+          code: "PARTICIPANT_PRINCIPAL_MISMATCH",
+          message: MISMATCH_MESSAGE,
+        },
       });
     }
     expect(createDocument).not.toHaveBeenCalled();
     expect(resendSend).not.toHaveBeenCalled();
     expect(notifySubscribersForRequest).not.toHaveBeenCalled();
 
-    const allowedLegacy = routeContext(legacyWeb("requester@stern.nyu.edu"));
-    await createRequest(allowedLegacy.req, allowedLegacy.res);
+    const matchingLegacy = routeContext(legacyWeb(participantPrincipal));
+    await createRequest(matchingLegacy.req, matchingLegacy.res);
 
-    expect(allowedLegacy.status).toHaveBeenCalledWith(201);
+    expect(matchingLegacy.status).toHaveBeenCalledWith(201);
   });
 
-  it("does not match an allowed domain by suffix or substring", async () => {
-    for (const email of [
-      "requester@evil-nyu.edu",
-      "requester@nyu.edu.evil.test",
-      "requester@stern.nyu.edu.evil.test",
-    ]) {
-      const context = routeContext(canonicalAsap({ email }));
+  it.each([
+    "requester@gmail.com",
+    "requester@law.nyu.edu",
+    "requester@evil-nyu.edu",
+    "requester@nyu.edu.evil.test",
+    "requester@stern.nyu.edu.evil.test",
+  ])(
+    "creates nothing for a stored principal that is not an allowed NYU address: %s",
+    async (storedPrincipal) => {
+      // The allowlist still gates every request; it now does so at the gate,
+      // against the stored principal, on every use. Verification would never
+      // have established one of these, but a persisted row that stops being
+      // eligible — a domain removed from the allowlist, a value written by some
+      // future path — must return the person to verification rather than post a
+      // request on the strength of already existing.
+      stubVerifiedParticipant(storedPrincipal);
+      const context = routeContext(canonicalAsap({ email: storedPrincipal }));
 
       await createRequest(context.req, context.res);
 
-      expect(context.status).toHaveBeenCalledWith(400);
-      expect(context.json).toHaveBeenCalledWith({
-        error: { code: "INVALID_EMAIL", message: NYU_MESSAGE },
-      });
+      expect(context.status).toHaveBeenCalledWith(401);
+      expect(context.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.objectContaining({
+            code: PARTICIPANT_AUTHORITY_INVALID_CODE,
+          }),
+        })
+      );
+      expect(countDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(notifySubscribersForRequest).not.toHaveBeenCalled();
     }
-
-    expect(createDocument).not.toHaveBeenCalled();
-  });
+  );
 
   it("still reports another invalid field as a payload error", async () => {
-    // Precedence is unchanged: the allowlist runs last and can only refuse a
-    // payload that would otherwise have been created, so a request that is
-    // wrong in more than one way keeps the message it has always returned.
+    // Precedence is unchanged: shape validation still runs first, so a request
+    // that is wrong in more than one way keeps the message it has always
+    // returned rather than being answered about identity.
     for (const body of [
       canonicalAsap({ email: "requester@gmail.com", vendor: "   " }),
       canonicalAsap({ email: "requester@gmail.com", timing: "soon" }),
@@ -526,7 +818,7 @@ describe("POST /api/request NYU requester-email allowlist", () => {
     expect(createDocument).not.toHaveBeenCalled();
   });
 
-  it("leaves the daily limit unchanged for an allowed address", async () => {
+  it("leaves the daily limit unchanged for the verified principal", async () => {
     countDocuments.mockResolvedValue(3);
     const limited = routeContext(canonicalAsap());
     await createRequest(limited.req, limited.res);
@@ -1607,14 +1899,28 @@ describe("POST /api/request helper push isolation", () => {
   });
 
   it.each([
-    ["a refused payload", () => canonicalAsap({ vendor: "   " })],
-    ["a refused email", () => canonicalAsap({ email: "requester@gmail.com" })],
-  ])("starts no push for %s", async (_label, body) => {
+    ["a refused payload", () => canonicalAsap({ vendor: "   " }), 400],
+    [
+      "a payload naming another address",
+      () => canonicalAsap({ email: "someone-else@nyu.edu" }),
+      403,
+    ],
+  ])("starts no push for %s", async (_label, body, status) => {
     const context = routeContext(body());
 
     await createRequest(context.req, context.res);
 
-    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.status).toHaveBeenCalledWith(status);
+    expect(requestExists).not.toHaveBeenCalled();
+    expect(installationFind).not.toHaveBeenCalled();
+  });
+
+  it("starts no push for an unverified caller", async () => {
+    const context = routeContext(canonicalAsap(), {});
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
     expect(requestExists).not.toHaveBeenCalled();
     expect(installationFind).not.toHaveBeenCalled();
   });
@@ -1981,7 +2287,10 @@ describe("POST /api/request rate limiting is a definitive pre-write refusal", ()
       const post = () =>
         fetch(`http://127.0.0.1:${port}/api/request`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority,
+          },
           body: JSON.stringify(canonicalAsap()),
         });
 

@@ -17,6 +17,10 @@ export const System = mongoose.models.System || mongoose.model<ISystem>("System"
 
 import mongoose, { Schema, Document, Types } from "mongoose";
 import {
+  INITIAL_PARTICIPANT_AUTHORITY_VERSION,
+  MAXIMUM_PARTICIPANT_AUTHORITY_VERSION,
+} from "../src/participantCredentials.js";
+import {
   INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION,
   MAXIMUM_UNSUBSCRIBE_CREDENTIAL_VERSION,
 } from "../src/unsubscribeCredential.js";
@@ -231,6 +235,8 @@ export interface IRequest extends Document {
   claimExtendedAt?: Date | null;
   claimTokenDigest?: string;
   installationId?: Types.ObjectId | null;
+  requesterParticipantId?: Types.ObjectId | null;
+  helperParticipantId?: Types.ObjectId | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -293,6 +299,27 @@ const RequestSchema = new Schema<IRequest>({
   // never exposed through any public projection, so it stays out of ordinary
   // reads like every other private lifecycle field.
   installationId: { type: Schema.Types.ObjectId, ref: "Installation", select: false },
+  // The verified participant who created this request (W3-I1). Written from
+  // backend-resolved participant authority, never from the payload, and paired
+  // with `email`, which is written from the same principal in the same call.
+  // Person identity, unlike `installationId` above — which is notification
+  // routing and nothing else — so it is `select: false` like every other
+  // private field and never reaches a public projection.
+  requesterParticipantId: {
+    type: Schema.Types.ObjectId,
+    ref: "Participant",
+    select: false,
+  },
+  // The verified participant holding the current reservation (W3-I1). Written
+  // by the claim mutation from resolved participant authority and retained
+  // through placement, because it is who actually placed the order: fulfillment
+  // derives `fulfillerEmail` from this binding instead of accepting a helper
+  // address from the caller.
+  helperParticipantId: {
+    type: Schema.Types.ObjectId,
+    ref: "Participant",
+    select: false,
+  },
 }, { timestamps: true });
 
 // `expiresAt` is the availability deadline; `deleteAt` owns physical retention.
@@ -453,3 +480,130 @@ PushDeliverySchema.index(
 export const PushDelivery =
   (mongoose.models.PushDelivery as mongoose.Model<IPushDelivery>) ||
   mongoose.model<IPushDelivery>("PushDelivery", PushDeliverySchema);
+
+
+/* ============================ Participant ============================= */
+// One record per NYU address that has proved control of its mailbox (W3-I1).
+//
+// Deliberately separate from Subscriber and from Installation, and not derived
+// from either. A Subscriber is an address that asked for alerts — its whole
+// lifecycle is about delivery consent and it is never proof of anything. An
+// Installation is a copy of the app — notification-routing identity, replaced
+// by a reinstall, and never a person. A Participant is the one thing neither of
+// them is: a human who demonstrated they can read mail at an allowed NYU
+// address, and therefore the only identity a request or a reservation may be
+// bound to.
+//
+// This still verifies control of an eligible NYU-domain address. It is not
+// authentication, not NetID, and not proof of enrollment, and two addresses
+// belonging to one human remain two participants.
+export interface IParticipant extends Document {
+  email: string;
+  authorityVersion: number;
+  verifiedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const ParticipantSchema = new Schema<IParticipant>(
+  {
+    // The principal itself: the exact normalized verified address. Unique, so
+    // one address is one participant no matter how many times it verifies.
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+    },
+    // The revocation lever behind every issued authority credential. No
+    // credential is stored: it is signed on demand from `_id` and this number,
+    // so raising it invalidates every credential already on every device that
+    // holds this identity, and nothing else does.
+    authorityVersion: {
+      type: Number,
+      required: true,
+      default: INITIAL_PARTICIPANT_AUTHORITY_VERSION,
+      min: INITIAL_PARTICIPANT_AUTHORITY_VERSION,
+      max: MAXIMUM_PARTICIPANT_AUTHORITY_VERSION,
+      validate: {
+        validator: Number.isInteger,
+        message: "authorityVersion must be an integer",
+      },
+    },
+    // The most recent successful verification. History, not authority: it never
+    // expires the identity, because the accepted contract has no routine
+    // periodic reverification while usable authority remains.
+    verifiedAt: { type: Date, required: true },
+  },
+  { timestamps: true }
+);
+
+export const Participant =
+  (mongoose.models.Participant as mongoose.Model<IParticipant>) ||
+  mongoose.model<IParticipant>("Participant", ParticipantSchema);
+
+
+/* ====================== ParticipantVerification ======================= */
+// The live emailed-code challenge for one address (W3-I1). At most one exists
+// per address at a time — that is what makes a resend *supersede* the previous
+// code rather than leave two working codes in two inboxes — and it is enforced
+// by the unique index below, not by reading first and deciding.
+export interface IParticipantVerification extends Document {
+  email: string;
+  codeDigest: string;
+  issuedAt: Date;
+  expiresAt: Date;
+  attemptsRemaining: number;
+  redeemedAt?: Date | null;
+  deleteAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const ParticipantVerificationSchema = new Schema<IParticipantVerification>(
+  {
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+    },
+    // HMAC-SHA256 of the emailed code, keyed by the participant signing secret
+    // and bound to this address (`src/participantCredentials.ts`). The raw code
+    // exists only in the email; nothing persists or logs it, and `select: false`
+    // keeps the digest out of ordinary reads like every other credential field.
+    codeDigest: { type: String, required: true, select: false },
+    // When this challenge was issued. The resend cooldown is measured from it,
+    // so a supersede cannot be used to mail an address repeatedly.
+    issuedAt: { type: Date, required: true },
+    expiresAt: { type: Date, required: true },
+    // Counts down on each wrong code, by conditional atomic decrement, so
+    // concurrent guesses cannot both spend the same remaining attempt.
+    attemptsRemaining: { type: Number, required: true, min: 0 },
+    // Set by the one mutation that wins redemption. The row survives to its
+    // original expiry afterwards so a duplicate submission of the same code —
+    // a double tap, a retried request — is answered as the success it already
+    // was rather than as an invalid code.
+    redeemedAt: { type: Date },
+    // TTL. Set past `expiresAt`, so a spent or lapsed challenge stops being
+    // matchable long before it stops existing, and nothing accumulates.
+    deleteAt: {
+      type: Date,
+      required: true,
+      index: {
+        expireAfterSeconds: 0,
+        name: "participant_verification_deleteAt_ttl",
+      },
+    },
+  },
+  { timestamps: true }
+);
+
+export const ParticipantVerification =
+  (mongoose.models.ParticipantVerification as mongoose.Model<IParticipantVerification>) ||
+  mongoose.model<IParticipantVerification>(
+    "ParticipantVerification",
+    ParticipantVerificationSchema
+  );

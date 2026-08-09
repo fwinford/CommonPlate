@@ -102,6 +102,8 @@ import { fileURLToPath } from "url";
 import {
   Fulfillment,
   Installation,
+  Participant,
+  ParticipantVerification,
   PushDelivery,
   Request as MealRequest,
   Subscriber,
@@ -138,6 +140,8 @@ import {
 import { readClaimTokenHmacSecret } from "./src/claimToken.js";
 import { assertUnsubscribeSigningSecretForActivation } from "./src/unsubscribeCredential.js";
 import { assertApnsConfigurationForActivation } from "./src/apnsConfig.js";
+import { assertParticipantSigningSecretForActivation } from "./src/participantCredentials.js";
+import { registerParticipantVerificationRoutes } from "./src/participantVerificationRoutes.js";
 import { buildEffectiveAvailabilityFilter } from "./src/requestAvailability.js";
 import {
   CREATE_UNAVAILABLE_MESSAGE,
@@ -225,6 +229,22 @@ try {
   );
   process.exit(1);
 }
+// Required only once public actions are unpaused, checked in the same place
+// for the same reason as the two above (W3-I1). Unpaused means requests can be
+// created and claimed, and both now require a participant credential this
+// process must be able to sign and verify. Without the secret every
+// participant action would fail at its first attempt instead of at boot, and
+// nobody could verify an address to begin with. Paused startup reads nothing.
+try {
+  assertParticipantSigningSecretForActivation();
+} catch (error) {
+  console.error(
+    error instanceof Error
+      ? error.message
+      : "Invalid participant signing secret"
+  );
+  process.exit(1);
+}
 
 // init Resend (email API)
 const resendApiKey = process.env.RESEND_API_KEY;
@@ -295,6 +315,22 @@ app.post(
   unsubscribePage,
   unsubscribeParserError
 );
+
+// api: participant verification (W3-I1). Registered here, ahead of the global
+// parsers, alongside the two emailed-link flows above and for a stricter
+// version of the same reason: this route's body is the one place in the service
+// where a raw verification code arrives from the wire, and a body the global
+// parser rejected would be answered by the global error handler, which logs the
+// parser error — and a parser error quotes the body. The focused production
+// registration function owns both complete middleware chains; the real-byte
+// HTTP tests invoke that same function.
+//
+// Both halves are paused ahead of their limiters, parsers, and handlers, so a
+// paused deployment mails no code, writes no challenge, and issues no
+// participant authority — nobody may become verified for actions that are
+// themselves refused. Separate limiter buckets keep submitting a code from
+// spending the allowance for requesting one.
+registerParticipantVerificationRoutes(app);
 
 // middleware to parse JSON and serve static files
 app.use(express.json({ limit: '100kb' }));
@@ -470,6 +506,13 @@ await Installation.createIndexes();
 // against: without it, two concurrent dispatches would both submit for the
 // same installation, and V1 has no retry path that could repair a duplicate.
 await PushDelivery.createIndexes();
+// Do not accept participant traffic until the database has established the
+// one-participant-per-address and one-live-challenge-per-address guarantees
+// (W3-I1). Without them two concurrent verifications could create two
+// Participant rows for one principal, and a resend could leave two working
+// codes live for one inbox instead of superseding the first.
+await Participant.createIndexes();
+await ParticipantVerification.createIndexes();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   const PUBLIC_BASE = process.env.BASE_URL || `http://localhost:${PORT}`;

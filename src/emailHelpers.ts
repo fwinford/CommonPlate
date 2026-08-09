@@ -20,20 +20,58 @@ type EmailRequestOptions = NonNullable<Parameters<typeof resend.emails.send>[1]>
 	signal?: AbortSignal;
 };
 
+/**
+ * Opt-in redaction for a send whose own message body is a credential.
+ *
+ * The default diagnostics below log the provider's error object and re-throw
+ * its message. For an ordinary alert or confirmation that is useful and safe:
+ * the worst it can quote is a subject line and a link that is already in the
+ * recipient's inbox. It is not safe for the participant verification code,
+ * whose subject *and* both bodies contain a live six-digit credential, and
+ * which a provider may echo back inside an error, a request object, or a
+ * response body this module has no way to inspect ahead of time.
+ *
+ * When a caller passes a label, nothing provider-supplied is logged or
+ * re-thrown: the log line and the thrown message are both this fixed label.
+ * Callers keep their existing failure handling, because the failure is still an
+ * exception at the same point — it simply carries no borrowed text.
+ */
+export interface RedactedEmailDiagnostics {
+	/**
+	 * Fixed, allowlisted text. Must be a literal in this codebase, never a
+	 * recipient, subject, body, or provider value.
+	 */
+	redactedLabel: string;
+}
+
 export async function sendEmailSafe(
 	opts: Parameters<typeof resend.emails.send>[0],
-	requestOptions?: EmailRequestOptions
+	requestOptions?: EmailRequestOptions,
+	diagnostics?: RedactedEmailDiagnostics
 ): Promise<{ success: boolean; error?: string; }> {
+	const redactedLabel = diagnostics?.redactedLabel;
+
 	try {
 		const result = await resend.emails.send(opts, requestOptions);
 		if ((result as any).error) {
 			const err = (result as any).error;
+			// Nothing logged and nothing borrowed from `err`: the catch below owns
+			// the single fixed log line and the single fixed thrown message.
+			if (redactedLabel) throw new Error(`${redactedLabel} send failed`);
 			console.error("[Resend] send returned error:", err);
 			// Throw so callers (which expect exceptions) will handle failures consistently
 			throw new Error(String(err.message || JSON.stringify(err)));
 		}
 		return { success: true };
 	} catch (err: any) {
+		if (redactedLabel) {
+			// Deliberately no provider error, request, response, recipient, or
+			// exception message: any of them can carry the credential this send
+			// exists to deliver. Re-thrown as a new error for the same reason —
+			// `err` itself must not travel to a caller that may log it.
+			console.error(`[email] ${redactedLabel} send failed`);
+			throw new Error(`${redactedLabel} send failed`);
+		}
 		// Quota, network error, or other failure — throw so calling code can decide how to handle
 		console.error("[Resend Exception]", err);
 		throw new Error(String(err?.message || err));
@@ -130,6 +168,19 @@ export async function sendNewRequestAlert(
 }
 
 
+/**
+ * Tells the requester their order was placed.
+ *
+ * `donorEmail` is the claim-bound helper's verified principal, and since W3-I1
+ * it is genuinely optional: a pre-I1 grandfathered claim carries no verified
+ * helper identity, and the payload no longer supplies one either. When there is
+ * no address, the reply line and the `mailto:` are omitted entirely rather than
+ * rendered empty. An empty `mailto:` link is worse than no link — it looks like
+ * contact the requester has and does not, and tapping it opens a blank message
+ * to nobody. Every other part of the placement email is unaffected: the vendor,
+ * pickup name, pickup window, order number, ETA, and the donor's own message
+ * are what actually let the requester collect their food.
+ */
 export async function sendFulfillmentEmail(
 	request: IRequest,
 	orderNumber: string,
@@ -157,7 +208,7 @@ export async function sendFulfillmentEmail(
 
 		${donorMessage ? `<h4>Message from your swipes donor</h4><p>${escapeHtml(donorMessage).replace(/\n/g, '<br>')}</p>` : ''}
 
-		<p>You can reply to them at: <a href="mailto:${escapeHtml(replyTo || '')}">${escapeHtml(replyTo || '')}</a></p>
+		${replyTo ? `<p>You can reply to them at: <a href="mailto:${escapeHtml(replyTo)}">${escapeHtml(replyTo)}</a></p>` : ''}
 
 		<p style="margin-top: 1.5rem;">Thanks for using CommonPlate!</p>
 		<p style="color: #6b6b6b; font-size: 0.9rem; margin-top: 1rem;">This is an automated message from CommonPlate @ NYU</p>
@@ -192,4 +243,51 @@ export async function sendFulfillmentEmail(
 		// dropped, which would send the requester notification with no Reply-To.
 		...(replyTo ? { replyTo } : {}),
 	});
+}
+
+/**
+ * The participant verification code (W3-I1).
+ *
+ * Deliberately not a link. A link is a bearer credential that inbox scanners,
+ * prefetchers, and forwarded mail can spend without a person acting — which is
+ * exactly why the confirmation and unsubscribe flows above need a GET that only
+ * renders a form. A typed code cannot be redeemed by anything that merely
+ * *reads* this message, and emailed-link participant verification is deferred
+ * to V2 by the accepted contract.
+ *
+ * The code is interpolated as text into both bodies and never escaped-then-
+ * altered: it is six digits by construction. Nothing here logs it, and the
+ * caller holds it only long enough to make this call.
+ *
+ * Bounded by the same provider deadline the confirmation email uses, so a
+ * provider that never answers cannot hold the issuing request open.
+ */
+export const PARTICIPANT_VERIFICATION_SEND_LABEL = "participant verification";
+
+export async function sendParticipantVerificationEmail(
+	email: string,
+	code: string,
+	lifetimeMinutes: number,
+	timeoutMs: number = CONFIRMATION_EMAIL_TIMEOUT_MS
+): Promise<void> {
+	const deadline = new AbortController();
+	const timer = setTimeout(() => deadline.abort(), timeoutMs);
+
+	try {
+		await sendEmailSafe({
+			from: FROM_EMAIL,
+			to: email,
+			subject: `${code} is your CommonPlate verification code`,
+			html: `<p>Your CommonPlate verification code is:</p><p style="font-size:1.6rem;font-weight:700;letter-spacing:0.2rem;">${escapeHtml(code)}</p><p>It expires in ${lifetimeMinutes} minutes. Enter it in the CommonPlate app to finish verifying this NYU email.</p><p>If you didn't ask to verify this address, you can ignore this email. Nobody can act as you without this code.</p>`,
+			text: `Your CommonPlate verification code is: ${code}\n\nIt expires in ${lifetimeMinutes} minutes. Enter it in the CommonPlate app to finish verifying this NYU email.\n\nIf you didn't ask to verify this address, you can ignore this email. Nobody can act as you without this code.`,
+			// Every field of this send — the subject and both bodies — contains a
+			// live credential, so no provider-supplied diagnostic may be logged or
+			// re-thrown from it.
+		}, { signal: deadline.signal }, { redactedLabel: PARTICIPANT_VERIFICATION_SEND_LABEL });
+	} catch (error) {
+		if (deadline.signal.aborted) throw new EmailProviderTimeoutError(timeoutMs);
+		throw error;
+	} finally {
+		clearTimeout(timer);
+	}
 }

@@ -102,6 +102,23 @@ struct RequestService {
         self.client = client
     }
 
+    /// The header the backend reads participant authority from (W3-I1). It has
+    /// to match `PARTICIPANT_AUTHORITY_HEADER` in
+    /// `src/participantAuthorityGate.ts`.
+    static let participantAuthorityHeader = "x-commonplate-participant"
+
+    /// Builds the credential header, or none at all.
+    ///
+    /// An absent credential deliberately sends *no* header rather than an empty
+    /// one: "this caller has not verified" and "this caller presented something
+    /// unusable" are different backend answers, and only the first is true
+    /// here. Conflating them would tell an unverified student their stored
+    /// identity had been rejected.
+    private static func participantHeaders(_ authority: String?) -> [String: String] {
+        guard let authority, !authority.isEmpty else { return [:] }
+        return [participantAuthorityHeader: authority]
+    }
+
     /// `GET /api/requests`
     func fetchActiveRequests() async throws -> [FoodRequest] {
         do {
@@ -160,7 +177,14 @@ struct RequestService {
     }
 
     /// `POST /api/request`
-    func createRequest(_ payload: CreateRequestPayload) async throws -> FoodRequest {
+    ///
+    /// The requester is the verified participant behind `participantAuthority`,
+    /// not the payload: the backend derives and binds identity from the
+    /// credential and ignores any address the payload happens to carry.
+    func createRequest(
+        _ payload: CreateRequestPayload,
+        participantAuthority: String? = nil
+    ) async throws -> FoodRequest {
         try Task.checkCancellation()
 
         let response: RequestDetailResponseDTO
@@ -168,7 +192,8 @@ struct RequestService {
             response = try await client.send(
                 path: "/api/request",
                 method: .post,
-                body: payload
+                body: payload,
+                headers: Self.participantHeaders(participantAuthority)
             )
         } catch is CancellationError {
             throw RequestServiceError.ambiguousCreateOutcome(underlying: CancellationError())
@@ -204,7 +229,14 @@ struct RequestService {
     }
 
     /// `POST /api/request/:id/claim`
-    func claimRequest(id: String) async throws -> ClaimOutcome {
+    ///
+    /// The reservation is bound to the verified participant behind
+    /// `participantAuthority`, and fulfillment later reuses that binding rather
+    /// than asking for a helper address.
+    func claimRequest(
+        id: String,
+        participantAuthority: String? = nil
+    ) async throws -> ClaimOutcome {
         try Task.checkCancellation()
 
         let response: ClaimResponseDTO
@@ -212,7 +244,8 @@ struct RequestService {
             response = try await client.send(
                 path: "/api/request/\(id)/claim",
                 method: .post,
-                body: EmptyBody()
+                body: EmptyBody(),
+                headers: Self.participantHeaders(participantAuthority)
             )
         } catch is CancellationError {
             throw RequestServiceError.ambiguousClaimOutcome(underlying: CancellationError())
@@ -293,10 +326,12 @@ struct RequestService {
     }
 
     /// `POST /api/request/:id/fulfill`
+    /// The helper is whoever the claim is bound to, so this deliberately takes
+    /// no address: the backend derives it from the reservation and refuses a
+    /// payload that carries one.
     func fulfillRequest(
         id: String,
         claimToken: String,
-        fulfillerEmail: String,
         orderNumber: String,
         eta: String,
         contactMessage: String?
@@ -304,7 +339,6 @@ struct RequestService {
         let payload = FulfillRequestPayload(
             claimToken: claimToken,
             fulfillment: FulfillmentPayload(
-                fulfillerEmail: fulfillerEmail,
                 orderNumber: orderNumber,
                 eta: eta,
                 contactMessage: contactMessage

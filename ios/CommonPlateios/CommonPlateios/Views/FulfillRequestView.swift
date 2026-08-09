@@ -145,7 +145,7 @@ enum FulfillmentPresentationError: Equatable {
             // The envelope has no field attribution. Ask the helper to recheck
             // both locally validated fields and never suggest placing another
             // external order.
-            return "We couldn’t save these details. Check your email address and order number, then tap “I placed this order” again. Don’t place another Grubhub order."
+            return "We couldn’t save these details. Check the order number, then tap “I placed this order” again. Don’t place another Grubhub order."
         case .rateLimited:
             return "Too many tries. Wait a moment, then tap “I placed this order” again. Don’t place another Grubhub order."
         case .temporarilyUnavailable:
@@ -442,20 +442,14 @@ struct FulfillRequestView: View {
     /// a form that was reading as too long.
     private var fulfillmentForm: some View {
         Section {
-            TextField("Your email", text: $draft.fulfillerEmail)
-                .textContentType(.emailAddress)
-                .keyboardType(.emailAddress)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .focused($focusedField, equals: .fulfillerEmail)
-                .accessibilityIdentifier("fulfillment-email")
-                .accessibilityHint(Text(fieldError(.fulfillerEmail) ?? ""))
-
-            fieldErrorText(.fulfillerEmail, identifier: "fulfillment-email-error")
-
+            // No email field (W3-I1). The helper is the verified participant
+            // this reservation is bound to, so the address the student can
+            // reply to is one CommonPlate already proved — not one retyped here
+            // on every order.
             Text(Self.helperEmailNotice)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("fulfillment-verified-helper-notice")
 
             // A digits-only contract, so the keypad matches it. The binding
             // stays a `String` and nothing filters or reformats it as the
@@ -517,10 +511,7 @@ struct FulfillRequestView: View {
     }
 
     private var currentFieldErrors: [FulfillmentFieldError] {
-        FulfillmentFormValidator.validate(
-            fulfillerEmail: draft.fulfillerEmail,
-            orderNumber: draft.orderNumber
-        )
+        FulfillmentFormValidator.validate(orderNumber: draft.orderNumber)
     }
 
     private func fieldError(_ field: FulfillmentFormField) -> String? {
@@ -559,8 +550,7 @@ struct FulfillRequestView: View {
     ) -> Bool {
         guard isOperationallyAvailable else { return false }
 
-        return !draft.fulfillerEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !draft.orderNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !draft.orderNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !draft.eta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -575,7 +565,6 @@ struct FulfillRequestView: View {
                 ) { values in
                     try await store.fulfill(
                         requestID: request.id,
-                        fulfillerEmail: values.fulfillerEmail,
                         orderNumber: values.orderNumber,
                         eta: values.eta,
                         contactMessage: values.contactMessage
@@ -600,14 +589,10 @@ struct FulfillRequestView: View {
         presentation: FulfillmentValidationPresentation,
         submission: (FulfillmentSubmissionValues) async throws -> Void
     ) async throws -> FulfillmentSubmissionResult {
-        let email = draft.fulfillerEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         let number = draft.orderNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         let eta = draft.eta.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = draft.contactMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        let errors = FulfillmentFormValidator.validate(
-            fulfillerEmail: email,
-            orderNumber: number
-        )
+        let errors = FulfillmentFormValidator.validate(orderNumber: number)
         var updatedPresentation = presentation
         updatedPresentation.presentAll(errors)
 
@@ -620,7 +605,6 @@ struct FulfillRequestView: View {
         }
 
         try await submission(FulfillmentSubmissionValues(
-            fulfillerEmail: email,
             orderNumber: number,
             eta: eta,
             contactMessage: message.isEmpty ? nil : message
@@ -678,10 +662,11 @@ struct FulfillRequestView: View {
     /// has to act on before touching anything else on the screen.
     static let completedOrderNotice =
         "Place the Grubhub order first. Then save the details here."
-    /// The provider submission carries this address as Reply-To, but provider
-    /// acceptance cannot prove the message reached the student.
+    /// The provider submission carries the helper's verified NYU address as
+    /// Reply-To, but provider acceptance cannot prove the message reached the
+    /// student.
     static let helperEmailNotice =
-        "If the email reaches the student, they can reply to this address."
+        "If the email reaches the student, they can reply to your verified NYU email."
     static let orderNumberNotice = "From your Grubhub confirmation."
     /// A question, because the control answers one. "Ready in" read as a label
     /// on a value rather than as something to choose.
@@ -763,7 +748,7 @@ struct FulfillRequestView: View {
     static func confirmationDetail(for kind: FulfillmentConfirmationKind) -> String {
         switch kind {
         case .notificationSent:
-            return "CommonPlate submitted the order details for email delivery. We can’t confirm that the student received or read the email, or that they will pick up the food. If they reply, it goes to the address you entered."
+            return "CommonPlate submitted the order details for email delivery. We can’t confirm that the student received or read the email, or that they will pick up the food. If they reply, it goes to your verified NYU email."
         case .notificationFailed:
             return "Your order is recorded, but we couldn’t email the student. They may not know their food is waiting. Don’t place another Grubhub order."
         case .emailStatusUnknown:

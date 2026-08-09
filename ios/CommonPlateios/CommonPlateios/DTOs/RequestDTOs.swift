@@ -87,11 +87,15 @@ struct PublicActionsStateDTO: Decodable {
 /// the backend derives the expiration from it. There is deliberately no
 /// `windowEnd` — the create shape is strict and would refuse one, because an
 /// end the requester did not choose is not theirs to state.
+///
+/// There is also deliberately no `email` (W3-I1). The requester is the verified
+/// participant behind the credential `RequestStore` attaches, the backend binds
+/// the request to that principal, and an address here could only either repeat
+/// it or contradict it.
 struct CreateRequestPayload: Encodable {
     let vendor: String
     let food: String
     let pickupName: String
-    let email: String
     let timing: RequestTimingWire
     let windowStart: Date?
     var installationCredential: String? = nil
@@ -143,8 +147,12 @@ struct ClaimExtensionResponseDTO: Decodable {
 /// Strict nested fields accepted by `POST /api/request/:id/fulfill`.
 /// `eta` is the request-body key; `etaText` is backend persistence vocabulary
 /// and must not be sent by iOS. `contactMessage` is the only optional field.
+///
+/// There is deliberately no `fulfillerEmail` (W3-I1): the helper is the
+/// verified participant the claim is already bound to, the backend reads that
+/// binding, and the strict schema refuses an address here — which is what stops
+/// the requester's coordination email from naming anyone else.
 struct FulfillmentPayload: Encodable {
-    let fulfillerEmail: String
     let orderNumber: String
     let eta: String
     let contactMessage: String?

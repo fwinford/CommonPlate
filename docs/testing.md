@@ -185,6 +185,14 @@ Faith's revised presentation contract — removing the standing daily-quota noti
 
 No persistence, schema, query, or notification-routing behavior changed, so `npm run test:mongo` was not rerun for the presentation correction itself and stands at its own baseline below. The non-Eastern `DatePicker` physical-device timezone proof (Phoenix time) predates and is unaffected by the presentation correction, which does not touch timezone rendering or submission code; see the environmental-proof note in section 9.
 
+### Verified participant identity (W3-I1) coverage
+
+W3-I1 is accepted. Backend unit and HTTP tests cover participant challenge issuance and redemption, exact normalized NYU principals, rate/error envelopes, authority signing and revocation, route-local parsing, and startup configuration. The Mongo suites cover challenge expiry, resend supersession, bounded incorrect attempts, concurrent redemption, one participant per verified address, no raw verification-code persistence, and durable requester/helper bindings. Request, claim, fulfillment, notification, and browser tests cover the participant gate, requester identity derived from authority, atomic helper binding, fulfillment reuse of that bound helper, the intentionally narrow pre-I1 active-claim compatibility path, and the legacy website's non-actionable form.
+
+The focused iOS participant identity, gate, and continuation suites contain 52 passing tests (including 15 continuation cases after the final test-proof correction). They cover code-verification flow, authority storage and rejection, Change Email staging, draft preservation through verification, requester/helper gates, and same-install continuation logic. The complete `CommonPlateiosTests` target passed with 550 tests and 0 failures.
+
+These automated, source, and simulator results do **not** prove real NYU verification-email receipt or real-code redemption; physical same-install relaunch retention; uninstall/reinstall or new-device reverification; physical Keychain lifecycle behavior; backup/device-migration exclusion; or a real-address Change Email flow. Those are accepted, explicitly unperformed environmental checks, not passed evidence.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -263,7 +271,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted baseline is **505 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target. The count moved from 508 at the W3-R1 presentation contract's fixes: a net reduction from consolidating the standing daily-quota-notice tests and the post-submit success-screen expiration tests down to the cases the accepted presentation contract still requires.
+The current accepted baseline is **550 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target. The increase includes the accepted W3-I1 participant-identity coverage described in section 4.
 
 Automated routing tests (this target included) prove tap-routing logic against stubbed backend resolution; they do not by themselves prove real APNs terminated-launch handoff on a device. Physical-device proof was required for helper terminated-launch tap routing and for requester-fulfillment push, and both have now passed on a physical iPhone. Release/Archive/TestFlight signing and environment behavior is unrelated evidence and remains a separate, still-open environmental gate (see `docs/system-contract.md` section 11).
 
@@ -300,18 +308,20 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend, Mongo, lint/typecheck/build, and `git diff --check` rows were last recorded at W3-R1 acceptance (request correctness); the `CommonPlateiosTests` row was last recorded at the W3-R1 presentation-contract rereview test-quality correction, which is iOS-only and did not touch backend or Mongo code.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. They are the accepted W3-I1 closeout baseline.
 
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Passed |
-| `npm test` | 990 passed; 172 Mongo-gated skipped |
-| `npm run test:mongo` | 172 passed across 13 files |
+| `npm test` | 1,254 passed; 243 Mongo-gated skipped |
+| `npm run test:mongo` | 243 passed across 16 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | 505 passed; 0 failed; TEST SUCCEEDED |
-| `npm run build:client` | Passed; regenerated bundles matched the tracked output exactly (no diff), confirmed at W3-R1 acceptance |
+| `CommonPlateiosTests` | 550 passed; 0 failed; TEST SUCCEEDED |
+| `npm run build:client` | Passed; regenerated bundles intentionally include the W3-I1 legacy website non-actionable form |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
 The non-Eastern `DatePicker` timezone proof required for W3-R1 (see section 9) is likewise device evidence, not part of the automated suite above.
+
+W3-I1 physical/environmental verification remains unperformed: real NYU verification-email receipt and real-code redemption; same-install physical relaunch; uninstall/reinstall and new-device reverification; Keychain lifecycle behavior; backup/device-migration exclusion where practical; and a real-address Change Email flow. Neither the accepted automated baseline nor source/simulator inspection proves those outcomes.

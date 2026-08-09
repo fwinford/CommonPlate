@@ -10,7 +10,16 @@ import {
   it,
   vi,
 } from "vitest";
-import { Request as MealRequest } from "../models/db.js";
+import { Request as MealRequest, Participant } from "../models/db.js";
+import {
+  PARTICIPANT_AUTHORITY_HEADER,
+  PARTICIPANT_AUTHORITY_INVALID_CODE,
+  PARTICIPANT_VERIFICATION_REQUIRED_CODE,
+} from "./participantAuthorityGate.js";
+import {
+  PARTICIPANT_SIGNING_SECRET_ENV,
+  signParticipantAuthority,
+} from "./participantCredentials.js";
 import {
   CLAIM_DURATION_MS,
   CLAIM_EXTENSION_MS,
@@ -59,11 +68,43 @@ function document(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * The verified helper every claim case in this file acts as (W3-I1).
+ *
+ * A real signed credential in the real header, resolved by the real gate
+ * against a stubbed Participant row, so these suites prove the helper gate as
+ * it runs rather than a stand-in for it.
+ */
+const helperParticipantId = new mongoose.Types.ObjectId(
+  "64c0000000000000000000b2"
+);
+const helperPrincipal = "helper@nyu.edu";
+const participantSecretText = "participant-claim-route-unit-test-secret";
+const participantSecret = Buffer.from(participantSecretText);
+const participantAuthority = signParticipantAuthority(
+  helperParticipantId,
+  1,
+  participantSecret
+);
+
+function stubVerifiedParticipant(email: string = helperPrincipal) {
+  return vi.spyOn(Participant, "findOne").mockReturnValue({
+    select: () => ({
+      lean: () => ({
+        exec: vi.fn().mockResolvedValue({ _id: helperParticipantId, email }),
+      }),
+    }),
+  } as unknown as ReturnType<typeof Participant.findOne>);
+}
+
 function routeContext(
   body: unknown = undefined,
-  id = requestId.toString()
+  id = requestId.toString(),
+  headers: Record<string, string | string[]> = {
+    [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority,
+  }
 ) {
-  const req = { params: { id }, body } as unknown as Request;
+  const req = { params: { id }, body, headers } as unknown as Request;
   const res = {} as Response;
   const status = vi.fn().mockReturnValue(res);
   const json = vi.fn().mockReturnValue(res);
@@ -106,7 +147,9 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(now);
   vi.stubEnv("CLAIM_TOKEN_HMAC_SECRET", secretText);
+  vi.stubEnv(PARTICIPANT_SIGNING_SECRET_ENV, participantSecretText);
   vi.stubEnv(PUBLIC_ACTIONS_PAUSED_ENV, "false");
+  stubVerifiedParticipant();
 });
 
 afterEach(() => {
@@ -147,6 +190,9 @@ describe("POST /api/request/:id/claim", () => {
       claimExtendedAt: null,
       updatedAt: now,
     });
+    // The reservation and the verified helper it belongs to are written by the
+    // same conditional mutation, so a claim never exists unbound (W3-I1).
+    expect(update[0].$set.helperParticipantId).toEqual(helperParticipantId);
     expect(update[0].$set.claimExpiresAt).toEqual({
       $min: [
         new Date(now.getTime() + CLAIM_DURATION_MS),
@@ -340,6 +386,130 @@ describe("POST /api/request/:id/claim", () => {
       },
     });
     expect(consoleError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("POST /api/request/:id/claim helper gate (W3-I1)", () => {
+  /**
+   * Browsing stays open to anyone; reserving does not. A reservation takes a
+   * real student's meal out of every other helper's reach and commits a person
+   * to placing an order, so it is a participant action.
+   */
+  it("refuses a helper with no participant credential and reserves nothing", async () => {
+    const atomic = mockAtomicResult(document());
+    const context = routeContext(undefined, requestId.toString(), {});
+
+    await claimRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(responseBody(context).error.code).toBe(
+      PARTICIPANT_VERIFICATION_REQUIRED_CODE
+    );
+    // Ahead of token generation and the conditional mutation: nothing is
+    // reserved, and no claim token is minted for a caller who proved nothing.
+    expect(atomic).not.toHaveBeenCalled();
+  });
+
+  it("refuses a credential whose participant no longer exists", async () => {
+    const atomic = mockAtomicResult(document());
+    vi.spyOn(Participant, "findOne").mockReturnValue({
+      select: () => ({ lean: () => ({ exec: vi.fn().mockResolvedValue(null) }) }),
+    } as unknown as ReturnType<typeof Participant.findOne>);
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(responseBody(context).error.code).toBe(
+      PARTICIPANT_AUTHORITY_INVALID_CODE
+    );
+    expect(atomic).not.toHaveBeenCalled();
+  });
+
+  it("refuses a credential signed at a revoked authority version", async () => {
+    // The stub answers only for version 1, so a version-2 credential fails the
+    // database check even though its signature is genuine. Revocation is the
+    // one lever that invalidates a credential already on a device.
+    const atomic = mockAtomicResult(document());
+    vi.spyOn(Participant, "findOne").mockReturnValue({
+      select: () => ({ lean: () => ({ exec: vi.fn().mockResolvedValue(null) }) }),
+    } as unknown as ReturnType<typeof Participant.findOne>);
+    const context = routeContext(undefined, requestId.toString(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: signParticipantAuthority(
+        helperParticipantId,
+        2,
+        participantSecret
+      ),
+    });
+
+    await claimRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(atomic).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 and reserves nothing when the gate itself cannot decide", async () => {
+    const atomic = mockAtomicResult(document());
+    vi.stubEnv(PARTICIPANT_SIGNING_SECRET_ENV, "");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(503);
+    expect(atomic).not.toHaveBeenCalled();
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      participantSecretText
+    );
+  });
+
+  it("rebinds the reservation to whoever wins a re-claim after expiry", async () => {
+    // A lapsed reservation is claimable again, and the new holder is the new
+    // bound helper — not whoever held it before.
+    const otherParticipantId = new mongoose.Types.ObjectId(
+      "64c0000000000000000000c3"
+    );
+    stubVerifiedParticipant("other-helper@nyu.edu");
+    vi.spyOn(Participant, "findOne").mockReturnValue({
+      select: () => ({
+        lean: () => ({
+          exec: vi.fn().mockResolvedValue({
+            _id: otherParticipantId,
+            email: "other-helper@nyu.edu",
+          }),
+        }),
+      }),
+    } as unknown as ReturnType<typeof Participant.findOne>);
+    const atomic = mockAtomicResult(document());
+    const context = routeContext(undefined, requestId.toString(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: signParticipantAuthority(
+        otherParticipantId,
+        1,
+        participantSecret
+      ),
+    });
+
+    await claimRequest(context.req, context.res);
+
+    const [, update] = atomic.mock.calls[0] as any[];
+    expect(update[0].$set.helperParticipantId).toEqual(otherParticipantId);
+  });
+
+  it("keeps the participant credential out of the claim response", async () => {
+    mockAtomicResult(document());
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(JSON.stringify(responseBody(context))).not.toContain(
+      participantAuthority
+    );
+    expect(JSON.stringify(responseBody(context))).not.toContain(
+      helperParticipantId.toString()
+    );
+    // Participant identity is not public request data, so the helper's own
+    // address must not appear either.
+    expect(JSON.stringify(responseBody(context))).not.toContain(helperPrincipal);
   });
 });
 

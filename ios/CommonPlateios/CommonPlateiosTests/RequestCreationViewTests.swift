@@ -24,7 +24,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
         )
@@ -35,10 +34,8 @@ final class RequestCreationViewTests: XCTestCase {
         missingFood.foodRequest = "  "
         var missingPickupName = complete
         missingPickupName.pickupName = "\n"
-        var missingEmail = complete
-        missingEmail.email = ""
 
-        for draft in [missingDiningSpot, missingFood, missingPickupName, missingEmail] {
+        for draft in [missingDiningSpot, missingFood, missingPickupName] {
             XCTAssertFalse(RequestFoodView.isSubmissionEnabled(
                 draft: draft,
                 submissionError: nil,
@@ -52,7 +49,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
         )
@@ -76,7 +72,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@",
             timing: .asap,
             preferredPickupTime: Date(timeIntervalSince1970: 0)
         )
@@ -88,60 +83,11 @@ final class RequestCreationViewTests: XCTestCase {
         ))
     }
 
-    func testMalformedCompletedRequestRevealsEmailErrorAndInvokesNoSubmission() async throws {
-        var submissionCount = 0
-
-        for invalidEmail in ["taylor@", "name@@nyu.edu", "name @nyu.edu", "name@."] {
-            let draft = RequestFoodFormDraft(
-                selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-                foodRequest: "Chicken bowl",
-                pickupName: "Taylor",
-                email: invalidEmail,
-                timing: .asap,
-                preferredPickupTime: Date(timeIntervalSince1970: 0)
-            )
-
-            XCTAssertTrue(RequestFoodView.isSubmissionEnabled(
-                draft: draft,
-                submissionError: nil,
-                isCreating: false
-            ))
-            let result = try await RequestFoodView.orchestrateSubmission(
-                draft: draft,
-                now: Date(timeIntervalSince1970: 1_000),
-                calendar: utcCalendar,
-                presentation: RequestFoodValidationPresentation()
-            ) { _ in
-                submissionCount += 1
-            }
-            let errors = RequestFoodFormValidator.validate(
-                selectedDiningSpot: draft.selectedDiningSpot,
-                foodRequest: draft.foodRequest,
-                pickupName: draft.pickupName,
-                email: draft.email,
-                timing: draft.timing,
-                isScheduledWindowValid: true,
-                isScheduledTimingAvailable: true
-            )
-
-            XCTAssertFalse(result.didSubmit, invalidEmail)
-            XCTAssertEqual(result.firstInvalidTextField, .requesterEmail, invalidEmail)
-            XCTAssertEqual(
-                result.presentation.visibleError(for: .requesterEmail, from: errors)?.error,
-                .invalidEmail,
-                invalidEmail
-            )
-        }
-
-        XCTAssertEqual(submissionCount, 0)
-    }
-
     func testInFlightAndExistingLifecycleBlockDisableRequestSubmission() {
         let draft = RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             preferredPickupTime: Date(timeIntervalSince1970: 0)
         )
@@ -158,48 +104,19 @@ final class RequestCreationViewTests: XCTestCase {
         ))
     }
 
-    func testMalformedEmailRemainsQuietDuringInitialTyping() {
+    func testInvalidFieldRemainsQuietDuringInitialTyping() {
         let errors = RequestFoodFormValidator.validate(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
+            foodRequest: "",
             pickupName: "Taylor",
-            email: "t",
             timing: .asap,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
         )
         let presentation = RequestFoodValidationPresentation()
 
-        XCTAssertEqual(errors.map(\.error), [.invalidEmail])
+        XCTAssertEqual(errors.map(\.error), [.missingFood])
         XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
-    }
-
-    func testEmptyAndMalformedEmailHaveDistinctCopy() {
-        let empty = RequestFoodFormValidator.validate(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            email: "  ",
-            timing: .asap,
-            isScheduledWindowValid: true,
-            isScheduledTimingAvailable: true
-        )
-        let malformed = RequestFoodFormValidator.validate(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            email: "taylor@",
-            timing: .asap,
-            isScheduledWindowValid: true,
-            isScheduledTimingAvailable: true
-        )
-
-        XCTAssertEqual(empty.last?.message, "Enter your email address.")
-        XCTAssertEqual(
-            malformed.last?.message,
-            "Enter an NYU email address ending in @nyu.edu or @stern.nyu.edu."
-        )
-        XCTAssertNotEqual(empty.last?.message, malformed.last?.message)
     }
 
     func testProductionFocusTransitionRevealsOnlyTheExitedInvalidRequestField() {
@@ -207,7 +124,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: nil,
             foodRequest: "",
             pickupName: "",
-            email: "invalid",
             timing: .later,
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: true
@@ -215,14 +131,14 @@ final class RequestCreationViewTests: XCTestCase {
         var presentation = RequestFoodValidationPresentation()
 
         presentation.handleFocusTransition(
-            from: .requesterEmail,
-            to: .pickupName,
+            from: .pickupName,
+            to: .foodDescription,
             errors: errors
         )
 
         XCTAssertEqual(
             presentation.visibleErrors(from: errors).map(\.field),
-            [.requesterEmail]
+            [.pickupName]
         )
     }
 
@@ -231,7 +147,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: nil,
             foodRequest: "",
             pickupName: "",
-            email: "",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T15:00:00.000Z")
         )
@@ -250,7 +165,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: true
@@ -261,7 +175,7 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(result.didSubmit)
         XCTAssertEqual(
             visible.map(\.field),
-            [.diningSpot, .foodDescription, .pickupName, .pickupSchedule, .requesterEmail]
+            [.diningSpot, .foodDescription, .pickupName, .pickupSchedule]
         )
         XCTAssertEqual(result.firstInvalidTextField, .foodDescription)
     }
@@ -271,23 +185,21 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: nil,
             foodRequest: "",
             pickupName: "Taylor",
-            email: "invalid",
             timing: .asap,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
         )
         var presentation = RequestFoodValidationPresentation()
         presentation.handleFocusTransition(
-            from: .requesterEmail,
+            from: .foodDescription,
             to: nil,
             errors: initial
         )
 
         let corrected = RequestFoodFormValidator.validate(
             selectedDiningSpot: nil,
-            foodRequest: "",
+            foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
@@ -298,29 +210,27 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: nil,
             foodRequest: "",
             pickupName: "Taylor",
-            email: "taylor@",
             timing: .asap,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
         )
         XCTAssertEqual(
             presentation.visibleErrors(from: invalidAgain).map(\.field),
-            [.requesterEmail],
-            "Dining spot and food never presented errors, so they must stay quiet"
+            [.foodDescription],
+            "Dining spot never presented an error, so it must stay quiet"
         )
 
         let emptied = RequestFoodFormValidator.validate(
             selectedDiningSpot: nil,
             foodRequest: "",
             pickupName: "Taylor",
-            email: "",
             timing: .asap,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
         )
         XCTAssertEqual(
-            presentation.visibleError(for: .requesterEmail, from: emptied)?.message,
-            "Enter your email address."
+            presentation.visibleError(for: .foodDescription, from: emptied)?.message,
+            "Tell us what food you need."
         )
     }
 
@@ -329,7 +239,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: nil,
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             preferredPickupTime: Date(timeIntervalSince1970: 0)
         )
@@ -337,7 +246,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
@@ -351,7 +259,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
@@ -369,7 +276,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "  Palladium  ", address: nil),
             foodRequest: "  Chicken bowl \n",
             pickupName: "  Taylor  ",
-            email: "  taylor@nyu.edu  ",
             timing: .later,
             preferredPickupTime: preferredTime
         )
@@ -389,7 +295,6 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(payloads.first?.vendor, "Palladium")
         XCTAssertEqual(payloads.first?.food, "Chicken bowl")
         XCTAssertEqual(payloads.first?.pickupName, "Taylor")
-        XCTAssertEqual(payloads.first?.email, "taylor@nyu.edu")
         XCTAssertEqual(payloads.first?.timing.rawValue, "scheduled")
         XCTAssertEqual(payloads.first?.windowStart, preferredTime)
     }
@@ -401,7 +306,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
         )
@@ -439,7 +343,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
         )
@@ -465,7 +368,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: false
@@ -482,7 +384,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: false
@@ -513,7 +414,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             // A start in the past: correctable, because a valid one still exists.
             isScheduledWindowValid: false,
@@ -537,7 +437,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
         )
@@ -574,7 +473,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: false
@@ -625,7 +523,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
         )
@@ -662,9 +559,9 @@ final class RequestCreationViewTests: XCTestCase {
         let now = try date("2026-07-28T16:00:00.000Z")
         let draft = RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
+            // The one remaining focusable rejection on this form.
+            foodRequest: "   ",
             pickupName: "Taylor",
-            email: "not-an-email",
             timing: .asap,
             preferredPickupTime: now
         )
@@ -680,7 +577,7 @@ final class RequestCreationViewTests: XCTestCase {
         }
 
         XCTAssertEqual(submissionCount, 0)
-        XCTAssertEqual(result.firstInvalidTextField, .requesterEmail)
+        XCTAssertEqual(result.firstInvalidTextField, .foodDescription)
         XCTAssertFalse(RequestFoodView.showsLocalRejectionPointer(for: result))
         XCTAssertFalse(RequestFoodView.showsLocalRejectionPointer(
             isPresenting: false,
@@ -697,7 +594,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T23:00:00.000Z")
         )
@@ -716,7 +612,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: false
@@ -732,7 +627,6 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(draft.selectedDiningSpot?.name, "Palladium")
         XCTAssertEqual(draft.foodRequest, "Chicken bowl")
         XCTAssertEqual(draft.pickupName, "Taylor")
-        XCTAssertEqual(draft.email, "taylor@nyu.edu")
         XCTAssertEqual(draft.preferredPickupTime, try date("2026-07-28T23:00:00.000Z"))
 
         var submitted: CreateRequestPayload?
@@ -790,7 +684,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: nil,
             foodRequest: "",
             pickupName: "",
-            email: "invalid",
             timing: .asap,
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
@@ -798,11 +691,11 @@ final class RequestCreationViewTests: XCTestCase {
         var presentation = RequestFoodValidationPresentation()
         let submissionCount = 0
 
-        presentation.handleFocusTransition(from: nil, to: .requesterEmail, errors: errors)
+        presentation.handleFocusTransition(from: nil, to: .foodDescription, errors: errors)
         XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
 
-        presentation.handleFocusTransition(from: .requesterEmail, to: nil, errors: errors)
-        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.requesterEmail])
+        presentation.handleFocusTransition(from: .foodDescription, to: nil, errors: errors)
+        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.foodDescription])
         XCTAssertEqual(submissionCount, 0)
     }
 
@@ -811,7 +704,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "  Palladium  ", address: nil),
             foodRequest: "  Chicken bowl \n",
             pickupName: "  Taylor  ",
-            email: "  taylor@nyu.edu  ",
             timing: .asap,
             preferredPickupTime: Date(timeIntervalSince1970: 0),
             now: Date(timeIntervalSince1970: 1_000),
@@ -821,7 +713,6 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(payload.vendor, "Palladium")
         XCTAssertEqual(payload.food, "Chicken bowl")
         XCTAssertEqual(payload.pickupName, "Taylor")
-        XCTAssertEqual(payload.email, "taylor@nyu.edu")
         XCTAssertEqual(payload.timing.rawValue, "asap")
         XCTAssertNil(payload.windowStart)
 
@@ -843,7 +734,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: preferredTime,
             now: now,
@@ -891,7 +781,6 @@ final class RequestCreationViewTests: XCTestCase {
                 selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
                 foodRequest: "Chicken bowl",
                 pickupName: "Taylor",
-                email: "taylor@nyu.edu",
                 timing: .later,
                 preferredPickupTime: try date("2026-07-28T23:31:00.000Z"),
                 now: now,
@@ -977,7 +866,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .later,
             preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
         )
@@ -1012,7 +900,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: nil,
             foodRequest: "",
             pickupName: "",
-            email: "invalid",
             timing: .later,
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: true
@@ -1022,7 +909,7 @@ final class RequestCreationViewTests: XCTestCase {
 
         XCTAssertEqual(
             validationPresentation.visibleErrors(from: errors).map(\.field),
-            [.diningSpot, .foodDescription, .pickupName, .pickupSchedule, .requesterEmail]
+            [.diningSpot, .foodDescription, .pickupName, .pickupSchedule]
         )
         XCTAssertNil(RequestFoodView.submissionSectionPresentation(for: nil))
     }
@@ -1329,7 +1216,6 @@ final class RequestCreationViewTests: XCTestCase {
                 selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
                 foodRequest: "Chicken bowl",
                 pickupName: "Taylor",
-                email: "taylor@nyu.edu",
                 timing: .later,
                 preferredPickupTime: tomorrowMorning,
                 now: now,
@@ -1351,7 +1237,6 @@ final class RequestCreationViewTests: XCTestCase {
                 selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
                 foodRequest: "Chicken bowl",
                 pickupName: "Taylor",
-                email: "taylor@nyu.edu",
                 timing: .later,
                 preferredPickupTime: tomorrowMorning,
                 now: openNow,
@@ -2191,7 +2076,6 @@ final class RequestCreationViewTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             preferredPickupTime: try date("2026-07-28T17:00:00.000Z")
         )
@@ -2202,7 +2086,6 @@ final class RequestCreationViewTests: XCTestCase {
             vendor: "Palladium",
             food: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             windowStart: nil
         )
@@ -2261,7 +2144,10 @@ final class RequestCreationViewTests: XCTestCase {
         )
         return RequestStore(
             service: RequestService(client: client),
-            installationCredentialProvider: { "test-installation-credential" }
+            installationCredentialProvider: { "test-installation-credential" },
+            // W3-I1: a verified participant, unless a case says otherwise.
+            participantAuthorityProvider: { "64c0000000000000000000a1.1.test-credential" },
+            participantAuthorityRejected: {}
         )
     }
 

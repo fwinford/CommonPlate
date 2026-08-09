@@ -10,8 +10,6 @@ enum RequestFoodFormError: Error, Equatable {
     case missingDiningSpot
     case missingFood
     case missingPickupName
-    case missingEmail
-    case invalidEmail
     case invalidScheduledTime
     /// A `Later` selection that outlived scheduling itself. Distinct from
     /// `invalidScheduledTime` because the correction is different: there is no
@@ -26,14 +24,6 @@ enum RequestFoodFormError: Error, Equatable {
             return "Tell us what food you need."
         case .missingPickupName:
             return "Enter the name to use for the order."
-        case .missingEmail:
-            return "Enter your email address."
-        case .invalidEmail:
-            // One sentence covers both an address that is not an address and
-            // one that is not an NYU address: the backend refuses them with the
-            // same envelope, and naming the accepted domains is the correction
-            // in either case.
-            return NYUEmailPolicy.requiredMessage
         case .invalidScheduledTime:
             return "Choose a pickup time later today."
         case .scheduledTimingUnavailable:
@@ -44,11 +34,21 @@ enum RequestFoodFormError: Error, Equatable {
 
 enum RequestCreatePresentationError: Equatable {
     case invalidRequest
-    /// `INVALID_EMAIL`. The backend enforces the NYU allowlist independently,
-    /// so this arrives when the local check and the backend disagree — an
-    /// allowlist that has moved, or an older build. It reads exactly like the
-    /// local email failure, because it is the same rule and the same fix.
-    case invalidEmail
+    /// `PARTICIPANT_VERIFICATION_REQUIRED`. Reachable only if the gate and this
+    /// screen disagree about whether this installation is verified — the form
+    /// asks for verification before submitting — so it says the same thing the
+    /// gate does rather than inventing a second explanation.
+    case verificationRequired
+    /// `PARTICIPANT_AUTHORITY_INVALID`. The stored identity has been discarded
+    /// by the time this renders, so the correction is to verify again.
+    case verificationExpired
+    /// `PARTICIPANT_VERIFICATION_UNAVAILABLE`. The backend could not check.
+    /// Never presented as "you are not verified", because it does not say that.
+    case verificationUnavailable
+    /// `PARTICIPANT_PRINCIPAL_MISMATCH`. This app never sends an address, so
+    /// this is a build/contract disagreement rather than anything the student
+    /// typed; it is still recoverable by verifying the address they want.
+    case principalMismatch
     case requestLimitReached
     /// `RATE_LIMITED`. Distinct from `requestLimitReached`: that one is the
     /// daily allowance and reopens tomorrow, this one is a short per-IP
@@ -64,8 +64,12 @@ enum RequestCreatePresentationError: Equatable {
         switch self {
         case .invalidRequest:
             return "Check the information you entered and try again."
-        case .invalidEmail:
-            return RequestFoodFormError.invalidEmail.message
+        case .verificationRequired:
+            return "Verify your NYU email to post a request."
+        case .verificationExpired, .principalMismatch:
+            return "Your NYU email needs to be verified again before posting."
+        case .verificationUnavailable:
+            return "We couldn’t check your NYU verification. Please try again in a moment."
         case .requestLimitReached:
             // Under the revised W3-R1 presentation contract, the daily quota is
             // not advertised on the ordinary form — only this actual-limit
@@ -98,8 +102,14 @@ enum RequestCreatePresentationError: Equatable {
             switch code {
             case "INVALID_REQUEST":
                 return .invalidRequest
-            case "INVALID_EMAIL":
-                return .invalidEmail
+            case ParticipantErrorCode.verificationRequired:
+                return .verificationRequired
+            case ParticipantErrorCode.authorityInvalid:
+                return .verificationExpired
+            case ParticipantErrorCode.verificationUnavailable:
+                return .verificationUnavailable
+            case ParticipantErrorCode.principalMismatch:
+                return .principalMismatch
             case "REQUEST_LIMIT_REACHED":
                 return .requestLimitReached
             case "RATE_LIMITED":
@@ -163,6 +173,13 @@ struct RequestFoodView: View {
     static let availabilityUnknownNotice =
         "We couldn’t check whether posting is available right now. Please try again in a moment."
 
+    /// Said before the first Submit, so the verification gate is something the
+    /// requester was told about rather than something that happens to them.
+    /// Deliberately names what will happen and why, and does not ask for the
+    /// address here — the form stays fillable without verifying first.
+    static let verificationRequiredNotice =
+        "Before your first request, we’ll email a code to your NYU email to verify it. Your draft is kept while you verify."
+
     /// States the eligibility rule before anything is typed, so the accepted
     /// domains are not something the requester discovers by being refused.
     ///
@@ -214,6 +231,18 @@ struct RequestFoodView: View {
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: RequestStore
+    /// Observed, not owned: the verified identity outlives this screen, and the
+    /// gate below has to see the same one every other participant action does.
+    @ObservedObject var identityStore: ParticipantIdentityStore
+    /// Shared production owner for the exact draft/operation continuation.
+    /// This view reports lifecycle events; it does not keep a parallel pending
+    /// intent in private SwiftUI state.
+    @ObservedObject var verificationCoordinator:
+        ParticipantActionVerificationCoordinator
+    /// The destination that owns this form. Continuation consumption checks it
+    /// so navigation replacement (including notification routing) cannot let a
+    /// still-mounted stale form post after verification.
+    @Binding var path: [AppRoute]
 
     @State private var draft = RequestFoodFormDraft()
     @State private var validationPresentation = RequestFoodValidationPresentation()
@@ -292,6 +321,49 @@ struct RequestFoodView: View {
             }
             await store.refreshRequestCreationAvailability()
         }
+        // A sheet, not a push: this screen stays mounted underneath, so the
+        // draft it holds is still there when verification finishes — and still
+        // there when it does not.
+        .sheet(isPresented: isPresentingVerification) {
+            ParticipantVerificationView(
+                store: identityStore,
+                cancel: verificationCoordinator.requesterCancelled
+            )
+        }
+        .onChange(of: identityStore.identity) { previous, current in
+            guard case .requestCreation(let submittedDraft)? =
+                    verificationCoordinator.requesterIdentityDidChange(
+                        from: previous,
+                        to: current,
+                        path: path
+                    ) else {
+                return
+            }
+            // The coordinator cleared both continuation owners before
+            // returning this exact snapshot, so no duplicate publication can
+            // enqueue another create.
+            Task { await submit(draftSnapshot: submittedDraft) }
+        }
+        .onChange(of: path) { _, currentPath in
+            verificationCoordinator.requesterNavigationChanged(path: currentPath)
+        }
+        .onDisappear {
+            verificationCoordinator.requesterDisappeared()
+        }
+    }
+
+    /// The sheet is open exactly while the identity store has a flow running.
+    /// Read-only from this screen's side — dismissing it goes through
+    /// `cancelVerification()`, so an abandoned flow is abandoned in one place.
+    private var isPresentingVerification: Binding<Bool> {
+        Binding(
+            get: { verificationCoordinator.isPresentingRequestCreationVerification },
+            set: { isPresented in
+                if !isPresented {
+                    verificationCoordinator.requesterSheetDismissed()
+                }
+            }
+        )
     }
 
     /// The blocked screen. It deliberately renders no fields and no submit
@@ -540,17 +612,29 @@ struct RequestFoodView: View {
             }
 
             Section("Contact") {
-                TextField("Email, required", text: $draft.email)
-                    .keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .focused($focusedField, equals: .requesterEmail)
-                    .accessibilityHint(Text(fieldError(.requesterEmail, errors: errors) ?? ""))
+                // No email field (W3-I1). Either this installation already has
+                // a verified identity — in which case asking again would be
+                // asking for something it can prove — or it does not, and the
+                // gate on Submit is what establishes one. Nothing here is
+                // editable, so nothing here can be lost by the gate.
+                if let identity = identityStore.identity {
+                    HStack {
+                        Text("Posting as")
+                        Spacer()
+                        Text(identity.masked)
+                            .fontWeight(.semibold)
+                    }
+                    .accessibilityIdentifier("request-verified-identity")
+                } else {
+                    // Said before the first Submit, so the gate is not a
+                    // surprise the student meets only after filling the form.
+                    Text(Self.verificationRequiredNotice)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("request-verification-notice")
+                }
 
-                // Unconditional, so it is present before submission and stays
-                // through editing and through a rejection. The error below it
-                // is unaffected: it still renders, still owns the red styling
-                // and the field's spoken hint, and is never swapped for this.
                 Text(Self.emailEligibilityNotice)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -560,12 +644,6 @@ struct RequestFoodView: View {
                     // sizes instead of growing taller.
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("request-email-eligibility")
-
-                fieldErrorText(
-                    .requesterEmail,
-                    errors: errors,
-                    identifier: "request-email-error"
-                )
 
                 Text(Self.emailPurposeNotice)
                     .font(.footnote)
@@ -637,12 +715,27 @@ struct RequestFoodView: View {
     }
 
     @MainActor
-    private func submit() async {
+    private func submit(draftSnapshot: RequestFoodFormDraft? = nil) async {
         submissionError = nil
         showsLocalRejectionPointer = false
 
+        let submittedDraft = draftSnapshot ?? draft
+
+        // The gate, and the whole reason it lives here rather than in the
+        // store: `draft` is `@State` on a screen that stays mounted behind the
+        // verification sheet, so the completed request survives verification by
+        // construction. Nothing is submitted, cleared, or reset on the way in
+        // or the way out — a failed, expired, abandoned, or ambiguous
+        // verification simply returns to the same filled form.
+        if !identityStore.isVerified {
+            _ = verificationCoordinator.beginRequestCreation(
+                draft: submittedDraft,
+                path: path
+            )
+            return
+        }
+
         let now = Date()
-        let submittedDraft = draft
         do {
             let result = try await Self.orchestrateSubmission(
                 draft: submittedDraft,
@@ -682,7 +775,6 @@ struct RequestFoodView: View {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: scheduledWindowIsValid,
             // Same `now` as the window check above: one snapshot decides both
@@ -707,7 +799,6 @@ struct RequestFoodView: View {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             preferredPickupTime: draft.preferredPickupTime,
             now: now,
@@ -729,7 +820,6 @@ struct RequestFoodView: View {
             selectedDiningSpot: draft.selectedDiningSpot,
             foodRequest: draft.foodRequest,
             pickupName: draft.pickupName,
-            email: draft.email,
             timing: draft.timing,
             isScheduledWindowValid: Self.isValidScheduledWindow(
                 startingAt: draft.preferredPickupTime,
@@ -887,7 +977,6 @@ struct RequestFoodView: View {
         selectedDiningSpot: DiningSpot?,
         foodRequest: String,
         pickupName: String,
-        email: String,
         timing: RequestTiming,
         preferredPickupTime: Date,
         now: Date,
@@ -902,7 +991,6 @@ struct RequestFoodView: View {
             selectedDiningSpot: selectedDiningSpot,
             foodRequest: foodRequest,
             pickupName: pickupName,
-            email: email,
             timing: timing,
             isScheduledWindowValid: scheduledWindowIsValid,
             isScheduledTimingAvailable: isScheduledTimingAvailable(
@@ -920,7 +1008,6 @@ struct RequestFoodView: View {
         let trimmedVendor = selectedDiningSpot.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedFood = foodRequest.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPickupName = pickupName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch timing {
         case .asap:
@@ -928,7 +1015,6 @@ struct RequestFoodView: View {
                 vendor: trimmedVendor,
                 food: trimmedFood,
                 pickupName: trimmedPickupName,
-                email: trimmedEmail,
                 timing: .asap,
                 windowStart: nil
             )
@@ -941,7 +1027,6 @@ struct RequestFoodView: View {
                 vendor: trimmedVendor,
                 food: trimmedFood,
                 pickupName: trimmedPickupName,
-                email: trimmedEmail,
                 timing: .scheduled,
                 windowStart: preferredPickupTime
             )
@@ -991,9 +1076,5 @@ struct RequestFoodView: View {
             return false
         }
         return start <= latestStart
-    }
-
-    static func isAllowedRequesterEmail(_ value: String) -> Bool {
-        RequestFoodFormValidator.isAllowedRequesterEmail(value)
     }
 }

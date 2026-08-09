@@ -9,6 +9,10 @@ import {
   APNS_KEY_ID_ENV,
   APNS_TEAM_ID_ENV,
 } from "./apnsConfig.js";
+import {
+  MINIMUM_PARTICIPANT_SIGNING_SECRET_BYTES,
+  PARTICIPANT_SIGNING_SECRET_ENV,
+} from "./participantCredentials.js";
 import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
 import {
   MINIMUM_UNSUBSCRIBE_SIGNING_SECRET_BYTES,
@@ -36,6 +40,8 @@ const appSource = readFileSync(appPath, "utf8");
 
 const ACTIVATION_CALL = "assertUnsubscribeSigningSecretForActivation()";
 const APNS_ACTIVATION_CALL = "assertApnsConfigurationForActivation()";
+const PARTICIPANT_ACTIVATION_CALL =
+  "assertParticipantSigningSecretForActivation()";
 
 /**
  * Every production source a deployment secret's name could reach.
@@ -238,6 +244,87 @@ describe("APNs provider configuration activation wiring", () => {
   });
 });
 
+/**
+ * The same activation architecture again, for the participant signing secret
+ * W3-I1 introduces. Unpaused means requests can be created and claimed, and
+ * both now require a participant credential this process must be able to sign
+ * and verify — so a deployment without the secret has no usable participant
+ * surface at all and must not start.
+ *
+ * `participantCredentials.test.ts` owns the validation rule itself.
+ */
+describe("participant signing secret activation wiring", () => {
+  it("validates from the same startup-validation block, after the APNs check", () => {
+    const apnsCheck = indexIn(APNS_ACTIVATION_CALL);
+    const participantCheck = indexIn(PARTICIPANT_ACTIVATION_CALL);
+    const resendClient = indexIn("const resend = new Resend(resendApiKey);");
+
+    expect(participantCheck).toBeGreaterThan(apnsCheck);
+    expect(participantCheck).toBeLessThan(resendClient);
+  });
+
+  it("is checked exactly once", () => {
+    expect(
+      appSource.match(/assertParticipantSigningSecretForActivation\(/g)
+    ).toHaveLength(1);
+  });
+
+  it("runs before the app, its routes, the database, and listening", () => {
+    const participantCheck = indexIn(PARTICIPANT_ACTIVATION_CALL);
+
+    for (const later of [
+      "const app = express();",
+      "app.get(",
+      "app.post(",
+      "app.use(",
+      "await mongoose.connect(MONGO_URI);",
+      "await Participant.createIndexes();",
+      "app.listen(",
+    ]) {
+      expect(
+        participantCheck,
+        `the participant activation check must run before ${later}`
+      ).toBeLessThan(indexIn(later));
+    }
+    expect(participantCheck).toBeLessThan(appSource.search(/^await\s/m));
+  });
+
+  it("logs the reported message and no configured value", () => {
+    const participantCheck = indexIn(PARTICIPANT_ACTIVATION_CALL);
+    const blockEnd = appSource.indexOf("\n}\n", participantCheck);
+    expect(blockEnd).toBeGreaterThan(participantCheck);
+    const block = appSource.slice(participantCheck, blockEnd);
+
+    expect(block).toContain("error.message");
+    expect(block).not.toContain("process.env");
+    expect(block).not.toContain(PARTICIPANT_SIGNING_SECRET_ENV);
+  });
+
+  it("keeps one module able to read the secret", () => {
+    // A second reader is how an inconsistent rule — or a silent substitution of
+    // one of the other credential namespaces — would appear. Participant
+    // identity must not share key material with subscription confirmation,
+    // unsubscribe links, installation credentials, or claim tokens.
+    const readers = [["app.ts", appSource] as const, ...productionSources()]
+      .filter(([, text]) => text.includes(PARTICIPANT_SIGNING_SECRET_ENV))
+      .map(([name]) => name);
+
+    expect(readers).toEqual(["src/participantCredentials.ts"]);
+  });
+
+  it("creates the participant uniqueness indexes before listening", () => {
+    // Without them two concurrent verifications could create two Participant
+    // rows for one address, and a resend could leave two live codes for one
+    // inbox instead of superseding the first.
+    for (const index of [
+      "await Participant.createIndexes();",
+      "await ParticipantVerification.createIndexes();",
+    ]) {
+      expect(indexIn(index)).toBeLessThan(indexIn("app.listen("));
+    }
+  });
+});
+
 interface StartupResult {
   code: number | null;
   stderr: string;
@@ -300,6 +387,13 @@ const VALID_APNS: Record<string, string> = {
   [APNS_BUNDLE_ID_ENV]: "org.commonplatenyu.CommonPlateios",
   [APNS_AUTH_KEY_P8_ENV]: apnsAuthKey,
 };
+
+const VALID_PARTICIPANT_SECRET = "p".repeat(
+  MINIMUM_PARTICIPANT_SIGNING_SECRET_BYTES
+);
+const SHORT_PARTICIPANT_SECRET = "p".repeat(
+  MINIMUM_PARTICIPANT_SIGNING_SECRET_BYTES - 1
+);
 
 /**
  * A process that reached `mongoose.connect` passed activation validation: the
@@ -369,9 +463,10 @@ describe("real startup with and without the signing secret", () => {
       const result = await startApp({
         [PUBLIC_ACTIONS_PAUSED_ENV]: "false",
         [UNSUBSCRIBE_SIGNING_SECRET_ENV]: VALID_SECRET,
-        // Unpaused startup also requires APNs provider configuration; that
-        // rule has its own group below.
+        // Unpaused startup also requires APNs provider configuration and a
+        // participant signing secret; each rule has its own group below.
         ...VALID_APNS,
+        [PARTICIPANT_SIGNING_SECRET_ENV]: VALID_PARTICIPANT_SECRET,
       });
 
       expect(result.stderr).not.toContain(UNSUBSCRIBE_SIGNING_SECRET_ENV);
@@ -425,6 +520,7 @@ describe("real startup with and without APNs provider configuration", () => {
       [PUBLIC_ACTIONS_PAUSED_ENV]: "false",
       [UNSUBSCRIBE_SIGNING_SECRET_ENV]: VALID_SECRET,
       ...VALID_APNS,
+      [PARTICIPANT_SIGNING_SECRET_ENV]: VALID_PARTICIPANT_SECRET,
       ...overrides,
     };
   }
@@ -502,6 +598,69 @@ describe("real startup with and without APNs provider configuration", () => {
       ]) {
         expect(result.stderr).not.toContain(name);
       }
+    },
+    30_000
+  );
+});
+
+describe("real startup with and without the participant signing secret", () => {
+  function unpaused(overrides: Record<string, string> = {}) {
+    return {
+      [PUBLIC_ACTIONS_PAUSED_ENV]: "false",
+      [UNSUBSCRIBE_SIGNING_SECRET_ENV]: VALID_SECRET,
+      ...VALID_APNS,
+      [PARTICIPANT_SIGNING_SECRET_ENV]: VALID_PARTICIPANT_SECRET,
+      ...overrides,
+    };
+  }
+
+  it.each([
+    ["no secret", ""],
+    ["fewer than 32 UTF-8 bytes", SHORT_PARTICIPANT_SECRET],
+  ])(
+    "refuses to start unpaused with %s",
+    async (_label, secret) => {
+      const result = await startApp(
+        unpaused({ [PARTICIPANT_SIGNING_SECRET_ENV]: secret })
+      );
+
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain(PARTICIPANT_SIGNING_SECRET_ENV);
+      // It never got as far as the database, so it never registered a usable
+      // participant surface or began listening either.
+      expect(reachedTheDatabase(result)).toBe(false);
+      expect(result.stdout).not.toContain("http://localhost");
+      if (secret) {
+        // The refused value itself must not reach the deployment log.
+        expect(result.stderr).not.toContain(secret);
+        expect(result.stdout).not.toContain(secret);
+      }
+    },
+    30_000
+  );
+
+  it(
+    "starts unpaused with a valid secret and never logs it",
+    async () => {
+      const result = await startApp(unpaused());
+
+      expect(reachedTheDatabase(result)).toBe(true);
+      expect(result.stderr).not.toContain(VALID_PARTICIPANT_SECRET);
+      expect(result.stdout).not.toContain(VALID_PARTICIPANT_SECRET);
+    },
+    30_000
+  );
+
+  it(
+    "starts while paused with no participant secret at all",
+    async () => {
+      // A paused process reads nothing, exactly like the unsubscribe secret and
+      // the APNs configuration: nobody can verify, and nobody can act, so there
+      // is nothing for the secret to be needed for.
+      const result = await startApp({ [PUBLIC_ACTIONS_PAUSED_ENV]: "true" });
+
+      expect(reachedTheDatabase(result)).toBe(true);
+      expect(result.stderr).not.toContain(PARTICIPANT_SIGNING_SECRET_ENV);
     },
     30_000
   );

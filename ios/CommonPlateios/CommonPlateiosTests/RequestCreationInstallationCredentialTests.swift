@@ -103,7 +103,10 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
         RequestCreationCredentialURLProtocol.reset(data: detailResponse())
         let store = RequestStore(
             service: makeService(),
-            installationCredentialProvider: { currentCredential }
+            installationCredentialProvider: { currentCredential },
+            // W3-I1: a verified participant, unless a case says otherwise.
+            participantAuthorityProvider: { "64c0000000000000000000a1.1.test-credential" },
+            participantAuthorityRejected: {}
         )
 
         try await store.createRequest(makePayload())
@@ -127,7 +130,6 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
             foodRequest: "Chicken bowl",
             pickupName: "Taylor",
-            email: "taylor@nyu.edu",
             timing: .asap,
             preferredPickupTime: Date(timeIntervalSince1970: 0),
             now: Date(timeIntervalSince1970: 1_000),
@@ -148,14 +150,20 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             vendor: "Palladium",
             food: "Vegetable rice bowl",
             pickupName: "Requester Private Name",
-            email: "requester@nyu.edu",
             timing: .asap,
             windowStart: nil
         )
     }
 
     private func makeStore(credential: String) -> RequestStore {
-        RequestStore(service: makeService(), installationCredentialProvider: { credential })
+        RequestStore(
+            service: makeService(),
+            installationCredentialProvider: { credential },
+            // W3-I1: a verified participant, so these cases prove the
+            // installation credential rather than the participant gate.
+            participantAuthorityProvider: { "64c0000000000000000000a1.1.credential" },
+            participantAuthorityRejected: {}
+        )
     }
 
     private func makeService() -> RequestService {
