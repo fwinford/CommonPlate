@@ -185,6 +185,26 @@ export const Installation =
 
 
 // ============================ Request =============================
+/**
+ * Which path owns starting this request's helper new-request notification, and
+ * whether that has happened yet (W3-N3). The product event that initiates
+ * helper notification is *the request becoming helper-eligible*, which for an
+ * ASAP request is its creation instant and for a future Later request is its
+ * `visibleFrom` — an instant that can arrive hours after `createdAt`.
+ *
+ * - `"initiated"`: helper email and push dispatch have been started for this
+ *   request. Nothing may start them again.
+ * - `"awaiting-eligibility"`: the request was not helper-eligible when it was
+ *   created, so creation-time dispatch deliberately did nothing and the
+ *   eligibility sweep (`src/eligibilityNotificationSweep.ts`) owns it.
+ *
+ * Absent is a third, deliberate state: rows persisted before this field existed
+ * were dispatched for (or not) at creation exactly as they always were, and the
+ * sweep never selects them. Nothing migrates them, for the same reason nothing
+ * migrates `visibleFrom`.
+ */
+export type HelperNotificationState = "awaiting-eligibility" | "initiated";
+
 export interface IRequest extends Document {
   vendor: string;
   food: string;
@@ -203,6 +223,7 @@ export interface IRequest extends Document {
   notificationStatus?: "pending" | "sent" | "failed";
   notificationAttemptedAt?: Date;
   visibleFrom?: Date;
+  helperNotification?: HelperNotificationState;
   expiresAt?: Date;
   deleteAt?: Date;
   claimedAt?: Date;
@@ -244,6 +265,16 @@ const RequestSchema = new Schema<IRequest>({
   // existed carry no value, and availability treats that absence as "visible
   // from creation" rather than migrating them.
   visibleFrom: { type: Date },
+  // Written explicitly at creation from the same visibility rule the
+  // dispatchers apply, and never by a client. Internal lifecycle bookkeeping
+  // like `notificationStatus`, kept out of responses by the allowlisted public
+  // projection rather than by a projection default. See
+  // `HelperNotificationState` above. No schema default: an absent value is the
+  // legacy meaning, not a new request's meaning.
+  helperNotification: {
+    type: String,
+    enum: ["awaiting-eligibility", "initiated"],
+  },
   expiresAt: { type: Date },
   deleteAt: {
     type: Date,
@@ -280,6 +311,22 @@ RequestSchema.pre("save", function (next) {
 
 // Index to support fast per-email daily count queries
 RequestSchema.index({ email: 1, createdAt: 1 });
+
+// The eligibility sweep's candidate set: requests whose helper notification has
+// not been initiated yet, ordered by the instant it becomes due. Partial on the
+// awaiting state, so the index holds only the future Later requests still
+// waiting — never the ASAP requests that are the overwhelming majority — and
+// disappears from it the moment one is initiated or TTL-deleted.
+//
+// This is a selection index, not a correctness guarantee: exactly-once
+// initiation comes from the conditional update the sweep writes, not from here.
+RequestSchema.index(
+  { visibleFrom: 1 },
+  {
+    name: "request_helper_notification_awaiting",
+    partialFilterExpression: { helperNotification: "awaiting-eligibility" },
+  }
+);
 
 /* ============================ Fulfillment ============================= */
 export interface IFulfillment extends Document {

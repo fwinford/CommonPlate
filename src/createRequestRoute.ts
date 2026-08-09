@@ -11,6 +11,7 @@ import { escapeHtml } from "./htmlEscape.js";
 import { startHelperNewRequestPush } from "./helperNewRequestPush.js";
 import { isValidRawInstallationCredential } from "./installationCredential.js";
 import { notifySubscribersForRequest } from "./notifySubscribers.js";
+import { isVisibleNow } from "./requestAvailability.js";
 import { resolveRequestInstallationAssociation } from "./requestInstallationAssociation.js";
 import {
   isSupportedVendor,
@@ -530,6 +531,16 @@ export async function createRequest(
       windowEnd: validated.timing === "scheduled" ? expiresAt : undefined,
       status: "open",
       visibleFrom,
+      // Which path owns starting helper notification for this request (W3-N3).
+      // Decided by the one visibility rule every other path applies, so this
+      // records what the two dispatches started below will actually do rather
+      // than a second opinion about it: a request that is helper-visible now is
+      // being dispatched for now, and a future Later request is not — its
+      // dispatches will both find it unavailable and do nothing, and the
+      // eligibility sweep picks it up at `visibleFrom` instead.
+      helperNotification: isVisibleNow(visibleFrom, now)
+        ? "initiated"
+        : "awaiting-eligibility",
       expiresAt,
       deleteAt: expiresAt,
       ...(installationId ? { installationId } : {}),

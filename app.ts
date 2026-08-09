@@ -118,6 +118,7 @@ import {
   createRequest,
   createRequestRateLimiter,
 } from "./src/createRequestRoute.js";
+import { scheduleEligibilityNotificationSweep } from "./src/eligibilityNotificationSweep.js";
 import {
   FULFILLMENT_ROUTE_PATH,
   fulfillRequest,
@@ -438,6 +439,14 @@ if (process.env.CRON_ENABLED === 'true') {
 } else {
   console.log('[cron] disabled — set CRON_ENABLED=true to enable scheduled cleanup');
 }
+
+// A request whose helper eligibility begins after its creation — a future Later
+// request (W3-R1) — is deliberately not dispatched for at creation. This is
+// what starts the existing helper email and push lifecycle at its `visibleFrom`
+// instead. Registered independently of `CRON_ENABLED`, like the digest and the
+// other notification jobs, because it is not a cleanup backup: without it those
+// requests are never notified about at all.
+scheduleEligibilityNotificationSweep();
 
 // ---- error handler (must be last) ----
 app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {

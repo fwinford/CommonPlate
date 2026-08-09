@@ -18,6 +18,7 @@ import {
   type ApnsOutcome,
 } from "./apnsClient.js";
 import { apnsProviderTokenSource } from "./apnsProviderToken.js";
+import type { HelperNotificationInitiation } from "./helperNotificationInitiation.js";
 import {
   buildHelperNewRequestHeaders,
   buildHelperNewRequestPayload,
@@ -92,6 +93,16 @@ export interface HelperPushDispatchSummary {
   accepted: number;
   rejected: number;
   failed: number;
+  /**
+   * Claims that could not be written for a reason other than "another dispatch
+   * already owns this triple". Counted apart from `failed`, which is provider
+   * truth: this installation was never submitted for and nothing about it was
+   * recorded, so it is the one outcome here that leaves initiation undecided
+   * (`src/helperNotificationInitiation.ts`). It adds no provider retry — the
+   * eligibility sweep may look at the request again, and any installation that
+   * *was* claimed is skipped as a duplicate.
+   */
+  claimFailed: number;
   /** Installations whose exact token/environment retirement matched a row. */
   retired: number;
   /**
@@ -113,9 +124,35 @@ function emptySummary(stop: HelperPushDispatchStop): HelperPushDispatchSummary {
     accepted: 0,
     rejected: 0,
     failed: 0,
+    claimFailed: 0,
     retired: 0,
     persistenceFailed: 0,
   };
+}
+
+/**
+ * Whether this dispatch reached its existing terminal outcome for the request,
+ * or did no initiation work at all. Initiation bookkeeping for the eligibility
+ * sweep only: it introduces no provider retry and reinterprets no provider
+ * answer.
+ *
+ * `paused` and `unavailable` are the two stops that return before anything is
+ * claimed or submitted. A `claimFailed` installation is the same situation at
+ * one installation's scale.
+ *
+ * Everything else stays exactly as terminal as it already was:
+ * `no-eligible-installations` is a complete dispatch to nobody,
+ * `configuration` is a per-deployment or per-request payload defect that
+ * repeating cannot fix, and `provider-auth` and `deadline` are the accepted
+ * abandonments — re-running them is the retry V1 deliberately does not have.
+ */
+export function helperPushInitiation(
+  summary: HelperPushDispatchSummary
+): HelperNotificationInitiation {
+  if (summary.stop === "paused" || summary.stop === "unavailable") {
+    return "retryable";
+  }
+  return summary.claimFailed > 0 ? "retryable" : "processed";
 }
 
 function isDuplicateKeyError(error: unknown): boolean {
@@ -416,7 +453,10 @@ export async function dispatchHelperNewRequestPush(
         summary.duplicate += 1;
         return;
       }
-      summary.failed += 1;
+      // Not a provider outcome: nothing was submitted and nothing was
+      // recorded, so this is counted apart from `failed` rather than being
+      // reported as a delivery failure.
+      summary.claimFailed += 1;
       console.error(
         `[push] could not claim a helper push delivery for request ${requestId}`,
         { error: errorLabel(error) }

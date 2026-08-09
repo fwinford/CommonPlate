@@ -176,6 +176,44 @@ describe("Request lifecycle and retention schema", () => {
     ).toEqual(["pending", "sent", "failed"]);
     expect(MealRequest.schema.path("helperPhone")).toBeUndefined();
   });
+
+  it("models helper-notification ownership with no default state", () => {
+    const path = MealRequest.schema.path("helperNotification") as unknown as {
+      options: { enum: string[]; default?: unknown };
+    };
+
+    expect(path.options.enum).toEqual(["awaiting-eligibility", "initiated"]);
+    // Absent is a third meaning — a row persisted before this field existed,
+    // which the eligibility sweep must never select. A default would erase it
+    // and hand every legacy row to the sweep.
+    expect(path.options.default).toBeUndefined();
+    expect(new MealRequest().helperNotification).toBeUndefined();
+  });
+
+  it("indexes only the requests still awaiting eligibility-time notification", () => {
+    expect(MealRequest.schema.indexes()).toEqual(
+      expect.arrayContaining([
+        [
+          { visibleFrom: 1 },
+          expect.objectContaining({
+            name: "request_helper_notification_awaiting",
+            partialFilterExpression: {
+              helperNotification: "awaiting-eligibility",
+            },
+          }),
+        ],
+      ])
+    );
+    // A selection index, not a uniqueness guarantee: exactly-once initiation
+    // comes from the sweep's conditional update.
+    const awaiting = MealRequest.schema
+      .indexes()
+      .find(
+        ([, options]) =>
+          options.name === "request_helper_notification_awaiting"
+      );
+    expect(awaiting?.[1].unique).toBeUndefined();
+  });
 });
 
 describe("Fulfillment all-time ledger schema", () => {

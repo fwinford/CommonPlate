@@ -110,14 +110,17 @@ describe("notification dispatch when public actions are resumed", () => {
   });
 
   it("resumes the real-time path past the pause guard", async () => {
-    // Reaching the idempotency check proves the guard did not short-circuit;
-    // reporting an existing successful send stops the rest of the flow.
+    // Reaching the availability re-check and then the recipient query proves
+    // the guard did not short-circuit; an empty eligible set stops the rest.
     models.Request.exists.mockResolvedValue({ _id: request()._id });
-    models.SendLog.exists.mockResolvedValue({ _id: "already-sent" });
+    models.Subscriber.find.mockReturnValue({
+      sort: vi.fn().mockResolvedValue([]),
+    });
 
     await notifySubscribersForRequest(request());
 
-    expect(models.SendLog.exists).toHaveBeenCalledOnce();
+    expect(models.Request.exists).toHaveBeenCalledOnce();
+    expect(models.Subscriber.find).toHaveBeenCalledOnce();
     expect(sendNewRequestAlert).not.toHaveBeenCalled();
   });
 
@@ -246,6 +249,140 @@ describe("notification dispatch when public actions are resumed", () => {
       { _id: sub._id },
       { $set: { lastSentAt: expect.any(Date) }, $inc: { dailyCount: 1 } }
     );
+  });
+
+  it("has no request-wide short-circuit for an already-sent request", async () => {
+    // The policy is every confirmed, non-bounced subscriber for every eligible
+    // request. One address already having been sent this request says nothing
+    // about the others, and asking "has anyone been sent this?" silenced
+    // everybody behind the first success.
+    const subs = [
+      subscriberWithId("64b00000000000000000001c"),
+      subscriberWithId("64b00000000000000000001d"),
+    ];
+    setUpEligible(subs);
+    models.SendLog.exists.mockResolvedValue({ _id: "already-sent" });
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledTimes(2);
+    // The request-level read is gone entirely, not merely ignored.
+    expect(models.SendLog.exists).not.toHaveBeenCalled();
+  });
+
+  it("skips only the recipient who already has a claim, and processes the rest", async () => {
+    // A already has a successful SendLog; B and C do not. The unique
+    // per-recipient claim is what decides, one subscriber at a time.
+    const [a, b, c] = [
+      subscriberWithId("64b00000000000000000001e"),
+      subscriberWithId("64b00000000000000000001f"),
+      subscriberWithId("64b000000000000000000020"),
+    ];
+    setUpEligible([a, b, c]);
+    const duplicateKeyError = Object.assign(new Error("E11000 duplicate key"), {
+      code: 11000,
+    });
+    models.SendLog.create.mockImplementation(async (claim: any) =>
+      String(claim.subscriberId) === String(a._id)
+        ? Promise.reject(duplicateKeyError)
+        : { _id: "claim" }
+    );
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledTimes(2);
+    expect(sendNewRequestAlert).toHaveBeenCalledWith(b, request());
+    expect(sendNewRequestAlert).toHaveBeenCalledWith(c, request());
+    expect(sendNewRequestAlert).not.toHaveBeenCalledWith(a, request());
+  });
+
+  it("resumes the remaining recipients after an interrupted fan-out", async () => {
+    // The first attempt reached A and died. The second must not stop at A.
+    const [a, b] = [
+      subscriberWithId("64b000000000000000000021"),
+      subscriberWithId("64b000000000000000000022"),
+    ];
+    setUpEligible([a, b]);
+    const duplicateKeyError = Object.assign(new Error("E11000 duplicate key"), {
+      code: 11000,
+    });
+    models.SendLog.create.mockImplementation(async (claim: any) =>
+      String(claim.subscriberId) === String(a._id)
+        ? Promise.reject(duplicateKeyError)
+        : { _id: "claim" }
+    );
+    sendNewRequestAlert.mockResolvedValue(undefined);
+
+    const initiation = await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).toHaveBeenCalledOnce();
+    expect(sendNewRequestAlert).toHaveBeenCalledWith(b, request());
+    expect(initiation).toBe("processed");
+  });
+
+  it("keeps the digest's own rows deduplicating a repeat for the same recipient", async () => {
+    // The hourly digest writes the same `(requestId, subscriberId)` rows, so a
+    // subscriber who received the digest for this request is skipped here by
+    // the same claim — without suppressing anybody else.
+    const digested = subscriberWithId("64b000000000000000000023");
+    setUpEligible([digested]);
+    models.SendLog.create.mockRejectedValue(
+      Object.assign(new Error("E11000 duplicate key"), { code: 11000 })
+    );
+
+    await notifySubscribersForRequest(request());
+
+    expect(sendNewRequestAlert).not.toHaveBeenCalled();
+  });
+
+  describe("initiation reporting for the eligibility sweep", () => {
+    it("reports a request that is no longer available as retryable", async () => {
+      models.Request.exists.mockResolvedValue(null);
+
+      expect(await notifySubscribersForRequest(request())).toBe("retryable");
+    });
+
+    it("reports an unwritten claim as retryable", async () => {
+      // Neither notified nor recorded, so nothing about this request has been
+      // decided and its one initiation must not be consumed.
+      const sub = subscriberWithId("64b000000000000000000024");
+      setUpEligible([sub]);
+      models.SendLog.create.mockRejectedValue(new Error("database unavailable"));
+
+      expect(await notifySubscribersForRequest(request())).toBe("retryable");
+      expect(sendNewRequestAlert).not.toHaveBeenCalled();
+    });
+
+    it("reports no eligible subscribers as terminally processed", async () => {
+      // The accepted lifecycle notifies whoever is eligible when a request
+      // becomes eligible; it does not hold the request open for a future
+      // subscriber.
+      models.Request.exists.mockResolvedValue({ _id: request()._id });
+      models.Subscriber.find.mockReturnValue({
+        sort: vi.fn().mockResolvedValue([]),
+      });
+
+      expect(await notifySubscribersForRequest(request())).toBe("processed");
+    });
+
+    it.each([
+      ["a delivered alert", undefined],
+      ["a provider failure", new Error("provider outage")],
+    ])("reports %s as terminally processed", async (_label, failure) => {
+      // A failed send keeps its `fail` row, which the unique claim turns into
+      // a skip next time. Neither outcome is ever attempted twice.
+      const sub = subscriberWithId("64b000000000000000000025");
+      setUpEligible([sub]);
+      if (failure) {
+        sendNewRequestAlert.mockRejectedValue(failure);
+      } else {
+        sendNewRequestAlert.mockResolvedValue(undefined);
+      }
+
+      expect(await notifySubscribersForRequest(request())).toBe("processed");
+    });
   });
 
   it("does not read or write the notify_cursor System document on the real-time path", async () => {

@@ -1,16 +1,24 @@
 import { Subscriber, SendLog, IRequest, ISubscriber, Request as MealRequest } from "../models/db.js";
 import { sendNewRequestAlert } from "./emailHelpers.js";
+import type { HelperNotificationInitiation } from "./helperNotificationInitiation.js";
 import { isPublicActionsPaused, logPausedSkip } from "./publicActionsPause.js";
 import { buildEffectiveAvailabilityFilter } from "./requestAvailability.js";
 
 // Notify every confirmed, non-bounced subscriber about a new eligible request.
-export async function notifySubscribersForRequest(request: IRequest) {
+//
+// The return value is initiation bookkeeping for the eligibility sweep
+// (`src/helperNotificationInitiation.ts`), not a delivery result. Callers that
+// dispatch at creation time ignore it, and it changes nothing about who is
+// emailed or what a provider outcome means.
+export async function notifySubscribersForRequest(
+  request: IRequest
+): Promise<HelperNotificationInitiation> {
   // Guarded here rather than only at the create route because this function is
   // also called directly (scripts/trigger-notify.ts). Returning before the
   // SendLog claim means a skipped alert leaves no delivery record behind.
   if (isPublicActionsPaused()) {
     logPausedSkip(`real-time alert for request ${request._id}`);
-    return;
+    return "retryable";
   }
 
   console.log(`[notify] called for request ${request._id} vendor=${request.vendor} pickupWindow=${request.pickupWindowText}`);
@@ -26,19 +34,21 @@ export async function notifySubscribersForRequest(request: IRequest) {
     console.log(
       `[notify] request ${request._id} is no longer available, skipping`
     );
-    return;
+    return "retryable";
   }
 
-  // Idempotency: only skip if there's already a successful send for this request.
-  // This allows retries when previous attempts failed while still preventing duplicate
-  // notifications once a send has succeeded.
-  const hasSuccessfulSend = await SendLog.exists({ requestId: request._id, status: 'sent' });
-  if (hasSuccessfulSend) {
-    console.log(`[notify] already sent for request ${request._id}, skipping`);
-    return;
-  } else {
-    console.log(`[notify] no successful SendLog for request ${request._id}, proceeding`);
-  }
+  // Deduplication is per recipient and nowhere else. The unique
+  // `(requestId, subscriberId)` claim below decides, one subscriber at a time,
+  // whether that specific address has already been processed for this request —
+  // by an earlier real-time attempt, by a concurrent one, or by the hourly
+  // digest, which writes the same rows.
+  //
+  // There is deliberately no request-level short-circuit. A single successful
+  // send does not mean the request is done: the accepted policy is that every
+  // confirmed, non-bounced subscriber is considered for every eligible request,
+  // and an interrupted fan-out that reached one address must be able to resume
+  // for the rest. Asking "has anyone been sent this?" answered a different
+  // question and silenced everybody behind the first success.
 
   // V1 real-time policy: every confirmed, non-bounced subscriber is notified
   // for every eligible request — no cooldown, no daily cap, no round-robin
@@ -56,10 +66,19 @@ export async function notifySubscribersForRequest(request: IRequest) {
 
   if (!eligible.length) {
     console.log(`[notify] no eligible subscribers for request ${request._id}, exiting`);
-    return;
+    // Terminally processed, not retryable: the accepted lifecycle notifies
+    // whoever is eligible when a request becomes eligible. It does not hold the
+    // request open until somebody subscribes.
+    return "processed";
   }
 
   let notified = 0;
+  // A claim that could not be written for any reason other than "already
+  // claimed" means this subscriber was neither notified nor recorded, so this
+  // request's initiation has not been decided. Tracked only to answer that
+  // question for the eligibility sweep; it changes nothing about the loop,
+  // which still isolates every subscriber from every other one.
+  let claimWriteFailed = false;
   for (const sub of eligible) {
     console.log(`[notify] processing subscriber ${String(sub._id)} <${sub.email}> for request ${request._id}`);
     // Atomic claim: try to insert a pending SendLog to claim this (request,subscriber).
@@ -80,6 +99,7 @@ export async function notifySubscribersForRequest(request: IRequest) {
         continue; // skip this subscriber
       }
       // Unexpected error creating claim - log and skip
+      claimWriteFailed = true;
       console.error('[notify] Error creating SendLog claim:', claimErr);
       continue;
     }
@@ -115,6 +135,12 @@ export async function notifySubscribersForRequest(request: IRequest) {
   if (notified) {
     console.log(`[notify] sent to ${notified} of ${eligible.length} eligible subscribers for request ${request._id}`);
   }
+
+  // Every send outcome above is terminal and stays terminal: a delivered alert
+  // is not repeated, and a failed one keeps its `fail` row, which the unique
+  // claim turns into a skip next time. Only an unwritten claim leaves anything
+  // undecided.
+  return claimWriteFailed ? "retryable" : "processed";
 }
 
 // Notify a single subscriber about recent un-notified requests (used after double-opt-in)

@@ -15,7 +15,9 @@ import {
   HELPER_NEW_REQUEST_PURPOSE,
   PUSH_DELIVERY_RETENTION_MS,
   dispatchHelperNewRequestPush,
+  helperPushInitiation,
   startHelperNewRequestPush,
+  type HelperPushDispatchSummary,
 } from "./helperNewRequestPush.js";
 
 /**
@@ -395,7 +397,11 @@ describe("helper push deduplication", () => {
 
     const summary = await dispatch({ openConnection: connections.openConnection });
 
-    expect(summary.failed).toBe(1);
+    // Counted apart from `failed`, which is provider truth. Nothing was
+    // submitted and nothing was recorded for this installation, so this is not
+    // a delivery failure — it is initiation that did not happen.
+    expect(summary.claimFailed).toBe(1);
+    expect(summary.failed).toBe(0);
     expect(connections.submissions).toHaveLength(0);
     expect(pushUpdate).not.toHaveBeenCalled();
   });
@@ -888,5 +894,95 @@ describe("the total start function", () => {
     } } as unknown as IRequest;
 
     expect(() => startHelperNewRequestPush(broken)).not.toThrow();
+  });
+});
+
+describe("initiation reporting for the eligibility sweep", () => {
+  /**
+   * Initiation bookkeeping only. Every provider outcome below keeps exactly the
+   * terminal, no-retry meaning it already had; the distinction is whether this
+   * dispatch reached one at all.
+   */
+  function summaryWith(
+    overrides: Partial<HelperPushDispatchSummary>
+  ): HelperPushDispatchSummary {
+    return {
+      stop: "completed",
+      eligible: 1,
+      skippedEnvironment: 0,
+      claimed: 1,
+      duplicate: 0,
+      accepted: 1,
+      rejected: 0,
+      failed: 0,
+      claimFailed: 0,
+      retired: 0,
+      persistenceFailed: 0,
+      ...overrides,
+    };
+  }
+
+  it.each(["paused", "unavailable"] as const)(
+    "reports %s as retryable, because nothing was initiated",
+    (stop) => {
+      expect(helperPushInitiation(summaryWith({ stop }))).toBe("retryable");
+    }
+  );
+
+  it("reports an unwritten claim as retryable", () => {
+    expect(
+      helperPushInitiation(summaryWith({ claimFailed: 1, claimed: 0 }))
+    ).toBe("retryable");
+  });
+
+  it.each([
+    ["a completed dispatch", summaryWith({})],
+    [
+      "an accepted submission",
+      summaryWith({ accepted: 1 }),
+    ],
+    [
+      "a token rejection",
+      summaryWith({ accepted: 0, rejected: 1, retired: 1 }),
+    ],
+    [
+      "a transient provider failure",
+      summaryWith({ accepted: 0, failed: 1 }),
+    ],
+    [
+      "an outcome that could not be recorded after submission",
+      summaryWith({ persistenceFailed: 1 }),
+    ],
+    [
+      "a duplicate another dispatch already owned",
+      summaryWith({ claimed: 0, duplicate: 1, accepted: 0 }),
+    ],
+    [
+      "no eligible installations",
+      summaryWith({
+        stop: "no-eligible-installations",
+        eligible: 0,
+        claimed: 0,
+        accepted: 0,
+      }),
+    ],
+    [
+      "an abandoned provider-auth dispatch",
+      summaryWith({ stop: "provider-auth", accepted: 0, failed: 1 }),
+    ],
+    [
+      "an abandoned deadline dispatch",
+      summaryWith({ stop: "deadline" }),
+    ],
+    [
+      "an unusable configuration or payload",
+      summaryWith({ stop: "configuration", eligible: 0, claimed: 0, accepted: 0 }),
+    ],
+  ])("reports %s as terminally processed", (_label, summary) => {
+    // None of these may be repeated: V1 has no push retry, and re-running them
+    // is precisely the duplicate submission the `PushDelivery` claim exists to
+    // prevent. Reporting them as processed is what stops the eligibility sweep
+    // from looping on the request until it expires.
+    expect(helperPushInitiation(summary)).toBe("processed");
   });
 });

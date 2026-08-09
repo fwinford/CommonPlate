@@ -147,6 +147,9 @@ describe("POST /api/request validation and persistence", () => {
       windowEnd: undefined,
       status: "open",
       visibleFrom: createdAt,
+      // Helper-visible at creation, so creation-time dispatch is the
+      // initiation and the eligibility sweep never owns this request (W3-N3).
+      helperNotification: "initiated",
       expiresAt: asapExpiresAt,
       deleteAt: asapExpiresAt,
     });
@@ -994,6 +997,107 @@ describe("POST /api/request backend-owned visibility and expiration", () => {
     expect(createDocument).not.toHaveBeenCalled();
     expect(resendSend).not.toHaveBeenCalled();
     expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/request eligibility-time notification ownership (W3-N3)", () => {
+  /**
+   * Which path owns starting this request's helper notification is decided
+   * once, at creation, from the same visibility rule every other path applies.
+   * The sweep in `src/eligibilityNotificationSweep.ts` owns what creation-time
+   * dispatch cannot: a request that is not helper-eligible yet.
+   */
+  function persistedState(): unknown {
+    const persistedInput = createDocument.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    return persistedInput.helperNotification;
+  }
+
+  it("records an ASAP request as already initiated at creation", async () => {
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    // Creation-time dispatch is this request's initiation, exactly as before.
+    // Recording that is what keeps the sweep from ever selecting it and
+    // producing a second notification for an ASAP request.
+    expect(persistedState()).toBe("initiated");
+  });
+
+  it("hands a future Later request to eligibility-time initiation", async () => {
+    const context = routeContext(canonicalScheduled());
+
+    await createRequest(context.req, context.res);
+
+    expect(persistedState()).toBe("awaiting-eligibility");
+  });
+
+  it("keeps a Later start exactly at the backend's now on the creation-time path", async () => {
+    // The same inclusive bound as `isVisibleNow` and `isAcceptableScheduledStart`:
+    // a request visible at this instant is dispatched for at this instant, and
+    // must not also be handed to the sweep.
+    const context = routeContext(
+      canonicalScheduled({ windowStart: createdAt.toISOString() })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(persistedState()).toBe("initiated");
+  });
+
+  it("applies the same ownership rule to the legacy web scheduled shape", async () => {
+    const context = routeContext({
+      vendor: "Palladium",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email: "requester@nyu.edu",
+      pickupWindowText: "ignored legacy display text",
+      windowStart: "2026-07-28T17:00:00.000Z",
+      windowEnd: "2026-07-28T18:00:00.000Z",
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(persistedState()).toBe("awaiting-eligibility");
+  });
+
+  it("still starts both creation-time dispatches for a future Later request", async () => {
+    // Withholding is the dispatchers' shared availability re-check, not the
+    // route quietly skipping them. Changing that would make the create path
+    // and the sweep path two different behaviors instead of one.
+    const context = routeContext(canonicalScheduled());
+
+    await createRequest(context.req, context.res);
+
+    expect(notifySubscribersForRequest).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a client that tries to name its own notification state", async () => {
+    for (const body of [
+      canonicalAsap({ helperNotification: "initiated" }),
+      canonicalScheduled({ helperNotification: "initiated" }),
+    ]) {
+      const context = routeContext(body);
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(400);
+      expect(createDocument).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the notification state out of the public response", async () => {
+    const context = routeContext(canonicalScheduled());
+
+    await createRequest(context.req, context.res);
+
+    const body = JSON.parse(
+      JSON.stringify(context.json.mock.calls[0][0])
+    ) as Record<string, Record<string, unknown>>;
+
+    expect(body.request).not.toHaveProperty("helperNotification");
   });
 });
 
