@@ -16,6 +16,18 @@ Current scope excludes authentication, chat, maps, payments, cancellation, picku
 
 Backend time is authoritative for availability, the five-minute claim threshold, and claim deadlines. Public list membership is effective availability, not simply the stored `status`; listed records are projected as `open`. `expiresAt` ends availability. `deleteAt` controls TTL retention: it initially matches `expiresAt`, while placement retains the request for seven days from `placedAt` by moving `deleteAt` without changing `expiresAt`.
 
+### 2.1 NYU campus time and request availability windows
+
+`America/New_York` is the canonical request timezone, named by IANA identifier so every conversion is DST-correct on its own. Backend time is authoritative for all request timing and availability; iOS presents and submits Later timing in NYU campus time even when the device is set to a different timezone (verified on a physical device configured to non-Eastern Phoenix time, with no source-text-only reliance).
+
+Two backend-owned absolute instants define a request's window: `visibleFrom` (when helpers begin seeing it) and `expiresAt` (`visibleFrom` plus a three-hour duration). An ASAP request becomes visible from the backend creation instant; a Later request becomes visible from its accepted scheduled start. Both instants are written explicitly at creation and are never accepted from a client.
+
+A Later start earlier than the creation instant is refused (`400 INVALID_REQUEST`) ahead of the daily-limit read, the write, the requester confirmation email, and helper notification, so a refused create has no side effect; the requester's Later selection is never silently converted to ASAP.
+
+A future Later request is not publicly visible before its `visibleFrom`: the public list, helper-alert selection, and the claim mutation all apply the same visibility rule, and direct public detail (`GET /api/request/:id`) reveals no request content and answers `409 REQUEST_NOT_YET_AVAILABLE` (`"This request is not available to help with yet."`) rather than `404`, so "come back later" stays distinct from "no such request." Claiming before `visibleFrom` answers the same `409 REQUEST_NOT_YET_AVAILABLE`. Legacy rows persisted before `visibleFrom` existed carry no value for it and are treated as visible from creation, so they remain unaffected.
+
+Presentation: the three-hour availability rule is explained once, where the requester chooses timing; downstream request/helper surfaces (lists, detail, requester and helper email, digest email, push) do not repeat it. The shared backend timing label for an ASAP request is `ASAP`; Later surfaces use the concrete backend-derived start/end window text instead of restating the rule.
+
 ## 3. Public and private data boundaries
 
 The public request projection is allowlisted: `id`, vendor, food, pickup-window text and bounds, persisted/projection status, `createdAt`, and `expiresAt`. It is used for list and detail responses.
@@ -71,7 +83,9 @@ Association is best-effort against unexpected backend persistence failure: if es
 
 ## 7. Daily request abuse control
 
-CommonPlate attempts to limit each email to three requests per day. The backend counts before creating, serially in the handler; this is best-effort abuse control, not an atomic quota transaction. A failed count read fails closed. Concurrent create requests can exceed the limit. Atomic enforcement is deferred to Week 5 if usage requires it.
+CommonPlate attempts to limit each email to three requests per NYU/New York calendar day (`startOfCampusDay`, not the requesting process's local timezone). The backend counts before creating, serially in the handler; this is best-effort abuse control, not an atomic quota transaction. A failed count read fails closed. Concurrent create requests can exceed the limit. Atomic enforcement is deferred to Week 5 if usage requires it.
+
+Ordinary Request Food presentation does not continuously advertise this limit. Only an actual `REQUEST_LIMIT_REACHED` refusal tells the requester to try again after midnight Eastern/New York time.
 
 ## 8. Email and notification truth
 

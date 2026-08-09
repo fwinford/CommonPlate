@@ -43,7 +43,7 @@ Run:
 npm test
 ```
 
-The current accepted baseline is **942 passed, 169 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
+The current accepted baseline is **990 passed, 172 Mongo-gated skipped**. Skipped Mongo suites are not failures. This command does not execute the real-Mongo transactional suite; run `npm run test:mongo` separately.
 
 Representative coverage includes validation, route logic, error envelopes, browser behavior, copy guards, and source-wiring assertions. Some tests read source text instead of importing `app.ts`, because `app.ts` connects to MongoDB and starts listening at module scope. These assertions are not end-to-end route tests.
 
@@ -177,6 +177,14 @@ Week 3 Day 7 Slices 7B and 7C add, relative to the supported-vendor integrity ba
 
 No Mongo suite reads or writes `Subscriber`, `SendLog`, or `System` selection logic differently under these slices — the change is a query-shape and dispatch-timing change, not new persistence, transaction, or index behavior — so `npm run test:mongo` was not rerun and stands at its Slice 5B baseline below.
 
+### Request correctness (W3-R1) coverage
+
+W3-R1 is ACCEPTED: NYU/`America/New_York` campus-time request timing, the ASAP/Later `visibleFrom`/`expiresAt` availability window, elapsed-Later refusal, pre-`visibleFrom` withholding on public detail and claim (`REQUEST_NOT_YET_AVAILABLE`), and the daily-quota calendar-day boundary are covered in `src/createRequestRoute.test.ts`, `src/requestTiming.test.ts`, `src/requestAvailability.test.ts`, and the corresponding iOS suites (`RequestCreationViewTests.swift`, `RequestFetchingTests.swift`, `ClaimFlowTests.swift`). These behaviors are unchanged from the checkpoint commit and are now promoted as accepted runtime truth in `docs/system-contract.md` section 2.1.
+
+Faith's revised presentation contract — removing the standing daily-quota notice from ordinary Request Food presentation, explaining the three-hour availability rule once at the timing choice instead of repeatedly downstream, and shortening the shared backend `ASAP` timing label — added and updated cases in `src/createRequestRoute.test.ts` (the shared `ASAP_WINDOW_TEXT` label and its propagation to `pickupWindowText`), `ios/CommonPlateios/CommonPlateiosTests/RequestPostingLimitCopyTests.swift` (the standing notice is gone from the ordinary form; the actual limit-reached recovery sentence is unchanged), and `ios/CommonPlateios/CommonPlateiosTests/RequestCreationViewTests.swift` (the timing-choice form states the three-hour rule exactly once per timing; the post-submit success screen states only the confirmation, with a scoped test reading the `successView` declaration's own source to guard against any reintroduction of timing/expiration policy there, under any name).
+
+No persistence, schema, query, or notification-routing behavior changed, so `npm run test:mongo` was not rerun for the presentation correction itself and stands at its own baseline below. The non-Eastern `DatePicker` physical-device timezone proof (Phoenix time) predates and is unaffected by the presentation correction, which does not touch timezone rendering or submission code; see the environmental-proof note in section 9.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -185,7 +193,7 @@ Run:
 npm run test:mongo
 ```
 
-The current accepted baseline is **169 passed**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
+The current accepted baseline is **172 passed across 13 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
 
 A replica set is required because placement verification exercises MongoDB transactions; standalone MongoDB cannot provide that behavior. Mongo verification remains incomplete until this command passes. `npm test` reporting the Mongo suites as skipped does not replace this run.
 
@@ -255,9 +263,11 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted baseline is **508 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
+The current accepted baseline is **505 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target. The count moved from 508 at the W3-R1 presentation contract's fixes: a net reduction from consolidating the standing daily-quota-notice tests and the post-submit success-screen expiration tests down to the cases the accepted presentation contract still requires.
 
 Automated routing tests (this target included) prove tap-routing logic against stubbed backend resolution; they do not by themselves prove real APNs terminated-launch handoff on a device. Physical-device proof was required for helper terminated-launch tap routing and for requester-fulfillment push, and both have now passed on a physical iPhone. Release/Archive/TestFlight signing and environment behavior is unrelated evidence and remains a separate, still-open environmental gate (see `docs/system-contract.md` section 11).
+
+Automated and source-text assertions can prove that `RequestFoodView` installs the NYU/New York timezone and calendar into the SwiftUI environment; they cannot prove what a real `DatePicker` renders on a device actually configured to a different timezone. W3-R1 required physical-device verification on a non-Eastern device for exactly that reason: an iPhone configured to Phoenix time (no DST offset from New York for part of the year) displayed the intended NYU/New York wall-clock selection of 10:30 PM rather than device-local Phoenix time, and submitted `windowStart = 2026-08-09T02:30:00.000Z`, `visibleFrom = 2026-08-09T02:30:00.000Z`, and `expiresAt = 2026-08-09T05:30:00.000Z`; the requester email rendered `Aug 8, 10:30 PM – Aug 9, 1:30 AM`. This is device evidence, not part of the automated `CommonPlateiosTests` count above, and it predates and is unaffected by the later presentation-contract correction, which does not touch timezone rendering or submission code.
 
 ## 10. Test-file organization
 
@@ -290,16 +300,18 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend, Mongo, and lint/typecheck/build rows were last recorded at Week 3 Day 6 Slice 6E (requester fulfillment push); the `CommonPlateiosTests` row was last recorded at the Slice 6F terminated-launch helper-notification routing correction, which is iOS-only and did not touch backend or Mongo code.
+These results are a reference baseline, not a substitute for rerunning affected checks after future changes. The backend, Mongo, lint/typecheck/build, and `git diff --check` rows were last recorded at W3-R1 acceptance (request correctness); the `CommonPlateiosTests` row was last recorded at the W3-R1 presentation-contract rereview test-quality correction, which is iOS-only and did not touch backend or Mongo code.
 
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | Passed |
-| `npm test` | 942 passed; 169 Mongo-gated skipped |
-| `npm run test:mongo` | 169 passed |
+| `npm test` | 990 passed; 172 Mongo-gated skipped |
+| `npm run test:mongo` | 172 passed across 13 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | 508 passed; 0 failed; TEST SUCCEEDED |
-| `npm run build:client` | Not part of Slice 6E's recorded verification; row still stands as recorded at Week 3 Day 7 Slice 7A |
+| `CommonPlateiosTests` | 505 passed; 0 failed; TEST SUCCEEDED |
+| `npm run build:client` | Passed; regenerated bundles matched the tracked output exactly (no diff), confirmed at W3-R1 acceptance |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
+
+The non-Eastern `DatePicker` timezone proof required for W3-R1 (see section 9) is likewise device evidence, not part of the automated suite above.

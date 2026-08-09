@@ -67,11 +67,9 @@ enum RequestCreatePresentationError: Equatable {
         case .invalidEmail:
             return RequestFoodFormError.invalidEmail.message
         case .requestLimitReached:
-            // The limit-state sentence only. The standing policy it enforces is
-            // its own sentence on the form
-            // (`RequestFoodView.postingLimitPolicyNotice`), shown before
-            // anything is typed, so the refusal does not have to teach the rule
-            // and explain the reset in one breath.
+            // Under the revised W3-R1 presentation contract, the daily quota is
+            // not advertised on the ordinary form — only this actual-limit
+            // recovery sentence, reached solely by a real backend refusal.
             return RequestFoodView.postingLimitReachedNotice
         case .rateLimited:
             // Same sentence the helper sees for a throttled claim, since the
@@ -180,18 +178,6 @@ struct RequestFoodView: View {
     static let emailPurposeNotice =
         "We use your email to coordinate updates about your request. Helpers never see it."
 
-    /// The standing posting-limit policy, shown before anything is submitted so
-    /// the rule is not something a student discovers only by being refused.
-    ///
-    /// "attempts to" is exact and deliberate: the backend counts today's
-    /// requests for this address before writing, which is best-effort abuse
-    /// control rather than a transactional guarantee, so the copy must not
-    /// promise an enforcement the runtime does not make. "(New York time)"
-    /// names the calendar day the count actually resets on
-    /// (`startOfCampusDay` in `src/utils/date.ts`), which is not the device's.
-    static let postingLimitPolicyNotice =
-        "CommonPlate attempts to limit each email to 3 meal requests per day (New York time)."
-
     /// Shown when the backend answers `REQUEST_LIMIT_REACHED`. Names the reset
     /// the requester is actually waiting for — campus midnight, not the
     /// device's — rather than a vague "tomorrow", and never describes the
@@ -199,18 +185,6 @@ struct RequestFoodView: View {
     /// student can act on.
     static let postingLimitReachedNotice =
         "Daily request limit reached. Try again after midnight Eastern Time."
-
-    /// Requester-facing timing copy. These two sentences must stay equal to the
-    /// backend contract in `src/requestTiming.ts`, which writes `visibleFrom`
-    /// and `expiresAt` explicitly at creation: an ASAP request becomes visible
-    /// at the backend creation instant, a scheduled one at its accepted start,
-    /// and both stay available for three hours from there. Neither sentence
-    /// promises fulfillment, and the scheduled one deliberately does not claim
-    /// the request is visible yet.
-    static let asapExpirationNotice =
-        "Your request is now visible to helpers. It will expire in 3 hours if it is not fulfilled."
-    static let scheduledExpirationNotice =
-        "Helpers will start seeing your request at the time you chose. It stays up for 3 hours after that, then expires if it is not fulfilled."
 
     /// Shown beneath the single scheduled-time control, which collects only a
     /// start; the end is derived by the backend. The student would otherwise
@@ -249,10 +223,6 @@ struct RequestFoodView: View {
     /// authoritative message for anything the server decided.
     @State private var showsLocalRejectionPointer = false
     @State private var didCreateRequest = false
-    /// The timing of the request the backend confirmed, captured at submission
-    /// so the success screen states that request's real expiration rather than
-    /// whatever the picker happens to show afterwards.
-    @State private var confirmedTiming: RequestTiming = .asap
     @FocusState private var focusedField: RequestFoodFormField?
 
     /// Campus time, not device time. Every day boundary, every clamp, and the
@@ -423,11 +393,6 @@ struct RequestFoodView: View {
                 .font(.title)
                 .fontWeight(.bold)
 
-            Text(Self.expirationNotice(for: confirmedTiming))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("request-success-expiration")
-
             Button("Back to Home") {
                 dismiss()
             }
@@ -560,10 +525,18 @@ struct RequestFoodView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
-                Text(Self.formExpirationNotice(for: draft.timing))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("request-form-expiration")
+                // The three-hour rule is explained once at this timing choice.
+                // A `Later` draft already reads it, tied to the concrete start
+                // it chose, in `scheduledWindowNotice` above; restating the
+                // generic form here would say the same thing twice on one
+                // screen. An `ASAP` draft has no picked start to attach it to,
+                // so this is that draft's only occurrence of the rule.
+                if draft.timing == .asap {
+                    Text(Self.formExpirationNotice(for: draft.timing))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("request-form-expiration")
+                }
             }
 
             Section("Contact") {
@@ -630,16 +603,6 @@ struct RequestFoodView: View {
                     }
                 }
 
-                // Unconditional, beside the action it constrains, and never
-                // swapped for the refusal below it: the same arrangement the
-                // email eligibility rule uses. A standing policy that only
-                // appears once it has been broken is not a policy the student
-                // could have planned around.
-                Text(Self.postingLimitPolicyNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("request-posting-limit-policy")
-
                 Button {
                     Task {
                         await submit()
@@ -691,7 +654,6 @@ struct RequestFoodView: View {
             }
             validationPresentation = result.presentation
             if result.didSubmit {
-                confirmedTiming = submittedDraft.timing
                 didCreateRequest = true
             } else {
                 focusedField = result.firstInvalidTextField
@@ -799,16 +761,6 @@ struct RequestFoodView: View {
                 .font(.footnote)
                 .foregroundStyle(.red)
                 .accessibilityIdentifier(identifier)
-        }
-    }
-
-    /// Success-screen expiration copy for the timing the backend confirmed.
-    static func expirationNotice(for timing: RequestTiming) -> String {
-        switch timing {
-        case .asap:
-            return asapExpirationNotice
-        case .later:
-            return scheduledExpirationNotice
         }
     }
 

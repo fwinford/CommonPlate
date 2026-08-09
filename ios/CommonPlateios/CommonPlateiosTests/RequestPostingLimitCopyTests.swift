@@ -2,12 +2,14 @@
 //  RequestPostingLimitCopyTests.swift
 //  CommonPlateiosTests
 //
-//  W3-R1: the two accepted posting-limit sentences on the request-facing
-//  surface. The backend rule they describe — three requests per normalized
-//  email per NYU/New York calendar day, counted before the write, best-effort
-//  rather than transactional, failing closed when the count cannot be read —
-//  is unchanged by these cases. What they pin is that the student is told the
-//  rule before submitting and told the real reset after being refused.
+//  W3-R1 revised presentation contract: the backend rule these sentences
+//  describe — three requests per normalized email per NYU/New York calendar
+//  day, counted before the write, best-effort rather than transactional,
+//  failing closed when the count cannot be read — is unchanged. What changed
+//  is presentation: the standing policy notice that used to sit on the
+//  ordinary form, unconditionally, before anything was typed, is gone. Only
+//  the actual limit-reached recovery sentence remains, reached solely by a
+//  real `REQUEST_LIMIT_REACHED` refusal.
 //
 
 import XCTest
@@ -15,14 +17,7 @@ import XCTest
 
 final class RequestPostingLimitCopyTests: XCTestCase {
 
-    // MARK: - The accepted sentences
-
-    func testStandingPolicyWordingIsExact() {
-        XCTAssertEqual(
-            RequestFoodView.postingLimitPolicyNotice,
-            "CommonPlate attempts to limit each email to 3 meal requests per day (New York time)."
-        )
-    }
+    // MARK: - The one accepted sentence
 
     func testLimitStateWordingIsExact() {
         XCTAssertEqual(
@@ -46,33 +41,6 @@ final class RequestPostingLimitCopyTests: XCTestCase {
         XCTAssertEqual(mapped.message, RequestFoodView.postingLimitReachedNotice)
     }
 
-    // MARK: - The two are separate, and both are honest
-
-    /// Standing policy and limit state are different jobs. The policy is shown
-    /// before anything is typed; the limit state is only reachable after a
-    /// refusal. Collapsing them would mean either teaching the rule only to
-    /// students who have already broken it, or repeating the reset time on a
-    /// form nobody has submitted.
-    func testThePolicyAndTheLimitStateAreDistinctSentences() {
-        XCTAssertNotEqual(
-            RequestFoodView.postingLimitPolicyNotice,
-            RequestFoodView.postingLimitReachedNotice
-        )
-    }
-
-    /// Enforcement is a best-effort count taken before the write, not a
-    /// transactional quota, so the standing sentence hedges — and must keep
-    /// hedging, because a promise the runtime does not make is the kind of copy
-    /// that quietly becomes false under concurrency.
-    func testTheStandingPolicyDoesNotPromiseGuaranteedEnforcement() {
-        let policy = RequestFoodView.postingLimitPolicyNotice
-
-        XCTAssertTrue(policy.contains("attempts to limit"))
-        XCTAssertTrue(policy.contains("3 meal requests per day"))
-        // The count resets on the campus calendar day, not the device's.
-        XCTAssertTrue(policy.contains("(New York time)"))
-    }
-
     /// "Tomorrow" was ambiguous for a student posting at 11 PM Pacific, whose
     /// allowance had already reset. The reset is a New York midnight, and the
     /// limit-state sentence now says so.
@@ -90,7 +58,6 @@ final class RequestPostingLimitCopyTests: XCTestCase {
     /// short per-IP throttle is a different refusal with different copy.
     func testNoPostingLimitCopyUsesAPIVocabulary() {
         let sentences = [
-            RequestFoodView.postingLimitPolicyNotice,
             RequestFoodView.postingLimitReachedNotice,
             RequestCreatePresentationError.requestLimitReached.message,
             RequestCreatePresentationError.rateLimited.message,
@@ -117,13 +84,14 @@ final class RequestPostingLimitCopyTests: XCTestCase {
         )
     }
 
-    // MARK: - The policy is actually on screen
+    // MARK: - The standing quota notice is gone from ordinary presentation
 
-    /// A standing sentence that exists only as a constant is not a standing
-    /// sentence. The form renders it unconditionally, beside the submit action
-    /// it constrains, with its own identifier — the same arrangement the email
-    /// eligibility rule uses, so a refusal never replaces the rule it broke.
-    func testTheStandingPolicyIsRenderedUnconditionallyOnTheForm() throws {
+    /// Faith's revised presentation contract removed the standing quota
+    /// explanation from ordinary Request Food submission: a student who has
+    /// not encountered the limit is no longer told about it. Only the actual
+    /// limit-reached recovery sentence remains, and it is reached solely by a
+    /// real backend refusal, never rendered unconditionally on the form.
+    func testTheStandingQuotaNoticeIsNotOnTheOrdinaryForm() throws {
         let source = try String(
             contentsOf: repositoryFile(
                 "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
@@ -131,9 +99,12 @@ final class RequestPostingLimitCopyTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(source.contains("Text(Self.postingLimitPolicyNotice)"))
-        XCTAssertTrue(
+        XCTAssertFalse(source.contains("postingLimitPolicyNotice"))
+        XCTAssertFalse(
             source.contains(#".accessibilityIdentifier("request-posting-limit-policy")"#)
+        )
+        XCTAssertFalse(
+            source.contains("attempts to limit each email to 3 meal requests per day")
         )
     }
 
@@ -148,6 +119,9 @@ final class RequestPostingLimitCopyTests: XCTestCase {
 
         XCTAssertFalse(source.contains("three meal requests a day"))
         XCTAssertFalse(source.contains("Please try again tomorrow."))
+        XCTAssertFalse(
+            source.contains("CommonPlate attempts to limit each email to 3 meal requests per day (New York time).")
+        )
     }
 
     // MARK: - Helpers

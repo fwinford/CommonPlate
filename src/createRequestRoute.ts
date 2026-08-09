@@ -216,11 +216,15 @@ function isUsableScheduledStart(windowStart: Date, now: Date): boolean {
 }
 
 /**
- * States the real three-hour lifetime. Helpers read this on every ASAP
- * request, so it has to name the same duration `REQUEST_VISIBLE_DURATION_MS`
- * enforces.
+ * What helpers read on every ASAP request. The three-hour availability rule
+ * is explained once, at the requester's timing choice (`RequestFoodView`'s
+ * form / the legacy web form's radio label); this label deliberately does not
+ * restate it, so every downstream surface that renders `pickupWindowText`
+ * (lists, detail, requester/helper email) is not repeating policy the
+ * requester already saw. `REQUEST_VISIBLE_DURATION_MS` remains the sole
+ * source of the actual duration.
  */
-export const ASAP_WINDOW_TEXT = "ASAP (available for the next 3 hours)";
+export const ASAP_WINDOW_TEXT = "ASAP";
 
 /**
  * What helpers read on every surface that renders a request. Derived here from

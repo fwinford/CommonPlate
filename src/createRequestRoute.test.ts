@@ -29,6 +29,7 @@ vi.mock("./notifySubscribers.js", () => ({
 
 import { Installation, Request as MealRequest } from "../models/db.js";
 import {
+  ASAP_WINDOW_TEXT,
   createRequest,
   createRequestRateLimiter,
 } from "./createRequestRoute.js";
@@ -141,7 +142,7 @@ describe("POST /api/request validation and persistence", () => {
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
-      pickupWindowText: "ASAP (available for the next 3 hours)",
+      pickupWindowText: ASAP_WINDOW_TEXT,
       windowStart: undefined,
       windowEnd: undefined,
       status: "open",
@@ -1010,7 +1011,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
 
     expect(createDocument).toHaveBeenCalledWith(
       expect.objectContaining({
-        pickupWindowText: "ASAP (available for the next 3 hours)",
+        pickupWindowText: ASAP_WINDOW_TEXT,
         windowStart: undefined,
         windowEnd: undefined,
       })
@@ -1778,13 +1779,15 @@ describe("POST /api/request helper email isolation (Slice 7C)", () => {
 
 });
 
-describe("ASAP window text states the real three-hour lifetime", () => {
+describe("ASAP window text carries no duration to go stale", () => {
   /**
-   * `REQUEST_VISIBLE_DURATION_MS` is three hours, and the iOS requester is told
-   * "It will expire in 3 hours". The window text is what *helpers* read, on
-   * every surface that renders a request, so a stale duration makes the two
-   * sides of one request disagree — which is exactly what the earlier
-   * "within the next hour" and "within the next 5 hours" phrasings did.
+   * `REQUEST_VISIBLE_DURATION_MS` is three hours, and the iOS requester is
+   * told this once, at the timing choice, before submission. Under the
+   * revised W3-R1 presentation contract `ASAP_WINDOW_TEXT` no longer restates
+   * that duration on every downstream surface that renders a request, so
+   * there is no prose duration left to drift out of sync — which is exactly
+   * what the earlier "within the next hour" and "within the next 5 hours"
+   * phrasings did.
    */
   const PRODUCTION_SOURCES = [
     "src",
@@ -1815,16 +1818,15 @@ describe("ASAP window text states the real three-hour lifetime", () => {
     }
   );
 
-  it("states the same three hours the expiration enforces", async () => {
+  it("persists the shared ASAP label and the real three-hour deadline separately", async () => {
     const context = routeContext(canonicalAsap());
 
     await createRequest(context.req, context.res);
 
     const persisted = createDocument.mock.calls[0][0] as Record<string, unknown>;
-    expect(persisted.pickupWindowText).toBe(
-      "ASAP (available for the next 3 hours)"
-    );
-    // The copy must name the deadline the record actually carries.
+    expect(persisted.pickupWindowText).toBe(ASAP_WINDOW_TEXT);
+    expect(ASAP_WINDOW_TEXT).not.toMatch(/\d+\s+hours?/i);
+    // The duration truth lives in the instants, not in prose.
     expect(persisted.expiresAt).toEqual(asapExpiresAt);
     expect(persisted.deleteAt).toEqual(asapExpiresAt);
     expect(

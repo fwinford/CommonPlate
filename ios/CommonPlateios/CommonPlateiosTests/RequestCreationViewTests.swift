@@ -1080,49 +1080,76 @@ final class RequestCreationViewTests: XCTestCase {
 
     // MARK: - Expiration copy
 
-    /// The backend writes `visibleFrom` and `expiresAt` explicitly at creation
-    /// (`src/requestTiming.ts`): ASAP is visible immediately, scheduled at its
-    /// chosen start, and both last three hours from there. The success screen
-    /// must state exactly that — including that a scheduled request is not
-    /// visible yet.
+    /// Under the revised W3-R1 presentation contract the three-hour rule is
+    /// explained once, at the timing choice
+    /// (`RequestFoodView.formExpirationNotice`); the post-submit success
+    /// screen no longer restates it under any name. Scoped to the
+    /// `successView` declaration itself — not a whole-file symbol-name ban —
+    /// so this guards the actual success-state presentation rather than a
+    /// particular former property or function name, and would still catch a
+    /// differently-named reintroduction of the same policy text.
     @MainActor
-    func testSuccessExpirationCopyMatchesTheBackendContract() {
-        XCTAssertEqual(
-            RequestFoodView.expirationNotice(for: .asap),
-            "Your request is now visible to helpers. It will expire in 3 hours if it is not fulfilled."
+    func testSuccessViewDoesNotReintroduceTheExpirationPolicy() throws {
+        let successViewSource = try successViewDeclarationSource()
+
+        // The confirmation state itself is unchanged.
+        XCTAssertTrue(successViewSource.contains(#"Text("Request posted")"#))
+        XCTAssertTrue(successViewSource.contains(#"Button("Back to Home")"#))
+
+        // No duration or expiration wording of any kind belongs on this
+        // screen; that explanation lives solely at the timing choice.
+        let lowercased = successViewSource.lowercased()
+        for forbidden in ["hour", "expir", "visible to helpers"] {
+            XCTAssertFalse(
+                lowercased.contains(forbidden),
+                "success view must not restate timing/expiration policy: found \"\(forbidden)\""
+            )
+        }
+    }
+
+    /// Extracts the `successView` computed property's own source text — from
+    /// its declaration up to (not including) the next declaration,
+    /// `requestForm` — so assertions about the success state cannot be
+    /// satisfied or defeated by unrelated content elsewhere in the file.
+    private func successViewDeclarationSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
         )
-        XCTAssertEqual(
-            RequestFoodView.expirationNotice(for: .later),
-            "Helpers will start seeing your request at the time you chose. It stays up for 3 hours after that, then expires if it is not fulfilled."
-        )
-        // A scheduled request is not visible at submission, and the copy must
-        // not say it is.
-        XCTAssertFalse(
-            RequestFoodView.expirationNotice(for: .later)
-                .contains("is now visible")
-        )
+
+        let startMarker = "private var successView: some View {"
+        let endMarker = "private var requestForm: some View {"
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after successView")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 
     /// A `201` proves the request was persisted, not that anyone will take it.
     @MainActor
     func testExpirationCopyPromisesNoFulfillment() {
         for timing in RequestTiming.allCases {
-            for notice in [
-                RequestFoodView.expirationNotice(for: timing),
-                RequestFoodView.formExpirationNotice(for: timing)
+            let notice = RequestFoodView.formExpirationNotice(for: timing)
+            let lowercased = notice.lowercased()
+            for forbidden in [
+                "will be fulfilled",
+                "someone will",
+                "a helper will",
+                "guarantee"
             ] {
-                let lowercased = notice.lowercased()
-                for forbidden in [
-                    "will be fulfilled",
-                    "someone will",
-                    "a helper will",
-                    "guarantee"
-                ] {
-                    XCTAssertFalse(
-                        lowercased.contains(forbidden),
-                        "expiration copy must not promise fulfillment: \(forbidden)"
-                    )
-                }
+                XCTAssertFalse(
+                    lowercased.contains(forbidden),
+                    "expiration copy must not promise fulfillment: \(forbidden)"
+                )
             }
         }
     }
@@ -1132,14 +1159,10 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testNoVagueExpirationCopyRemains() {
         for timing in RequestTiming.allCases {
-            for notice in [
-                RequestFoodView.expirationNotice(for: timing),
-                RequestFoodView.formExpirationNotice(for: timing)
-            ] {
-                let lowercased = notice.lowercased()
-                XCTAssertFalse(lowercased.contains("a few hours"))
-                XCTAssertFalse(lowercased.contains("automatically"))
-            }
+            let notice = RequestFoodView.formExpirationNotice(for: timing)
+            let lowercased = notice.lowercased()
+            XCTAssertFalse(lowercased.contains("a few hours"))
+            XCTAssertFalse(lowercased.contains("automatically"))
         }
     }
 
@@ -2113,13 +2136,15 @@ final class RequestCreationViewTests: XCTestCase {
 
     // MARK: - ASAP wording
 
-    /// The backend keeps an ASAP request available for three hours, and the
-    /// requester is told so at submission. Both superseded phrasings — "within
-    /// the next hour" and "within the next 5 hours" — made the two sides of one
-    /// request disagree, so neither may reappear.
+    /// Under the revised W3-R1 presentation contract the backend's concise
+    /// `"ASAP"` label carries no duration of its own — the three-hour rule is
+    /// explained once, at the timing choice, not restated on every surface
+    /// that renders the label. This proves iOS preserves whatever backend
+    /// value it is given verbatim, and that the superseded phrasings — "within
+    /// the next hour" and "within the next 5 hours" — do not reappear.
     @MainActor
-    func testASAPWindowTextStatesTheRealThreeHourLifetime() async throws {
-        let asapWindowText = "ASAP (available for the next 3 hours)"
+    func testASAPWindowTextPreservesTheBackendProvidedLabel() async throws {
+        let asapWindowText = "ASAP"
 
         let request = try await decodedCreatedRequest(
             createResponse(requestObject: createdRequestObject(
@@ -2131,11 +2156,9 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(request.pickupWindowText.contains("within the next hour"))
         XCTAssertFalse(request.pickupWindowText.contains("within the next 5 hours"))
 
-        // The two sides of the same request must agree.
-        XCTAssertTrue(
-            RequestFoodView.asapExpirationNotice.contains("3 hours"),
-            "The requester is told three hours; helpers must see the same"
-        )
+        // The timing-choice form still explains the same three-hour rule the
+        // backend enforces; the helper-facing label itself no longer needs to
+        // restate it.
         XCTAssertTrue(
             RequestFoodView.formExpirationNotice(for: .asap).contains("3 hours")
         )
@@ -2191,7 +2214,7 @@ final class RequestCreationViewTests: XCTestCase {
 
     private func createdRequestObject(
         id: String,
-        pickupWindowText: String = "ASAP (available for the next 3 hours)"
+        pickupWindowText: String = "ASAP"
     ) -> String {
         """
         {
@@ -2273,5 +2296,21 @@ final class RequestCreationViewTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return try XCTUnwrap(formatter.date(from: value))
+    }
+
+    /// Walks up from this file to the repository root, so the source-text
+    /// assertions above read the real tracked file rather than a copy.
+    private func repositoryFile(_ relativePath: String) throws -> URL {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // CommonPlateiosTests
+            .deletingLastPathComponent() // CommonPlateios
+            .deletingLastPathComponent() // ios
+            .deletingLastPathComponent() // repository root
+        let url = root.appendingPathComponent(relativePath)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: url.path),
+            "expected \(relativePath) at \(url.path)"
+        )
+        return url
     }
 }
