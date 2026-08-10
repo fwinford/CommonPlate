@@ -254,11 +254,11 @@ final class ParticipantGateTests: XCTestCase {
     // MARK: - Copy
 
     func testTheGateIsAnnouncedBeforeTheFirstSubmit() {
-        // Not a surprise: the requirement is stated on the form, before Submit.
-        let notice = RequestFoodView.verificationRequiredNotice.lowercased()
-        XCTAssertTrue(notice.contains("verify"))
-        XCTAssertTrue(notice.contains("draft"))
-
+        // The requester-side standing notice moved to Home (W3-I3): Request
+        // Food no longer restates the requirement inside its own Contact
+        // section, since entry sequencing (W3-I2) already verifies before the
+        // form is ever shown. The helper side is unaffected — Help/Reserve
+        // still states its own requirement in place.
         let helperNotice = RequestDetailView.verificationRequiredNotice.lowercased()
         XCTAssertTrue(helperNotice.contains("verify"))
         // And it says nothing is reserved yet, which is the helper's actual

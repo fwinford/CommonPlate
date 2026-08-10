@@ -184,69 +184,44 @@ final class RequestEmailAllowlistTests: XCTestCase {
         XCTAssertFalse(json.contains("@"))
     }
 
-    // MARK: - Pre-entry eligibility copy
+    // MARK: - No Contact section (W3-I3)
 
-    func testEmailEligibilityNoticeIsTheAcceptedSentence() {
-        XCTAssertEqual(
-            RequestFoodView.emailEligibilityNotice,
-            "Use your @nyu.edu or @stern.nyu.edu email."
+    /// Request Food's Contact section is removed entirely (W3-I3): verified
+    /// participant identity moved to app-level Home presentation, and the
+    /// eligibility/purpose copy that lived beside it went with it. This reads
+    /// the file's own source rather than rendering the view, matching this
+    /// suite's existing source-inspection pattern elsewhere in this target, so
+    /// it fails on any reintroduction under a different property or section
+    /// name.
+    func testRequestFoodHasNoContactSection() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
         )
+
+        XCTAssertFalse(source.contains(#"Section("Contact")"#))
+        XCTAssertFalse(source.contains("Posting as"))
+        XCTAssertFalse(source.contains("emailEligibilityNotice"))
+        XCTAssertFalse(source.contains("emailPurposeNotice"))
+        XCTAssertFalse(source.contains("verificationRequiredNotice"))
     }
 
-    /// The notice and the rule it describes must not drift apart. This fails if
-    /// the allowlist gains, loses, or renames a domain without the copy moving.
-    func testEmailEligibilityNoticeNamesEveryAllowedDomain() {
-        for domain in NYUEmailPolicy.allowedDomains {
-            XCTAssertTrue(
-                RequestFoodView.emailEligibilityNotice.contains("@\(domain)"),
-                domain
-            )
-        }
-
-        // Every `@`-prefixed token in the sentence is an allowed domain, so the
-        // copy cannot advertise a domain the validator would refuse.
-        let advertised = RequestFoodView.emailEligibilityNotice
-            .split(whereSeparator: { $0 == " " })
-            .filter { $0.hasPrefix("@") }
-            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,")) }
-            .map { String($0.dropFirst()) }
-        XCTAssertEqual(Set(advertised), NYUEmailPolicy.allowedDomains)
-    }
-
-    /// Standing help text, not an error and not the purpose notice. It has to
-    /// stay distinguishable from both, since all three sit in one section.
-    func testEmailEligibilityNoticeIsDistinctFromTheErrorAndThePurposeNotice() {
-        XCTAssertNotEqual(RequestFoodView.emailEligibilityNotice, nyuMessage)
-        XCTAssertNotEqual(
-            RequestFoodView.emailEligibilityNotice,
-            RequestFoodView.emailPurposeNotice
+    /// Walks up from this file to the repository root, so the source-text
+    /// assertion above reads the real tracked file rather than a copy.
+    private func repositoryFile(_ relativePath: String) throws -> URL {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // CommonPlateiosTests
+            .deletingLastPathComponent() // CommonPlateios
+            .deletingLastPathComponent() // ios
+            .deletingLastPathComponent() // repository root
+        let url = root.appendingPathComponent(relativePath)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: url.path),
+            "expected \(relativePath) at \(url.path)"
         )
-        XCTAssertNotEqual(
-            RequestFoodView.emailEligibilityNotice,
-            RequestFoodView.verificationRequiredNotice
-        )
-    }
-
-    /// Same guarantee the purpose notice carries: persistence does not depend
-    /// on requester email delivery, so no copy beside this section may promise
-    /// a message about the *request*. Verification's own copy is separate and
-    /// does promise a code — that one is a real, immediate send.
-    func testEmailEligibilityNoticePromisesNoDelivery() {
-        let notice = RequestFoodView.emailEligibilityNotice.lowercased()
-
-        for forbidden in [
-            "we'll send",
-            "we will send",
-            "confirmation",
-            "confirm",
-            "notify",
-            "inbox",
-            "receipt",
-            "check your",
-            "verify"
-        ] {
-            XCTAssertFalse(notice.contains(forbidden), forbidden)
-        }
+        return url
     }
 
     // MARK: - Backend refusal

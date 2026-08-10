@@ -173,28 +173,6 @@ struct RequestFoodView: View {
     static let availabilityUnknownNotice =
         "We couldn’t check whether posting is available right now. Please try again in a moment."
 
-    /// Said before the first Submit, so the verification gate is something the
-    /// requester was told about rather than something that happens to them.
-    /// Deliberately names what will happen and why, and does not ask for the
-    /// address here — the form stays fillable without verifying first.
-    static let verificationRequiredNotice =
-        "Before your first request, we’ll email a code to your NYU email to verify it. Your draft is kept while you verify."
-
-    /// States the eligibility rule before anything is typed, so the accepted
-    /// domains are not something the requester discovers by being refused.
-    ///
-    /// Deliberately not the validation message: this is a standing requirement
-    /// shown while the field is empty and while it is being edited, and it
-    /// neither replaces nor suppresses the error, which keeps its own red
-    /// styling, its own identifier, and the field's accessibility hint.
-    static let emailEligibilityNotice =
-        "Use your @nyu.edu or @stern.nyu.edu email."
-
-    /// Explains why email is collected: public endpoints never return it, and
-    /// request creation does not guarantee email delivery.
-    static let emailPurposeNotice =
-        "We use your email to coordinate updates about your request. Helpers never see it."
-
     /// Shown when the backend answers `REQUEST_LIMIT_REACHED`. Names the reset
     /// the requester is actually waiting for — campus midnight, not the
     /// device's — rather than a vague "tomorrow", and never describes the
@@ -609,45 +587,6 @@ struct RequestFoodView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("request-form-expiration")
                 }
-            }
-
-            Section("Contact") {
-                // No email field (W3-I1). Either this installation already has
-                // a verified identity — in which case asking again would be
-                // asking for something it can prove — or it does not, and the
-                // gate on Submit is what establishes one. Nothing here is
-                // editable, so nothing here can be lost by the gate.
-                if let identity = identityStore.identity {
-                    HStack {
-                        Text("Posting as")
-                        Spacer()
-                        Text(identity.masked)
-                            .fontWeight(.semibold)
-                    }
-                    .accessibilityIdentifier("request-verified-identity")
-                } else {
-                    // Said before the first Submit, so the gate is not a
-                    // surprise the student meets only after filling the form.
-                    Text(Self.verificationRequiredNotice)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("request-verification-notice")
-                }
-
-                Text(Self.emailEligibilityNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    // The neighbouring prose wraps on its own, but this
-                    // sentence is mostly two long unbreakable addresses, which
-                    // is exactly what gets truncated at accessibility text
-                    // sizes instead of growing taller.
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("request-email-eligibility")
-
-                Text(Self.emailPurposeNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
             Section {

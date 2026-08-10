@@ -930,41 +930,6 @@ final class RequestCreationViewTests: XCTestCase {
         )
     }
 
-    /// The web form asserts this same sentence against its email hint in
-    /// `public/new-request.html` (`src/client/new-request.test.ts`). Both
-    /// halves must exist, or the two requester forms can explain the same
-    /// required field differently.
-    @MainActor
-    func testEmailPurposeNoticeIsSharedVerbatimWithTheWebForm() {
-        XCTAssertEqual(
-            RequestFoodView.emailPurposeNotice,
-            "We use your email to coordinate updates about your request. Helpers never see it."
-        )
-    }
-
-    /// Persistence succeeds independently of requester email delivery, so the
-    /// purpose notice must explain the use without promising a message.
-    @MainActor
-    func testEmailPurposeNoticePromisesNoDelivery() {
-        let notice = RequestFoodView.emailPurposeNotice.lowercased()
-
-        for forbidden in [
-            "we'll send",
-            "we will send",
-            "confirmation",
-            "confirm",
-            "notify",
-            "inbox",
-            "receipt",
-            "check your"
-        ] {
-            XCTAssertFalse(
-                notice.contains(forbidden),
-                "email purpose notice must not promise delivery: \(forbidden)"
-            )
-        }
-    }
-
     // MARK: - Expiration copy
 
     /// Under the revised W3-R1 presentation contract the three-hour rule is

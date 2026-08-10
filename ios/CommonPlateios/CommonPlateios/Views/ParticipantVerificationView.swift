@@ -92,8 +92,13 @@ struct ParticipantVerificationView: View {
         }
     }
 
+    @ViewBuilder
     private var emailSection: some View {
         Section {
+            // Primary action first (W3-I3): the field and Send code are what
+            // this screen is for, so they lead. Everything below is
+            // supporting explanation, visually secondary, and never gates or
+            // delays these two controls.
             TextField("NYU email", text: $email)
                 .keyboardType(.emailAddress)
                 .textContentType(.emailAddress)
@@ -102,46 +107,59 @@ struct ParticipantVerificationView: View {
                 .focused($focusedField, equals: .email)
                 .accessibilityIdentifier("participant-verification-email")
 
-            Text(NYUEmailPolicy.requiredMessage)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("participant-verification-eligibility")
-
-            Text(Self.purposeNotice)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if store.flow?.purpose == .emailReplacement {
-                Text(Self.replacementNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("participant-replacement-notice")
-            } else if store.wasIdentityRevoked {
-                Text(Self.revokedNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("participant-revoked-notice")
-            }
-
             Button {
                 let address = email
                 Task { await store.requestCode(for: address) }
             } label: {
                 if store.isRequestingCode {
                     HStack {
+                        Spacer()
                         ProgressView()
                         Text("Sending…")
+                        Spacer()
                     }
                 } else {
                     Text("Send code")
+                        .frame(maxWidth: .infinity)
                 }
             }
+            // Bordered-prominent + large control (W3-I3 physical-device
+            // correction): the plain in-row button style this shared with
+            // every other row read as one more line of text, not the
+            // screen's actual primary action. Full-width for the same
+            // reason "Send code" needed a stronger visual claim than its own
+            // label width gave it.
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .disabled(!Self.canSendCode(email: email, isRequesting: store.isRequestingCode))
             .accessibilityIdentifier("participant-verification-send")
+        }
+
+        Section {
+            Text(NYUEmailPolicy.requiredMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("participant-verification-eligibility")
+
+            Text(Self.purposeNotice)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if store.flow?.purpose == .emailReplacement {
+                Text(Self.replacementNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("participant-replacement-notice")
+            } else if store.wasIdentityRevoked {
+                Text(Self.revokedNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("participant-revoked-notice")
+            }
         }
     }
 
@@ -169,13 +187,21 @@ struct ParticipantVerificationView: View {
             } label: {
                 if store.isSubmittingCode {
                     HStack {
+                        Spacer()
                         ProgressView()
                         Text("Verifying…")
+                        Spacer()
                     }
                 } else {
                     Text("Verify")
+                        .frame(maxWidth: .infinity)
                 }
             }
+            // Same bordered-prominent/full-width correction as Send code
+            // above, for the same reason: this is the code-entry state's one
+            // primary action, and the plain in-row style did not read as one.
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .disabled(
                 !Self.canSubmitCode(
                     code: code,
