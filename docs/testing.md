@@ -193,7 +193,7 @@ W3-I1 is accepted. Backend unit and HTTP tests cover participant challenge issua
 
 The focused iOS participant identity, gate, and continuation suites contain 52 passing tests (including 15 continuation cases after the final test-proof correction). They cover code-verification flow, authority storage and rejection, Change Email staging, draft preservation through verification, requester/helper gates, and same-install continuation logic. The complete `CommonPlateiosTests` target passed with 550 tests and 0 failures.
 
-These automated, source, and simulator results do **not** prove real NYU verification-email receipt or real-code redemption; physical same-install relaunch retention; uninstall/reinstall or new-device reverification; physical Keychain lifecycle behavior; backup/device-migration exclusion; or a real-address Change Email flow. Those are accepted, explicitly unperformed environmental checks, not passed evidence.
+These automated, source, and simulator results do **not** prove real NYU verification-email receipt or real-code redemption; uninstall/reinstall or new-device reverification; the remaining physical Keychain lifecycle behavior; backup/device-migration exclusion; or a real-address Change Email flow. Same-install authority retention through terminate/relaunch continuation was subsequently observed in the accepted W3-H1 physical flow below. The remaining items are accepted, explicitly unperformed environmental checks, not passed evidence.
 
 ### Requester verification entry (W3-I2) coverage
 
@@ -205,7 +205,7 @@ That last case matters specifically because simulator/unit tests cannot, by them
 
 Physical confirmation was subsequently performed and passed on a real iPhone: unverified Request Food opened participant verification before the form; real NYU verification succeeded; successful verification proceeded immediately into Request Food without a second Request Food entry; Request Food had no second editable participant-email field; a valid request submitted using the verified participant identity with no further email/verification step; leaving and reopening Request Food entered the form directly using restored verified identity; and Change Email required reverification. Faith accepted W3-I2 on this basis.
 
-The complete `CommonPlateiosTests` target has passed alongside this coverage, but only against a working tree that also contains the still-unaccepted W3-H1 slice; that combined-tree result is not recorded here as a clean repository baseline. The accepted clean `CommonPlateiosTests` baseline remains **550 passed, 0 failed, TEST SUCCEEDED** (section 9) until W3-I2 is committed and a clean run is performed against the resulting tree.
+The complete `CommonPlateiosTests` target has passed alongside this coverage. The combined-tree result is recorded as current execution evidence below; it is not a historical clean-commit baseline for W3-I2 alone.
 
 ### Verification UX and app-level identity presentation (W3-I3) coverage
 
@@ -215,7 +215,15 @@ New focused `ios/CommonPlateios/CommonPlateiosTests/ParticipantVerificationHiera
 
 These are structural source-text assertions, matching the existing source-inspection pattern used elsewhere in this target (e.g. the Slice 5B pre-entry-notice cases they replace). They do not by themselves prove real rendered hierarchy, visual density, or discoverability on screen — the repository has no UI-test target. Physical-device presentation is the evidence that established those rendered/discoverability properties: on a real iPhone, entering the NYU email was immediately understandable, Send code read clearly as the verification screen's primary action, Verify read clearly as the code-entry screen's primary action, Change Email presentation looked good, Home-level verified identity and Change Email were discoverable, and Request Food showed no Contact/participant-email presentation and felt limited to request-specific information. Faith accepted W3-I3 on this basis.
 
-A final focused run after the physical-presentation fix (the `.buttonStyle(.borderedProminent)`/`.controlSize(.large)` correction to Send code and Verify) passed 60 tests, 0 failures. The complete `CommonPlateiosTests` target has also passed (649 tests, 0 failed, TEST SUCCEEDED) alongside this coverage, but only against a working tree that also contains the still-unaccepted, unrelated W3-H1 slice; that combined-tree total is execution evidence for W3-I3 and is not recorded as a new clean repository baseline. The accepted clean `CommonPlateiosTests` baseline remains **550 passed, 0 failed, TEST SUCCEEDED** (section 9) until W3-I3 is committed and a clean run is performed against the resulting tree.
+A final focused run after the physical-presentation fix (the `.buttonStyle(.borderedProminent)`/`.controlSize(.large)` correction to Send code and Verify) passed 60 tests, 0 failures. The complete `CommonPlateiosTests` target also passed with **649 tests, 0 failed, TEST SUCCEEDED** alongside this coverage. That later composite result is retained as the newest recorded complete-target execution evidence below.
+
+### Reservation Lifecycle (W3-H1) coverage
+
+W3-H1 is accepted. Backend automated coverage includes one-active-reservation enforcement across principals and requests; atomic release and continuation authorization; exact release CAS handling for absent, `null`, and date representations; release/extension one-winner races on real MongoDB; fulfillment/release safety; and deterministic transaction-callback retry regression proof. The H1 closeout typecheck, focused claim/reservation/fulfillment suites, complete non-Mongo suite, and complete Mongo-gated suite passed.
+
+iOS coverage exercises continuation truth (`active` only for a claimed embedded request, `none` only for authoritative absence, and `unknown` for transport/server/decode/contradictory responses); reservation-scoped authority and stale-credential rejection; release/extend/fulfill exclusion and recovery; bounded ambiguous-fulfillment resend; requestID-stable warning scheduling; active/inactive warning ownership transfer; scheduler callback fencing; and warning tap routing, including cold launch and stale-warning isolation. The H1 closeout complete `CommonPlateiosTests` run passed **633 tests, 0 failed** on an iPhone 17 Pro simulator running iOS 26.5; final focused rereview suites and both diff checks also passed.
+
+Faith's physical iPhone acceptance established the device-only behaviors not proven by simulator/unit tests: terminate/relaunch continuation; foreground in-app T−5 warning without a duplicate system warning; backgrounded and terminated local warning delivery; terminated-app warning-tap cold launch to the matching reservation; release; and fulfillment after restored continuation. These observations establish H1 behavior on the observed device only. They do not establish APNs provider behavior, Release/Archive/TestFlight signing, or release-environment configuration, which remain separate gates.
 
 ## 5. Mongo integration tests
 
@@ -225,7 +233,7 @@ Run:
 npm run test:mongo
 ```
 
-The current accepted baseline is **172 passed across 13 files**. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
+A prior reference baseline was **172 passed across 13 files**. The complete Mongo-gated suite also passed in the accepted H1 closeout; section 13 deliberately records that pass without inventing an unrecorded new total. `mongod` and `mongosh` must both be on `PATH`. The script creates a temporary data directory, starts a temporary single-member replica set on a free local port, initializes it, injects an isolated `MONGO_INTEGRATION_URI`, runs `*.mongo.test.ts`, and removes the temporary database directory afterward.
 
 A replica set is required because placement verification exercises MongoDB transactions; standalone MongoDB cannot provide that behavior. Mongo verification remains incomplete until this command passes. `npm test` reporting the Mongo suites as skipped does not replace this run.
 
@@ -332,20 +340,22 @@ Before committing, inspect generated files, new tracked documentation, and delet
 
 ## 13. Current verification baseline
 
-These results are a reference baseline, not a substitute for rerunning affected checks after future changes. They are the accepted W3-I1 closeout baseline.
+These results are reference evidence, not a substitute for rerunning affected checks after future changes. Where an exact later total is recorded, it is retained; otherwise the row records the accepted H1 pass without inventing a new count.
 
 | Check | Result |
 | --- | --- |
-| `npm run typecheck` | Passed |
-| `npm test` | 1,254 passed; 243 Mongo-gated skipped |
-| `npm run test:mongo` | 243 passed across 16 files |
+| `npm run typecheck` | Passed in the H1 closeout |
+| `npm test` | Passed in the H1 closeout; prior W3-I1 reference: 1,254 passed; 243 Mongo-gated skipped |
+| `npm run test:mongo` | Passed in the H1 closeout; prior W3-I1 reference: 243 passed across 16 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | 550 passed; 0 failed; TEST SUCCEEDED |
+| `CommonPlateiosTests` | H1 closeout: 633 passed; 0 failed; TEST SUCCEEDED. Newest recorded complete-target composite run: 649 passed; 0 failed; TEST SUCCEEDED |
 | `npm run build:client` | Passed; regenerated bundles intentionally include the W3-I1 legacy website non-actionable form |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
+W3-H1 physical-device acceptance is recorded above. It closes H1's reservation-lifecycle device gate only; it does not close W3-N3 Later eligibility notification dispatch or the Release/Archive/TestFlight APNs environment gate.
+
 The non-Eastern `DatePicker` timezone proof required for W3-R1 (see section 9) is likewise device evidence, not part of the automated suite above.
 
-W3-I1 physical/environmental verification remains unperformed: real NYU verification-email receipt and real-code redemption; same-install physical relaunch; uninstall/reinstall and new-device reverification; Keychain lifecycle behavior; backup/device-migration exclusion where practical; and a real-address Change Email flow. Neither the accepted automated baseline nor source/simulator inspection proves those outcomes.
+W3-I1 physical/environmental verification remains unperformed for real NYU verification-email receipt and real-code redemption; uninstall/reinstall and new-device reverification; remaining Keychain lifecycle behavior; backup/device-migration exclusion where practical; and a real-address Change Email flow. The accepted W3-H1 flow has physically established same-install authority retention through terminate/relaunch continuation; neither that result nor source/simulator inspection proves the remaining outcomes.

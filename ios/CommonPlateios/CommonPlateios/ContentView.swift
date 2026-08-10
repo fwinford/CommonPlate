@@ -98,7 +98,8 @@ struct ContentView: View {
                 service: service,
                 installationCredentialProvider: installationStorage.installationCredential,
                 participantAuthorityProvider: { identityStore.currentAuthority() },
-                participantAuthorityRejected: { identityStore.discardRejectedIdentity() }
+                participantAuthorityRejected: { identityStore.discardRejectedIdentity() },
+                reservationWarningScheduler: UNUserNotificationCenterReservationWarningScheduler()
             )
         )
         _alertSubscriptionStore = StateObject(
@@ -181,9 +182,24 @@ struct ContentView: View {
                 destination(for: route)
             }
         }
+        // Cold-launch and relaunch-after-termination continuation (W3-H1):
+        // reconstructs "do I have an active reservation" from backend truth,
+        // since a terminated process discarded whatever `RequestStore` held
+        // in memory. Runs once at this view's first appearance; a no-op on
+        // every call after the first successfully resolves one, and a no-op
+        // immediately if `RequestStore` already holds a claim from `claim()`
+        // in the same process.
+        .task {
+            let isActive = scenePhase == .active
+            notificationRouter.updateApplicationSceneActivity(isActive: isActive)
+            requestStore.updateApplicationVisibility(isVisible: isActive)
+            _ = try? await requestStore.continueActiveReservationIfNeeded()
+        }
         .onChange(of: scenePhase) { _, phase in
+            let isActive = phase == .active
+            notificationRouter.updateApplicationSceneActivity(isActive: isActive)
+            requestStore.updateApplicationVisibility(isVisible: isActive)
             if phase == .active {
-                requestStore.revalidateActiveClaimExpiration()
                 // Detects a notification permission changed in Settings, and
                 // silently re-registers an installation that was previously
                 // confirmed on. Never shows Apple's permission prompt.
@@ -201,6 +217,9 @@ struct ContentView: View {
                 // immediate no-op, and running alongside the `.task` is safe
                 // — see `HelperNotificationRouteDriver.routeIfNeeded`.
                 Task { await routePendingHelperNotification() }
+                // Same second-chance reasoning for a reservation-warning tap
+                // (W3-H1).
+                Task { await routePendingReservationWarning() }
             }
         }
         // Reruns whenever a *new* tap intent is captured, including the
@@ -216,6 +235,24 @@ struct ContentView: View {
         // pending and nothing but a fresh tap advances the generation.
         .task(id: notificationRouter.routingGeneration) {
             await routePendingHelperNotification()
+        }
+        // The reservation-warning tap's own trigger (W3-H1), independent of
+        // `routingGeneration` above for the identical self-cancellation
+        // reason `HelperNotificationRouter.reservationWarningRoutingGeneration`
+        // documents.
+        .task(id: notificationRouter.reservationWarningRoutingGeneration) {
+            await routePendingReservationWarning()
+        }
+        // The foreground half of the same warning (W3-H1): no notification
+        // tap is involved when CommonPlate is already visible when the
+        // five-minute mark arrives, so this is the one place that path
+        // still has to land on the reservation screen. A no-op if already
+        // there — `AppRoute.appending` only pushes when it is not already on
+        // top — so this cannot duplicate the destination if the helper had
+        // already navigated there themselves.
+        .onChange(of: requestStore.isShowingReservationWarning) { _, isWarning in
+            guard isWarning, let activeClaim = requestStore.activeClaim else { return }
+            path = AppRoute.appending(.fulfillment(activeClaim.request), to: [.activeRequests])
         }
         // A requester-fulfillment tap always opens Home (`path = []`) and
         // presents this one-time notice, per its own independently-numbered
@@ -330,6 +367,20 @@ struct ContentView: View {
     /// still pending afterwards and gets applied by the next attempt.
     private func routePendingHelperNotification() async {
         guard let resolvedPath = await HelperNotificationRouteDriver.routeIfNeeded(
+            router: notificationRouter,
+            resolver: requestStore
+        ) else {
+            return
+        }
+        path = resolvedPath
+    }
+
+    /// The reservation-warning equivalent (W3-H1): applies whatever
+    /// reservation-warning notification tap is currently pending, if any. See
+    /// `ReservationWarningRouteDriver` for the decision-making this only
+    /// applies the result of.
+    private func routePendingReservationWarning() async {
+        guard let resolvedPath = await ReservationWarningRouteDriver.routeIfNeeded(
             router: notificationRouter,
             resolver: requestStore
         ) else {

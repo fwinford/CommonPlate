@@ -48,10 +48,24 @@ struct ActiveClaimPresentation {
 
 /// Store-only authorization for the active claim. This is deliberately private
 /// so the raw token cannot enter view-readable observable state.
+///
+/// `claimToken` is `nil` after W3-H1 continuation: the raw token generated at
+/// claim time is never persisted, so a claim restored from
+/// `continueActiveReservationIfNeeded()` after a relaunch has none. Extend,
+/// release, and fulfillment all accept verified participant authority as an
+/// additive authorization path for exactly this case — the raw-token path is
+/// preserved unchanged for the still-in-process case — so a continued claim
+/// with no token can be viewed, extended, released, and fulfilled, all from
+/// this same process.
 private struct ActiveClaimAuthorization {
     let claimID: UUID
     let requestID: String
-    let claimToken: String
+    let claimToken: String?
+    /// Exact authority that established a continuation-restored reservation.
+    /// Nil for an in-process claim, whose raw token remains preferred and is
+    /// sufficient. This is reservation-scoped private state, never the app's
+    /// current/presentation identity and never persisted.
+    let participantAuthority: String?
 }
 
 private struct ClaimAttempt: Equatable {
@@ -64,6 +78,12 @@ private struct ClaimExtensionAttempt: Equatable {
     let claimID: UUID
     let requestID: String
     let originalExpiration: Date
+}
+
+private struct ClaimReleaseAttempt: Equatable {
+    let id: UUID
+    let claimID: UUID
+    let requestID: String
 }
 
 /// The exact values submitted on the original fulfillment POST. They stay in
@@ -81,10 +101,26 @@ private struct FulfillmentAttempt: Equatable {
     let claimID: UUID
     let requestID: String
     let submission: FulfillmentSubmissionSnapshot
+    let authorization: FulfillmentAuthorization
     /// Non-nil only for the single manual repeat. This ties its independent
     /// operation identity back to the original ambiguity it is allowed to
     /// resolve, so a stale recovery response cannot act on another context.
     let originatingAmbiguityID: UUID?
+}
+
+/// How `performFulfillment` authorizes the POST (W3-H1 continuation): the raw
+/// token, preserved unchanged, when the claim is still in-process; verified
+/// participant authority, additive, when a relaunch already discarded it.
+/// Mirrors the backend's own `FulfillmentAuthorization` in
+/// `fulfillmentRoute.ts`.
+private enum FulfillmentAuthorization: Equatable {
+    case token(String)
+    case participant(String)
+
+    var participantAuthority: String? {
+        guard case .participant(let authority) = self else { return nil }
+        return authority
+    }
 }
 
 private struct FulfillmentAmbiguityContext: Equatable {
@@ -92,6 +128,7 @@ private struct FulfillmentAmbiguityContext: Equatable {
     let claimID: UUID
     let requestID: String
     let submission: FulfillmentSubmissionSnapshot
+    let authorization: FulfillmentAuthorization
     var hasConsumedRecovery: Bool
 }
 
@@ -198,6 +235,15 @@ enum HelperNotificationResolution: Equatable {
     /// deliberately distinct from `.unavailable`: it must never be presented
     /// as "this request is gone", only as "try again".
     case temporarilyUnavailable
+}
+
+/// Truth established by the active-reservation continuation read (W3-H1).
+/// `unknown` is deliberately not absence: transport, server, and decoding
+/// failures cannot prove that a reservation ended.
+enum ActiveReservationContinuationOutcome {
+    case active(ActiveClaimPresentation)
+    case none
+    case unknown
 }
 
 /// Stable backend claim and extension error codes, centralized so handling
@@ -318,6 +364,16 @@ final class RequestStore: ObservableObject {
     /// prompt is never offered a second time for the same claim.
     @Published private(set) var hasResolvedClaimExtensionPrompt = false
 
+    /// Whether the W3-H1 five-minute reservation warning is currently offered
+    /// in-app. Foreground-only presentation: while CommonPlate is not visible
+    /// at the warning instant, the scheduled local notification is the
+    /// warning instead, and the two must never both be true for one
+    /// reservation — see `presentReservationWarningIfEligible`.
+    @Published private(set) var isShowingReservationWarning = false
+
+    @Published private(set) var isReleasingClaim = false
+    @Published private(set) var releaseClaimError: RequestServiceError?
+
     @Published private(set) var isFulfilling = false
     @Published private(set) var fulfillError: RequestServiceError?
     @Published private(set) var confirmedFulfillmentOutcome: FulfillOutcome?
@@ -350,13 +406,33 @@ final class RequestStore: ObservableObject {
     /// The identity store owns discarding it; publishing the refusal back
     /// through a closure keeps this store from reaching into that lifecycle.
     private let participantAuthorityRejected: () -> Void
+    /// Owns the W3-H1 five-minute local warning notification's lifecycle.
+    /// `RequestStore` decides *when* one is due; this decides how it actually
+    /// gets scheduled, rescheduled, and canceled. See
+    /// `ReservationWarningScheduling` for why this stays UIKit/
+    /// UserNotifications-free here.
+    private let reservationWarningScheduler: ReservationWarningScheduling
     private var fetchGeneration = 0
     private var collectionRevision = 0
     private var activeClaimAuthorization: ActiveClaimAuthorization?
     private var activeClaimAttempt: ClaimAttempt?
     private var activeClaimExtensionAttempt: ClaimExtensionAttempt?
+    private var activeClaimReleaseAttempt: ClaimReleaseAttempt?
     private var activeFulfillmentAttempt: FulfillmentAttempt?
     private var fulfillmentAmbiguityContext: FulfillmentAmbiguityContext?
+
+    /// Actual scene visibility supplied by `ContentView`. A live process is
+    /// not necessarily visible: inactive and background scenes must leave the
+    /// local warning available instead of manufacturing a foreground warning.
+    private var isApplicationVisible = false
+
+    /// Whether the in-app reservation warning has already been shown for the
+    /// claim's *current* deadline. Reset in `beginActiveClaim` (a new claim or
+    /// a continuation-restored one starts a fresh cycle) and again on a
+    /// successful extension (the deadline moved, so five minutes before the
+    /// new one is a legitimately new warning instant) — but not on a failed
+    /// extension, which leaves the deadline, and this flag, untouched.
+    private var hasShownReservationWarning = false
 
     /// The claim identity a placement submission has been attempted under. The
     /// claimant screen permits that submission only after the external order is
@@ -378,16 +454,24 @@ final class RequestStore: ObservableObject {
     /// backend re-checks this and remains authoritative.
     static let claimExtensionDuration: TimeInterval = 5 * 60
 
+    /// How far ahead of the reservation deadline the W3-H1 warning fires.
+    /// Fixed at five minutes, matching the backend's own fixed
+    /// `CLAIM_EXTENSION_MS` framing — this is presentation timing only, never
+    /// a value the backend is asked to confirm.
+    static let reservationWarningLead: TimeInterval = 5 * 60
+
     init(
         service: RequestService,
         installationCredentialProvider: @escaping () -> String,
         participantAuthorityProvider: @escaping () -> String?,
-        participantAuthorityRejected: @escaping () -> Void
+        participantAuthorityRejected: @escaping () -> Void,
+        reservationWarningScheduler: ReservationWarningScheduling = NoOpReservationWarningScheduler()
     ) {
         self.service = service
         self.installationCredentialProvider = installationCredentialProvider
         self.participantAuthorityProvider = participantAuthorityProvider
         self.participantAuthorityRejected = participantAuthorityRejected
+        self.reservationWarningScheduler = reservationWarningScheduler
     }
 
     /// Applies a backend verdict on the credential just presented.
@@ -397,9 +481,18 @@ final class RequestStore: ObservableObject {
     /// `PARTICIPANT_VERIFICATION_REQUIRED` deliberately does not — that answer
     /// is what an unverified caller gets, and treating it as revocation would
     /// let an unrelated request wipe an identity that is perfectly valid.
-    private func applyParticipantVerdict(_ error: RequestServiceError) {
+    private func applyParticipantVerdict(
+        _ error: RequestServiceError,
+        presentedAuthority: String?
+    ) {
         guard case .serverError(let code, _) = error,
-              code == ParticipantErrorCode.authorityInvalid else {
+              code == ParticipantErrorCode.authorityInvalid,
+              let presentedAuthority,
+              // The backend rejected the credential this request actually
+              // sent. A newer Change Email result must not be erased by that
+              // stale response; equality with the still-current credential is
+              // the accepted W3-I1 response fence.
+              participantAuthorityProvider() == presentedAuthority else {
             return
         }
         participantAuthorityRejected()
@@ -550,13 +643,14 @@ final class RequestStore: ObservableObject {
         // (including `RequestFoodView`'s own tests) unaware of it.
         var submittedPayload = payload
         submittedPayload.installationCredential = installationCredentialProvider()
+        let participantAuthority = participantAuthorityProvider()
         do {
             let created = try await service.createRequest(
                 submittedPayload,
                 // Read here, immediately before sending, rather than captured
                 // at init: an identity replaced by Change Email mid-session
                 // must bind the request to the principal that is current now.
-                participantAuthority: participantAuthorityProvider()
+                participantAuthority: participantAuthority
             )
             advanceCollectionRevision()
             applyConfirmed(created)
@@ -565,7 +659,10 @@ final class RequestStore: ObservableObject {
         } catch {
             let serviceError = Self.asServiceError(error)
             createError = serviceError
-            applyParticipantVerdict(serviceError)
+            applyParticipantVerdict(
+                serviceError,
+                presentedAuthority: participantAuthority
+            )
             if case .ambiguousCreateOutcome = serviceError {
                 unresolvedCreateError = serviceError
             }
@@ -639,10 +736,11 @@ final class RequestStore: ObservableObject {
                 }
             }
         }
+        let participantAuthority = participantAuthorityProvider()
         do {
             let outcome = try await service.claimRequest(
                 id: requestID,
-                participantAuthority: participantAuthorityProvider()
+                participantAuthority: participantAuthority
             )
             guard activeClaimAttempt == attempt else {
                 return
@@ -655,12 +753,17 @@ final class RequestStore: ObservableObject {
                     pickupName: outcome.pickupName,
                     claimExpiresAt: outcome.claimExpiresAt,
                     claimExtendedAt: nil,
-                    isExtensionAvailable: true
+                    isExtensionAvailable: Self.extensionIsAvailable(
+                        claimExpiresAt: outcome.claimExpiresAt,
+                        claimExtendedAt: nil,
+                        requestExpiresAt: outcome.request.expiresAt
+                    )
                 ),
                 authorization: ActiveClaimAuthorization(
                     claimID: UUID(),
                     requestID: outcome.request.id,
-                    claimToken: outcome.claimToken
+                    claimToken: outcome.claimToken,
+                    participantAuthority: nil
                 )
             )
         } catch is CancellationError {
@@ -673,7 +776,10 @@ final class RequestStore: ObservableObject {
                 return
             }
             let serviceError = Self.asServiceError(error)
-            applyParticipantVerdict(serviceError)
+            applyParticipantVerdict(
+                serviceError,
+                presentedAuthority: participantAuthority
+            )
             let backendCode = Self.backendCode(for: serviceError)
             claimErrorEvent = ClaimErrorEvent(
                 id: UUID(),
@@ -694,17 +800,201 @@ final class RequestStore: ObservableObject {
         }
     }
 
+    /// `GET /api/participant/active-reservation` (W3-H1 continuation).
+    /// Reconstructs "do I have an active reservation, and which one" after a
+    /// relaunch that did not go through `claim()` — process termination
+    /// discards the in-memory claim (and the raw token was never persisted
+    /// to begin with), but backend reservation truth outlives the process.
+    ///
+    /// A no-op whenever there is nothing to reconcile: a claim already held
+    /// in this process (from `claim()` or an earlier continuation call), or
+    /// no verified participant to ask on behalf of. Safe to call more than
+    /// once and from more than one call site (`ContentView`'s launch-time
+    /// `.task` and `ReservationWarningRouteDriver`, independently) — the
+    /// first guard makes every call after the first a no-op.
+    ///
+    /// Never fabricates a reservation the backend does not currently confirm:
+    /// transport/server/decode failure returns `.unknown` and leaves both
+    /// `activeClaim` and existing warning state untouched. Cancellation still
+    /// throws so a cold-launch routing attempt can leave its tap pending.
+    func continueActiveReservationIfNeeded() async throws -> ActiveReservationContinuationOutcome {
+        if let activeClaim {
+            return .active(activeClaim)
+        }
+        guard let participantAuthority = participantAuthorityProvider() else {
+            return .unknown
+        }
+        do {
+            guard let reservation = try await service.fetchActiveReservation(
+                participantAuthority: participantAuthority
+            ) else {
+                if let activeClaim {
+                    return .active(activeClaim)
+                }
+                reservationWarningScheduler.cancelAllWarnings()
+                return .none
+            }
+            // Re-checked after the `await`: a concurrent `claim()` (unlikely,
+            // but not impossible if this races a fresh user-initiated claim)
+            // must not be overwritten by a continuation read that started
+            // before it.
+            if let activeClaim {
+                return .active(activeClaim)
+            }
+            let presentation = ActiveClaimPresentation(
+                request: reservation.request,
+                pickupName: reservation.pickupName,
+                claimExpiresAt: reservation.claimExpiresAt,
+                claimExtendedAt: reservation.claimExtendedAt,
+                isExtensionAvailable: Self.extensionIsAvailable(
+                    claimExpiresAt: reservation.claimExpiresAt,
+                    claimExtendedAt: reservation.claimExtendedAt,
+                    requestExpiresAt: reservation.request.expiresAt
+                )
+            )
+            beginActiveClaim(
+                presentation: presentation,
+                authorization: ActiveClaimAuthorization(
+                    claimID: UUID(),
+                    requestID: reservation.request.id,
+                    // The raw token was never persisted; continuation
+                    // authorizes further actions on this claim (extend,
+                    // release) with participant authority instead.
+                    claimToken: nil,
+                    // Capture the exact credential whose successful read
+                    // established ownership. A later Change Email affects
+                    // future participant actions, not this reservation.
+                    participantAuthority: participantAuthority
+                )
+            )
+            return .active(presentation)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Backend truth could not be established (transport, timeout, a
+            // server failure, or a decoding failure). Leaving `activeClaim`
+            // nil and every existing warning untouched is the only truthful
+            // answer here — never invent absence or active state.
+            applyParticipantVerdict(
+                Self.asServiceError(error),
+                presentedAuthority: participantAuthority
+            )
+            return .unknown
+        }
+    }
+
+    /// One presentation/action truth for explicit release. The destructive
+    /// action is available only while this store would actually start the
+    /// release operation: a matching, still-active claimed reservation exists
+    /// and no release, extension, fulfillment, or ambiguity/recovery operation
+    /// currently owns it.
+    var canReleaseActiveClaim: Bool {
+        guard !isReleasingClaim,
+              activeClaimReleaseAttempt == nil,
+              !isExtendingClaim,
+              activeClaimExtensionAttempt == nil,
+              fulfillmentAmbiguityContext == nil,
+              !isFulfilling,
+              activeFulfillmentAttempt == nil,
+              let claim = activeClaim,
+              claim.request.status == .claimed,
+              claim.claimExpiresAt > Date(),
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID else {
+            return false
+        }
+        return true
+    }
+
+    /// `POST /api/request/:id/claim/release` (W3-H1). Atomically invalidates
+    /// the caller's still-active reservation and restores the request to
+    /// availability. Backend-confirmed before any local state clears: a
+    /// failed or unconfirmed attempt leaves the claim exactly as it was, and
+    /// — unlike claim/fulfill — is always safe to simply retry, because a
+    /// release that already succeeded is refused cleanly rather than
+    /// duplicated.
+    func releaseActiveClaim() async {
+        guard canReleaseActiveClaim,
+              let claim = activeClaim,
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID else {
+            return
+        }
+        let attempt = ClaimReleaseAttempt(
+            id: UUID(),
+            claimID: authorization.claimID,
+            requestID: authorization.requestID
+        )
+        activeClaimReleaseAttempt = attempt
+        isReleasingClaim = true
+        releaseClaimError = nil
+        defer {
+            if activeClaimReleaseAttempt == attempt {
+                activeClaimReleaseAttempt = nil
+                isReleasingClaim = false
+            }
+        }
+
+        do {
+            // The raw token, when still available, is preserved unchanged as
+            // the primary authorization; participant authority is additive,
+            // for the case a relaunch already discarded it.
+            if let claimToken = authorization.claimToken {
+                try await service.releaseClaim(id: authorization.requestID, claimToken: claimToken)
+            } else {
+                guard let participantAuthority = authorization.participantAuthority else {
+                    return
+                }
+                try await service.releaseClaim(
+                    id: authorization.requestID,
+                    participantAuthority: participantAuthority
+                )
+            }
+            guard activeClaimReleaseAttempt == attempt,
+                  activeClaimAuthorization?.claimID == attempt.claimID,
+                  activeClaim?.requestID == attempt.requestID else {
+                return
+            }
+            clearActiveClaim()
+            refreshRequestsAfterClaimConflict()
+        } catch is CancellationError {
+        } catch {
+            guard activeClaimReleaseAttempt == attempt else {
+                return
+            }
+            let serviceError = Self.asServiceError(error)
+            releaseClaimError = serviceError
+            applyParticipantVerdict(
+                serviceError,
+                presentedAuthority: authorization.participantAuthority
+            )
+        }
+    }
+
     /// `POST /api/request/:id/claim/extend`, sending the active claim's raw
     /// token. Answering the prompt resolves it either way, so a failed or
     /// unconfirmed attempt cannot re-open the prompt into a retry loop, and
     /// the local expiration advances only on a confirmed backend response.
-    func extendActiveClaim() async {
+    var canExtendActiveClaim: Bool {
         guard !isExtendingClaim,
               activeClaimExtensionAttempt == nil,
+              !isReleasingClaim,
+              activeClaimReleaseAttempt == nil,
               fulfillmentAmbiguityContext == nil,
+              !isFulfilling,
               activeFulfillmentAttempt == nil,
               let claim = activeClaim,
               claim.isExtensionAvailable,
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID else {
+            return false
+        }
+        return true
+    }
+
+    func extendActiveClaim() async {
+        guard canExtendActiveClaim,
+              let claim = activeClaim,
               let authorization = activeClaimAuthorization,
               authorization.requestID == claim.requestID else {
             return
@@ -729,10 +1019,30 @@ final class RequestStore: ObservableObject {
         }
 
         do {
-            let outcome = try await service.extendClaim(
-                id: authorization.requestID,
-                claimToken: authorization.claimToken
-            )
+            // The raw token, when it is still available, is preserved
+            // unchanged as the primary authorization. Participant authority
+            // is additive, for the case a relaunch already discarded it
+            // (W3-H1 continuation) — never the other way around.
+            let outcome: ClaimExtensionOutcome
+            if let claimToken = authorization.claimToken {
+                outcome = try await service.extendClaim(
+                    id: authorization.requestID,
+                    claimToken: claimToken
+                )
+            } else {
+                guard let participantAuthority = authorization.participantAuthority else {
+                    // Continuation authorized this claim in the first place,
+                    // so authority missing now means it was discarded (e.g. a
+                    // rejected/revoked credential) after that. There is
+                    // nothing to authorize this attempt with; `defer` above
+                    // still resets the in-flight state normally.
+                    return
+                }
+                outcome = try await service.extendClaim(
+                    id: authorization.requestID,
+                    participantAuthority: participantAuthority
+                )
+            }
             guard extensionAttemptIsCurrent(attempt),
                   var current = activeClaim else {
                 return
@@ -744,6 +1054,15 @@ final class RequestStore: ObservableObject {
             guard finishExtensionAttempt(attempt) else {
                 return
             }
+            // The deadline moved: the W3-H1 warning is due again five minutes
+            // before the new one, and the scheduled notification moves with
+            // it.
+            hasShownReservationWarning = false
+            isShowingReservationWarning = false
+            reservationWarningScheduler.scheduleWarning(
+                requestID: attempt.requestID,
+                fireAt: outcome.claimExpiresAt.addingTimeInterval(-Self.reservationWarningLead)
+            )
             // The reservation moved, so the expiration timer is rescheduled
             // against the new backend deadline. No further prompt is possible.
             startClaimLifecycleTimer()
@@ -753,6 +1072,10 @@ final class RequestStore: ObservableObject {
             }
             let serviceError = Self.asServiceError(error)
             claimExtensionError = serviceError
+            applyParticipantVerdict(
+                serviceError,
+                presentedAuthority: authorization.participantAuthority
+            )
             applyExtensionFailure(serviceError, for: attempt)
             guard finishExtensionAttempt(attempt) else {
                 return
@@ -800,6 +1123,7 @@ final class RequestStore: ObservableObject {
             return
         }
 
+        reconcileExtensionAvailability()
         if claim.claimExpiresAt <= now {
             markActiveClaimExpired(
                 claimID: authorization.claimID,
@@ -809,6 +1133,40 @@ final class RequestStore: ObservableObject {
         } else {
             startClaimLifecycleTimer()
         }
+    }
+
+    /// Reconciles the reservation-warning lifecycle with real SwiftUI scene
+    /// visibility. Becoming visible also re-runs deadline/warning checks from
+    /// the authoritative deadline. Becoming inactive/backgrounded while the
+    /// due warning is currently owned by the in-app surface transfers that
+    /// ownership back to the same request-keyed local notification path.
+    func updateApplicationVisibility(isVisible: Bool, now: Date = Date()) {
+        isApplicationVisible = isVisible
+        if isVisible {
+            revalidateActiveClaimExpiration(now: now)
+            return
+        }
+
+        guard isShowingReservationWarning,
+              let claim = activeClaim,
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID,
+              claim.claimExpiresAt > now,
+              claim.claimExpiresAt.addingTimeInterval(-Self.reservationWarningLead) <= now else {
+            return
+        }
+
+        // The app can no longer truthfully own a visible presentation. Retire
+        // that ownership and make the already-due request-keyed notification
+        // eligible immediately. Resetting the foreground latch lets an active
+        // re-entry that wins before delivery cancel this local duplicate and
+        // restore the in-app warning from the same authoritative deadline.
+        isShowingReservationWarning = false
+        hasShownReservationWarning = false
+        reservationWarningScheduler.scheduleWarning(
+            requestID: claim.requestID,
+            fireAt: now
+        )
     }
 
     /// Removes only the exactly acknowledged notice. A stale or unknown
@@ -841,6 +1199,16 @@ final class RequestStore: ObservableObject {
         // is not a reason to drop it, and Active Requests keeps it reachable.
         isShowingClaimExtensionPrompt = false
         hasResolvedClaimExtensionPrompt = false
+        // A new claim — including one just restored by continuation — starts
+        // its own W3-H1 warning cycle.
+        hasShownReservationWarning = false
+        isShowingReservationWarning = false
+        invalidateActiveReleaseAttempt()
+        releaseClaimError = nil
+        reservationWarningScheduler.scheduleWarning(
+            requestID: presentation.requestID,
+            fireAt: presentation.claimExpiresAt.addingTimeInterval(-Self.reservationWarningLead)
+        )
         // The attempt that was "already starting" has finished starting.
         clearPreflightClaimRefusal { error in
             if case .operationInProgress = error { return true }
@@ -851,15 +1219,27 @@ final class RequestStore: ObservableObject {
 
     private func clearActiveClaim() {
         let clearedClaimID = activeClaimAuthorization?.claimID
+        let clearedRequestID = activeClaimAuthorization?.requestID ?? activeClaim?.requestID
         claimLifecycleTask?.cancel()
         claimLifecycleTask = nil
         invalidateActiveExtensionAttempt()
         invalidateActiveFulfillmentAttempt()
+        invalidateActiveReleaseAttempt()
         activeClaim = nil
         activeClaimAuthorization = nil
         isShowingClaimExtensionPrompt = false
         hasResolvedClaimExtensionPrompt = false
+        isShowingReservationWarning = false
+        hasShownReservationWarning = false
         claimExtensionError = nil
+        releaseClaimError = nil
+        if let clearedRequestID {
+            // Covers every path that ends a claim locally: release, confirmed
+            // fulfillment, expiry, and a lost claim conflict. One hook, so
+            // "canceled on release/fulfill/expiry/claim-end" cannot drift out
+            // of sync as new end-of-claim paths are added.
+            reservationWarningScheduler.cancelWarning(requestID: clearedRequestID)
+        }
         if fulfillmentAmbiguityContext?.claimID == clearedClaimID {
             fulfillmentAmbiguityContext = nil
             fulfillmentAmbiguity = nil
@@ -884,6 +1264,11 @@ final class RequestStore: ObservableObject {
     private func invalidateActiveFulfillmentAttempt() {
         activeFulfillmentAttempt = nil
         isFulfilling = false
+    }
+
+    private func invalidateActiveReleaseAttempt() {
+        activeClaimReleaseAttempt = nil
+        isReleasingClaim = false
     }
 
     private func extensionAttemptIsCurrent(_ attempt: ClaimExtensionAttempt) -> Bool {
@@ -922,9 +1307,24 @@ final class RequestStore: ObservableObject {
         let claimID = authorization.claimID
         let requestID = claim.requestID
         let expiration = claim.claimExpiresAt
+        let warningMoment = expiration.addingTimeInterval(-Self.reservationWarningLead)
         let promptMoment = expiration.addingTimeInterval(-Self.claimExtensionPromptLead)
 
         claimLifecycleTask = Task { [weak self] in
+            // T-5 always precedes T-3 (five minutes remaining comes before
+            // three), so this step's own effect — resolving the T-3 prompt
+            // once the warning has something to say about the same decision
+            // — always lands before the T-3 step below can run.
+            if let interval = Self.secondsUntil(warningMoment) {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            self?.presentReservationWarningIfEligible(
+                claimID: claimID,
+                requestID: requestID,
+                expiration: expiration
+            )
+
             if let interval = Self.secondsUntil(promptMoment) {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
@@ -954,6 +1354,63 @@ final class RequestStore: ObservableObject {
         return interval > 0 ? interval : nil
     }
 
+    /// One presentation truth for every path that constructs or revalidates a
+    /// reservation: the extension is unused and the complete fixed five
+    /// minutes still fit before the request's authoritative expiry.
+    static func extensionIsAvailable(
+        claimExpiresAt: Date,
+        claimExtendedAt: Date?,
+        requestExpiresAt: Date
+    ) -> Bool {
+        claimExtendedAt == nil
+            && claimExpiresAt.addingTimeInterval(Self.claimExtensionDuration) <= requestExpiresAt
+    }
+
+    private func reconcileExtensionAvailability() {
+        guard var claim = activeClaim,
+              claim.isExtensionAvailable,
+              !Self.extensionIsAvailable(
+                claimExpiresAt: claim.claimExpiresAt,
+                claimExtendedAt: claim.claimExtendedAt,
+                requestExpiresAt: claim.requestExpiresAt
+              ) else {
+            return
+        }
+        claim.isExtensionAvailable = false
+        activeClaim = claim
+    }
+
+    /// The W3-H1 five-minute warning's foreground half. Fires once per warning
+    /// cycle (`hasShownReservationWarning`), only while actual scene state is
+    /// visible. A merely alive background process leaves the scheduled local
+    /// notification untouched; the visible path cancels it here rather than
+    /// let both surfaces interrupt for the same live moment.
+    ///
+    /// Also resolves the pre-existing T-3 "Still ordering?" prompt: the
+    /// warning now carries the same `Add 5 minutes` / `Release reservation`
+    /// actions the T-3 prompt exists to offer, so letting T-3 still interrupt
+    /// two minutes later would ask the same question twice.
+    private func presentReservationWarningIfEligible(
+        claimID: UUID,
+        requestID: String,
+        expiration: Date
+    ) {
+        guard let claim = activeClaim,
+              activeClaimAuthorization?.claimID == claimID,
+              claim.requestID == requestID,
+              claim.claimExpiresAt == expiration,
+              isApplicationVisible,
+              !hasShownReservationWarning else {
+            return
+        }
+        hasShownReservationWarning = true
+        isShowingReservationWarning = true
+        hasResolvedClaimExtensionPrompt = true
+        isShowingClaimExtensionPrompt = false
+        reservationWarningScheduler.cancelWarning(requestID: requestID)
+        reconcileExtensionAvailability()
+    }
+
     private func presentClaimExtensionPromptIfEligible(
         claimID: UUID,
         requestID: String,
@@ -963,10 +1420,9 @@ final class RequestStore: ObservableObject {
               activeClaimAuthorization?.claimID == claimID,
               claim.requestID == requestID,
               claim.claimExpiresAt == expiration,
+              isApplicationVisible,
               claim.isExtensionAvailable,
-              activeClaimExtensionAttempt == nil,
-              fulfillmentAmbiguityContext == nil,
-              activeFulfillmentAttempt == nil,
+              canExtendActiveClaim,
               !hasResolvedClaimExtensionPrompt else {
             return
         }
@@ -1302,6 +1758,9 @@ final class RequestStore: ObservableObject {
         guard !isFulfilling else {
             throw RequestServiceError.operationInProgress
         }
+        guard !isReleasingClaim, activeClaimReleaseAttempt == nil else {
+            throw RequestServiceError.operationInProgress
+        }
         guard activeClaimExtensionAttempt == nil else {
             throw RequestServiceError.operationInProgress
         }
@@ -1312,7 +1771,11 @@ final class RequestStore: ObservableObject {
               claim.requestID == requestID,
               let authorization = activeClaimAuthorization,
               authorization.requestID == requestID,
-              !authorization.claimToken.isEmpty else {
+              // Fulfillment now accepts the same additive participant-authority
+              // path extend/release already do (W3-H1 MUST FIX 1): a claim
+              // restored by continuation, with no raw token, can be fulfilled
+              // from this process too, not only viewed, extended, and released.
+              let fulfillmentAuthorization = resolveFulfillmentAuthorization(authorization) else {
             fulfillError = .noActiveClaim
             throw RequestServiceError.noActiveClaim
         }
@@ -1343,9 +1806,29 @@ final class RequestStore: ObservableObject {
             claimID: authorization.claimID,
             requestID: requestID,
             submission: submission,
+            authorization: fulfillmentAuthorization,
             originatingAmbiguityID: nil
         )
-        try await performFulfillment(attempt: attempt, claimToken: authorization.claimToken)
+        try await performFulfillment(attempt: attempt)
+    }
+
+    /// Resolves how to authorize a fulfillment POST for the active claim
+    /// (W3-H1 continuation): the raw token, preserved unchanged, when it is
+    /// still available; verified participant authority, additive, for the
+    /// case a relaunch already discarded it. `nil` only when neither is
+    /// available — the credential store's own precondition failure, not a
+    /// backend refusal.
+    private func resolveFulfillmentAuthorization(
+        _ authorization: ActiveClaimAuthorization
+    ) -> FulfillmentAuthorization? {
+        if let claimToken = authorization.claimToken, !claimToken.isEmpty {
+            return .token(claimToken)
+        }
+        guard let participantAuthority = authorization.participantAuthority,
+              !participantAuthority.isEmpty else {
+            return nil
+        }
+        return .participant(participantAuthority)
     }
 
     /// Performs the one explicit CommonPlate-only repeat after the original
@@ -1358,6 +1841,9 @@ final class RequestStore: ObservableObject {
         now: Date = Date()
     ) async throws {
         guard !isFulfilling, activeFulfillmentAttempt == nil else {
+            throw RequestServiceError.operationInProgress
+        }
+        guard !isReleasingClaim, activeClaimReleaseAttempt == nil else {
             throw RequestServiceError.operationInProgress
         }
         guard activeClaimExtensionAttempt == nil else {
@@ -1376,8 +1862,7 @@ final class RequestStore: ObservableObject {
               claim.requestID == requestID,
               let authorization = activeClaimAuthorization,
               authorization.claimID == context.claimID,
-              authorization.requestID == requestID,
-              !authorization.claimToken.isEmpty else {
+              authorization.requestID == requestID else {
             throw RequestServiceError.unresolvedFulfillment
         }
 
@@ -1406,15 +1891,13 @@ final class RequestStore: ObservableObject {
             claimID: authorization.claimID,
             requestID: requestID,
             submission: context.submission,
+            authorization: context.authorization,
             originatingAmbiguityID: context.id
         )
-        try await performFulfillment(attempt: attempt, claimToken: authorization.claimToken)
+        try await performFulfillment(attempt: attempt)
     }
 
-    private func performFulfillment(
-        attempt: FulfillmentAttempt,
-        claimToken: String
-    ) async throws {
+    private func performFulfillment(attempt: FulfillmentAttempt) async throws {
         activeFulfillmentAttempt = attempt
         fulfillmentSubmissionClaimID = attempt.claimID
         isFulfilling = true
@@ -1429,13 +1912,25 @@ final class RequestStore: ObservableObject {
             }
         }
         do {
-            let outcome = try await service.fulfillRequest(
-                id: attempt.requestID,
-                claimToken: claimToken,
-                orderNumber: attempt.submission.orderNumber,
-                eta: attempt.submission.eta,
-                contactMessage: attempt.submission.contactMessage
-            )
+            let outcome: FulfillOutcome
+            switch attempt.authorization {
+            case .token(let claimToken):
+                outcome = try await service.fulfillRequest(
+                    id: attempt.requestID,
+                    claimToken: claimToken,
+                    orderNumber: attempt.submission.orderNumber,
+                    eta: attempt.submission.eta,
+                    contactMessage: attempt.submission.contactMessage
+                )
+            case .participant(let participantAuthority):
+                outcome = try await service.fulfillRequest(
+                    id: attempt.requestID,
+                    participantAuthority: participantAuthority,
+                    orderNumber: attempt.submission.orderNumber,
+                    eta: attempt.submission.eta,
+                    contactMessage: attempt.submission.contactMessage
+                )
+            }
             guard fulfillmentAttemptIsCurrent(attempt) else { return }
             applyConfirmedFulfillment(
                 request: outcome.request,
@@ -1452,6 +1947,10 @@ final class RequestStore: ObservableObject {
             guard fulfillmentAttemptIsCurrent(attempt) else { return }
             let serviceError = Self.asServiceError(error)
             fulfillError = serviceError
+            applyParticipantVerdict(
+                serviceError,
+                presentedAuthority: attempt.authorization.participantAuthority
+            )
             if Self.warrantsPlacementStatusCheck(serviceError, attempt: attempt) {
                 await revalidateAmbiguousFulfillment(attempt: attempt)
                 if fulfillmentConfirmation?.requestID == attempt.requestID {
@@ -1478,6 +1977,8 @@ final class RequestStore: ObservableObject {
     /// different reservation and must not disable it.
     func canSubmitFulfillment(requestID: String, now: Date = Date()) -> Bool {
         guard !isFulfilling,
+              !isReleasingClaim,
+              activeClaimReleaseAttempt == nil,
               activeClaimExtensionAttempt == nil,
               fulfillmentAmbiguityContext == nil,
               fulfillmentConfirmation?.requestID != requestID,
@@ -1486,7 +1987,10 @@ final class RequestStore: ObservableObject {
               claim.claimExpiresAt > now,
               let authorization = activeClaimAuthorization,
               authorization.requestID == requestID,
-              !authorization.claimToken.isEmpty else {
+              // A continuation-restored claim (no raw token) can now be
+              // fulfilled too (W3-H1 MUST FIX 1), authorized by verified
+              // participant authority instead.
+              resolveFulfillmentAuthorization(authorization) != nil else {
             return false
         }
         return true
@@ -1577,6 +2081,7 @@ final class RequestStore: ObservableObject {
                   existingContext.claimID == attempt.claimID,
                   existingContext.requestID == attempt.requestID,
                   existingContext.submission == attempt.submission,
+                  existingContext.authorization == attempt.authorization,
                   existingContext.hasConsumedRecovery else {
                 return
             }
@@ -1587,6 +2092,7 @@ final class RequestStore: ObservableObject {
                 claimID: attempt.claimID,
                 requestID: attempt.requestID,
                 submission: attempt.submission,
+                authorization: attempt.authorization,
                 hasConsumedRecovery: false
             )
             fulfillmentAmbiguityContext = context

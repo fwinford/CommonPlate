@@ -20,10 +20,16 @@ import {
   generateClaimToken,
   readClaimTokenHmacSecret,
 } from "./claimToken.js";
+import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
+import {
+  PARTICIPANT_SIGNING_SECRET_ENV,
+  signParticipantAuthority,
+} from "./participantCredentials.js";
 
 const sendFulfillmentEmail = vi.hoisted(() => vi.fn());
 vi.mock("./emailHelpers.js", () => ({ sendFulfillmentEmail }));
 
+import { releaseClaim } from "./claimRoute.js";
 import {
   fulfillRequest,
   PLACED_RETENTION_MS,
@@ -44,8 +50,12 @@ const mongoUri = process.env.MONGO_INTEGRATION_URI
   : undefined;
 const describeMongo = mongoUri ? describe : describe.skip;
 
-function routeContext(id: string, body: unknown) {
-  const req = { params: { id }, body } as unknown as Request;
+function routeContext(
+  id: string,
+  body: unknown,
+  headers: Record<string, string> = {}
+) {
+  const req = { params: { id }, body, headers } as unknown as Request;
   const res = {} as Response;
   let statusCode = 200;
   let bodyValue: any;
@@ -79,10 +89,36 @@ const helperParticipantId = new mongoose.Types.ObjectId(
   "64d0000000000000000000c3"
 );
 const boundHelperEmail = "fulfillment-mongo-helper@nyu.edu";
+const participantSecret = Buffer.from(
+  "real-mongo-test-participant-secret-material"
+);
+/**
+ * A real signed credential for the bound helper (W3-H1 continuation), used in
+ * place of the raw claim token once a relaunch has discarded it.
+ */
+const participantAuthority = signParticipantAuthority(
+  helperParticipantId,
+  1,
+  participantSecret
+);
+const continuationHeaders = {
+  [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority,
+};
 
 function fulfillmentBody(rawToken: string) {
   return {
     claimToken: rawToken,
+    fulfillment: {
+      orderNumber: "70154321",
+      eta: "15 minutes",
+      contactMessage: "Your meal is ready",
+    },
+  };
+}
+
+/** The W3-H1 continuation wire shape: no raw token, participant header instead. */
+function continuationFulfillmentBody() {
+  return {
     fulfillment: {
       orderNumber: "70154321",
       eta: "15 minutes",
@@ -124,6 +160,10 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     vi.stubEnv(
       "CLAIM_TOKEN_HMAC_SECRET",
       "real-mongo-test-secret-material-32-bytes"
+    );
+    vi.stubEnv(
+      PARTICIPANT_SIGNING_SECRET_ENV,
+      participantSecret.toString("utf8")
     );
     await mongoose.connect(mongoUri!);
     await MealRequest.syncIndexes();
@@ -626,5 +666,248 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       .select("+installationId")
       .lean();
     expect(stored?.installationId).toBeUndefined();
+  });
+
+  it("clears the verified helper's one-active-reservation lock on successful placement (W3-H1)", async () => {
+    const { request, rawToken } = await createClaimedRequest();
+    await Participant.updateOne(
+      { _id: helperParticipantId },
+      {
+        $set: {
+          activeReservationRequestId: request._id,
+          activeReservationClaimExpiresAt: new Date(
+            Date.now() + 60 * 60 * 1000
+          ),
+        },
+      }
+    ).exec();
+    const context = routeContext(String(request._id), fulfillmentBody(rawToken));
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.statusCode).toBe(200);
+    const lock = await Participant.findById(helperParticipantId)
+      .select("+activeReservationRequestId +activeReservationClaimExpiresAt")
+      .lean();
+    expect(lock?.activeReservationRequestId).toBeNull();
+    expect(lock?.activeReservationClaimExpiresAt).toBeNull();
+  });
+
+  it("release-vs-fulfillment race cannot reopen a successful placement (W3-H1)", async () => {
+    const { request, rawToken } = await createClaimedRequest();
+    const release = routeContext(String(request._id), { claimToken: rawToken });
+    const fulfill = routeContext(String(request._id), fulfillmentBody(rawToken));
+
+    await Promise.all([
+      releaseClaim(release.req, release.res),
+      fulfillRequest(fulfill.req, fulfill.res),
+    ]);
+
+    // Both mutations pivot on the same `status: "claimed"` conditional
+    // filter, so exactly one of them can have matched; the other lost the
+    // race and was refused. Whichever won, the persisted status settles on a
+    // terminal outcome the loser cannot undo.
+    const releaseWon = release.statusCode === 200;
+    const fulfillWon = fulfill.statusCode === 200;
+    expect(releaseWon !== fulfillWon).toBe(true);
+    const stored = await MealRequest.findById(request._id).lean();
+    expect(stored?.status).toBe(releaseWon ? "open" : "placed");
+  });
+
+  describe("participant-authority continuation (W3-H1 MUST FIX 1)", () => {
+    it("fulfills a restored reservation without the lost raw claim token", async () => {
+      const { request } = await createClaimedRequest();
+      const context = routeContext(
+        String(request._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      expect(context.body.request.status).toBe("placed");
+      const stored = await MealRequest.findById(request._id)
+        .select("+claimTokenDigest")
+        .lean();
+      expect(stored?.status).toBe("placed");
+      expect(stored?.orderNumber).toBe("70154321");
+      expect(stored?.fulfillerEmail).toBe(boundHelperEmail);
+      expect(stored).not.toHaveProperty("claimTokenDigest");
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+      expect(sendFulfillmentEmail).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: request._id }),
+        "70154321",
+        "15 minutes",
+        "Your meal is ready",
+        boundHelperEmail
+      );
+    });
+
+    it("still authorizes fine with the raw token unchanged (regression)", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const context = routeContext(
+        String(request._id),
+        fulfillmentBody(rawToken)
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      const stored = await MealRequest.findById(request._id).lean();
+      expect(stored?.status).toBe("placed");
+      expect(stored?.fulfillerEmail).toBe(boundHelperEmail);
+    });
+
+    it("refuses without any participant credential or raw token", async () => {
+      const { request } = await createClaimedRequest();
+      const context = routeContext(
+        String(request._id),
+        continuationFulfillmentBody()
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(401);
+      expect(context.body.error.code).toBe("PARTICIPANT_VERIFICATION_REQUIRED");
+      const stored = await MealRequest.findById(request._id).lean();
+      expect(stored?.status).toBe("claimed");
+    });
+
+    it("refuses fulfillment of a differently owned reservation", async () => {
+      const otherParticipantId = new mongoose.Types.ObjectId();
+      const { request } = await createClaimedRequest({
+        helperParticipantId: otherParticipantId,
+      });
+      const context = routeContext(
+        String(request._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(403);
+      expect(context.body.error.code).toBe("INVALID_CLAIM_TOKEN");
+      const stored = await MealRequest.findById(request._id).lean();
+      expect(stored?.status).toBe("claimed");
+      expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+    });
+
+    it("refuses fulfillment of a released reservation", async () => {
+      const released = await MealRequest.create({
+        vendor: "Transaction Cafe",
+        food: "Rice bowl",
+        pickupName: "Requester Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "open",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        deleteAt: new Date(Date.now() + 60 * 60 * 1000),
+      });
+      const context = routeContext(
+        String(released._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(409);
+      expect(context.body.error.code).toBe("REQUEST_NOT_CLAIMED");
+      expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+    });
+
+    it("refuses fulfillment of an expired reservation", async () => {
+      const { request } = await createClaimedRequest({
+        claimExpiresAt: new Date(Date.now() - 1),
+      });
+      const context = routeContext(
+        String(request._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(409);
+      expect(context.body.error.code).toBe("CLAIM_EXPIRED");
+      expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+    });
+
+    it("refuses fulfillment of an already-placed reservation and cannot double-record it", async () => {
+      const { request } = await createClaimedRequest({ status: "placed" });
+      const context = routeContext(
+        String(request._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(409);
+      expect(context.body.error.code).toBe("REQUEST_ALREADY_PLACED");
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(0);
+      expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+    });
+
+    it("participant-authorized fulfillment racing release remains one-winner and cannot reopen placement", async () => {
+      const { request } = await createClaimedRequest();
+      const release = routeContext(String(request._id), {}, continuationHeaders);
+      const fulfill = routeContext(
+        String(request._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await Promise.all([
+        releaseClaim(release.req, release.res),
+        fulfillRequest(fulfill.req, fulfill.res),
+      ]);
+
+      const releaseWon = release.statusCode === 200;
+      const fulfillWon = fulfill.statusCode === 200;
+      expect(releaseWon !== fulfillWon).toBe(true);
+      const stored = await MealRequest.findById(request._id).lean();
+      expect(stored?.status).toBe(releaseWon ? "open" : "placed");
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(
+        fulfillWon ? 1 : 0
+      );
+    });
+
+    // The transactional rollback and one-active-reservation-lock-clearing
+    // safeguards already proved above for the raw-token path are the same
+    // production code path for participant-authority continuation — both
+    // modes converge on the identical `persistCorePlacement` transaction —
+    // so this proves the convergence itself rather than re-proving rollback
+    // and lock-clearing from scratch.
+    it("clears the verified helper's one-active-reservation lock via participant-authority continuation", async () => {
+      const { request } = await createClaimedRequest();
+      await Participant.updateOne(
+        { _id: helperParticipantId },
+        {
+          $set: {
+            activeReservationRequestId: request._id,
+            activeReservationClaimExpiresAt: new Date(
+              Date.now() + 60 * 60 * 1000
+            ),
+          },
+        }
+      ).exec();
+      const context = routeContext(
+        String(request._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      const lock = await Participant.findById(helperParticipantId)
+        .select("+activeReservationRequestId +activeReservationClaimExpiresAt")
+        .lean();
+      expect(lock?.activeReservationRequestId).toBeNull();
+      expect(lock?.activeReservationClaimExpiresAt).toBeNull();
+    });
   });
 });

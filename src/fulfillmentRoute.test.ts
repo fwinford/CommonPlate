@@ -9,6 +9,11 @@ import {
   Participant,
   Request as MealRequest,
 } from "../models/db.js";
+import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
+import {
+  PARTICIPANT_SIGNING_SECRET_ENV,
+  signParticipantAuthority,
+} from "./participantCredentials.js";
 import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
 
 /** A real, disposable EC key — the dispatcher's default configuration reader
@@ -35,6 +40,30 @@ const helperParticipantId = new mongoose.Types.ObjectId(
   "64c0000000000000000000b2"
 );
 const boundHelperEmail = "helper@nyu.edu";
+const participantSecretText = "participant-fulfillment-route-unit-test-secret";
+const participantSecret = Buffer.from(participantSecretText);
+/**
+ * A real signed credential in the real header, resolved by the real gate
+ * against a stubbed `Participant.findOne` — matching `claimRoute.test.ts`'s
+ * convention for proving the participant-authority continuation path (W3-H1)
+ * as it actually runs, rather than a stand-in for it.
+ */
+const participantAuthority = signParticipantAuthority(
+  helperParticipantId,
+  1,
+  participantSecret
+);
+
+/** Stubs the `resolveParticipantAuthority` gate's own `Participant.findOne` read. */
+function stubVerifiedParticipant(email: string = boundHelperEmail) {
+  return vi.spyOn(Participant, "findOne").mockReturnValue({
+    select: () => ({
+      lean: () => ({
+        exec: vi.fn().mockResolvedValue({ _id: helperParticipantId, email }),
+      }),
+    }),
+  } as unknown as ReturnType<typeof Participant.findOne>);
+}
 
 function validBody() {
   return {
@@ -49,8 +78,10 @@ function validBody() {
 
 /**
  * Stubs both reads behind `resolveBoundHelper`, and leaves the diagnostic path
- * that shares `MealRequest.findById` alone by dispatching on the projection:
- * only the bound-helper read asks for `+helperParticipantId`.
+ * that shares `MealRequest.findById` alone by dispatching on the exact
+ * projection: only the bound-helper read asks for `+helperParticipantId`
+ * alone, while the diagnostic read (`explainConditionalFailure`) asks for
+ * several fields, `helperParticipantId` among them since W3-H1 continuation.
  */
 function stubBoundHelper({
   participantId = helperParticipantId as mongoose.Types.ObjectId | null,
@@ -68,7 +99,7 @@ function stubBoundHelper({
           exec: vi
             .fn()
             .mockResolvedValue(
-              projection.includes("helperParticipantId")
+              projection === "+helperParticipantId"
                 ? { helperParticipantId: participantId }
                 : diagnostic
             ),
@@ -83,10 +114,21 @@ function stubBoundHelper({
       }),
     }),
   } as unknown as ReturnType<typeof Participant.findById>);
+  // A committed placement for a verified helper clears that helper's
+  // one-active-reservation lock in the same transaction (W3-H1). Defaulted
+  // to a harmless success here so every case not itself exercising that
+  // behavior is unaffected by it.
+  vi.spyOn(Participant, "updateOne").mockReturnValue({
+    exec: vi.fn().mockResolvedValue({}),
+  } as unknown as ReturnType<typeof Participant.updateOne>);
 }
 
-function routeContext(body: unknown, id = requestId) {
-  const req = { params: { id }, body } as unknown as Request;
+function routeContext(
+  body: unknown,
+  id = requestId,
+  headers: Record<string, string> = {}
+) {
+  const req = { params: { id }, body, headers } as unknown as Request;
   const res = {} as Response;
   const status = vi.fn().mockReturnValue(res);
   const json = vi.fn().mockReturnValue(res);
@@ -104,7 +146,9 @@ beforeEach(() => {
     "CLAIM_TOKEN_HMAC_SECRET",
     "unit-test-claim-hmac-secret-material"
   );
+  vi.stubEnv(PARTICIPANT_SIGNING_SECRET_ENV, participantSecretText);
   stubBoundHelper();
+  stubVerifiedParticipant();
 });
 
 afterEach(() => {
@@ -125,14 +169,12 @@ describe("POST /api/request/:id/fulfill validation", () => {
     expect(startSession).not.toHaveBeenCalled();
   });
 
-  it.each([
-    undefined,
-    {},
-    { fulfillment: validBody().fulfillment },
-    { claimToken: "not-a-canonical-token", fulfillment: validBody().fulfillment },
-  ])("rejects a missing or malformed claim token", async (body) => {
+  it("rejects a claim token that is present but malformed", async () => {
     const startSession = vi.spyOn(mongoose, "startSession");
-    const context = routeContext(body);
+    const context = routeContext({
+      claimToken: "not-a-canonical-token",
+      fulfillment: validBody().fulfillment,
+    });
 
     await fulfillRequest(context.req, context.res);
 
@@ -140,6 +182,29 @@ describe("POST /api/request/:id/fulfill validation", () => {
     expect(responseBody(context).error.code).toBe("INVALID_CLAIM_TOKEN");
     expect(startSession).not.toHaveBeenCalled();
   });
+
+  // A body with no `claimToken` key at all (undefined, `{}`, or a bare
+  // `{ fulfillment }`) is the accepted W3-H1 continuation shape, not a
+  // malformed-token error: it is authorized by verified participant
+  // authority instead, so an absent credential answers with the participant
+  // gate's own refusal rather than a claim-token complaint. See the
+  // "participant-authority continuation" describe block below for the
+  // credential-present cases.
+  it.each([undefined, {}, { fulfillment: validBody().fulfillment }])(
+    "requires participant authority when the body carries no claim token",
+    async (body) => {
+      const startSession = vi.spyOn(mongoose, "startSession");
+      const context = routeContext(body);
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(401);
+      expect(responseBody(context).error.code).toBe(
+        "PARTICIPANT_VERIFICATION_REQUIRED"
+      );
+      expect(startSession).not.toHaveBeenCalled();
+    }
+  );
 
   it.each([
     {
@@ -687,6 +752,193 @@ describe("POST /api/request/:id/fulfill reuses the claim-bound helper identity (
         expect(sendFulfillmentEmail).not.toHaveBeenCalled();
       }
     );
+  });
+});
+
+describe("POST /api/request/:id/fulfill participant-authority continuation (W3-H1)", () => {
+  const continuationHeaders = { [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority };
+  const placedAt = new Date("2026-08-01T12:00:00.000Z");
+
+  function continuationBody() {
+    return {
+      fulfillment: {
+        orderNumber: "70154321",
+        eta: "15 minutes",
+        contactMessage: "Your meal is ready",
+      },
+    };
+  }
+
+  /**
+   * Mirrors `stubCommittedPlacement` above: a committed placement whose
+   * conditional update and ledger insert both succeed.
+   */
+  function stubCommittedPlacement() {
+    const placed = {
+      _id: new mongoose.Types.ObjectId(requestId),
+      status: "placed",
+      vendor: "Palladium",
+      food: "Vegetable rice bowl",
+      pickupWindowText: "ASAP",
+      windowStart: null,
+      windowEnd: null,
+      createdAt: placedAt,
+      expiresAt: new Date(placedAt.getTime() + 3 * 60 * 60 * 1000),
+      placedAt,
+    };
+    const findOneAndUpdate = vi
+      .spyOn(MealRequest, "findOneAndUpdate")
+      .mockReturnValue({
+        select: () => ({ exec: vi.fn().mockResolvedValue(placed) }),
+      } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
+    vi.spyOn(Fulfillment, "create").mockResolvedValue([{}] as never);
+    vi.spyOn(MealRequest, "updateOne").mockReturnValue({
+      exec: vi.fn().mockResolvedValue({}),
+    } as unknown as ReturnType<typeof MealRequest.updateOne>);
+    vi.spyOn(mongoose, "startSession").mockResolvedValue({
+      withTransaction: vi.fn(async (work: () => Promise<void>) => {
+        await work();
+      }),
+      endSession: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    return { findOneAndUpdate, placed };
+  }
+
+  /** A miss on the conditional update, classified from the diagnostic read. */
+  function stubConditionalMiss(diagnostic: unknown) {
+    stubBoundHelper({ diagnostic });
+    vi.spyOn(MealRequest, "findOneAndUpdate").mockReturnValue({
+      select: () => ({ exec: vi.fn().mockResolvedValue(null) }),
+    } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
+    vi.spyOn(mongoose, "startSession").mockResolvedValue({
+      withTransaction: vi.fn(async (work: () => Promise<void>) => {
+        await work();
+      }),
+      endSession: vi.fn().mockResolvedValue(undefined),
+    } as never);
+  }
+
+  it("fulfills a safely restored reservation without the lost raw claim token", async () => {
+    const { findOneAndUpdate } = stubCommittedPlacement();
+    const context = routeContext(continuationBody(), requestId, continuationHeaders);
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).not.toHaveBeenCalled();
+    const [filter, update] = findOneAndUpdate.mock.calls[0] as any[];
+    // No raw token exists in this mode, so nothing pins the write to a
+    // digest — the caller's own verified identity, matched against the
+    // reservation's binding below, is already the full authorization.
+    expect(filter.claimTokenDigest).toBeUndefined();
+    expect(filter.helperParticipantId).toEqual(helperParticipantId);
+    expect(update.$set.fulfillerEmail).toBe(boundHelperEmail);
+    expect(sendFulfillmentEmail).toHaveBeenCalledWith(
+      expect.anything(),
+      "70154321",
+      "15 minutes",
+      "Your meal is ready",
+      boundHelperEmail
+    );
+  });
+
+  it("requires participant verification when no token and no credential are presented", async () => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext(continuationBody());
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(responseBody(context).error.code).toBe(
+      "PARTICIPANT_VERIFICATION_REQUIRED"
+    );
+    expect(startSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "a differently owned reservation",
+      403,
+      "INVALID_CLAIM_TOKEN",
+      {
+        status: "claimed",
+        claimExpiresAt: new Date(Date.now() + 60_000),
+        helperParticipantId: new mongoose.Types.ObjectId(
+          "64c0000000000000000000c9"
+        ),
+      },
+    ],
+    [
+      "a released reservation",
+      409,
+      "REQUEST_NOT_CLAIMED",
+      { status: "open" },
+    ],
+    [
+      "an expired reservation",
+      409,
+      "CLAIM_EXPIRED",
+      {
+        status: "claimed",
+        claimExpiresAt: new Date(Date.now() - 1),
+        helperParticipantId,
+      },
+    ],
+    [
+      "an already-placed reservation",
+      409,
+      "REQUEST_ALREADY_PLACED",
+      { status: "placed" },
+    ],
+  ])("never authorizes fulfillment of %s", async (_label, status, code, diagnostic) => {
+    stubConditionalMiss(diagnostic);
+    const context = routeContext(continuationBody(), requestId, continuationHeaders);
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(status);
+    expect(responseBody(context).error.code).toBe(code);
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
+  it("falls through to the generic internal-failure terminal when nothing else classifies the miss", async () => {
+    // Every diagnostic field is consistent with this exact caller (matching
+    // status, unexpired, matching binding), so a conditional-update miss here
+    // has no more specific classification available — unlike token mode,
+    // participant mode never calls `resolveBoundHelper` and so can never
+    // reach the dedicated `MissingHelperIdentity` terminal; this is its only
+    // terminal fallback.
+    stubConditionalMiss({
+      status: "claimed",
+      claimExpiresAt: new Date(Date.now() + 60_000),
+      helperParticipantId,
+    });
+    const context = routeContext(continuationBody(), requestId, continuationHeaders);
+
+    await fulfillRequest(context.req, context.res);
+
+    // The diagnostic finds every field consistent with this exact caller, so
+    // the walk falls through to the generic internal-failure terminal —
+    // truthful, since nothing here names a more specific reason once
+    // ownership itself is confirmed.
+    expect(context.status).toHaveBeenCalledWith(500);
+    expect(responseBody(context).error.code).toBe("INTERNAL_FAILURE");
+  });
+
+  it("rejects a continuation body that also carries an unexpected field", async () => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext(
+      { ...continuationBody(), unexpected: true },
+      requestId,
+      continuationHeaders
+    );
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe(
+      "INVALID_FULFILLMENT_PAYLOAD"
+    );
+    expect(startSession).not.toHaveBeenCalled();
   });
 });
 

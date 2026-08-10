@@ -355,6 +355,18 @@ RequestSchema.index(
   }
 );
 
+// Supports W3-H1 continuation: "does this verified participant currently hold
+// an active reservation, and which request". Partial on `status: "claimed"`
+// for the same reason as the index above — only the requests this lookup can
+// ever match belong in it.
+RequestSchema.index(
+  { helperParticipantId: 1, status: 1 },
+  {
+    name: "request_helper_active_reservation",
+    partialFilterExpression: { status: "claimed" },
+  }
+);
+
 /* ============================ Fulfillment ============================= */
 export interface IFulfillment extends Document {
   requestId: mongoose.Types.ObjectId;
@@ -501,6 +513,8 @@ export interface IParticipant extends Document {
   email: string;
   authorityVersion: number;
   verifiedAt: Date;
+  activeReservationRequestId?: Types.ObjectId | null;
+  activeReservationClaimExpiresAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -535,6 +549,31 @@ const ParticipantSchema = new Schema<IParticipant>(
     // expires the identity, because the accepted contract has no routine
     // periodic reverification while usable authority remains.
     verifiedAt: { type: Date, required: true },
+    // The one-active-reservation-per-verified-helper lock (W3-H1). Not
+    // participant-facing state — `select: false` like every other private
+    // field — and deliberately kept on this single, already-unique-by-`_id`
+    // document rather than a new collection: MongoDB's per-document write
+    // conflict detection is what makes the claim transaction's conditional
+    // update here safe against two concurrent claims by the same principal on
+    // two *different* Request documents, which a cross-collection query alone
+    // could not serialize. Absence (from a Participant that predates this
+    // field, or one that has never held a reservation) matches a `null`
+    // query the same way every other legacy-absent field in this file does.
+    // `activeReservationClaimExpiresAt` in the past means the lock is stale
+    // and does not block a new reservation, without any explicit cleanup step
+    // — the same passive-expiry meaning `claimExpiresAt` already carries on
+    // `Request`.
+    activeReservationRequestId: {
+      type: Schema.Types.ObjectId,
+      ref: "Request",
+      select: false,
+      default: null,
+    },
+    activeReservationClaimExpiresAt: {
+      type: Date,
+      select: false,
+      default: null,
+    },
   },
   { timestamps: true }
 );

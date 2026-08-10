@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import mongoose from "mongoose";
-import { Request as MealRequest } from "../models/db.js";
+import { Participant, Request as MealRequest } from "../models/db.js";
 import {
   buildPublicRequestDetailResponse,
   type PublicRequestDocument,
@@ -17,6 +17,7 @@ import { day4Error, sendDay4Error } from "./day4Errors.js";
 import {
   resolveParticipantAuthority,
   sendParticipantAuthorityRefusal,
+  type ParticipantAuthorityRefusal,
 } from "./participantAuthorityGate.js";
 import { isPublicActionsPaused } from "./publicActionsPause.js";
 import {
@@ -30,10 +31,16 @@ import {
 
 export const CLAIM_ROUTE_PATH = "/api/request/:id/claim";
 export const CLAIM_EXTENSION_ROUTE_PATH = "/api/request/:id/claim/extend";
+export const CLAIM_RELEASE_ROUTE_PATH = "/api/request/:id/claim/release";
 export const CLAIM_DURATION_MS = 15 * 60 * 1000;
 export const CLAIM_EXTENSION_MS = 5 * 60 * 1000;
 export const CLAIM_UNAVAILABLE_MESSAGE =
   "Helping with meal requests is temporarily unavailable.";
+
+export const HELPER_ALREADY_HAS_ACTIVE_RESERVATION_CODE =
+  "HELPER_ALREADY_HAS_ACTIVE_RESERVATION";
+export const HELPER_ALREADY_HAS_ACTIVE_RESERVATION_MESSAGE =
+  "You already have an active reservation. Finish or release it before starting another.";
 
 interface ClaimDiagnosticDocument {
   status?: string;
@@ -42,6 +49,7 @@ interface ClaimDiagnosticDocument {
   claimExpiresAt?: Date | null;
   claimExtendedAt?: Date | null;
   claimTokenDigest?: string | null;
+  helperParticipantId?: mongoose.Types.ObjectId | null;
 }
 
 function isInvalidId(id: unknown): boolean {
@@ -51,7 +59,7 @@ function isInvalidId(id: unknown): boolean {
 function diagnosticRequest(id: string) {
   return MealRequest.findById(id)
     .select(
-      "status visibleFrom expiresAt claimExpiresAt claimExtendedAt +claimTokenDigest"
+      "status visibleFrom expiresAt claimExpiresAt claimExtendedAt +claimTokenDigest +helperParticipantId"
     )
     .lean()
     .exec() as Promise<ClaimDiagnosticDocument | null>;
@@ -132,6 +140,21 @@ async function explainClaimFailure(
   );
 }
 
+class ConditionalClaimFailure extends Error {}
+/**
+ * The target request was successfully claimed, but this exact verified
+ * helper already holds a different active reservation elsewhere (W3-H1). The
+ * Request-side claim is rolled back with the rest of the transaction: a
+ * helper never ends up holding two reservations because the second half of
+ * this check failed.
+ */
+class ActiveReservationConflict extends Error {}
+
+interface ClaimedRequestDocument extends PublicRequestDocument {
+  pickupName: string;
+  claimExpiresAt: Date;
+}
+
 export async function claimRequest(
   req: Request,
   res: Response
@@ -155,68 +178,144 @@ export async function claimRequest(
   if (!authority.ok) {
     return sendParticipantAuthorityRefusal(res, authority.refusal);
   }
+  const participantId = new mongoose.Types.ObjectId(
+    authority.participant.participantId
+  );
 
   // This one captured instant drives the eligibility filter, all persisted
   // claim timestamps, failure classification, and the returned expiration.
   const now = new Date();
   const maximumClaimExpiration = new Date(now.getTime() + CLAIM_DURATION_MS);
 
+  let session: mongoose.ClientSession | undefined;
   try {
     const secret = readClaimTokenHmacSecret();
     const rawToken = generateClaimToken();
     const tokenDigest = digestClaimToken(rawToken, secret);
 
-    const document = await MealRequest.findOneAndUpdate(
-      {
-        _id: id,
-        status: { $ne: "placed" },
-        // The same start-of-visibility rule the list, digest, and alert paths
-        // apply. A request nobody can see yet must not be claimable either.
-        visibleFrom: buildVisibleNowFilter(now),
-        expiresAt: buildMinimumRemainingTimeFilter(now),
-        $or: [
-          { status: "open" },
+    session = await mongoose.startSession();
+    let claimedDocument: ClaimedRequestDocument | null = null;
+
+    await session.withTransaction(
+      async () => {
+        // Rollout-compatibility gap (W3-H1): a claim granted before the
+        // Participant lock below existed never wrote
+        // `activeReservationRequestId`, so the lock-only check further down
+        // cannot see it — that participant would read as lock-free even
+        // while a real reservation is still live. This direct read closes
+        // the gap by finding any *other* live claim already bound to this
+        // participant, regardless of whether the lock was ever written for
+        // it. Concurrency safety for two brand-new claims by the same
+        // participant still comes from the Participant document's own
+        // write-conflict detection below — this read only extends what
+        // counts as "already reserved," it does not replace the lock.
+        const existingActiveReservation = await MealRequest.findOne(
           {
+            helperParticipantId: participantId,
             status: "claimed",
-            claimExpiresAt: { $lte: now },
+            claimExpiresAt: { $gt: now },
           },
-        ],
-      },
-      [
-        {
-          $set: {
-            status: "claimed",
-            claimedAt: now,
-            claimExpiresAt: {
-              $min: [maximumClaimExpiration, "$expiresAt"],
+          { _id: 1 },
+          { session }
+        )
+          .lean()
+          .exec();
+
+        if (existingActiveReservation) {
+          throw new ActiveReservationConflict();
+        }
+
+        const document = await MealRequest.findOneAndUpdate(
+          {
+            _id: id,
+            status: { $ne: "placed" },
+            // The same start-of-visibility rule the list, digest, and alert
+            // paths apply. A request nobody can see yet must not be
+            // claimable either.
+            visibleFrom: buildVisibleNowFilter(now),
+            expiresAt: buildMinimumRemainingTimeFilter(now),
+            $or: [
+              { status: "open" },
+              {
+                status: "claimed",
+                claimExpiresAt: { $lte: now },
+              },
+            ],
+          },
+          [
+            {
+              $set: {
+                status: "claimed",
+                claimedAt: now,
+                claimExpiresAt: {
+                  $min: [maximumClaimExpiration, "$expiresAt"],
+                },
+                claimExtendedAt: null,
+                claimTokenDigest: tokenDigest,
+                // The reservation's owner, written in the same conditional
+                // mutation that grants it, so a claim never exists without
+                // the verified helper it belongs to. A request re-claimed
+                // after an expired reservation is rebound to whoever won it
+                // this time. Fulfillment reads this instead of accepting a
+                // helper address.
+                helperParticipantId: participantId,
+                updatedAt: now,
+              },
             },
-            claimExtendedAt: null,
-            claimTokenDigest: tokenDigest,
-            // The reservation's owner, written in the same conditional
-            // mutation that grants it, so a claim never exists without the
-            // verified helper it belongs to. A request re-claimed after an
-            // expired reservation is rebound to whoever won it this time.
-            // Fulfillment reads this instead of accepting a helper address.
-            helperParticipantId: new mongoose.Types.ObjectId(
-              authority.participant.participantId
-            ),
-            updatedAt: now,
+          ],
+          { new: true, session }
+        )
+          .lean()
+          .exec();
+
+        if (!document) {
+          throw new ConditionalClaimFailure();
+        }
+
+        // One-active-reservation-per-verified-helper (W3-H1). Pinned to this
+        // exact participant document, whose per-`_id` write conflict
+        // detection is what makes this safe against a second concurrent
+        // claim by the same principal on a *different* request — the two
+        // transactions cannot both win a conditional update against the same
+        // document, so only one commits.
+        const lock = await Participant.findOneAndUpdate(
+          {
+            _id: participantId,
+            $or: [
+              { activeReservationRequestId: null },
+              { activeReservationClaimExpiresAt: { $lte: now } },
+            ],
           },
-        },
-      ],
-      { new: true }
-    )
-      .lean()
-      .exec();
+          {
+            $set: {
+              activeReservationRequestId: document._id,
+              activeReservationClaimExpiresAt: (
+                document as ClaimedRequestDocument
+              ).claimExpiresAt,
+            },
+          },
+          { session }
+        ).exec();
 
-    if (!document) {
-      return await explainClaimFailure(id, now, res);
-    }
+        if (!lock) {
+          throw new ActiveReservationConflict();
+        }
 
-    const publicResponse = buildPublicRequestDetailResponse(
-      document as unknown as PublicRequestDocument,
-      now
+        claimedDocument = document as unknown as ClaimedRequestDocument;
+      },
+      {
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
+      }
     );
+
+    if (!claimedDocument) {
+      throw new ConditionalClaimFailure();
+    }
+    // TypeScript cannot see through the transaction closure's assignment.
+    const document = claimedDocument as ClaimedRequestDocument;
+
+    const publicResponse = buildPublicRequestDetailResponse(document, now);
     return res.json({
       request: publicResponse.request,
       claim: {
@@ -225,7 +324,18 @@ export async function claimRequest(
         claimExpiresAt: document.claimExpiresAt,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof ActiveReservationConflict) {
+      return sendDay4Error(
+        res,
+        409,
+        HELPER_ALREADY_HAS_ACTIVE_RESERVATION_CODE,
+        HELPER_ALREADY_HAS_ACTIVE_RESERVATION_MESSAGE
+      );
+    }
+    if (error instanceof ConditionalClaimFailure) {
+      return await explainClaimFailure(id, now, res);
+    }
     console.error("[route] Claim mutation failed");
     return sendDay4Error(
       res,
@@ -233,14 +343,150 @@ export async function claimRequest(
       "INTERNAL_FAILURE",
       "Unable to claim this request right now."
     );
+  } finally {
+    if (session) {
+      try {
+        await session.endSession();
+      } catch {
+        console.error(
+          "[route] MongoDB session cleanup failed after claim attempt"
+        );
+      }
+    }
   }
+}
+
+/**
+ * How a caller may authorize an action against an existing claim (extend,
+ * release), once the raw claim token generated at claim time is no longer
+ * available in-process (W3-H1 continuation).
+ *
+ * `token` is the original, unchanged authorization: the raw claim token
+ * confirms possession of a specific reservation and is matched by digest,
+ * exactly as before this slice.
+ *
+ * `participant` is additive: the caller's verified participant authority
+ * (W3-I1), matched against the target request's own `helperParticipantId`.
+ * It exists for the case the raw token is gone — after termination and
+ * relaunch — and never replaces or weakens the token path, which stays
+ * available for the still-in-process case.
+ */
+export type ClaimActionAuthorization =
+  | { mode: "token"; digest: string }
+  | { mode: "participant"; participantId: string };
+
+export type ClaimActionAuthorizationRefusal =
+  | { kind: "participant"; refusal: ParticipantAuthorityRefusal }
+  | { kind: "invalidToken" }
+  | { kind: "unavailable" };
+
+/**
+ * Distinguishes the two accepted request shapes for a claim action: a body
+ * carrying exactly `{ claimToken }` (the original in-process path), or an
+ * empty body carrying the participant-authority header (the continuation
+ * path). Any other shape is refused before either credential is checked, the
+ * same "answer nothing until the shape is right" posture `extendClaim`
+ * already applied to the token-only body.
+ */
+async function resolveClaimActionAuthorization(
+  req: Request
+): Promise<
+  | { ok: true; authorization: ClaimActionAuthorization }
+  | { ok: false; refusal: ClaimActionAuthorizationRefusal }
+> {
+  const body = req.body;
+  const isPlainObject =
+    Boolean(body) && typeof body === "object" && !Array.isArray(body);
+  const keys = isPlainObject ? Object.keys(body as Record<string, unknown>) : [];
+
+  if (isPlainObject && keys.length === 1 && keys[0] === "claimToken") {
+    const candidate = (body as Record<string, unknown>).claimToken;
+    if (!isValidRawClaimToken(candidate)) {
+      return { ok: false, refusal: { kind: "invalidToken" } };
+    }
+    try {
+      const secret = readClaimTokenHmacSecret();
+      const digest = digestClaimToken(candidate, secret);
+      return { ok: true, authorization: { mode: "token", digest } };
+    } catch {
+      console.error("[route] Claim token secret unavailable");
+      return { ok: false, refusal: { kind: "unavailable" } };
+    }
+  }
+
+  if (isPlainObject && keys.length === 0) {
+    const authority = await resolveParticipantAuthority(req);
+    if (!authority.ok) {
+      return {
+        ok: false,
+        refusal: { kind: "participant", refusal: authority.refusal },
+      };
+    }
+    return {
+      ok: true,
+      authorization: {
+        mode: "participant",
+        participantId: authority.participant.participantId,
+      },
+    };
+  }
+
+  return { ok: false, refusal: { kind: "invalidToken" } };
+}
+
+function sendClaimActionAuthorizationRefusal(
+  res: Response,
+  refusal: ClaimActionAuthorizationRefusal,
+  unavailableMessage: string
+): Response {
+  switch (refusal.kind) {
+    case "participant":
+      return sendParticipantAuthorityRefusal(res, refusal.refusal);
+    case "invalidToken":
+      return sendDay4Error(
+        res,
+        400,
+        "INVALID_CLAIM_TOKEN",
+        "The claim token is missing or invalid."
+      );
+    case "unavailable":
+      return sendDay4Error(res, 500, "INTERNAL_FAILURE", unavailableMessage);
+  }
+}
+
+function claimActionAuthorizationMatches(
+  authorization: ClaimActionAuthorization,
+  document: ClaimDiagnosticDocument
+): boolean {
+  if (authorization.mode === "token") {
+    return claimTokenDigestMatches(
+      document.claimTokenDigest,
+      authorization.digest
+    );
+  }
+  return (
+    document.helperParticipantId != null &&
+    String(document.helperParticipantId) === authorization.participantId
+  );
+}
+
+function claimActionFilter(
+  authorization: ClaimActionAuthorization
+): Record<string, unknown> {
+  return authorization.mode === "token"
+    ? { claimTokenDigest: authorization.digest }
+    : {
+        helperParticipantId: new mongoose.Types.ObjectId(
+          authorization.participantId
+        ),
+      };
 }
 
 async function explainExtensionFailure(
   id: string,
-  submittedDigest: string,
   now: Date,
-  res: Response
+  res: Response,
+  authorization: ClaimActionAuthorization
 ): Promise<Response> {
   const document = await diagnosticRequest(id);
   if (!document) {
@@ -262,7 +508,7 @@ async function explainExtensionFailure(
   // Deliberately no start-of-visibility branch here, unlike the claim
   // diagnostic. Extension is only reachable by a caller who already holds a
   // claim, so a not-yet-visible request cannot legitimately arrive — and this
-  // classification runs before token validation, so adding one would answer a
+  // classification runs before authorization, so adding one would answer a
   // caller who has proved nothing.
   if (isExpired(document.expiresAt, now)) {
     return sendDay4Error(
@@ -280,11 +526,12 @@ async function explainExtensionFailure(
       "This request does not have an active claim."
     );
   }
-  // Expiration is classified before the digest. A claim that lapsed and was
-  // replaced by another helper carries that helper's digest, so checking the
-  // token first would tell the original holder their token is invalid when the
-  // truth is that their claim ran out. Token validation is unchanged for an
-  // active claim: the digest still gates every non-expired path below.
+  // Expiration is classified before authorization. A claim that lapsed and
+  // was replaced by another helper carries that helper's credential, so
+  // checking authorization first would tell the original holder their
+  // credential is wrong when the truth is that their claim ran out.
+  // Authorization is unchanged for an active claim: it still gates every
+  // non-expired path below.
   if (isExpired(document.claimExpiresAt, now)) {
     return sendDay4Error(
       res,
@@ -293,9 +540,7 @@ async function explainExtensionFailure(
       "This claim has expired."
     );
   }
-  if (
-    !claimTokenDigestMatches(document.claimTokenDigest, submittedDigest)
-  ) {
+  if (!claimActionAuthorizationMatches(authorization, document)) {
     return sendDay4Error(
       res,
       403,
@@ -331,6 +576,15 @@ async function explainExtensionFailure(
   );
 }
 
+class ConditionalExtensionFailure extends Error {}
+
+interface ExtendedRequestDocument {
+  _id: mongoose.Types.ObjectId;
+  claimExpiresAt: Date;
+  claimExtendedAt: Date;
+  helperParticipantId?: mongoose.Types.ObjectId | null;
+}
+
 export async function extendClaim(
   req: Request,
   res: Response
@@ -345,67 +599,117 @@ export async function extendClaim(
     );
   }
 
-  const rawToken =
-    req.body &&
-    typeof req.body === "object" &&
-    Object.keys(req.body).length === 1
-      ? req.body.claimToken
-      : undefined;
-  if (!isValidRawClaimToken(rawToken)) {
-    return sendDay4Error(
+  const resolution = await resolveClaimActionAuthorization(req);
+  if (!resolution.ok) {
+    return sendClaimActionAuthorizationRefusal(
       res,
-      400,
-      "INVALID_CLAIM_TOKEN",
-      "The claim token is missing or invalid."
+      resolution.refusal,
+      "Unable to extend this claim right now."
     );
   }
+  const authorization = resolution.authorization;
 
   // This one captured instant drives the active-claim filter, the persisted
   // extension timestamp, failure classification, and the response.
   const now = new Date();
+  let session: mongoose.ClientSession | undefined;
 
   try {
-    const secret = readClaimTokenHmacSecret();
-    const submittedDigest = digestClaimToken(rawToken, secret);
+    session = await mongoose.startSession();
+    let extendedDocument: ExtendedRequestDocument | null = null;
 
-    const document = await MealRequest.findOneAndUpdate(
-      {
-        _id: id,
-        status: "claimed",
-        claimTokenDigest: submittedDigest,
-        claimExpiresAt: { $gt: now },
-        claimExtendedAt: null,
-        $expr: {
-          $lte: [
-            { $add: ["$claimExpiresAt", CLAIM_EXTENSION_MS] },
-            "$expiresAt",
-          ],
-        },
-      },
-      [
-        {
-          $set: {
-            claimExpiresAt: {
-              $add: ["$claimExpiresAt", CLAIM_EXTENSION_MS],
+    await session.withTransaction(
+      async () => {
+        const document = await MealRequest.findOneAndUpdate(
+          {
+            _id: id,
+            status: "claimed",
+            claimExpiresAt: { $gt: now },
+            claimExtendedAt: null,
+            ...claimActionFilter(authorization),
+            $expr: {
+              $lte: [
+                { $add: ["$claimExpiresAt", CLAIM_EXTENSION_MS] },
+                "$expiresAt",
+              ],
             },
-            claimExtendedAt: now,
-            updatedAt: now,
           },
-        },
-      ],
-      { new: true }
-    )
-      .lean()
-      .exec();
+          [
+            {
+              $set: {
+                claimExpiresAt: {
+                  $add: ["$claimExpiresAt", CLAIM_EXTENSION_MS],
+                },
+                claimExtendedAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+          { new: true, session }
+        )
+          .select("+helperParticipantId")
+          .lean()
+          .exec();
 
-    if (!document) {
-      return await explainExtensionFailure(
-        id,
-        submittedDigest,
-        now,
-        res
-      );
+        if (!document) {
+          throw new ConditionalExtensionFailure();
+        }
+        const extended = document as unknown as ExtendedRequestDocument;
+
+        // Mirrors the new deadline onto the one-active-reservation lock so a
+        // just-extended claim cannot be mistaken for a stale one that no
+        // longer blocks a fresh claim by the same principal. A
+        // pre-W3-I1 legacy claim has no `helperParticipantId` and therefore
+        // no lock to mirror; nothing here needs to run for it.
+        if (extended.helperParticipantId) {
+          // Owning the exact lock is now mandatory for the extension to
+          // commit at all (independent-review MUST FIX 2), not merely a
+          // best-effort mirror. A stale/delayed extension whose lock has
+          // since moved to a later reservation — because the old claim
+          // genuinely expired and this same participant reserved something
+          // else in the meantime — must never durably renew this Request's
+          // deadline; that would leave the participant holding two live
+          // reservations at once. The `$or` accepts the lock either already
+          // pointing at this exact request (the ordinary case) or never
+          // having been written for it at all — a pre-H1 claim, self-healed
+          // here rather than refused, matching the accepted rollout-
+          // compatibility handling `claimRequest`'s own direct read applies.
+          // It never accepts the lock pointing at a *different* request:
+          // that is exactly the race this closes.
+          const lockSync = await Participant.updateOne(
+            {
+              _id: extended.helperParticipantId,
+              $or: [
+                { activeReservationRequestId: extended._id },
+                { activeReservationRequestId: null },
+              ],
+            },
+            {
+              $set: {
+                activeReservationRequestId: extended._id,
+                activeReservationClaimExpiresAt: extended.claimExpiresAt,
+              },
+            },
+            { session }
+          ).exec();
+
+          if (lockSync.matchedCount === 0) {
+            throw new ConditionalExtensionFailure();
+          }
+        }
+
+        extendedDocument = extended;
+      },
+      {
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
+      }
+    );
+
+    if (!extendedDocument) {
+      throw new ConditionalExtensionFailure();
     }
+    const document = extendedDocument as ExtendedRequestDocument;
 
     return res.json({
       claim: {
@@ -413,7 +717,10 @@ export async function extendClaim(
         claimExtendedAt: document.claimExtendedAt,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof ConditionalExtensionFailure) {
+      return await explainExtensionFailure(id, now, res, authorization);
+    }
     console.error("[route] Claim extension mutation failed");
     return sendDay4Error(
       res,
@@ -421,6 +728,282 @@ export async function extendClaim(
       "INTERNAL_FAILURE",
       "Unable to extend this claim right now."
     );
+  } finally {
+    if (session) {
+      try {
+        await session.endSession();
+      } catch {
+        console.error(
+          "[route] MongoDB session cleanup failed after extension attempt"
+        );
+      }
+    }
+  }
+}
+
+async function explainReleaseFailure(
+  id: string,
+  now: Date,
+  res: Response,
+  authorization: ClaimActionAuthorization
+): Promise<Response> {
+  const document = await diagnosticRequest(id);
+  if (!document) {
+    return sendDay4Error(
+      res,
+      404,
+      "REQUEST_NOT_FOUND",
+      "This request could not be found."
+    );
+  }
+  // Pinned by the release mutation's own filter (`status: "claimed"`): a
+  // placed request can never be the row this update matched, so this is a
+  // truthful classification of why release found nothing to do, never a
+  // path that could itself reopen a placement.
+  if (document.status === "placed") {
+    return sendDay4Error(
+      res,
+      409,
+      "REQUEST_ALREADY_PLACED",
+      "This request has already been placed."
+    );
+  }
+  if (document.status !== "claimed") {
+    return sendDay4Error(
+      res,
+      409,
+      "REQUEST_NOT_CLAIMED",
+      "This request does not have an active claim."
+    );
+  }
+  if (isExpired(document.claimExpiresAt, now)) {
+    return sendDay4Error(
+      res,
+      409,
+      "CLAIM_EXPIRED",
+      "This claim has expired."
+    );
+  }
+  if (!claimActionAuthorizationMatches(authorization, document)) {
+    return sendDay4Error(
+      res,
+      403,
+      "INVALID_CLAIM_TOKEN",
+      "The claim token is missing or invalid."
+    );
+  }
+
+  return sendDay4Error(
+    res,
+    500,
+    "INTERNAL_FAILURE",
+    "Unable to release this reservation right now."
+  );
+}
+
+class ConditionalReleaseFailure extends Error {}
+
+interface ReleaseReservationVersion {
+  claimExpiresAt: Date;
+  claimExtendedAt?: Date | null;
+}
+
+interface ReleasedRequestDocument {
+  _id: mongoose.Types.ObjectId;
+  helperParticipantId?: mongoose.Types.ObjectId | null;
+}
+
+/**
+ * Captures the reservation version this release attempt originally met.
+ *
+ * This read deliberately happens once, outside `withTransaction`: the Mongo
+ * driver may invoke a transaction callback again after a transient write
+ * conflict, but a retry must not silently adopt an extension that committed
+ * after this release began. `claimExpiresAt` changes on every extension, and
+ * `claimExtendedAt` records the one-use transition, so together they are the
+ * existing reservation-version CAS without adding persistence or wire state.
+ */
+async function readReleaseReservationVersion(
+  id: string
+): Promise<ReleaseReservationVersion | null> {
+  const document = (await MealRequest.findById(id)
+    .select("claimExpiresAt claimExtendedAt")
+    .lean()
+    .exec()) as ReleaseReservationVersion | null;
+
+  if (!document?.claimExpiresAt) return null;
+  return {
+    claimExpiresAt: document.claimExpiresAt,
+    ...(document.claimExtendedAt === undefined
+      ? {}
+      : { claimExtendedAt: document.claimExtendedAt }),
+  };
+}
+
+function releaseVersionFilter(
+  version: ReleaseReservationVersion,
+  now: Date
+): Record<string, unknown> {
+  return {
+    // `$gt` preserves the existing active-claim deadline gate while `$eq`
+    // prevents a driver retry from releasing a newer extension.
+    claimExpiresAt: {
+      $gt: now,
+      $eq: version.claimExpiresAt,
+    },
+    claimExtendedAt:
+      version.claimExtendedAt === undefined
+        ? { $exists: false }
+        // MongoDB's bare `{ field: null }` also matches an absent field.
+        // H1 rows write an explicit null, while pre-H1 rows may physically
+        // omit this marker, so preserve the representation captured above.
+        : version.claimExtendedAt === null
+          ? { $eq: null, $exists: true }
+          : version.claimExtendedAt,
+  };
+}
+
+/**
+ * Explicit release (W3-H1, new). Atomically invalidates only the caller's
+ * still-active reservation and restores the request to `open`, pinned to
+ * `status: "claimed"` plus the matching authorization exactly as
+ * `claimRequest`, `extendClaim`, and `fulfillmentRoute`'s placement mutation
+ * already pin their own conditional updates — so release can never reopen a
+ * `placed` request and can never release a different helper's reservation.
+ *
+ * Because release and fulfillment both pivot on the same
+ * `status: "claimed"` → terminal-state conditional mutation, whichever
+ * mutation's filter matches first simply wins; the other's conditional
+ * update misses and is classified by `explainReleaseFailure` /
+ * `explainConditionalFailure` exactly as any other lost race already is. No
+ * new concurrency primitive is required.
+ */
+export async function releaseClaim(
+  req: Request,
+  res: Response
+): Promise<Response> {
+  const id = req.params.id;
+  if (isInvalidId(id)) {
+    return sendDay4Error(
+      res,
+      400,
+      "INVALID_REQUEST_ID",
+      "The request ID is invalid."
+    );
+  }
+
+  const resolution = await resolveClaimActionAuthorization(req);
+  if (!resolution.ok) {
+    return sendClaimActionAuthorizationRefusal(
+      res,
+      resolution.refusal,
+      "Unable to release this reservation right now."
+    );
+  }
+  const authorization = resolution.authorization;
+
+  const now = new Date();
+  let session: mongoose.ClientSession | undefined;
+
+  try {
+    // Immutable across every callback invocation `withTransaction` may make.
+    // If extension moves the reservation to a new deadline after this read,
+    // the release CAS below misses on retry instead of adopting that version.
+    const originalVersion = await readReleaseReservationVersion(id);
+    if (!originalVersion) {
+      throw new ConditionalReleaseFailure();
+    }
+
+    session = await mongoose.startSession();
+    let released: ReleasedRequestDocument | null = null;
+
+    await session.withTransaction(
+      async () => {
+        // `new: false` (the default) returns the pre-release document, which
+        // still carries `helperParticipantId` — needed a moment later to
+        // clear that participant's reservation lock. The unset fields put
+        // this request back exactly where an unclaimed request already
+        // stands: nothing here distinguishes a released request from one
+        // that was never claimed.
+        const document = await MealRequest.findOneAndUpdate(
+          {
+            _id: id,
+            status: "claimed",
+            // The exact version captured before this transaction started.
+            ...releaseVersionFilter(originalVersion, now),
+            ...claimActionFilter(authorization),
+          },
+          {
+            $set: { status: "open", updatedAt: now },
+            $unset: {
+              claimedAt: 1,
+              claimExpiresAt: 1,
+              claimExtendedAt: 1,
+              claimTokenDigest: 1,
+              helperParticipantId: 1,
+            },
+          },
+          { session }
+        )
+          .select("+helperParticipantId")
+          .lean()
+          .exec();
+
+        if (!document) {
+          throw new ConditionalReleaseFailure();
+        }
+        const releasedDocument = document as unknown as ReleasedRequestDocument;
+
+        if (releasedDocument.helperParticipantId) {
+          await Participant.updateOne(
+            {
+              _id: releasedDocument.helperParticipantId,
+              activeReservationRequestId: releasedDocument._id,
+            },
+            {
+              $set: {
+                activeReservationRequestId: null,
+                activeReservationClaimExpiresAt: null,
+              },
+            },
+            { session }
+          ).exec();
+        }
+
+        released = releasedDocument;
+      },
+      {
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
+      }
+    );
+
+    if (!released) {
+      throw new ConditionalReleaseFailure();
+    }
+
+    return res.json({ released: true });
+  } catch (error) {
+    if (error instanceof ConditionalReleaseFailure) {
+      return await explainReleaseFailure(id, now, res, authorization);
+    }
+    console.error("[route] Claim release mutation failed");
+    return sendDay4Error(
+      res,
+      500,
+      "INTERNAL_FAILURE",
+      "Unable to release this reservation right now."
+    );
+  } finally {
+    if (session) {
+      try {
+        await session.endSession();
+      } catch {
+        console.error(
+          "[route] MongoDB session cleanup failed after release attempt"
+        );
+      }
+    }
   }
 }
 
@@ -461,3 +1044,4 @@ export function createDay4MutationRateLimiter(max: number) {
 // the other mutation's allowance.
 export const claimRateLimiter = createDay4MutationRateLimiter(10);
 export const claimExtensionRateLimiter = createDay4MutationRateLimiter(10);
+export const claimReleaseRateLimiter = createDay4MutationRateLimiter(10);

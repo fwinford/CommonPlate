@@ -133,6 +133,44 @@ enum FulfillmentReadyTime: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
+/// Copy for a failed explicit release (W3-H1). Release is always safe to
+/// retry — a repeat of an already-ended claim is refused, never duplicated —
+/// so none of these states end the flow on their own; the reservation stays
+/// exactly as it was and the helper may try again.
+enum ReleasePresentationError: Equatable {
+    case publicActionsPaused
+    case rateLimited
+    case couldNotRelease
+
+    var message: String {
+        switch self {
+        case .publicActionsPaused:
+            return "The reservation wasn’t released because helping is temporarily unavailable."
+        case .rateLimited:
+            return "Too many attempts. Please wait a moment and try again."
+        case .couldNotRelease:
+            return "We couldn’t release this reservation right now. Please try again."
+        }
+    }
+
+    static func map(_ error: RequestServiceError?) -> ReleasePresentationError? {
+        guard let error else { return nil }
+        switch error {
+        case .serverError(let code, _):
+            switch code {
+            case ClaimErrorCode.publicActionsPaused:
+                return .publicActionsPaused
+            case ClaimErrorCode.rateLimited:
+                return .rateLimited
+            default:
+                return .couldNotRelease
+            }
+        default:
+            return .couldNotRelease
+        }
+    }
+}
+
 enum FulfillmentPresentationError: Equatable {
     case invalidDetails
     case rateLimited
@@ -200,6 +238,12 @@ struct FulfillRequestView: View {
     static let extensionAcceptTitle = "Give me 5 more minutes"
     static let extensionDeclineTitle = "Keep my current time"
 
+    /// The W3-H1 five-minute warning and its two actions. Locked copy, per
+    /// the accepted contract — reused verbatim rather than paraphrased.
+    static let reservationWarningTitle = "5 minutes remain"
+    static let reservationWarningExtendTitle = "Add 5 minutes"
+    static let reservationWarningReleaseTitle = "Release reservation"
+
     let request: FoodRequest
     @ObservedObject var store: RequestStore
     @Binding var path: [AppRoute]
@@ -230,6 +274,8 @@ struct FulfillRequestView: View {
                 if store.isShowingClaimExtensionPrompt {
                     extensionPromptSection
                 }
+
+                reservationActionsSection(claim: claim)
 
                 Section("Reservation") {
                     Label {
@@ -333,7 +379,7 @@ struct FulfillRequestView: View {
                                     )
                                 }
                             }
-                            .disabled(store.isFulfilling)
+                            .disabled(store.isFulfilling || store.isReleasingClaim)
                             .accessibilityIdentifier("fulfillment-ambiguity-recovery")
                         }
                         // Navigation only. It uses the same exit the
@@ -636,7 +682,7 @@ struct FulfillRequestView: View {
                     Text(Self.extensionAcceptTitle)
                 }
             }
-            .disabled(store.isExtendingClaim)
+            .disabled(!store.canExtendActiveClaim)
             .accessibilityIdentifier("claim-extension-accept")
 
             Button(Self.extensionDeclineTitle) {
@@ -644,6 +690,70 @@ struct FulfillRequestView: View {
             }
             .disabled(store.isExtendingClaim)
             .accessibilityIdentifier("claim-extension-decline")
+        }
+    }
+
+    /// Always-available reservation actions (W3-H1 MUST FIX 2). `Release
+    /// reservation` is offered whenever the caller holds a still-active,
+    /// releasable reservation, and `Add 5 minutes` whenever the one extension
+    /// is actually still available — neither waits for the five-minute
+    /// warning to fire; both are backend-authoritative regardless. The
+    /// warning still surfaces here as the "5 minutes remain" heading and
+    /// routes into these same actions — it supersedes the T-3 "Still
+    /// ordering?" prompt for this reservation (`RequestStore` already
+    /// resolves that prompt the instant the warning fires, so the two never
+    /// both show) — but it is no longer the condition that first enables
+    /// them.
+    private func reservationActionsSection(claim: ActiveClaimPresentation) -> some View {
+        Section {
+            if store.isShowingReservationWarning {
+                Text(Self.reservationWarningTitle)
+                    .font(.headline)
+                    .accessibilityIdentifier("reservation-warning")
+            }
+
+            if claim.isExtensionAvailable {
+                Button {
+                    Task {
+                        await store.extendActiveClaim()
+                    }
+                } label: {
+                    if store.isExtendingClaim {
+                        HStack {
+                            ProgressView()
+                            Text("Adding time…")
+                        }
+                    } else {
+                        Text(Self.reservationWarningExtendTitle)
+                    }
+                }
+                .disabled(!store.canExtendActiveClaim)
+                .accessibilityIdentifier("reservation-warning-extend")
+            }
+
+            Button(role: .destructive) {
+                Task {
+                    await store.releaseActiveClaim()
+                }
+            } label: {
+                if store.isReleasingClaim {
+                    HStack {
+                        ProgressView()
+                        Text("Releasing…")
+                    }
+                } else {
+                    Text(Self.reservationWarningReleaseTitle)
+                }
+            }
+            .disabled(!store.canReleaseActiveClaim)
+            .accessibilityIdentifier("reservation-warning-release")
+
+            if let releaseError = ReleasePresentationError.map(store.releaseClaimError) {
+                Text(releaseError.message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("reservation-warning-release-error")
+            }
         }
     }
 

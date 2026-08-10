@@ -88,6 +88,16 @@ struct ClaimExtensionOutcome {
     let claimExtendedAt: Date
 }
 
+/// `GET /api/participant/active-reservation`'s answer for the current verified
+/// participant (W3-H1 continuation). Carries no claim token — it was never
+/// persisted, so continuation cannot recover it.
+struct ActiveReservationOutcome {
+    let request: FoodRequest
+    let pickupName: String
+    let claimExpiresAt: Date
+    let claimExtendedAt: Date?
+}
+
 /// Result of a successful fulfillment, mirroring the backend's fulfill response shape.
 /// Core placement success (`request`) is independent of notification delivery.
 struct FulfillOutcome {
@@ -325,6 +335,116 @@ struct RequestService {
         )
     }
 
+    /// `POST /api/request/:id/claim/extend`, authorizing with verified
+    /// participant authority instead of the raw claim token (W3-H1
+    /// continuation) — for the case the raw token is gone after termination
+    /// and relaunch. An empty JSON object body plus the credential header is
+    /// the accepted second request shape the backend authorizes.
+    func extendClaim(id: String, participantAuthority: String) async throws -> ClaimExtensionOutcome {
+        try Task.checkCancellation()
+
+        let response: ClaimExtensionResponseDTO
+        do {
+            response = try await client.send(
+                path: "/api/request/\(id)/claim/extend",
+                method: .post,
+                body: EmptyBody(),
+                headers: Self.participantHeaders(participantAuthority)
+            )
+        } catch is CancellationError {
+            throw RequestServiceError.ambiguousExtensionOutcome(underlying: CancellationError())
+        } catch let error as APIClientError {
+            switch error {
+            case .transport, .decoding, .unexpectedStatus:
+                throw RequestServiceError.ambiguousExtensionOutcome(underlying: error)
+            default:
+                throw Self.translate(error)
+            }
+        } catch {
+            throw Self.translate(error)
+        }
+
+        return ClaimExtensionOutcome(
+            claimExpiresAt: response.claim.claimExpiresAt,
+            claimExtendedAt: response.claim.claimExtendedAt
+        )
+    }
+
+    /// `POST /api/request/:id/claim/release` (W3-H1), authorizing with the raw
+    /// claim token. Safe to retry: a repeated release of an already-released
+    /// or otherwise-ended claim is refused, never duplicated, so an outcome
+    /// iOS cannot confirm needs no ambiguity recovery of its own — the caller
+    /// simply leaves its local claim state untouched and may try again.
+    func releaseClaim(id: String, claimToken: String) async throws {
+        try Task.checkCancellation()
+        do {
+            let response: ReleaseResponseDTO = try await client.send(
+                path: "/api/request/\(id)/claim/release",
+                method: .post,
+                body: ClaimExtensionPayload(claimToken: claimToken)
+            )
+            try Self.validateConfirmedRelease(response)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
+    /// `POST /api/request/:id/claim/release`, authorizing with verified
+    /// participant authority instead of the raw claim token (W3-H1
+    /// continuation).
+    func releaseClaim(id: String, participantAuthority: String) async throws {
+        try Task.checkCancellation()
+        do {
+            let response: ReleaseResponseDTO = try await client.send(
+                path: "/api/request/\(id)/claim/release",
+                method: .post,
+                body: EmptyBody(),
+                headers: Self.participantHeaders(participantAuthority)
+            )
+            try Self.validateConfirmedRelease(response)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
+    /// `GET /api/participant/active-reservation` (W3-H1 continuation).
+    /// Resolves the verified participant's current active reservation from
+    /// backend truth, or `nil` if they hold none. Never fabricates a
+    /// reservation from local state — only a confirmed backend answer, or a
+    /// thrown error the caller must treat as "truth not established", is
+    /// returned.
+    func fetchActiveReservation(participantAuthority: String) async throws -> ActiveReservationOutcome? {
+        try Task.checkCancellation()
+
+        let response: ActiveReservationResponseDTO
+        do {
+            response = try await client.send(
+                path: "/api/participant/active-reservation",
+                method: .get,
+                headers: Self.participantHeaders(participantAuthority)
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+
+        guard let reservation = response.reservation else {
+            return nil
+        }
+        let request = try Self.mapPublicRequest(reservation.request)
+        return ActiveReservationOutcome(
+            request: request,
+            pickupName: reservation.pickupName,
+            claimExpiresAt: reservation.claimExpiresAt,
+            claimExtendedAt: reservation.claimExtendedAt
+        )
+    }
+
     /// `POST /api/request/:id/fulfill`
     /// The helper is whoever the claim is bound to, so this deliberately takes
     /// no address: the backend derives it from the reservation and refuses a
@@ -382,6 +502,62 @@ struct RequestService {
         }
     }
 
+    /// `POST /api/request/:id/fulfill`, authorizing with verified participant
+    /// authority instead of the raw claim token (W3-H1 continuation) — for a
+    /// reservation restored by `fetchActiveReservation` after the raw token
+    /// was already lost to process termination. The backend accepts this as
+    /// an additive authorization path and never persists the (never sent)
+    /// raw token; see `fulfillRequest(id:claimToken:...)` above for the
+    /// still-unchanged in-process path.
+    func fulfillRequest(
+        id: String,
+        participantAuthority: String,
+        orderNumber: String,
+        eta: String,
+        contactMessage: String?
+    ) async throws -> FulfillOutcome {
+        let payload = FulfillContinuationRequestPayload(
+            fulfillment: FulfillmentPayload(
+                orderNumber: orderNumber,
+                eta: eta,
+                contactMessage: contactMessage
+            )
+        )
+        try Task.checkCancellation()
+
+        let response: FulfillResponseDTO
+        do {
+            response = try await client.send(
+                path: "/api/request/\(id)/fulfill",
+                method: .post,
+                body: payload,
+                headers: Self.participantHeaders(participantAuthority)
+            )
+        } catch is CancellationError {
+            throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: CancellationError())
+        } catch let error as APIClientError {
+            switch error {
+            case .apiError(let code, _) where code == ClaimErrorCode.internalFailure:
+                throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
+            case .transport, .decoding, .unexpectedStatus:
+                throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
+            default:
+                throw Self.translate(error)
+            }
+        } catch {
+            throw Self.translate(error)
+        }
+
+        do {
+            try Self.validateResponseRequestID(response.request.id, expected: id)
+            let request = try Self.mapPublicRequest(response.request)
+            try Self.validateResponseStatus(request.status, expected: .placed)
+            return FulfillOutcome(request: request, notificationStatus: response.notification.status)
+        } catch {
+            throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
+        }
+    }
+
     // MARK: - Mapping
 
     private static func validateResponseRequestID(_ responseID: String, expected requestID: String) throws {
@@ -391,6 +567,22 @@ struct RequestService {
                     .init(
                         codingPath: [],
                         debugDescription: "Response request ID does not match the requested resource"
+                    )
+                )
+            )
+        }
+    }
+
+    /// A decoded 2xx body is not itself release truth. Only the backend's
+    /// explicit affirmative result permits `RequestStore` to retire the local
+    /// reservation; `false` follows the existing ordinary release-failure path.
+    private static func validateConfirmedRelease(_ response: ReleaseResponseDTO) throws {
+        guard response.released else {
+            throw APIClientError.decoding(
+                DecodingError.dataCorrupted(
+                    .init(
+                        codingPath: [],
+                        debugDescription: "Release response did not confirm release"
                     )
                 )
             )

@@ -5,10 +5,10 @@
 // The `UNUserNotificationCenterDelegate` for helper new-request push (Week 3
 // Day 6 tap-routing slice). Two responsibilities only:
 //
-// 1. Foreground presentation: while CommonPlate is in the foreground, show
-//    the same visible system banner/sound a backgrounded delivery would —
-//    ordinary `UNUserNotificationCenter` foreground presentation is enough,
-//    so nothing here invents a custom in-app notification surface.
+// 1. Foreground presentation: helper/requester pushes keep their visible
+//    system banner/sound. A valid reservation warning is suppressed only
+//    while an actually active CommonPlate scene owns its in-app surface;
+//    inactive scenes remain eligible for local presentation.
 // 2. Capturing a tap (from background, or a cold launch) as one pending
 //    `requestId` that `HelperNotificationRouteDriver` applies exactly once
 //    when the app is ready to navigate. Held in memory only: this object is
@@ -130,6 +130,21 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
     /// self-cancel the work it started.
     @Published private(set) var routingGeneration = 0
 
+    /// The one captured, not-yet-applied reservation-warning tap (W3-H1).
+    /// Reuses `HelperNotificationIntent`'s exact shape — a routing
+    /// `requestId` plus a frozen `latestTapSequence` claim — because the
+    /// routing need is identical: resolve current backend truth, then land
+    /// on the one destination that answer implies. Kept as its own field
+    /// rather than folded into `pendingHelperIntent`: the two intents route
+    /// to different resolution logic (`resolveHelperNotificationRequest`'s
+    /// "is this request still open" versus "do I still hold this exact
+    /// reservation") and must retire independently.
+    @Published private(set) var pendingReservationWarningIntent: HelperNotificationIntent?
+
+    /// Same self-cancellation reasoning as `routingGeneration`, for the
+    /// reservation-warning intent.
+    @Published private(set) var reservationWarningRoutingGeneration = 0
+
     /// FIFO queue of requester-fulfillment intents waiting to be presented.
     /// A real queue, not a count or `Bool`, so each tap is retained with its
     /// own capture-time snapshot rather than coalesced into one latch.
@@ -147,6 +162,12 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
     /// requester-notice staleness fence: see the type header.
     @Published private(set) var latestHelperTapSequence = 0
 
+    /// Actual active-scene ownership supplied by `ContentView`. Defaulting to
+    /// false is fail-open for local presentation during launch: until a real
+    /// active scene says it owns the in-app warning, the delegate must not
+    /// suppress the system surface merely because the process is alive.
+    private var isApplicationSceneActive = false
+
     /// Non-nil exactly while a captured helper tap is waiting to be routed.
     /// Reading never clears: the intent is retired only by
     /// `markHelperIntentHandled(tapSequence:)`, once routing has actually
@@ -163,6 +184,34 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
     /// How many requester-fulfillment taps are currently queued.
     var pendingRequesterFulfillmentCount: Int { pendingRequesterFulfillmentIntents.count }
 
+    /// Keeps the notification delegate on the same visibility truth as
+    /// `RequestStore`: only `.active` owns in-app warning presentation;
+    /// `.inactive` and `.background` do not.
+    func updateApplicationSceneActivity(isActive: Bool) {
+        isApplicationSceneActive = isActive
+    }
+
+    /// Main-actor decision used by the delegate callback and directly by its
+    /// tests, so the exercised seam includes the router's current scene truth
+    /// rather than only a caller-supplied Boolean.
+    func foregroundPresentationOptions(
+        userInfo: [AnyHashable: Any]
+    ) -> UNNotificationPresentationOptions {
+        foregroundPresentationOptions(
+            isReservationWarning:
+                ReservationWarningNotificationPayloadParser.parse(userInfo: userInfo) != nil
+        )
+    }
+
+    private func foregroundPresentationOptions(
+        isReservationWarning: Bool
+    ) -> UNNotificationPresentationOptions {
+        guard isReservationWarning else {
+            return [.banner, .list, .sound]
+        }
+        return isApplicationSceneActive ? [] : [.banner, .list, .sound]
+    }
+
     /// The testable entry point: extracts the payload and records the
     /// pending route. Called by the `UNUserNotificationCenterDelegate` bridge
     /// below, and directly by tests, since `UNNotificationResponse` has no
@@ -173,6 +222,18 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
             latestHelperTapSequence = latestTapSequence
             pendingHelperIntent = HelperNotificationIntent(requestID: payload.requestID, tapSequence: latestTapSequence)
             routingGeneration += 1
+            return
+        }
+        if let payload = ReservationWarningNotificationPayloadParser.parse(userInfo: userInfo) {
+            // Advances the same two counters a helper tap does: returning to
+            // an already-held reservation is at least as specific a
+            // navigation intent, and a still-queued requester-fulfillment
+            // notice should be knocked off Home by it exactly as it would be
+            // by a helper tap.
+            latestTapSequence += 1
+            latestHelperTapSequence = latestTapSequence
+            pendingReservationWarningIntent = HelperNotificationIntent(requestID: payload.requestID, tapSequence: latestTapSequence)
+            reservationWarningRoutingGeneration += 1
             return
         }
         if RequesterFulfillmentNotificationPayloadParser.isRequesterFulfillmentPayload(userInfo: userInfo) {
@@ -215,6 +276,15 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
         pendingHelperIntent = nil
     }
 
+    /// The reservation-warning equivalent of `markHelperIntentHandled(tapSequence:)`;
+    /// same reasoning and the same terminated-launch safety property applies.
+    func markReservationWarningIntentHandled(tapSequence: Int) {
+        guard pendingReservationWarningIntent?.tapSequence == tapSequence else {
+            return
+        }
+        pendingReservationWarningIntent = nil
+    }
+
     /// Claims and dequeues requester-fulfillment intents in tap order until
     /// it finds one still authoritative — a helper tap has not been captured
     /// since it was captured — or the queue empties. Discarding a stale
@@ -241,15 +311,23 @@ final class HelperNotificationRouter: NSObject, ObservableObject {
 }
 
 extension HelperNotificationRouter: UNUserNotificationCenterDelegate {
-    /// Foreground presentation. Unconditional: the only push CommonPlate
-    /// currently sends is the helper new-request alert, and the accepted
-    /// contract requires it to be visible in the foreground too.
+    /// Foreground presentation is payload-aware only for the W3-H1 local
+    /// warning; this does not globally suppress existing push presentation.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .list, .sound])
+        let isReservationWarning = ReservationWarningNotificationPayloadParser.parse(
+            userInfo: notification.request.content.userInfo
+        ) != nil
+        Task { @MainActor in
+            completionHandler(
+                self.foregroundPresentationOptions(
+                    isReservationWarning: isReservationWarning
+                )
+            )
+        }
     }
 
     /// A tap from background or terminated state. `completionHandler()` is

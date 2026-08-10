@@ -28,6 +28,7 @@ final class ClaimFlowURLProtocol: URLProtocol {
         let path: String
         let method: String
         let body: Data?
+        let headers: [String: String]
 
         var bodyObject: [String: Any]? {
             guard let body else { return nil }
@@ -107,7 +108,8 @@ final class ClaimFlowURLProtocol: URLProtocol {
             CapturedRequest(
                 path: request.url?.path ?? "",
                 method: request.httpMethod ?? "",
-                body: Self.readBody(from: request)
+                body: Self.readBody(from: request),
+                headers: request.allHTTPHeaderFields ?? [:]
             )
         )
         Self.lock.unlock()
@@ -1503,10 +1505,16 @@ final class ClaimFlowTests: XCTestCase {
         await waitUntil { !store.isFetching }
     }
 
+    /// W3-H1: a claim this short (under five minutes total) reaches the T-5
+    /// warning moment immediately, and the warning resolves the T-3 prompt
+    /// before the prompt's own, later moment ever arrives — so this claim
+    /// duration, which used to reach the T-3 prompt directly, now reaches the
+    /// warning instead. `ReservationWarningTests` covers the warning itself in
+    /// detail; this keeps proving the T-3 prompt's own one-time guarantee: it
+    /// still never (re)appears once resolved, however that resolution happened.
     func testExtensionIsOfferedOnceAndNeverReappears() async throws {
         let store = makeStore()
-        // Expires just past the three-minute prompt lead, so the local timer
-        // reaches the prompt moment almost immediately.
+        store.updateApplicationVisibility(isVisible: true)
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
             claimExpiresAt: Date().addingTimeInterval(
                 RequestStore.claimExtensionPromptLead + 0.2
@@ -1516,22 +1524,26 @@ final class ClaimFlowTests: XCTestCase {
         try await store.claim(requestID: requestID)
 
         XCTAssertFalse(store.isShowingClaimExtensionPrompt)
-        await waitUntil { store.isShowingClaimExtensionPrompt }
+        await waitUntil { store.hasResolvedClaimExtensionPrompt }
+        XCTAssertFalse(store.isShowingClaimExtensionPrompt)
 
+        // Declining what is not currently showing is a harmless no-op, and
+        // must not reopen or otherwise disturb the already-resolved prompt.
         store.dismissClaimExtensionPrompt()
         XCTAssertFalse(store.isShowingClaimExtensionPrompt)
         XCTAssertTrue(store.hasResolvedClaimExtensionPrompt)
 
-        // The prompt moment has passed and cannot come back around.
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertFalse(store.isShowingClaimExtensionPrompt)
-
-        // A declined prompt sends nothing.
+        // Nothing here sent any request beyond the original claim.
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, ["/api/request/\(requestID)/claim"])
     }
 
+    /// W3-H1: see `testExtensionIsOfferedOnceAndNeverReappears` above for why
+    /// this claim duration now reaches the warning rather than the T-3
+    /// prompt. `extendActiveClaim()` itself is unchanged by which surface
+    /// calls it, so this still proves the accepted one-extension guarantee.
     func testSuccessfulExtensionRetiresThePromptAndBlocksASecondAttempt() async throws {
         let store = makeStore()
+        store.updateApplicationVisibility(isVisible: true)
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
             claimExpiresAt: Date().addingTimeInterval(
                 RequestStore.claimExtensionPromptLead + 0.2
@@ -1539,7 +1551,7 @@ final class ClaimFlowTests: XCTestCase {
             requestExpiresAt: Date().addingTimeInterval(60 * 60)
         )))
         try await store.claim(requestID: requestID)
-        await waitUntil { store.isShowingClaimExtensionPrompt }
+        await waitUntil { store.isShowingReservationWarning }
 
         ClaimFlowURLProtocol.enqueue(.response(data: extensionResponse(
             claimExpiresAt: Date().addingTimeInterval(60 * 8),
@@ -1561,6 +1573,7 @@ final class ClaimFlowTests: XCTestCase {
     /// full five minutes does not fit inside the request's own expiration.
     func testPromptIsWithheldWhenAFullExtensionCannotFit() async throws {
         let store = makeStore()
+        store.updateApplicationVisibility(isVisible: true)
         let claimExpiresAt = Date().addingTimeInterval(RequestStore.claimExtensionPromptLead + 0.2)
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse(
             claimExpiresAt: claimExpiresAt,
@@ -2241,8 +2254,14 @@ final class ClaimFlowTests: XCTestCase {
 
     // MARK: - Declining an extension
 
+    /// W3-H1: see `testExtensionIsOfferedOnceAndNeverReappears` above for why
+    /// this claim duration now reaches the warning rather than the T-3
+    /// prompt before `dismissClaimExtensionPrompt()` is exercised.
+    /// `dismissClaimExtensionPrompt()` itself is unchanged: declining still
+    /// retires the prompt state only and must never touch the reservation.
     func testDecliningTheExtensionKeepsTheCurrentReservationActive() async throws {
         let store = makeStore()
+        store.updateApplicationVisibility(isVisible: true)
         let claimExpiresAt = Date().addingTimeInterval(
             RequestStore.claimExtensionPromptLead + 0.2
         )
@@ -2251,7 +2270,7 @@ final class ClaimFlowTests: XCTestCase {
             requestExpiresAt: Date().addingTimeInterval(60 * 60)
         )))
         try await store.claim(requestID: requestID)
-        await waitUntil { store.isShowingClaimExtensionPrompt }
+        await waitUntil { store.hasResolvedClaimExtensionPrompt }
 
         store.dismissClaimExtensionPrompt()
 

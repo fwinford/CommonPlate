@@ -142,6 +142,55 @@ struct ClaimExtensionResponseDTO: Decodable {
     let claim: ClaimExtensionDetailsDTO
 }
 
+// MARK: - Reservation release/continuation (W3-H1)
+
+/// Response for `POST /api/request/:id/claim/release` → `{ released: true }`.
+/// Nothing else is returned: the caller already holds the public request
+/// state and clears its own claimant-private state locally on success.
+struct ReleaseResponseDTO: Decodable {
+    let released: Bool
+}
+
+/// The claimant-private half of `GET /api/participant/active-reservation`.
+/// Deliberately carries no claim token: the raw token is never persisted, so
+/// continuation cannot recover it — only participant authority, which
+/// `extendClaim`/`releaseClaim` accept as an additive authorization path.
+struct ActiveReservationDetailsDTO: Decodable {
+    let request: RequestResponseDTO
+    let pickupName: String
+    let claimExpiresAt: Date
+    let claimExtendedAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case request
+        case pickupName
+        case claimExpiresAt
+        case claimExtendedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let request = try container.decode(RequestResponseDTO.self, forKey: .request)
+        guard request.status == .claimed else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .request,
+                in: container,
+                debugDescription: "A non-null active reservation must embed a claimed request"
+            )
+        }
+
+        self.request = request
+        pickupName = try container.decode(String.self, forKey: .pickupName)
+        claimExpiresAt = try container.decode(Date.self, forKey: .claimExpiresAt)
+        claimExtendedAt = try container.decodeIfPresent(Date.self, forKey: .claimExtendedAt)
+    }
+}
+
+/// `{ reservation: null }` when the verified participant holds none.
+struct ActiveReservationResponseDTO: Decodable {
+    let reservation: ActiveReservationDetailsDTO?
+}
+
 // MARK: - Fulfillment
 
 /// Strict nested fields accepted by `POST /api/request/:id/fulfill`.
@@ -161,6 +210,17 @@ struct FulfillmentPayload: Encodable {
 /// Payload for `POST /api/request/:id/fulfill`.
 struct FulfillRequestPayload: Encodable {
     let claimToken: String
+    let fulfillment: FulfillmentPayload
+}
+
+/// Payload for `POST /api/request/:id/fulfill` when authorizing with verified
+/// participant authority instead of the raw claim token (W3-H1 continuation).
+/// The backend distinguishes this shape from `FulfillRequestPayload` by the
+/// absence of the `claimToken` key, exactly as it already does for
+/// `ClaimExtensionPayload` versus the empty-body release/extend continuation
+/// requests — so this is a distinct type rather than an optional field on the
+/// one above.
+struct FulfillContinuationRequestPayload: Encodable {
     let fulfillment: FulfillmentPayload
 }
 

@@ -130,13 +130,21 @@ import { assertMongoTransactionsSupported } from "./src/mongoTransactions.js";
 import { getStats } from "./src/statsRoute.js";
 import {
   CLAIM_EXTENSION_ROUTE_PATH,
+  CLAIM_RELEASE_ROUTE_PATH,
   CLAIM_ROUTE_PATH,
   claimExtensionRateLimiter,
   claimRateLimiter,
+  claimReleaseRateLimiter,
   claimRequest,
   extendClaim,
   pauseDay4Mutation,
+  releaseClaim,
 } from "./src/claimRoute.js";
+import {
+  ACTIVE_RESERVATION_ROUTE_PATH,
+  activeReservationRateLimiter,
+  getActiveReservation,
+} from "./src/reservationRoute.js";
 import { readClaimTokenHmacSecret } from "./src/claimToken.js";
 import { assertUnsubscribeSigningSecretForActivation } from "./src/unsubscribeCredential.js";
 import { assertApnsConfigurationForActivation } from "./src/apnsConfig.js";
@@ -449,6 +457,21 @@ app.post(
   pauseDay4Mutation,
   claimExtensionRateLimiter,
   extendClaim
+);
+app.post(
+  CLAIM_RELEASE_ROUTE_PATH,
+  pauseDay4Mutation,
+  claimReleaseRateLimiter,
+  releaseClaim
+);
+
+// A read of the caller's own already-granted reservation truth (W3-H1
+// continuation), not a new mutation, so it is not paused by
+// `PUBLIC_ACTIONS_PAUSED` — matching `GET /api/request/:id` above.
+app.get(
+  ACTIVE_RESERVATION_ROUTE_PATH,
+  activeReservationRateLimiter,
+  getActiveReservation
 );
 
 // A valid active claim is the only authorization for placement. This route is
