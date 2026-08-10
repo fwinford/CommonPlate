@@ -49,6 +49,20 @@ protocol PushInstallationStorage {
     var settingsRecoveryIntentStartedAt: Date? { get }
 
     func setSettingsRecoveryIntentStartedAt(_ date: Date?)
+
+    /// The desired push state (`true` = enable, `false` = disable) of a
+    /// synchronization attempt whose outcome is unresolved — the request may
+    /// have reached the backend, but this installation never received and
+    /// validated a usable response. `nil` while nothing is unresolved.
+    ///
+    /// Persisted so the ambiguity survives relaunch: the whole point is that
+    /// `PushSubscriptionStore` must not fabricate On or Off, and must not
+    /// silently resolve one way or the other on its own — only an explicit
+    /// retry through `PushSubscriptionStore.retryAmbiguousSync()`, reasserting
+    /// this exact same desired state, may resolve it.
+    var pendingAmbiguousDesiredEnabled: Bool? { get }
+
+    func setPendingAmbiguousDesiredEnabled(_ desired: Bool?)
 }
 
 /// `UserDefaults`-backed storage, matching
@@ -59,6 +73,7 @@ struct UserDefaultsPushInstallationStorage: PushInstallationStorage {
     private static let credentialKey = "com.commonplate.push.installationCredential"
     private static let confirmedEnabledKey = "com.commonplate.push.lastConfirmedEnabled"
     private static let settingsRecoveryIntentStartedAtKey = "com.commonplate.push.settingsRecoveryIntentStartedAt"
+    private static let pendingAmbiguousDesiredEnabledKey = "com.commonplate.push.pendingAmbiguousDesiredEnabled"
 
     private let defaults: UserDefaults
 
@@ -103,6 +118,21 @@ struct UserDefaultsPushInstallationStorage: PushInstallationStorage {
             return
         }
         defaults.set(date, forKey: Self.settingsRecoveryIntentStartedAtKey)
+    }
+
+    var pendingAmbiguousDesiredEnabled: Bool? {
+        guard defaults.object(forKey: Self.pendingAmbiguousDesiredEnabledKey) != nil else {
+            return nil
+        }
+        return defaults.bool(forKey: Self.pendingAmbiguousDesiredEnabledKey)
+    }
+
+    func setPendingAmbiguousDesiredEnabled(_ desired: Bool?) {
+        guard let desired else {
+            defaults.removeObject(forKey: Self.pendingAmbiguousDesiredEnabledKey)
+            return
+        }
+        defaults.set(desired, forKey: Self.pendingAmbiguousDesiredEnabledKey)
     }
 }
 

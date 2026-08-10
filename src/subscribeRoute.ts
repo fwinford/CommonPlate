@@ -19,8 +19,6 @@ export const SUBSCRIBE_ACCEPTED_RESPONSE = {
   message: "If confirmation is needed, check your email for the next step.",
 } as const;
 
-export const CONFIRMATION_EMAIL_UNAVAILABLE_MESSAGE =
-  "Email confirmation is temporarily unavailable. Please try again.";
 export const CONFIRMATION_TOKEN_BYTES = SUBSCRIPTION_TOKEN_BYTES;
 export const CONFIRMATION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 /**
@@ -206,15 +204,6 @@ function accepted(res: Response): Response {
   return res.status(202).json(SUBSCRIBE_ACCEPTED_RESPONSE);
 }
 
-function providerUnavailable(res: Response): Response {
-  return sendDay4Error(
-    res,
-    503,
-    "CONFIRMATION_EMAIL_UNAVAILABLE",
-    CONFIRMATION_EMAIL_UNAVAILABLE_MESSAGE
-  );
-}
-
 export function createSubscribeHandler(
   overrides: Partial<SubscribeDependencies> = {}
 ) {
@@ -372,9 +361,8 @@ export function createSubscribeHandler(
           );
         }
       } catch (compensationError) {
-        // Compensation is best-effort: the caller still learns only that the
-        // confirmation email failed, and the lease keeps the lifecycle
-        // recoverable by a later signup.
+        // Compensation is best-effort. Keep the lifecycle recoverable by a
+        // later explicit signup without exposing this provider outcome.
         console.error(
           created
             ? "[subscribe] Confirmation cleanup outcome is unknown; new-record deletion could not be verified."
@@ -386,7 +374,10 @@ export function createSubscribeHandler(
           }
         );
       }
-      return providerUnavailable(res);
+      // Provider submission failure is operational truth, not public
+      // Subscriber-lifecycle truth. The generic wording does not claim that
+      // a confirmation email was submitted, delivered, or received.
+      return accepted(res);
     }
   };
 }

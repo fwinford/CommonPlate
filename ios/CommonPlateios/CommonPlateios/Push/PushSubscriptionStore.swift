@@ -30,6 +30,14 @@ enum PushPreferenceState: Equatable {
     case on
     case denied
     case failed
+    /// An enable or disable call may have reached the backend, but this
+    /// installation never received and validated a usable response. `On` and
+    /// `Off` are both withheld; `desiredEnabled` is the declarative state the
+    /// unresolved attempt asked for, and the only thing `retryAmbiguousSync()`
+    /// may reassert. Never entered or left by any automatic reconciliation —
+    /// only an explicit attempt (the original call, or a later explicit
+    /// retry) can resolve it.
+    case ambiguous(desiredEnabled: Bool)
 }
 
 enum PushSyncFailure: Equatable {
@@ -78,6 +86,16 @@ final class PushSubscriptionStore: ObservableObject {
         self.settingsOpener = settingsOpener
         self.registrationTimeout = registrationTimeout
 
+        // An unresolved prior attempt takes priority over everything else: it
+        // must survive relaunch exactly as it was, presenting neither On nor
+        // Off, until an explicit retry resolves it. Checked before the
+        // ordinary confirmed-state restoration below, so a relaunch never
+        // silently reverts an unresolved choice to a stale confirmed value.
+        if let pendingDesired = installationStorage.pendingAmbiguousDesiredEnabled {
+            self.state = .ambiguous(desiredEnabled: pendingDesired)
+            return
+        }
+
         // A previously confirmed installation starts in a checking state
         // rather than claiming `.on` before this launch has reconfirmed it —
         // and rather than showing `.off` and flashing back to `.on` a moment
@@ -102,6 +120,11 @@ final class PushSubscriptionStore: ObservableObject {
     /// on the Settings-recovery card by accident, however many times the
     /// screen reappears.
     func refreshAuthorizationStatus(now: Date = Date()) async {
+        // An unresolved ambiguous outcome is never automatically retried or
+        // silently resolved by an ordinary lifecycle refresh — only an
+        // explicit `retryAmbiguousSync()` call may act on it.
+        if case .ambiguous = state { return }
+
         let status = await authorizationCoordinator.currentAuthorizationStatus()
 
         switch status {
@@ -173,6 +196,19 @@ final class PushSubscriptionStore: ObservableObject {
     }
 
     private func registerAndSynchronize(requestingPermission: Bool) async {
+        // Captured before `.settingUp` overwrites it: whether this attempt is
+        // resolving a previously ambiguous enable governs every failure
+        // branch below. A fresh failure from `.off`/`.failed` may safely show
+        // `.failed` (nothing was left unresolved); a failure while retrying an
+        // ambiguous attempt must never downgrade — the earlier unresolved
+        // mutation is still exactly as unresolved as it was.
+        let cameFromAmbiguousEnable: Bool
+        if case .ambiguous(true) = state {
+            cameFromAmbiguousEnable = true
+        } else {
+            cameFromAmbiguousEnable = false
+        }
+
         failure = nil
         state = .settingUp
 
@@ -184,8 +220,7 @@ final class PushSubscriptionStore: ObservableObject {
                 do {
                     granted = try await authorizationCoordinator.requestAuthorization()
                 } catch {
-                    state = .failed
-                    failure = .couldNotEnable
+                    failEnable(cameFromAmbiguous: cameFromAmbiguousEnable)
                     return
                 }
                 guard granted else {
@@ -210,8 +245,7 @@ final class PushSubscriptionStore: ObservableObject {
         do {
             token = try await remoteNotificationRegistrar.registerAndAwaitToken(timeout: registrationTimeout)
         } catch {
-            state = .failed
-            failure = .couldNotEnable
+            failEnable(cameFromAmbiguous: cameFromAmbiguousEnable)
             return
         }
 
@@ -223,8 +257,26 @@ final class PushSubscriptionStore: ObservableObject {
                 environment: .current
             )
             installationStorage.recordConfirmedPushEnabled(confirmedEnabled)
+            installationStorage.setPendingAmbiguousDesiredEnabled(nil)
             state = confirmedEnabled ? .on : .off
+        } catch InstallationPushSyncError.ambiguousOutcome {
+            installationStorage.setPendingAmbiguousDesiredEnabled(true)
+            state = .ambiguous(desiredEnabled: true)
         } catch {
+            failEnable(cameFromAmbiguous: cameFromAmbiguousEnable)
+        }
+    }
+
+    /// The one place a non-ambiguous enable failure is applied: `.failed` for
+    /// an ordinary attempt, or — while resolving a previously ambiguous
+    /// enable — a return to the same unresolved `.ambiguous(true)` rather
+    /// than a claim that the earlier unresolved mutation is now known to have
+    /// failed, which this new, separate failure does not establish.
+    private func failEnable(cameFromAmbiguous: Bool) {
+        if cameFromAmbiguous {
+            state = .ambiguous(desiredEnabled: true)
+            failure = .couldNotEnable
+        } else {
             state = .failed
             failure = .couldNotEnable
         }
@@ -237,6 +289,10 @@ final class PushSubscriptionStore: ObservableObject {
     /// last confirmed `.on` state rather than claiming delivery stopped.
     func disable() async {
         guard state == .on else { return }
+        await performDisable(cameFromAmbiguous: false)
+    }
+
+    private func performDisable(cameFromAmbiguous: Bool) async {
         failure = nil
         state = .settingUp
 
@@ -244,10 +300,36 @@ final class PushSubscriptionStore: ObservableObject {
         do {
             let confirmedEnabled = try await service.synchronizeDisabled(credential: credential)
             installationStorage.recordConfirmedPushEnabled(confirmedEnabled)
+            installationStorage.setPendingAmbiguousDesiredEnabled(nil)
             state = confirmedEnabled ? .on : .off
+        } catch InstallationPushSyncError.ambiguousOutcome {
+            installationStorage.setPendingAmbiguousDesiredEnabled(false)
+            state = .ambiguous(desiredEnabled: false)
         } catch {
-            state = .on
+            // A definitive (non-ambiguous) disable failure while resolving a
+            // previously ambiguous disable must not claim the earlier
+            // unresolved mutation is now known to have failed — it stays
+            // exactly as unresolved as it was. Only a fresh, ordinary disable
+            // may fall back to the last confirmed On.
+            if cameFromAmbiguous {
+                state = .ambiguous(desiredEnabled: false)
+            } else {
+                state = .on
+            }
             failure = .couldNotDisable
+        }
+    }
+
+    /// Explicit recovery from `.ambiguous`. Reasserts only the same
+    /// declarative desired state the unresolved attempt already asked for —
+    /// never the opposite — through the same synchronization contract as an
+    /// ordinary enable or disable. Never called automatically.
+    func retryAmbiguousSync() async {
+        guard case .ambiguous(let desiredEnabled) = state else { return }
+        if desiredEnabled {
+            await registerAndSynchronize(requestingPermission: false)
+        } else {
+            await performDisable(cameFromAmbiguous: true)
         }
     }
 

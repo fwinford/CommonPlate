@@ -16,6 +16,7 @@ import {
   CONFIRMATION_TOKEN_BYTES,
   SUBSCRIBE_ACCEPTED_RESPONSE,
   createSubscribeHandler,
+  digestConfirmationToken,
   generateConfirmationToken,
 } from "./subscribeRoute.js";
 
@@ -194,6 +195,33 @@ describe("confirmation token generation", () => {
         CONFIRMATION_TOKEN_BYTES
       );
     }
+  });
+});
+
+describe("provider-failure public response", () => {
+  it("returns generic acceptance after conditional new-record cleanup without leaking the raw credential", async () => {
+    const id = new mongoose.Types.ObjectId();
+    const rawToken = "provider-failure-raw-token";
+    vi.spyOn(Subscriber, "findOne").mockReturnValue(queryResult(null));
+    vi.spyOn(Subscriber, "create").mockResolvedValue({ _id: id } as never);
+    vi.spyOn(Subscriber, "exists").mockResolvedValue({ _id: id } as never);
+    const cleanup = vi.spyOn(Subscriber, "deleteOne").mockResolvedValue(null as never);
+    const context = routeContext({ email: "provider-failure@nyu.edu" });
+
+    await createSubscribeHandler({
+      generateRawToken: () => rawToken,
+      generateAttemptId: () => "provider-failure-attempt",
+      sendConfirmationEmail: vi.fn().mockRejectedValue(new Error("offline")),
+    })(context.req, context.res);
+
+    expect(context.statusCode).toBe(202);
+    expect(context.body).toEqual(SUBSCRIBE_ACCEPTED_RESPONSE);
+    expect(JSON.stringify(context.body)).not.toContain(rawToken);
+    expect(cleanup).toHaveBeenCalledWith({
+      _id: id,
+      confirmationTokenDigest: digestConfirmationToken(rawToken),
+      confirmationSendAttemptId: "provider-failure-attempt",
+    });
   });
 });
 

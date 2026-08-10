@@ -42,9 +42,6 @@ enum AlertSignupFailure: Equatable {
     case paused
     /// Too many attempts from here. Waiting is the only next step.
     case rateLimited
-    /// The confirmation email could not be started. Signup did not succeed, and
-    /// an explicit manual retry is appropriate.
-    case confirmationEmailUnavailable
     /// Receipt is uncertain. Never retried automatically, and never described
     /// as either success or failure.
     case ambiguousOutcome
@@ -199,8 +196,6 @@ final class AlertSubscriptionStore: ObservableObject {
             failure = .paused
         case .rateLimited:
             failure = .rateLimited
-        case .confirmationEmailUnavailable:
-            failure = .confirmationEmailUnavailable
         case .ambiguousSignupOutcome:
             failure = .ambiguousOutcome
         case .unknownFailure:

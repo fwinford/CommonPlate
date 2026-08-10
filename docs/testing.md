@@ -249,6 +249,20 @@ At acceptance: `npm run typecheck` passed; `npm test` passed 1,317 tests with 27
 
 **Week 4 deferral.** `Meal swipes: N` is technically correct but its user-facing meaning and visual hierarchy are deferred to Week 4; that resolution must not reopen C1 data semantics, backend behavior, validation rules, or notification content.
 
+### Notification Management / Activation Truth (W3-N2) coverage
+
+W3-N2 is accepted. Backend coverage adds focused participant-authorized email-unsubscribe route/primitive tests proving: exact participant-email authorization with no caller-supplied email or Subscriber ID accepted; rejection of forged, revoked, deleted, and stale participant authority; absent/pending/confirmed/already-unsubscribed Subscriber convergence to the identical `{ "email": { "unsubscribed": true } }` result with no lifecycle or identifier leakage; atomicity and idempotency under repeat and concurrent calls; the exact cleared confirmation-credential field set, matching the existing emailed-unsubscribe clear list; that `unsubscribeCredentialVersion` is untouched; pause and rate-limit behavior; and that existing emailed unsubscribe credentials and browser GET/POST behavior are unaffected. Backend coverage also adds focused signup-privacy tests proving the same generic accepted `202` response across Subscriber lifecycle states and confirmation-email provider outcomes that previously exposed `CONFIRMATION_EMAIL_UNAVAILABLE`, that internal cleanup/rollback and sanitized logging still run on provider failure, and that the response makes no provider-submission or delivery claim.
+
+At acceptance: `npm run typecheck` passed; complete `npm test` passed after the signup-privacy correction; `npm run test:mongo` passed **283 tests across 18 files**; `npm run ci-check` passed; `git diff --check` passed.
+
+**Verification-environment limitation.** Sandboxed backend test execution could not bind `127.0.0.1` and produced unrelated EPERM/timeout failures unconnected to this slice's behavior. The complete backend suite passed when run with the necessary local-loopback permission. This is recorded as a verification-environment limitation, not a product defect.
+
+iOS coverage adds focused suites for: ambiguous push enable/disable persistence surviving relaunch and requiring an explicit retry, with no automatic ambiguous reconciliation across relaunch or authorization refresh; participant-authorized email unsubscribe through `ParticipantEmailUnsubscribeService`/`ParticipantEmailUnsubscribeStore`, including forged/stale-credential rejection and convergence to the same Off result regardless of prior Subscriber state; a stale Email Alerts Off presentation being reset by a later signup, both to the same address and to a different one, returning to `Check your email` rather than a stale Off; in-flight unsubscribe generation/reset races; and removal of retired `CONFIRMATION_EMAIL_UNAVAILABLE` client-side handling from `AlertSubscriptionService` and `AlertSubscriptionStore`.
+
+Final complete iOS evidence: **CommonPlateiosTests — 689 passed / 0 failed / TEST SUCCEEDED**. This supersedes the W3-C1 iOS baseline (662 passed) as the current accepted baseline below.
+
+**Physical acceptance.** Faith completed the W3-N2 physical acceptance walkthrough on a physical iPhone and reported the behavior worked as expected. The walkthrough covered: physical Apple notification-permission behavior; push enable reaching authoritative On; push disable reaching authoritative Off; relaunch preserving accepted push-management truth; ambiguous push recovery/retry behavior as exercised in the walkthrough; participant-authorized in-app email unsubscribe; later signup returning to Check Your Email rather than stale Off; and email/push channel independence. This walkthrough does not establish verified email delivery or reading, a production APNs delivery environment, TestFlight signing/configuration, or production backend reachability — those remain separate provider/release gates (`docs/system-contract.md` section 11).
+
 ## 5. Mongo integration tests
 
 Run:
@@ -368,12 +382,12 @@ These results are reference evidence, not a substitute for rerunning affected ch
 
 | Check | Result |
 | --- | --- |
-| `npm run typecheck` | Passed in the C1 closeout |
-| `npm test` | Passed in the C1 closeout: 1,317 passed; 275 Mongo-gated skipped |
-| `npm run test:mongo` | Passed in the C1 closeout: 275 passed across 17 files |
+| `npm run typecheck` | Passed in the N2 closeout |
+| `npm test` | Passed in the N2 closeout, after the signup-privacy correction (exact non-Mongo total not reliably recoverable; last recorded exact total was the C1 closeout's 1,317 passed / 275 Mongo-gated skipped) |
+| `npm run test:mongo` | Passed in the N2 closeout: 283 passed across 18 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | C1 closeout: 662 passed; 0 failed; TEST SUCCEEDED |
-| `npm run build:client` | Passed; no tracked bundle diff |
+| `CommonPlateiosTests` | N2 closeout: 689 passed; 0 failed; TEST SUCCEEDED |
+| `npm run build:client` | Passed; no tracked bundle diff (C1 closeout; no browser-client source changed in N2) |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
@@ -383,6 +397,8 @@ W3-C1 physical acceptance (meal-swipe quantity visible in Active Requests, Reque
 W3-H1 physical-device acceptance is recorded above. It closes H1's reservation-lifecycle device gate only; it does not close the Release/Archive/TestFlight APNs environment gate.
 
 W3-N3 physical-device/environmental acceptance (real future Later request: no early email/APNs initiation, then eligibility-time email + APNs initiation, observed inbox arrival and physical notification presentation) is recorded above and in `docs/system-contract.md` section 8.5. It closes N3's environmental acceptance gate; the physical request's `createdAt` was not old enough to reproduce the former long-lookback omission on its own, which real-Mongo integration coverage establishes separately. It does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
+
+W3-N2 physical-device acceptance (push enable/disable reaching authoritative On/Off, relaunch-preserved push-management truth, ambiguous push recovery/retry, participant-authorized in-app email unsubscribe, later signup returning to Check Your Email rather than stale Off, and email/push channel independence) is recorded above and in `docs/system-contract.md` sections 8.6 and 9.8–9.9. It closes N2's device-acceptance gate; it does not establish verified email delivery/reading, a production APNs environment, TestFlight signing/configuration, or production backend reachability, which remain open (section 11 of the same document). Sandboxed local-loopback bind failures (EPERM/timeouts) observed during N2 backend verification are recorded as a verification-environment limitation, not a product defect (section 4 notes above).
 
 The non-Eastern `DatePicker` timezone proof required for W3-R1 (see section 9) is likewise device evidence, not part of the automated suite above.
 

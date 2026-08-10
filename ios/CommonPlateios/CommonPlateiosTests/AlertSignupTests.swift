@@ -431,29 +431,6 @@ final class AlertSignupTests: XCTestCase {
         XCTAssertNil(store.fieldError)
     }
 
-    func testConfirmationProviderUnavailableMapsDistinctlyAndClaimsNoSuccess() async {
-        let store = makeStore()
-        AlertSignupURLProtocol.enqueue(.response(
-            statusCode: 503,
-            data: errorBody(
-                code: "CONFIRMATION_EMAIL_UNAVAILABLE",
-                message: "Email confirmation is temporarily unavailable. Please try again."
-            )
-        ))
-
-        await store.submit(email: "faith@nyu.edu")
-
-        XCTAssertEqual(store.phase, .editing)
-        XCTAssertEqual(store.failure, .confirmationEmailUnavailable)
-        XCTAssertNotEqual(store.failure, .paused)
-
-        // An explicit manual retry is available and is the only retry there is.
-        AlertSignupURLProtocol.enqueue(.response(statusCode: 202, data: acceptedBody))
-        await store.submit(email: "faith@nyu.edu")
-        XCTAssertEqual(AlertSignupURLProtocol.capturedRequests.count, 2)
-        XCTAssertEqual(store.phase, .checkEmail)
-    }
-
     func testTransportFailureMapsToTheAmbiguousStateAndIsNotRetried() async {
         let store = makeStore()
         AlertSignupURLProtocol.enqueue(.failure(.networkConnectionLost))
@@ -591,7 +568,7 @@ final class AlertSignupTests: XCTestCase {
 
     func testEveryFailureStateHasItsOwnMessage() {
         let failures: [AlertSignupFailure] = [
-            .paused, .rateLimited, .confirmationEmailUnavailable, .ambiguousOutcome, .unknown
+            .paused, .rateLimited, .ambiguousOutcome, .unknown
         ]
         let messages = failures.map(AlertSignupView.message(for:))
 
@@ -600,7 +577,7 @@ final class AlertSignupTests: XCTestCase {
             XCTAssertFalse(message.isEmpty)
             let lowercased = message.lowercased()
             // No backend jargon reaches the screen.
-            for jargon in ["503", "429", "http", "invalid_email", "confirmation_email_unavailable", "envelope", "null"] {
+            for jargon in ["503", "429", "http", "invalid_email", "envelope", "null"] {
                 XCTAssertFalse(lowercased.contains(jargon), "\(message) leaks \(jargon)")
             }
             // No failure may imply the signup worked.

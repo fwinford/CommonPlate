@@ -201,15 +201,19 @@ final class InMemoryPushInstallationStorage: PushInstallationStorage {
     private(set) var recordCalls: [Bool] = []
     private(set) var settingsRecoveryIntentStartedAt: Date?
     private(set) var settingsRecoveryIntentStartedAtCalls: [Date?] = []
+    private(set) var pendingAmbiguousDesiredEnabled: Bool?
+    private(set) var pendingAmbiguousDesiredEnabledCalls: [Bool?] = []
 
     init(
         credential: String? = nil,
         lastConfirmedPushEnabled: Bool? = nil,
-        settingsRecoveryIntentStartedAt: Date? = nil
+        settingsRecoveryIntentStartedAt: Date? = nil,
+        pendingAmbiguousDesiredEnabled: Bool? = nil
     ) {
         self.credential = credential
         self.lastConfirmedPushEnabled = lastConfirmedPushEnabled
         self.settingsRecoveryIntentStartedAt = settingsRecoveryIntentStartedAt
+        self.pendingAmbiguousDesiredEnabled = pendingAmbiguousDesiredEnabled
     }
 
     func installationCredential() -> String {
@@ -227,6 +231,11 @@ final class InMemoryPushInstallationStorage: PushInstallationStorage {
     func setSettingsRecoveryIntentStartedAt(_ date: Date?) {
         settingsRecoveryIntentStartedAt = date
         settingsRecoveryIntentStartedAtCalls.append(date)
+    }
+
+    func setPendingAmbiguousDesiredEnabled(_ desired: Bool?) {
+        pendingAmbiguousDesiredEnabled = desired
+        pendingAmbiguousDesiredEnabledCalls.append(desired)
     }
 }
 
@@ -382,32 +391,135 @@ final class PushSubscriptionStoreTests: XCTestCase {
         XCTAssertEqual(store.failure, .couldNotEnable)
     }
 
-    func testBackendFailureAfterAValidTokenProducesTheRetryStateAndDoesNotPersistOn() async {
+    /// A transport-level loss after the request may already have reached the
+    /// backend is genuinely ambiguous, not a known failure: `.failed` would
+    /// wrongly claim the enable definitely did not apply, and reverting to
+    /// `.off` would wrongly claim the opposite. The unresolved desired state
+    /// must also survive relaunch, which is why it is persisted here rather
+    /// than only held in memory.
+    func testBackendFailureAfterAValidTokenProducesTheAmbiguousStateAndDoesNotPersistOn() async {
         let storage = InMemoryPushInstallationStorage()
         let store = makeStore(authorization: alreadyAuthorized(), storage: storage)
         InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
 
         await store.enableAfterExplanation()
 
-        XCTAssertEqual(store.state, .failed)
-        XCTAssertEqual(store.failure, .couldNotEnable)
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
         XCTAssertNil(storage.lastConfirmedPushEnabled)
         XCTAssertTrue(storage.recordCalls.isEmpty)
+        XCTAssertEqual(storage.pendingAmbiguousDesiredEnabled, true)
+    }
+
+    /// A backend rejection the service can definitively decode (here, a rate
+    /// limit) is not ambiguous: it never reached the reconciliation logic, so
+    /// `.failed` is the correct — and retryable through the ordinary
+    /// `enableAfterExplanation` entry point — state, with no unresolved
+    /// desired state left persisted.
+    func testDefinitiveBackendRejectionProducesFailedRatherThanAmbiguous() async {
+        let storage = InMemoryPushInstallationStorage()
+        let store = makeStore(authorization: alreadyAuthorized(), storage: storage)
+        InstallationPushURLProtocol.enqueue(.response(statusCode: 429, data: Data()))
+
+        await store.enableAfterExplanation()
+
+        XCTAssertEqual(store.state, .failed)
+        XCTAssertEqual(store.failure, .couldNotEnable)
+        XCTAssertNil(storage.pendingAmbiguousDesiredEnabled)
     }
 
     /// The whole point of `.failed` being an allowed entry point for
     /// `enableAfterExplanation`: one recovery state, retried by calling
     /// exactly the same thing again.
     func testRetryingAfterAFailureCanSucceed() async {
-        let store = makeStore(authorization: alreadyAuthorized())
-        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        let registrar = StubRemoteNotificationRegistrar()
+        registrar.outcome = .failure(RemoteNotificationRegistrationError.timedOut)
+        let store = makeStore(authorization: alreadyAuthorized(), registrar: registrar)
         await store.enableAfterExplanation()
         XCTAssertEqual(store.state, .failed)
 
+        registrar.outcome = .token("aabbccdd")
         InstallationPushURLProtocol.enqueue(.response(statusCode: 200, data: enabledBody))
         await store.enableAfterExplanation()
         XCTAssertEqual(store.state, .on)
         XCTAssertNil(store.failure)
+    }
+
+    // MARK: - Ambiguous synchronization (W3-N2)
+
+    /// Explicit recovery from `.ambiguous` reasserts only the same desired
+    /// state, through `retryAmbiguousSync()` — never the ordinary
+    /// `enableAfterExplanation`/`disable` entry points, which refuse outside
+    /// their own states.
+    func testExplicitRetryFromAmbiguousEnableCanSucceedAndClearsThePersistedFlag() async {
+        let storage = InMemoryPushInstallationStorage()
+        let store = makeStore(authorization: alreadyAuthorized(), storage: storage)
+        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await store.enableAfterExplanation()
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
+
+        InstallationPushURLProtocol.enqueue(.response(statusCode: 200, data: enabledBody))
+        await store.retryAmbiguousSync()
+
+        XCTAssertEqual(store.state, .on)
+        XCTAssertNil(storage.pendingAmbiguousDesiredEnabled)
+    }
+
+    /// A second ambiguous outcome while retrying must not be reported as a
+    /// definitive `.failed` — the original unresolved mutation is still
+    /// exactly as unresolved as it was, so the state stays `.ambiguous`.
+    func testExplicitRetryFromAmbiguousEnableThatIsAgainAmbiguousStaysAmbiguous() async {
+        let storage = InMemoryPushInstallationStorage()
+        let store = makeStore(authorization: alreadyAuthorized(), storage: storage)
+        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await store.enableAfterExplanation()
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
+
+        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await store.retryAmbiguousSync()
+
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
+        XCTAssertEqual(storage.pendingAmbiguousDesiredEnabled, true)
+    }
+
+    /// A relaunch is simulated by constructing a fresh store over the same
+    /// storage. The unresolved desired state must be exactly what the new
+    /// store starts in, with no automatic reconciliation attempted from
+    /// `init` itself.
+    func testAmbiguousDesiredStateSurvivesRelaunch() async {
+        let storage = InMemoryPushInstallationStorage()
+        let store = makeStore(authorization: alreadyAuthorized(), storage: storage)
+        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await store.enableAfterExplanation()
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
+
+        let relaunched = makeStore(storage: storage)
+
+        XCTAssertEqual(relaunched.state, .ambiguous(desiredEnabled: true))
+        XCTAssertEqual(InstallationPushURLProtocol.capturedRequests.count, 1, "relaunch alone must attempt no network call")
+    }
+
+    /// An ordinary lifecycle refresh (app foreground, screen revisit) must
+    /// never automatically resolve or retry an ambiguous outcome — only an
+    /// explicit `retryAmbiguousSync()` call may.
+    func testLifecycleRefreshNeverAutomaticallyRetriesAnAmbiguousOutcome() async {
+        let storage = InMemoryPushInstallationStorage()
+        let authorization = StubPushAuthorizationCoordinator()
+        authorization.status = .authorized
+        let store = makeStore(authorization: authorization, storage: storage)
+        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await store.enableAfterExplanation()
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
+        let requestCountAfterFirstAttempt = InstallationPushURLProtocol.capturedRequests.count
+
+        await store.refreshAuthorizationStatus()
+        await store.refreshAuthorizationStatus()
+
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
+        XCTAssertEqual(
+            InstallationPushURLProtocol.capturedRequests.count,
+            requestCountAfterFirstAttempt,
+            "a lifecycle refresh must not itself attempt a network call while ambiguous"
+        )
     }
 
     // MARK: - Backend success required before showing on
@@ -467,22 +579,48 @@ final class PushSubscriptionStoreTests: XCTestCase {
         XCTAssertEqual(store.state, .off)
     }
 
-    func testFailedDisablePreservesTheLastConfirmedOnStateAndOffersRetry() async throws {
+    /// A definitive backend rejection during disable — one the service can
+    /// decode, so it never reached reconciliation — preserves the last
+    /// confirmed On state and remains retryable through the ordinary
+    /// `disable()` entry point.
+    func testDefinitivelyFailedDisablePreservesTheLastConfirmedOnStateAndOffersRetry() async throws {
         let storage = InMemoryPushInstallationStorage()
         let store = await enabledStore(storage: storage)
         let recordsBeforeFailure = storage.recordCalls.count
-        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        InstallationPushURLProtocol.enqueue(.response(statusCode: 429, data: Data()))
 
         await store.disable()
 
-        XCTAssertEqual(store.state, .on, "a failed disable must not claim delivery stopped")
+        XCTAssertEqual(store.state, .on, "a definitively failed disable must not claim delivery stopped")
         XCTAssertEqual(store.failure, .couldNotDisable)
         XCTAssertEqual(storage.recordCalls.count, recordsBeforeFailure)
+        XCTAssertNil(storage.pendingAmbiguousDesiredEnabled)
 
         InstallationPushURLProtocol.enqueue(.response(statusCode: 200, data: disabledBody))
         await store.disable()
         XCTAssertEqual(store.state, .off)
         XCTAssertNil(store.failure)
+    }
+
+    /// A transport-level loss during disable is genuinely ambiguous: `.on`
+    /// would wrongly claim delivery definitely did not stop, and `.off` would
+    /// wrongly claim it definitely did. The unresolved desired state (Off)
+    /// must survive relaunch and resolve only through explicit retry.
+    func testAmbiguousDisableWithholdsBothOnAndOffAndPersistsTheDesiredState() async throws {
+        let storage = InMemoryPushInstallationStorage()
+        let store = await enabledStore(storage: storage)
+        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+
+        await store.disable()
+
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: false))
+        XCTAssertEqual(storage.pendingAmbiguousDesiredEnabled, false)
+
+        InstallationPushURLProtocol.enqueue(.response(statusCode: 200, data: disabledBody))
+        await store.retryAmbiguousSync()
+
+        XCTAssertEqual(store.state, .off)
+        XCTAssertNil(storage.pendingAmbiguousDesiredEnabled)
     }
 
     // MARK: - Relaunch / activation re-registration
@@ -705,7 +843,28 @@ final class PushSubscriptionStoreTests: XCTestCase {
         XCTAssertEqual(store.failure, .couldNotEnable)
     }
 
-    func testBackendFailureDuringSettingsRecoveryProducesTheRetryState() async {
+    /// A transport-level loss while Settings recovery auto-continues is still
+    /// genuinely ambiguous, exactly like any other backend call: `.failed`
+    /// would wrongly claim the enable definitely did not apply.
+    func testAmbiguousBackendOutcomeDuringSettingsRecoveryProducesTheAmbiguousState() async {
+        let authorization = StubPushAuthorizationCoordinator()
+        authorization.status = .denied
+        let storage = InMemoryPushInstallationStorage()
+        let store = makeStore(authorization: authorization, storage: storage)
+        await store.enableAfterExplanation()
+        store.openSystemSettings()
+
+        authorization.status = .authorized
+        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        await store.refreshAuthorizationStatus()
+
+        XCTAssertEqual(store.state, .ambiguous(desiredEnabled: true))
+        XCTAssertEqual(storage.pendingAmbiguousDesiredEnabled, true)
+    }
+
+    /// A definitive backend rejection during Settings recovery is not
+    /// ambiguous and produces the ordinary retryable `.failed` state.
+    func testDefinitiveBackendRejectionDuringSettingsRecoveryProducesFailed() async {
         let authorization = StubPushAuthorizationCoordinator()
         authorization.status = .denied
         let store = makeStore(authorization: authorization)
@@ -713,7 +872,7 @@ final class PushSubscriptionStoreTests: XCTestCase {
         store.openSystemSettings()
 
         authorization.status = .authorized
-        InstallationPushURLProtocol.enqueue(.failure(.notConnectedToInternet))
+        InstallationPushURLProtocol.enqueue(.response(statusCode: 429, data: Data()))
         await store.refreshAuthorizationStatus()
 
         XCTAssertEqual(store.state, .failed)

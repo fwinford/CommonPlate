@@ -41,8 +41,6 @@ struct AlertSignupView: View {
             return "Email alerts aren’t open for signup right now. Try again later."
         case .rateLimited:
             return "Too many attempts from this device. Wait a minute, then try again."
-        case .confirmationEmailUnavailable:
-            return "We couldn’t start the confirmation email just now, so your signup didn’t go through. Try again in a moment."
         case .ambiguousOutcome:
             return "We couldn’t confirm whether your signup was received. Check your email before trying again."
         case .unknown:
@@ -58,6 +56,24 @@ struct AlertSignupView: View {
         phase == .editing && !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    static let turnOffEmailAlertsButtonTitle = "Turn off email alerts"
+    static let emailAlertsOffTitle = "Email alerts are off"
+    static let emailAlertsOffBody =
+        "You won’t receive CommonPlate alert or digest emails unless you sign up and confirm again."
+
+    static func unsubscribeMessage(for failure: ParticipantEmailUnsubscribeFailure) -> String {
+        switch failure {
+        case .verificationRequired, .authorityInvalid:
+            return "Verify your NYU email to turn off email alerts from here."
+        case .paused:
+            return "This isn’t available right now. Try again later."
+        case .rateLimited:
+            return "Too many attempts from this device. Wait a minute, then try again."
+        case .unavailable:
+            return "We couldn’t reach the server just now. Try again in a moment."
+        }
+    }
+
     // MARK: - View
 
     @ObservedObject var store: AlertSubscriptionStore
@@ -65,6 +81,14 @@ struct AlertSignupView: View {
     /// email form (Week 3 Day 6 Slice 6A.2). It shares no state with `store`:
     /// email and push are independent controls.
     @ObservedObject var pushStore: PushSubscriptionStore
+    /// The participant-authorized "Turn off email alerts" action (W3-N2).
+    /// Its own state owner, sharing nothing with `store`: signup presentation
+    /// history establishes no Subscriber truth, and this action's Off result
+    /// establishes no future On.
+    @ObservedObject var unsubscribeStore: ParticipantEmailUnsubscribeStore
+    /// Read only for its current authority credential at the moment of the
+    /// tap — this view holds no identity state of its own.
+    @ObservedObject var identityStore: ParticipantIdentityStore
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isEmailFocused: Bool
 
@@ -159,15 +183,44 @@ struct AlertSignupView: View {
 
     private var acceptedState: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(Self.checkEmailTitle)
-                .font(.title2)
-                .fontWeight(.semibold)
+            if unsubscribeStore.emailAlertsOff {
+                Text(Self.emailAlertsOffTitle)
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text(Self.emailAlertsOffBody)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(Self.checkEmailTitle)
+                    .font(.title2)
+                    .fontWeight(.semibold)
 
-            Text(Self.checkEmailBody)
-                .foregroundStyle(.secondary)
+                Text(Self.checkEmailBody)
+                    .foregroundStyle(.secondary)
+
+                if let failure = unsubscribeStore.failure {
+                    Text(Self.unsubscribeMessage(for: failure))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button(Self.turnOffEmailAlertsButtonTitle) {
+                    Task {
+                        await unsubscribeStore.turnOffEmailAlerts(
+                            authority: identityStore.currentAuthority()
+                        )
+                    }
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity)
+                .disabled(unsubscribeStore.isUnsubscribing)
+            }
 
             Button(Self.useDifferentEmailTitle) {
                 store.useDifferentEmail()
+                // The screen is moving on to a different signup: a stale
+                // in-session Off (or failure message) from the address just
+                // left behind must not be shown for whatever comes next.
+                unsubscribeStore.reset()
             }
             .buttonStyle(.bordered)
             .frame(maxWidth: .infinity)

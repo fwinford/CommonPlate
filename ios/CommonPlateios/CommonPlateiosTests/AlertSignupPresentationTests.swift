@@ -264,19 +264,6 @@ final class AlertSignupPresentationTests: XCTestCase {
         )
     }
 
-    func testConfirmationProviderUnavailableCreatesNoRecord() async {
-        await assertFailureTouchesNoRecord(
-            stub: .response(
-                statusCode: 503,
-                data: errorBody(
-                    code: "CONFIRMATION_EMAIL_UNAVAILABLE",
-                    message: "Email confirmation is temporarily unavailable. Please try again."
-                )
-            ),
-            expectedFailure: .confirmationEmailUnavailable
-        )
-    }
-
     func testAmbiguousOutcomeCreatesNoRecord() async {
         // The one that matters most: an uncertain outcome must not be recorded
         // as an accepted one, because a restored `Check your email` would then

@@ -162,4 +162,52 @@ final class PushInstallationStorageTests: XCTestCase {
 
         XCTAssertNil(storage.settingsRecoveryIntentStartedAt)
     }
+
+    // MARK: - Pending ambiguous desired state
+
+    func testPendingAmbiguousDesiredEnabledIsNilUntilRecorded() {
+        let storage = UserDefaultsPushInstallationStorage(defaults: defaults)
+        XCTAssertNil(storage.pendingAmbiguousDesiredEnabled)
+    }
+
+    func testPendingAmbiguousDesiredEnabledRoundTripsThroughStorage() {
+        let storage = UserDefaultsPushInstallationStorage(defaults: defaults)
+
+        storage.setPendingAmbiguousDesiredEnabled(true)
+        XCTAssertEqual(storage.pendingAmbiguousDesiredEnabled, true)
+
+        storage.setPendingAmbiguousDesiredEnabled(false)
+        XCTAssertEqual(storage.pendingAmbiguousDesiredEnabled, false)
+    }
+
+    /// `nil` (nothing unresolved) and `false` (an unresolved disable) must
+    /// not collapse into the same stored representation — the same
+    /// distinction `lastConfirmedPushEnabled` already draws.
+    func testNoPendingAmbiguityIsDistinctFromAPendingDisable() {
+        let storage = UserDefaultsPushInstallationStorage(defaults: defaults)
+        XCTAssertNil(storage.pendingAmbiguousDesiredEnabled)
+
+        storage.setPendingAmbiguousDesiredEnabled(false)
+        XCTAssertNotNil(storage.pendingAmbiguousDesiredEnabled)
+        XCTAssertEqual(storage.pendingAmbiguousDesiredEnabled, false)
+    }
+
+    func testClearingRemovesThePersistedPendingAmbiguity() {
+        let storage = UserDefaultsPushInstallationStorage(defaults: defaults)
+        storage.setPendingAmbiguousDesiredEnabled(true)
+
+        storage.setPendingAmbiguousDesiredEnabled(nil)
+
+        XCTAssertNil(storage.pendingAmbiguousDesiredEnabled)
+    }
+
+    /// Persists across a fresh storage instance over the same suite, the
+    /// shape of an app relaunch — the whole reason this value exists.
+    func testPendingAmbiguousDesiredEnabledSurvivesAFreshStorageInstance() {
+        let storage = UserDefaultsPushInstallationStorage(defaults: defaults)
+        storage.setPendingAmbiguousDesiredEnabled(true)
+
+        let reopened = UserDefaultsPushInstallationStorage(defaults: defaults)
+        XCTAssertEqual(reopened.pendingAmbiguousDesiredEnabled, true)
+    }
 }

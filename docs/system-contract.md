@@ -178,6 +178,18 @@ A pre-existing future Later request created before this behavior existed, once i
 
 Provider acceptance for eligibility-time dispatch carries the same meaning as elsewhere in this section: submission only, never delivery, reading, or pickup. A real future Later request has been observed end to end: no helper email or push initiation before `visibleFrom`, and eligibility-time initiation — confirmed email submission and physical APNs delivery to an intended installation — after it. That observation establishes correct no-early-dispatch and first-eligible-sweep timing on the observed request; it does not by itself establish that an old-`createdAt` request survives the former lookback omission, which is separately established by real-Mongo integration coverage (`docs/testing.md`).
 
+### 8.6 Push enable/disable management truth (W3-N2)
+
+Email and push remain independent channels: changing one never automatically creates, confirms, enables, disables, or rewrites the other, and participant verification never creates or confirms a Subscriber or changes push state (section 3.1).
+
+Stable Push **On** requires all three of: Apple notification authorization permitting delivery, a current APNs token, and authoritative backend Installation synchronization confirming `enabled: true`. iOS does not present On before that complete sequence completes.
+
+Stable Push **Off** requires the same authoritative backend-confirmed `enabled: false`; iOS never optimistically flips to Off before that confirmation.
+
+For a synchronization request whose backend result is ambiguous, iOS presents neither stable On nor stable Off. The unresolved desired enable/disable state is persisted and survives relaunch. Authorization refresh and relaunch do not automatically retry the ambiguous mutation, so relaunch cannot silently reverse the unresolved user choice. An explicit retry reasserts only the same declarative desired state through the existing synchronization contract; it cannot make relaunch or backend reconciliation choose the opposite state.
+
+Apple permission truth remains distinct from CommonPlate backend Installation state: denied or revoked Apple permission may be presented as Needs Permission, while a backend reconciliation failure is never mislabeled as an Apple permission failure.
+
 ## 9. Subscriber lifecycle
 
 The lifecycle is `signup → pending → confirmed → unsubscribed`. Only `confirmed` subscribers are eligible for real-time helper alerts and the hourly digest; `pending` and `unsubscribed` subscribers are excluded by both the alert query and the recent-request path. Signing up again never silently reactivates alerts.
@@ -210,12 +222,9 @@ HTTP 202
 { "message": "If confirmation is needed, check your email for the next step." }
 ```
 
-Confirmation-email submission failure returns the shared structured error envelope:
+**Confirmation-email provider-submission failure (W3-N2).** A confirmation-email provider-submission failure is operational/internal truth, not public Subscriber-lifecycle truth. The public response is the same generic accepted `202` above rather than a distinct status or code; it makes no claim that a confirmation email was submitted, delivered, or received. Existing lifecycle cleanup/rollback (section 9.3), send-lease handling, and sanitized internal logging remain unchanged and still run before the response is sent. `CONFIRMATION_EMAIL_UNAVAILABLE` is retired as public runtime behavior; invalid NYU email, malformed input, rate limiting, and public-action pause retain their existing distinct error behavior because none of those reveal Subscriber lifecycle state. A user who does not receive a confirmation email may explicitly retry signup.
 
-```http
-HTTP 503
-{ "error": { "code": "CONFIRMATION_EMAIL_UNAVAILABLE", "message": "Email confirmation is temporarily unavailable. Please try again.", "fields": null } }
-```
+**Accepted V1 response-timing limitation.** An already-confirmed address requires no confirmation-email provider submission, while a pending address may wait on that provider during signup, so response timing may differ between these cases even though response content and status do not. Faith has explicitly accepted this timing side channel as a known V1 limitation. Timing equalization — artificial delays, unnecessary provider calls for confirmed addresses, or asynchronous architecture solely for timing parity — is not current behavior and is not required for V1 acceptance.
 
 An already-confirmed address performs no mutation and submits no email. Signup never auto-confirms, never creates unsubscribe credentials, never resets delivery history, and never dispatches recent-request alerts. Re-signup preserves `bounced`, `dailyCount`, `lastSentAt`, unsubscribe-token state, unsubscribe timestamp, and existing delivery history.
 
@@ -435,6 +444,24 @@ No page renders a subscriber's address, status, counters, history, or internal i
 
 Redemption existing is not activation: `pauseUnsubscribePage` refuses both verbs while `PUBLIC_ACTIONS_PAUSED` holds, and signup, confirmation, real-time alerts, and the digest all remain paused.
 
+### 9.8 Participant-authorized email unsubscribe (W3-N2)
+
+`POST /api/participant/email-alerts/unsubscribe` authorizes one explicit in-app "Turn off email alerts" operation, gated by the same participant-authority mechanism as request creation and claim (section 3.1). The route accepts no body: it never takes a caller-supplied email or Subscriber ID, and the only address ever acted on is the exact normalized address `resolveParticipantAuthority` resolves the caller's credential to.
+
+Participant identity, Subscriber identity, and Push Installation identity remain distinct (section 3.1). This route does not create, read, or otherwise touch Subscriber state beyond the one declarative mutation below, and no Participant ID is ever persisted onto a Subscriber.
+
+The operation is one unconditional atomic update matched by the resolved email, not a read-then-branch, so absent, pending, confirmed, and already-unsubscribed Subscriber cases are indistinguishable to the caller: all converge externally to the same result, `{ "email": { "unsubscribed": true } }`. An absent Subscriber performs the update against zero matching documents and still reports the same result, because there is nothing to turn off and the declarative result is already true.
+
+The mutation sets `status: "unsubscribed"`, writes `unsubscribedAt` only if not already set (`$ifNull`), and clears the same confirmation-credential fields the existing emailed-link unsubscribe clears (section 9.7) — the active `confirmationTokenDigest`/`confirmationExpiresAt`, confirmation send-attempt ownership/lease fields, the legacy raw `confirmToken`/`unsubToken`, and the bounded confirmation receipt. It does not touch `unsubscribeCredentialVersion`: unsubscribing is not credential revocation, and an already-emailed unsubscribe link must keep working afterward.
+
+This is declarative and idempotent, matching `PUT /api/installations/push`: a repeated call, a retry after a dropped response, or concurrent calls from two devices holding the same participant credential all converge on the same result with no special-casing. It is rate-limited in its own bucket, matching the installation-push and claim mutation buckets, so it cannot spend, or be spent by, another public action's allowance, and it is registered ahead of the global body parsers and behind `PUBLIC_ACTIONS_PAUSED` like the other participant-gated routes.
+
+Existing signed emailed unsubscribe credentials and browser GET/POST unsubscribe behavior (section 9.7) remain fully supported and unchanged; this route is an additional path for the browser-only, no-current-credential, reinstall, and already-delivered-link cases participant authority can reach that an emailed link cannot.
+
+### 9.9 iOS email-alert state truth (W3-N2)
+
+iOS may present Email Alerts Off only after the backend confirms the declarative result of section 9.8. That local Off presentation is not a durable Subscriber-status cache and cannot itself establish a future On state: iOS still cannot infer Email Alerts On from a generic signup `202`, signup presentation history, participant credential possession, or prior confirmation (section 9.1). A later signup or reconfirmation attempt returns to the existing `Check your email` presentation rather than continuing to show a stale Off.
+
 ## 10. Public-actions pause and scheduled jobs
 
 `PUBLIC_ACTIONS_PAUSED` fails closed unless explicitly set to `false` or `0`. It blocks public request creation, subscription signup, both halves of the browser confirmation flow (section 9.5), both halves of the unsubscribe flow (section 9.7), claim, claim-extension, and release mutations, real-time helper alerts, and hourly subscriber digests. The API mutations answer a paused request in JSON through `pausePublicAction`; the confirmation and unsubscribe routes answer in HTML through `pauseConfirmationPage` and `pauseUnsubscribePage`. It does not block fulfillment: a valid active claim token or reservation-scoped continuation authority is already authorization to record an order, and blocking that path could strand a helper who has already placed one.
@@ -442,6 +469,8 @@ Redemption existing is not activation: `pauseUnsubscribePage` refuses both verbs
 The same variable is the activation switch for the unsubscribe signing secret: unpausing is what makes that secret a startup requirement (section 9.6).
 
 `CRON_ENABLED=true` controls only the hourly expired-request cleanup backup to TTL deletion. The hourly digest, daily confirmed-subscriber `dailyCount` reset, and ten-minute SendLog failure monitor are registered independently of `CRON_ENABLED`; the digest additionally exits when public actions are paused.
+
+Notification-management correctness (W3-N2, sections 8.6 and 9.8–9.9) does not itself change this pause boundary or authorize production/TestFlight unpause. Deployed secrets/provider configuration, signed build environment, and provider proof remain separate release gates (section 11).
 
 ## 11. Durable deferrals that constrain current behavior
 

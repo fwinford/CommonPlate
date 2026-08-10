@@ -150,6 +150,7 @@ import { assertUnsubscribeSigningSecretForActivation } from "./src/unsubscribeCr
 import { assertApnsConfigurationForActivation } from "./src/apnsConfig.js";
 import { assertParticipantSigningSecretForActivation } from "./src/participantCredentials.js";
 import { registerParticipantVerificationRoutes } from "./src/participantVerificationRoutes.js";
+import { registerParticipantEmailUnsubscribeRoute } from "./src/participantEmailUnsubscribeRoute.js";
 import { buildEffectiveAvailabilityFilter } from "./src/requestAvailability.js";
 import {
   CREATE_UNAVAILABLE_MESSAGE,
@@ -339,6 +340,13 @@ app.post(
 // themselves refused. Separate limiter buckets keep submitting a code from
 // spending the allowance for requesting one.
 registerParticipantVerificationRoutes(app);
+
+// api: participant-authorized email-alert unsubscribe (W3-N2). Registered
+// alongside participant verification, ahead of the global parsers, for the
+// same body-shape reason: there is no body to parse for this route, but pause
+// and the participant-authority gate must still run before any global
+// middleware could otherwise see the request.
+registerParticipantEmailUnsubscribeRoute(app);
 
 // middleware to parse JSON and serve static files
 app.use(express.json({ limit: '100kb' }));

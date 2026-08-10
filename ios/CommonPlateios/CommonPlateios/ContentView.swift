@@ -24,6 +24,12 @@ struct ContentView: View {
     /// email alerts and push notifications are separate controls with no
     /// shared state or error semantics.
     @StateObject private var pushSubscriptionStore: PushSubscriptionStore
+    /// The participant-authorized "Turn off email alerts" action keeps its
+    /// own state owner (W3-N2). It shares no state with
+    /// `alertSubscriptionStore`: signup presentation history establishes no
+    /// Subscriber truth, and this store's confirmed Off result is session-only
+    /// and establishes no future On.
+    @StateObject private var participantEmailUnsubscribeStore: ParticipantEmailUnsubscribeStore
     /// Participant identity keeps its own state owner (W3-I1). It is not
     /// subscription state and not installation state: it is the one thing in
     /// the app that represents a person, every participant action reads it, and
@@ -118,6 +124,11 @@ struct ContentView: View {
                 authorizationCoordinator: UNUserNotificationCenterAuthorizationCoordinator(),
                 remoteNotificationRegistrar: remoteNotificationRegistrar,
                 settingsOpener: UIApplicationPushSettingsOpener()
+            )
+        )
+        _participantEmailUnsubscribeStore = StateObject(
+            wrappedValue: ParticipantEmailUnsubscribeStore(
+                service: ParticipantEmailUnsubscribeService(client: client)
             )
         )
     }
@@ -423,7 +434,12 @@ struct ContentView: View {
         case .activeRequests:
             ActiveRequestsView(store: requestStore)
         case .alerts:
-            AlertSignupView(store: alertSubscriptionStore, pushStore: pushSubscriptionStore)
+            AlertSignupView(
+                store: alertSubscriptionStore,
+                pushStore: pushSubscriptionStore,
+                unsubscribeStore: participantEmailUnsubscribeStore,
+                identityStore: participantIdentityStore
+            )
         case .privacySafety:
             PrivacySafetyView()
         case .requestDetail(let request):

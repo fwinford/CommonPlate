@@ -19,6 +19,10 @@ struct PushNotificationSection: View {
     static let settingUpTitle = "Setting up push notifications…"
     static let deniedTitle = "Notifications are off"
     static let failedTitle = "Push alerts couldn’t be turned on"
+    static let ambiguousEnablingTitle = "We couldn’t confirm push notifications turned on"
+    static let ambiguousDisablingTitle = "We couldn’t confirm push notifications turned off"
+    static let ambiguousBody =
+        "This may already have gone through. Try again — it won’t turn on and off, only finish the same change."
 
     static let turnOnButtonTitle = "Turn on push notifications"
     static let turnOffButtonTitle = "Turn off"
@@ -52,6 +56,8 @@ struct PushNotificationSection: View {
                 deniedState
             case .failed:
                 failedState
+            case .ambiguous(let desiredEnabled):
+                ambiguousState(desiredEnabled: desiredEnabled)
             }
         }
         .task {
@@ -148,6 +154,25 @@ struct PushNotificationSection: View {
 
             Button(Self.tryAgainButtonTitle) {
                 Task { await store.enableAfterExplanation() }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    /// Neither On nor Off is shown here — that is the whole point of this
+    /// state. `Try again` reasserts only the same desired state the
+    /// unresolved attempt already asked for, never the opposite.
+    private func ambiguousState(desiredEnabled: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(desiredEnabled ? Self.ambiguousEnablingTitle : Self.ambiguousDisablingTitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(Self.ambiguousBody)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Button(Self.tryAgainButtonTitle) {
+                Task { await store.retryAmbiguousSync() }
             }
             .buttonStyle(.bordered)
         }

@@ -18,7 +18,6 @@ import Foundation
 /// than guessed at.
 enum AlertSubscriptionErrorCode {
     static let invalidEmail = "INVALID_EMAIL"
-    static let confirmationEmailUnavailable = "CONFIRMATION_EMAIL_UNAVAILABLE"
 }
 
 /// Product-safe, structured failure surface for alert signup. Each case is a
@@ -34,9 +33,6 @@ enum AlertSubscriptionError: Error {
     /// Throttled before the handler ran. Definitive; only a manual, later
     /// retry is appropriate.
     case rateLimited
-    /// The backend could not hand the confirmation email to its provider and
-    /// rolled its own state back. Definitive failure — signup did not succeed.
-    case confirmationEmailUnavailable
     /// The POST may have been received and applied, but iOS did not receive
     /// and validate a usable accepted response. Never retried automatically.
     case ambiguousSignupOutcome(underlying: Error)
@@ -101,8 +97,6 @@ struct AlertSubscriptionService {
             switch code {
             case AlertSubscriptionErrorCode.invalidEmail:
                 return .invalidEmail
-            case AlertSubscriptionErrorCode.confirmationEmailUnavailable:
-                return .confirmationEmailUnavailable
             default:
                 // A decoded envelope is the backend deciding and saying so, so
                 // the outcome is definitive even when the code is unfamiliar.
@@ -117,8 +111,9 @@ struct AlertSubscriptionService {
         // The pause gate refuses `POST /api/subscribe` with a bare
         // `{ "error": "<message>" }` string rather than the structured
         // envelope, so a 503 that carries no decodable envelope is exactly the
-        // paused response. The provider-unavailable 503 does carry one and is
-        // matched above by its code.
+        // paused response. Confirmation-email provider failure no longer
+        // surfaces as a distinct public status/code at all (W3-N2): the
+        // generic accepted response covers that case too.
         case .unexpectedStatus(503):
             return .publicActionsPaused
         // Anything else here is genuinely indeterminate: transport loss or a

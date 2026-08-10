@@ -16,7 +16,6 @@ vi.mock("./emailHelpers.js", () => ({
 }));
 
 import {
-  CONFIRMATION_EMAIL_UNAVAILABLE_MESSAGE,
   CONFIRMATION_LIFETIME_MS,
   CONFIRMATION_SEND_LEASE_MS,
   SUBSCRIBE_ACCEPTED_RESPONSE,
@@ -27,7 +26,8 @@ import {
 /**
  * Mirrors the name thrown by the real `sendSubscriptionConfirmationEmail`
  * deadline. `emailHelpers.test.ts` proves a genuine abort produces that error;
- * these suites prove such a rejection takes the compensation and 503 path.
+ * these suites prove such a rejection takes the compensation while preserving
+ * the generic accepted public response.
  */
 class ProviderTimeout extends Error {
   constructor() {
@@ -78,17 +78,6 @@ function expectAccepted(context: ReturnType<typeof routeContext>) {
   expect(JSON.stringify(context.body)).toBe(
     JSON.stringify(SUBSCRIBE_ACCEPTED_RESPONSE)
   );
-}
-
-function expectProviderUnavailable(context: ReturnType<typeof routeContext>) {
-  expect(context.statusCode).toBe(503);
-  expect(context.body).toEqual({
-    error: {
-      code: "CONFIRMATION_EMAIL_UNAVAILABLE",
-      message: CONFIRMATION_EMAIL_UNAVAILABLE_MESSAGE,
-      fields: null,
-    },
-  });
 }
 
 function deferred() {
@@ -351,7 +340,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       sendConfirmationEmail: vi.fn().mockRejectedValue(new Error("offline")),
     })(context.req, context.res);
 
-    expectProviderUnavailable(context);
+    expectAccepted(context);
     expect(
       await Subscriber.countDocuments({ email: "new-failure@nyu.edu" })
     ).toBe(0);
@@ -382,7 +371,32 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         .mockResolvedValue({ error: { message: "rejected" } }),
     })(context.req, context.res);
 
-    expectProviderUnavailable(context);
+    expectAccepted(context);
+    expect(await Subscriber.collection.findOne({ _id: id })).toEqual(before);
+  });
+
+  it("restores a pending lifecycle after provider failure while returning generic acceptance", async () => {
+    const id = new mongoose.Types.ObjectId();
+    await Subscriber.collection.insertOne({
+      _id: id,
+      email: "pending-failure@nyu.edu",
+      status: "pending",
+      confirmationTokenDigest: "a".repeat(64),
+      confirmationExpiresAt: new Date(backendNow.getTime() + 60_000),
+      bounced: false,
+      dailyCount: 0,
+    });
+    const before = await Subscriber.collection.findOne({ _id: id });
+    const context = routeContext("pending-failure@nyu.edu");
+
+    await createSubscribeHandler({
+      now: () => backendNow,
+      generateRawToken: () => rawToken(30),
+      generateAttemptId: () => "pending-failure-attempt",
+      sendConfirmationEmail: vi.fn().mockRejectedValue(new Error("offline")),
+    })(context.req, context.res);
+
+    expectAccepted(context);
     expect(await Subscriber.collection.findOne({ _id: id })).toEqual(before);
   });
 
@@ -414,7 +428,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     releaseProvider.resolve();
     await attempt;
 
-    expectProviderUnavailable(context);
+    expectAccepted(context);
     const stored = await Subscriber.collection.findOne({
       email: "stale-delete@nyu.edu",
     });
@@ -460,7 +474,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
     releaseProvider.resolve();
     await attempt;
 
-    expectProviderUnavailable(context);
+    expectAccepted(context);
     const stored = await Subscriber.collection.findOne({ _id: id });
     expect(stored?.confirmationTokenDigest).toBe(newerDigest);
     expect(stored?.confirmationSendAttemptId).toBe("newer-attempt");
@@ -727,7 +741,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         sendConfirmationEmail: vi.fn().mockRejectedValue(new ProviderTimeout()),
       })(context.req, context.res);
 
-      expectProviderUnavailable(context);
+      expectAccepted(context);
       // Including the expired lease itself: an already-stale owner is harmless
       // because the next signup may take it over again immediately.
       expect(await Subscriber.collection.findOne({ _id: id })).toEqual(before);
@@ -795,7 +809,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
   });
 
   describe("provider timeout and compensation containment", () => {
-    it("routes a provider timeout through deletion and the exact 503", async () => {
+    it("routes a provider timeout through deletion and generic acceptance", async () => {
       const context = routeContext("timeout-new@nyu.edu");
 
       await createSubscribeHandler({
@@ -804,13 +818,13 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         sendConfirmationEmail: vi.fn().mockRejectedValue(new ProviderTimeout()),
       })(context.req, context.res);
 
-      expectProviderUnavailable(context);
+      expectAccepted(context);
       expect(
         await Subscriber.countDocuments({ email: "timeout-new@nyu.edu" })
       ).toBe(0);
     });
 
-    it("returns the exact 503 when new-record deletion itself rejects", async () => {
+    it("returns generic acceptance when new-record deletion itself rejects", async () => {
       const errors = vi.spyOn(console, "error").mockImplementation(() => {});
       vi.spyOn(Subscriber, "deleteOne").mockRejectedValue(
         new Error("delete unavailable") as never
@@ -824,7 +838,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         sendConfirmationEmail: vi.fn().mockRejectedValue(new Error("offline")),
       })(context.req, context.res);
 
-      expectProviderUnavailable(context);
+      expectAccepted(context);
       expect(errors).toHaveBeenCalledWith(
         expect.stringContaining(
           "Confirmation cleanup outcome is unknown; new-record deletion could not be verified"
@@ -840,7 +854,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
       );
     });
 
-    it("returns the exact 503 when existing-record rollback itself rejects", async () => {
+    it("returns generic acceptance when existing-record rollback itself rejects", async () => {
       const id = new mongoose.Types.ObjectId();
       await Subscriber.collection.insertOne({
         _id: id,
@@ -863,7 +877,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         sendConfirmationEmail: vi.fn().mockRejectedValue(new Error("offline")),
       })(context.req, context.res);
 
-      expectProviderUnavailable(context);
+      expectAccepted(context);
       expect(errors).toHaveBeenCalledWith(
         expect.stringContaining(
           "Confirmation rollback outcome is unknown; restoration of the previous lifecycle could not be verified"
@@ -922,7 +936,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         "digest-only-attempt"
       );
 
-      expectProviderUnavailable(context);
+      expectAccepted(context);
       const stored = await Subscriber.collection.findOne({ email });
       expect(stored).not.toBeNull();
       expect(stored?.confirmationTokenDigest).toBe(newerDigest);
@@ -943,7 +957,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
         "attempt-only-attempt"
       );
 
-      expectProviderUnavailable(context);
+      expectAccepted(context);
       const stored = await Subscriber.collection.findOne({ email });
       expect(stored).not.toBeNull();
       expect(stored?.confirmationTokenDigest).toBe(
@@ -983,7 +997,7 @@ describeMongo("pending subscription lifecycle against real MongoDB", () => {
           attemptId
         );
 
-        expectProviderUnavailable(context);
+        expectAccepted(context);
         const stored = await Subscriber.collection.findOne({ _id: id });
         // The rotation stayed: a stale rollback must not resurrect the
         // pre-rotation `unsubscribed` lifecycle over the newer one.
