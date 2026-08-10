@@ -363,7 +363,7 @@ struct ContentView: View {
     private func destination(for route: AppRoute) -> some View {
         switch route {
         case .requestFood:
-            RequestFoodView(
+            RequestFoodEntryView(
                 store: requestStore,
                 identityStore: participantIdentityStore,
                 verificationCoordinator: participantActionVerificationCoordinator,

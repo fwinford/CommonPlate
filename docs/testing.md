@@ -193,6 +193,18 @@ The focused iOS participant identity, gate, and continuation suites contain 52 p
 
 These automated, source, and simulator results do **not** prove real NYU verification-email receipt or real-code redemption; physical same-install relaunch retention; uninstall/reinstall or new-device reverification; physical Keychain lifecycle behavior; backup/device-migration exclusion; or a real-address Change Email flow. Those are accepted, explicitly unperformed environmental checks, not passed evidence.
 
+### Requester verification entry (W3-I2) coverage
+
+W3-I2 is accepted. It changes only requester-entry sequencing (verification before the Request Food form, rather than a gate at first Submit) and consumes W3-I1's identity, credential, storage, and lifetime semantics unchanged; the W3-I1 coverage above still governs those.
+
+Focused `ios/CommonPlateios/CommonPlateiosTests/RequestFoodEntryTests.swift` coverage exists for: clean/no-identity entry routing to verification rather than the form; a usable verification-start/email-entry action; successful verification continuing directly into the form; failed/cancelled verification not doing so; already-verified and restored identity entering the form directly; no second editable participant-email field; submission carrying the authority entry verification established; sticky form-admission surviving a later mid-form authority loss without losing the draft; a repeat appearance after admission not opening a second entry-owned verification flow; and the real SwiftUI sheet-dismissal handshake (successful verification's own dismissal) not being mistaken for a user cancellation and popping the Request Food navigation destination.
+
+That last case matters specifically because simulator/unit tests cannot, by themselves, establish the real physical-device sheet-presentation/dismissal transition — an initial round of this coverage passed in simulator while a real iPhone still required a second "I Need Food" entry after successful verification, because nothing in the automated suite drives an actual `.sheet` presentation/dismissal handshake. That physical defect was found, fixed, and its regression proof added at the same pure-predicate boundary the fix itself uses; simulator/unit results remain a proxy for, not a substitute for, physical confirmation of this exact transition.
+
+Physical confirmation was subsequently performed and passed on a real iPhone: unverified Request Food opened participant verification before the form; real NYU verification succeeded; successful verification proceeded immediately into Request Food without a second Request Food entry; Request Food had no second editable participant-email field; a valid request submitted using the verified participant identity with no further email/verification step; leaving and reopening Request Food entered the form directly using restored verified identity; and Change Email required reverification. Faith accepted W3-I2 on this basis.
+
+The complete `CommonPlateiosTests` target has passed alongside this coverage, but only against a working tree that also contains the still-unaccepted W3-H1 slice; that combined-tree result is not recorded here as a clean repository baseline. The accepted clean `CommonPlateiosTests` baseline remains **550 passed, 0 failed, TEST SUCCEEDED** (section 9) until W3-I2 is committed and a clean run is performed against the resulting tree.
+
 ## 5. Mongo integration tests
 
 Run:
