@@ -108,7 +108,14 @@ final class ParticipantContinuationTests: XCTestCase {
         XCTAssertNil(identityStore.pendingContinuation)
 
         RequestFetchingURLProtocol.enqueue(
-            .response(statusCode: 200, data: claimedResponse(requestID: requestA.id))
+            .response(
+                statusCode: 200,
+                // A distinctive quantity (4, not the file's usual default of
+                // 2) proves the continuation's completed claim carries the
+                // exact backend-confirmed value into `activeClaim.request`,
+                // not a coincidental default (W3-C1).
+                data: claimedResponse(requestID: requestA.id, mealSwipes: 4)
+            )
         )
         try await requestStore.claim(requestID: requestA.id)
 
@@ -122,6 +129,7 @@ final class ParticipantContinuationTests: XCTestCase {
         XCTAssertEqual(capturedRequestCount(path: "/api/request/\(requestA.id)/claim"), 1)
         XCTAssertEqual(capturedRequestCount(path: "/api/request/\(requestB.id)/claim"), 0)
         XCTAssertEqual(requestStore.activeClaim?.requestID, requestA.id)
+        XCTAssertEqual(requestStore.activeClaim?.request.mealSwipes, 4)
     }
 
     func testRequesterSuccessfulSheetDismissalBeforeIdentityPublicationPreservesExactResumeOnce() async throws {
@@ -538,6 +546,7 @@ final class ParticipantContinuationTests: XCTestCase {
             diningSpot: DiningSpot(name: "Palladium", address: nil),
             foodDescription: "Rice bowl",
             pickupWindowText: "ASAP",
+            mealSwipes: 2,
             windowStart: nil,
             windowEnd: nil,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
@@ -559,11 +568,11 @@ final class ParticipantContinuationTests: XCTestCase {
     }
 
     private func createdResponse(food: String) -> Data {
-        Data(#"{"request":{"id":"64b0000000000000000000a1","vendor":"Palladium","food":"\#(food)","pickupWindowText":"ASAP","windowStart":null,"windowEnd":null,"status":"open","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2026-08-09T20:00:00.000Z"}}"#.utf8)
+        Data(#"{"request":{"id":"64b0000000000000000000a1","vendor":"Palladium","food":"\#(food)","pickupWindowText":"ASAP","mealSwipes":2,"windowStart":null,"windowEnd":null,"status":"open","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2026-08-09T20:00:00.000Z"}}"#.utf8)
     }
 
-    private func claimedResponse(requestID: String) -> Data {
-        Data(#"{"request":{"id":"\#(requestID)","vendor":"Palladium","food":"Rice bowl","pickupWindowText":"ASAP","windowStart":null,"windowEnd":null,"status":"claimed","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2036-08-09T20:00:00.000Z"},"claim":{"pickupName":"Taylor","claimToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","claimExpiresAt":"2036-08-09T17:15:00.000Z"}}"#.utf8)
+    private func claimedResponse(requestID: String, mealSwipes: Int = 2) -> Data {
+        Data(#"{"request":{"id":"\#(requestID)","vendor":"Palladium","food":"Rice bowl","pickupWindowText":"ASAP","mealSwipes":\#(mealSwipes),"windowStart":null,"windowEnd":null,"status":"claimed","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2036-08-09T20:00:00.000Z"},"claim":{"pickupName":"Taylor","claimToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","claimExpiresAt":"2036-08-09T17:15:00.000Z"}}"#.utf8)
     }
 
     private var utcCalendar: Calendar {

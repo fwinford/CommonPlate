@@ -95,6 +95,7 @@ function canonicalAsap(overrides: Record<string, unknown> = {}) {
     pickupName: "  Requester Private Name  ",
     email: "  REQUESTER@NYU.EDU  ",
     timing: "asap",
+    mealSwipes: 2,
     ...overrides,
   };
 }
@@ -107,6 +108,7 @@ function canonicalScheduled(overrides: Record<string, unknown> = {}) {
     email: "requester@nyu.edu",
     timing: "scheduled",
     windowStart: "2026-07-28T17:00:00.000Z",
+    mealSwipes: 2,
     ...overrides,
   };
 }
@@ -192,6 +194,7 @@ describe("POST /api/request validation and persistence", () => {
       vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupName: "Requester Private Name",
+      mealSwipes: 2,
       // Both written from the verified participant, never from the payload.
       email: participantPrincipal,
       requesterParticipantId: participantId.toString(),
@@ -401,6 +404,7 @@ describe("POST /api/request validation and persistence", () => {
       vendor: "Palladium",
       food: "Vegetable rice bowl",
       pickupWindowText: "Jul 28, 1:00 PM – 4:00 PM",
+      mealSwipes: 2,
       windowStart: "2026-07-28T17:00:00.000Z",
       windowEnd: "2026-07-28T20:00:00.000Z",
       status: "open",
@@ -432,6 +436,164 @@ describe("POST /api/request validation and persistence", () => {
     expect(persistedInput.visibleFrom).toEqual(scheduledStart);
     expect(persistedInput.expiresAt).toEqual(scheduledExpiresAt);
     expect(persistedInput.deleteAt).toEqual(persistedInput.expiresAt);
+  });
+});
+
+describe("POST /api/request meal-swipe quantity (W3-C1)", () => {
+  it.each([1, 2, 3, 4, 5])(
+    "accepts and persists an exact integer quantity of %d",
+    async (mealSwipes) => {
+      const context = routeContext(canonicalAsap({ mealSwipes }));
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(201);
+      expect(createDocument).toHaveBeenCalledWith(
+        expect.objectContaining({ mealSwipes })
+      );
+      const body = context.json.mock.calls[0][0] as {
+        request: Record<string, unknown>;
+      };
+      expect(body.request.mealSwipes).toBe(mealSwipes);
+    }
+  );
+
+  it.each([
+    undefined,
+    0,
+    -1,
+    6,
+    1.5,
+    "2",
+    null,
+  ])("rejects an invalid quantity %j", async (mealSwipes) => {
+    const context = routeContext(canonicalAsap({ mealSwipes }));
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: "INVALID_REQUEST",
+        message: "Invalid request payload",
+      },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing quantity on a canonical scheduled request", async () => {
+    const body = canonicalScheduled();
+    delete (body as Record<string, unknown>).mealSwipes;
+    const context = routeContext(body);
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("accepts a canonical scheduled request with a bounded quantity", async () => {
+    const context = routeContext(canonicalScheduled({ mealSwipes: 5 }));
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ mealSwipes: 5 })
+    );
+  });
+
+  it("accepts and persists each exact integer quantity 1-5 on the legacy web shape", async () => {
+    for (const mealSwipes of [1, 2, 3, 4, 5]) {
+      countDocuments.mockResolvedValue(0 as never);
+      const context = routeContext({
+        vendor: "Palladium",
+        food: "Vegetable rice bowl",
+        pickupName: "Requester Private Name",
+        email: "requester@nyu.edu",
+        pickupWindowText: "client display text",
+        mealSwipes,
+      });
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(201);
+      expect(createDocument).toHaveBeenCalledWith(
+        expect.objectContaining({ mealSwipes })
+      );
+      const body = context.json.mock.calls[
+        context.json.mock.calls.length - 1
+      ][0] as { request: Record<string, unknown> };
+      expect(body.request.mealSwipes).toBe(mealSwipes);
+    }
+  });
+
+  it.each([
+    undefined,
+    0,
+    -1,
+    6,
+    1.5,
+    "2",
+    null,
+  ])("rejects an invalid quantity %j on the legacy web shape", async (mealSwipes) => {
+    const context = routeContext({
+      vendor: "Palladium",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email: "requester@nyu.edu",
+      pickupWindowText: "client display text",
+      mealSwipes,
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: "INVALID_REQUEST",
+        message: "Invalid request payload",
+      },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects a legacy web submission omitting the quantity entirely", async () => {
+    const context = routeContext({
+      vendor: "Palladium",
+      food: "Vegetable rice bowl",
+      pickupName: "Requester Private Name",
+      email: "requester@nyu.edu",
+      pickupWindowText: "client display text",
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("does not fabricate a default or fallback quantity on any accepted shape", async () => {
+    for (const body of [
+      canonicalAsap({ mealSwipes: undefined }),
+      canonicalScheduled({ mealSwipes: undefined }),
+      {
+        vendor: "Palladium",
+        food: "Vegetable rice bowl",
+        pickupName: "Requester Private Name",
+        email: "requester@nyu.edu",
+        pickupWindowText: "client display text",
+      },
+    ]) {
+      const context = routeContext(body);
+      await createRequest(context.req, context.res);
+      expect(context.status).toHaveBeenCalledWith(400);
+    }
+    expect(createDocument).not.toHaveBeenCalled();
   });
 });
 
@@ -623,6 +785,7 @@ describe("POST /api/request requester identity comes from participant authority 
       pickupName: "Requester Private Name",
       email,
       pickupWindowText: "Legacy display",
+      mealSwipes: 2,
     };
   }
 
@@ -912,6 +1075,7 @@ describe("POST /api/request supported-vendor allowlist", () => {
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
+      mealSwipes: 2,
     });
     await createRequest(legacy.req, legacy.res);
 
@@ -929,6 +1093,7 @@ describe("POST /api/request supported-vendor allowlist", () => {
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
+      mealSwipes: 2,
     });
     await createRequest(allowedLegacy.req, allowedLegacy.res);
 
@@ -1236,6 +1401,7 @@ describe("POST /api/request backend-owned visibility and expiration", () => {
         pickupWindowText: "Legacy display",
         windowStart,
         windowEnd,
+        mealSwipes: 2,
       };
     }
 
@@ -1348,6 +1514,7 @@ describe("POST /api/request eligibility-time notification ownership (W3-N3)", ()
       pickupWindowText: "ignored legacy display text",
       windowStart: "2026-07-28T17:00:00.000Z",
       windowEnd: "2026-07-28T18:00:00.000Z",
+      mealSwipes: 2,
     });
 
     await createRequest(context.req, context.res);
@@ -1401,6 +1568,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
       pickupWindowText: "Client-owned text must be ignored",
+      mealSwipes: 2,
     });
 
     await createRequest(context.req, context.res);
@@ -1424,6 +1592,7 @@ describe("POST /api/request narrow legacy web compatibility", () => {
       pickupWindowText: "Wrong client display text",
       windowStart: "2026-07-28T17:00:00.000Z",
       windowEnd: "2026-07-28T18:00:00.000Z",
+      mealSwipes: 2,
     });
 
     await createRequest(context.req, context.res);
@@ -2098,6 +2267,7 @@ describe("POST /api/request installation association (Slice 6E)", () => {
       pickupName: "Requester Private Name",
       email: "requester@nyu.edu",
       pickupWindowText: "ASAP",
+      mealSwipes: 2,
     });
 
     await createRequest(context.req, context.res);

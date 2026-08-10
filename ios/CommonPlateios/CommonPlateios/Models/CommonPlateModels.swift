@@ -44,6 +44,11 @@ struct FoodRequest: Identifiable, Hashable {
     let diningSpot: DiningSpot
     let foodDescription: String
     let pickupWindowText: String
+    /// V1 meal-swipe requirement (W3-C1). Every request this app can fetch or
+    /// create carries one — the backend requires it on every accepted shape,
+    /// including the legacy web one — so this is never a placeholder for an
+    /// absent value.
+    let mealSwipes: Int
     let windowStart: Date?
     let windowEnd: Date?
     let timing: RequestTiming
@@ -59,6 +64,7 @@ struct FoodRequest: Identifiable, Hashable {
         diningSpot: DiningSpot,
         foodDescription: String,
         pickupWindowText: String,
+        mealSwipes: Int,
         windowStart: Date?,
         windowEnd: Date?,
         createdAt: Date,
@@ -69,6 +75,7 @@ struct FoodRequest: Identifiable, Hashable {
         self.diningSpot = diningSpot
         self.foodDescription = foodDescription
         self.pickupWindowText = pickupWindowText
+        self.mealSwipes = mealSwipes
         self.windowStart = windowStart
         self.windowEnd = windowEnd
         self.timing = windowStart != nil || windowEnd != nil ? .later : .asap

@@ -237,6 +237,18 @@ iOS coverage exercises continuation truth (`active` only for a claimed embedded 
 
 Faith's physical iPhone acceptance established the device-only behaviors not proven by simulator/unit tests: terminate/relaunch continuation; foreground in-app T−5 warning without a duplicate system warning; backgrounded and terminated local warning delivery; terminated-app warning-tap cold launch to the matching reservation; release; and fulfillment after restored continuation. These observations establish H1 behavior on the observed device only. They do not establish APNs provider behavior, Release/Archive/TestFlight signing, or release-environment configuration, which remain separate gates.
 
+### Meal-Plan / Payment Requirement (W3-C1) coverage
+
+W3-C1 is accepted. Backend coverage in `src/createRequestRoute.test.ts` proves the required integer 1–5 `mealSwipes` quantity is enforced identically on the canonical/iOS and `legacyWebSchema` request shapes: values 1–5 are accepted and round-trip unchanged; missing, invalid, fractional, and out-of-range values are rejected on both shapes, including a `legacyWebSchema` submission omitting the quantity. `src/requestListResponse.test.ts` and `src/requestDetailRoute.test.ts` prove the helper projection exposes the quantity without newly exposing any private field. `src/emailHelpers.test.ts` and `src/helperPushPayload.test.ts` prove the helper new-request email (text and HTML) and push payload carry the same authoritative quantity through the existing `sendNewRequestAlert()` and `buildHelperNewRequestPayload()` composition paths, unchanged for both immediate-creation and W3-N3 eligibility-sweep dispatch. `src/participantBinding.mongo.test.ts` and `models/db.ts` cover Request-owned persistence of the field.
+
+iOS coverage proves the bounded 1–5 picker, payload behavior, and pre-Reserve visibility in Active Requests and `RequestDetailView`, continuity through active-reservation presentation and `FulfillRequestView`, and that fulfillment navigation reads the quantity from the active claim's authoritative request rather than a stale pre-claim copy — across `RequestCreationViewTests.swift`, `RequestFetchingTests.swift`, `RequestFoodEntryTests.swift`, `ClaimFlowTests.swift`, `ReservationContinuationTests.swift`, `ReservationFulfillmentContinuationTests.swift`, `ReservationReleaseTests.swift`, `ReservationWarningTests.swift`, `ReservationWarningRoutingTests.swift`, `ParticipantContinuationTests.swift`, `ParticipantGateTests.swift`, `RequestCreationInstallationCredentialTests.swift`, `RequestEmailAllowlistTests.swift`, `RequestTimingContractTests.swift`, `HelperNotificationRoutingTests.swift`, and `HelperNotificationTerminatedLaunchRoutingTests.swift`.
+
+At acceptance: `npm run typecheck` passed; `npm test` passed 1,317 tests with 275 Mongo-gated skips; `npm run test:mongo` passed 275 tests across 17 files; `npm run ci-check` passed; `npm run build:client` produced no tracked bundle diff. The final focused Active Requests visibility test, the ClaimFlow focused proof after continuity fixes, and the complete `CommonPlateiosTests` target (662 passed, 0 failed, TEST SUCCEEDED) all passed. An independent engineering review resolved backend validation/persistence/privacy/notification findings and one iOS stale-request fulfillment continuity MUST FIX, with no remaining engineering finding afterward.
+
+**Physical acceptance evidence.** Faith verified the meal-swipe quantity is visibly acceptable in Active Requests on a physical device. An earlier walkthrough verified the same distinctive quantity (`4`) in Request Detail, active-reservation presentation, and fulfillment/order context, and the helper new-request notification and email presentation were also physically reviewed and accepted. These observations establish on-device presentation on the observed device only; they do not establish Release/Archive/TestFlight signing or environment behavior, which remains a separate gate (`docs/system-contract.md` section 11).
+
+**Week 4 deferral.** `Meal swipes: N` is technically correct but its user-facing meaning and visual hierarchy are deferred to Week 4; that resolution must not reopen C1 data semantics, backend behavior, validation rules, or notification content.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -356,15 +368,17 @@ These results are reference evidence, not a substitute for rerunning affected ch
 
 | Check | Result |
 | --- | --- |
-| `npm run typecheck` | Passed in the H1 closeout |
-| `npm test` | Passed in the H1 closeout; prior W3-I1 reference: 1,254 passed; 243 Mongo-gated skipped |
-| `npm run test:mongo` | Passed in the H1 closeout; prior W3-I1 reference: 243 passed across 16 files |
+| `npm run typecheck` | Passed in the C1 closeout |
+| `npm test` | Passed in the C1 closeout: 1,317 passed; 275 Mongo-gated skipped |
+| `npm run test:mongo` | Passed in the C1 closeout: 275 passed across 17 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | H1 closeout: 633 passed; 0 failed; TEST SUCCEEDED. Newest recorded complete-target composite run: 649 passed; 0 failed; TEST SUCCEEDED |
-| `npm run build:client` | Passed; regenerated bundles intentionally include the W3-I1 legacy website non-actionable form |
+| `CommonPlateiosTests` | C1 closeout: 662 passed; 0 failed; TEST SUCCEEDED |
+| `npm run build:client` | Passed; no tracked bundle diff |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
+
+W3-C1 physical acceptance (meal-swipe quantity visible in Active Requests, Request Detail, active-reservation presentation, fulfillment/order context, and helper new-request notification/email) is recorded above and in `docs/system-contract.md` section 6.2. It does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
 W3-H1 physical-device acceptance is recorded above. It closes H1's reservation-lifecycle device gate only; it does not close the Release/Archive/TestFlight APNs environment gate.
 

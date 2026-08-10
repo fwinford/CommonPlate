@@ -321,7 +321,8 @@ final class RequestFoodEntryTests: XCTestCase {
                 food: draft.foodRequest,
                 pickupName: draft.pickupName,
                 timing: .asap,
-                windowStart: nil
+                windowStart: nil,
+                mealSwipes: 2
             ))
             XCTFail("expected the rejected authority to surface as an error")
         } catch {
@@ -427,7 +428,8 @@ final class RequestFoodEntryTests: XCTestCase {
                 food: draft.foodRequest,
                 pickupName: draft.pickupName,
                 timing: .asap,
-                windowStart: nil
+                windowStart: nil,
+                mealSwipes: 2
             ))
             XCTFail("expected the rejected authority to surface as an error")
         } catch {
@@ -528,7 +530,8 @@ final class RequestFoodEntryTests: XCTestCase {
             food: "Chicken bowl",
             pickupName: "Taylor",
             timing: .asap,
-            windowStart: nil
+            windowStart: nil,
+            mealSwipes: 2
         ))
 
         let headers = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedHeaders)
@@ -580,7 +583,7 @@ final class RequestFoodEntryTests: XCTestCase {
     }
 
     private func createdResponse() -> Data {
-        Data(#"{"request":{"id":"64b0000000000000000000a1","vendor":"Palladium","food":"Chicken bowl","pickupWindowText":"ASAP","windowStart":null,"windowEnd":null,"status":"open","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2026-08-09T20:00:00.000Z"}}"#.utf8)
+        Data(#"{"request":{"id":"64b0000000000000000000a1","vendor":"Palladium","food":"Chicken bowl","pickupWindowText":"ASAP","mealSwipes":2,"windowStart":null,"windowEnd":null,"status":"open","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2026-08-09T20:00:00.000Z"}}"#.utf8)
     }
 
     /// Walks up from this file to the repository root, matching the pattern

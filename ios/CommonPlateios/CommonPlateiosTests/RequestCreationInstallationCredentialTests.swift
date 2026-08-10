@@ -132,6 +132,7 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             pickupName: "Taylor",
             timing: .asap,
             preferredPickupTime: Date(timeIntervalSince1970: 0),
+            mealSwipes: 2,
             now: Date(timeIntervalSince1970: 1_000),
             calendar: Calendar(identifier: .gregorian)
         )
@@ -151,7 +152,8 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             food: "Vegetable rice bowl",
             pickupName: "Requester Private Name",
             timing: .asap,
-            windowStart: nil
+            windowStart: nil,
+            mealSwipes: 2
         )
     }
 
@@ -185,6 +187,7 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             "vendor": "Palladium",
             "food": "Vegetable rice bowl",
             "pickupWindowText": "ASAP (available for the next 3 hours)",
+            "mealSwipes": 2,
             "windowStart": null,
             "windowEnd": null,
             "status": "open",

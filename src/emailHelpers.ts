@@ -146,18 +146,27 @@ export async function sendNewRequestAlert(
 	const htmlVendor = escapeHtml(request.vendor);
 	const htmlFood = escapeHtml(request.food);
 	const htmlPickupWindow = escapeHtml(request.pickupWindowText);
+	// Every shape `POST /api/request` accepts, including the legacy web one,
+	// has required an integer 1-5 since W3-C1, so `undefined` here reaches
+	// this composer only from a malformed/pre-C1 stored `Request` document —
+	// not a supported representation of any accepted submission. The alert
+	// degrades by omitting the line rather than fabricating a value for that
+	// impossible state.
+	const mealSwipesLine =
+		request.mealSwipes != null ? `Meal swipes: ${request.mealSwipes}` : null;
 	const html = `
 			<h2>New meal request: ${htmlVendor} · ${htmlPickupWindow}</h2>
 			<ul>
 				<li><strong>Vendor:</strong> ${htmlVendor}</li>
 				<li><strong>Food:</strong> ${htmlFood}</li>
 				<li><strong>Pickup Window:</strong> ${htmlPickupWindow}</li>
+				${mealSwipesLine ? `<li><strong>Meal swipes:</strong> ${escapeHtml(String(request.mealSwipes))}</li>` : ""}
 			</ul>
 		<p><a href="${requestListUrl}">View meal request</a></p>
 		<hr>
 		<p style="font-size:0.9em;">To unsubscribe from these alerts, <a href="${escapeHtml(unsubUrl)}">click here</a>.</p>
 	`;
-	const text = `New meal request: ${request.vendor} · ${request.pickupWindowText}\n\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Window: ${request.pickupWindowText}\n\nView meal request: ${requestListUrl}\n\nTo unsubscribe: ${unsubUrl}`;
+	const text = `New meal request: ${request.vendor} · ${request.pickupWindowText}\n\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Window: ${request.pickupWindowText}${mealSwipesLine ? `\n${mealSwipesLine}` : ""}\n\nView meal request: ${requestListUrl}\n\nTo unsubscribe: ${unsubUrl}`;
 	await sendEmailSafe({
 		from: FROM_EMAIL,
 		to: subscriber.email,

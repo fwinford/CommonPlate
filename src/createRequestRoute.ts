@@ -73,10 +73,19 @@ const requesterFields = {
   email: submittedRequesterEmail.optional(),
 };
 
+/**
+ * V1 meal-swipe requirement (W3-C1): an exact integer 1 through 5. Required on
+ * every accepted request shape, including `legacyWebSchema` — the legacy web
+ * form has no picker to supply it yet, so its submissions are rejected like
+ * any other missing-field submission until later website-parity work.
+ */
+const mealSwipesField = z.number().int().min(1).max(5);
+
 const canonicalAsapSchema = z
   .object({
     ...requesterFields,
     timing: z.literal("asap"),
+    mealSwipes: mealSwipesField,
     installationCredential: optionalInstallationCredential,
   })
   .strict();
@@ -94,6 +103,7 @@ const canonicalScheduledSchema = z
     ...requesterFields,
     timing: z.literal("scheduled"),
     windowStart: isoTimestamp,
+    mealSwipes: mealSwipesField,
     installationCredential: optionalInstallationCredential,
   })
   .strict();
@@ -122,6 +132,7 @@ const legacyWebSchema = z
     pickupWindowText: requesterString,
     windowStart: isoTimestamp.optional(),
     windowEnd: isoTimestamp.optional(),
+    mealSwipes: mealSwipesField,
   })
   .strict()
   .superRefine(({ windowStart, windowEnd }, context) => {
@@ -164,6 +175,11 @@ interface ValidatedCreateRequest {
    * and the display text are all derived from it plus the backend clock.
    */
   windowStart?: Date;
+  /**
+   * Required on every accepted request shape (W3-C1); this route persists it
+   * exactly as received — never a fallback or migrated value.
+   */
+  mealSwipes: number;
   /** Present only on the canonical iOS shapes; the legacy web shape has none. */
   installationCredential?: string;
 }
@@ -260,6 +276,7 @@ function validateCreateShape(
         pickupName: result.data.pickupName,
         submittedEmail: result.data.email,
         timing: "asap",
+        mealSwipes: result.data.mealSwipes,
         installationCredential: result.data.installationCredential,
       };
     }
@@ -274,6 +291,7 @@ function validateCreateShape(
       submittedEmail: result.data.email,
       timing: "scheduled",
       windowStart,
+      mealSwipes: result.data.mealSwipes,
       installationCredential: result.data.installationCredential,
     };
   }
@@ -291,6 +309,7 @@ function validateCreateShape(
       pickupName: result.data.pickupName,
       submittedEmail: result.data.email,
       timing: "asap",
+      mealSwipes: result.data.mealSwipes,
     };
   }
 
@@ -304,6 +323,7 @@ function validateCreateShape(
     submittedEmail: result.data.email,
     timing: "scheduled",
     windowStart,
+    mealSwipes: result.data.mealSwipes,
   };
 }
 
@@ -558,6 +578,7 @@ export async function createRequest(
       vendor: validated.vendor,
       food: validated.food,
       pickupName: validated.pickupName,
+      mealSwipes: validated.mealSwipes,
       // Both written from the resolved participant, never from the payload.
       // `email` stays the requester address every downstream path already
       // reads; `requesterParticipantId` is the durable binding to the identity

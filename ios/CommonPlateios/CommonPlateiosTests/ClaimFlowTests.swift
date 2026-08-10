@@ -151,6 +151,10 @@ final class ClaimFlowURLProtocol: URLProtocol {
 
 @MainActor
 final class ClaimFlowTests: XCTestCase {
+    enum TestHelperError: Error {
+        case markerNotFound
+    }
+
     private let requestID = "meal-a"
 
     /// The one sentence that stops a second real-world order. It is reproduced
@@ -299,6 +303,158 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertFalse(
             RequestDetailView.opensClaimedFlow(activeClaim: claim, requestID: "other-meal")
         )
+    }
+
+    /// W3-C1 continuity: the exact meal-swipe quantity the claim response
+    /// returns survives, unchanged, into `activeClaim.request` — the same
+    /// `FoodRequest` the active-reservation presentation and the fulfillment
+    /// flow both read from. A distinctive value (4, not the file's usual
+    /// default of 2) proves this is the claim response's own value flowing
+    /// through, not a coincidental default.
+    func testConfirmedClaimCarriesTheExactMealSwipeQuantityIntoActiveClaimRequest() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(
+            .response(data: claimResponse(pickupName: "Taylor", mealSwipes: 4))
+        )
+
+        try await store.claim(requestID: requestID)
+
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertEqual(claim.request.mealSwipes, 4)
+        // The same request also reaches the public collection's own entry,
+        // which `RequestDetailView` and `ActiveRequestsView` both read.
+        XCTAssertEqual(store.requests.first?.mealSwipes, 4)
+    }
+
+    /// W3-C1 regression: `RequestDetailView` opens fulfillment (both on an
+    /// immediate successful claim and on Continue Helping) through
+    /// `fulfillmentDestination(activeClaim:)`. This proves that function
+    /// itself returns the confirmed active claim's own request — not a
+    /// value-type copy fetched before the claim existed — using a
+    /// distinctive quantity (4) that differs from the pre-claim fetch's 1, so
+    /// passing is proof the claim response's own value survived, not a
+    /// coincidence of two fixtures sharing a default.
+    func testFulfillmentDestinationUsesTheActiveClaimsOwnRequestNotAStalePreClaimCopy() async throws {
+        let store = makeStore()
+        ClaimFlowURLProtocol.enqueue(.response(data: listResponse([
+            requestObject(id: requestID, mealSwipes: 1, status: "open")
+        ])))
+        await store.fetchRequests()
+        let preClaimRequest = try XCTUnwrap(store.requests.first)
+        XCTAssertEqual(preClaimRequest.mealSwipes, 1)
+
+        ClaimFlowURLProtocol.enqueue(
+            .response(data: claimResponse(mealSwipes: 4))
+        )
+        try await store.claim(requestID: requestID)
+
+        let activeClaim = try XCTUnwrap(store.activeClaim)
+        let destination = RequestDetailView.fulfillmentDestination(activeClaim: activeClaim)
+        guard case .fulfillment(let deliveredRequest) = destination else {
+            XCTFail("Expected a fulfillment destination")
+            return
+        }
+        XCTAssertEqual(deliveredRequest.mealSwipes, 4)
+        XCTAssertNotEqual(deliveredRequest.mealSwipes, preClaimRequest.mealSwipes)
+    }
+
+    /// Structural proof that both `RequestDetailView` navigation sites this
+    /// bug affected — the immediate successful-claim transition and the
+    /// Continue Helping link, independently — actually route through the
+    /// shared, behaviorally-proved `fulfillmentDestination(activeClaim:)`
+    /// rather than a re-introduced `AppRoute.fulfillment(request)` using this
+    /// screen's stale pre-claim value-type copy. Each is checked over its own
+    /// bounded declaration slice, not the whole file, so this cannot pass
+    /// merely because a *different* still-correct site (Go to Active
+    /// Reservation) happens to contain the same call.
+    func testRequestDetailViewRoutesBothFulfillmentEntryPointsThroughTheActiveClaimsOwnRequest() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestDetailView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(
+            source.contains("AppRoute.fulfillment(request)"),
+            "no navigation site may open fulfillment with this screen's pre-claim value-type copy"
+        )
+
+        // The immediate successful-claim transition: the `onChange` reacting
+        // to a newly confirmed `store.activeClaim`, bounded to the next
+        // `.onChange` modifier so this cannot pick up a later, unrelated site.
+        let claimConfirmedOnChange = try sourceSlice(
+            of: source,
+            from: ".onChange(of: store.activeClaim?.requestID)",
+            to: ".onChange(of: identityStore.identity)"
+        )
+        XCTAssertTrue(
+            claimConfirmedOnChange.contains(
+                "Self.fulfillmentDestination(activeClaim: activeClaim)"
+            ),
+            "the immediate successful-claim transition must route through fulfillmentDestination(activeClaim:)"
+        )
+
+        // The Continue Helping link: bounded to its own declaration, ending
+        // where `claimSection` (which owns the separate Go to Active
+        // Reservation link) begins — so that link's identical call cannot
+        // satisfy this assertion on Continue Helping's behalf.
+        let continueHelpingLink = try sourceSlice(
+            of: source,
+            from: "private var continueHelpingLink: some View {",
+            to: "private var claimSection: some View {"
+        )
+        XCTAssertTrue(
+            continueHelpingLink.contains(
+                "Self.fulfillmentDestination(activeClaim: activeClaim)"
+            ),
+            "the Continue Helping link must route through fulfillmentDestination(activeClaim:)"
+        )
+        XCTAssertFalse(
+            continueHelpingLink.contains("go-to-active-reservation"),
+            "this slice must be Continue Helping's own declaration, not claimSection's"
+        )
+    }
+
+    /// The substring strictly between the first occurrence of `start` and the
+    /// following occurrence of `end`. The substring's whitespace is normalized
+    /// so assertions about its content are insensitive to indentation or
+    /// wrapping — a slice-scoped assertion still holds after reformatting
+    /// that leaves the code's actual structure unchanged.
+    private func sourceSlice(of source: String, from start: String, to end: String) throws -> String {
+        guard let startRange = source.range(of: start) else {
+            XCTFail("Expected marker not found in source: \(start)")
+            throw TestHelperError.markerNotFound
+        }
+        guard let endRange = source.range(of: end, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("Expected marker not found in source: \(end)")
+            throw TestHelperError.markerNotFound
+        }
+        let slice = source[startRange.upperBound..<endRange.lowerBound]
+        return normalizeWhitespace(String(slice))
+    }
+
+    /// Normalize whitespace: collapse internal runs to single spaces, preserve
+    /// semantic structure for assertions about function calls and identifiers.
+    private func normalizeWhitespace(_ text: String) -> String {
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func repositoryFile(_ relativePath: String) throws -> URL {
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while directory.pathComponents.count > 1 {
+            let candidate = directory.appendingPathComponent(relativePath)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            directory.deleteLastPathComponent()
+        }
+        XCTFail("Expected repository file not found: \(relativePath)")
+        throw TestHelperError.markerNotFound
     }
 
     func testAmbiguousClaimCreatesNoClaimAndOpensNothing() async {
@@ -965,6 +1121,7 @@ final class ClaimFlowTests: XCTestCase {
             vendor: "Crave NYU",
             food: "Rice bowl",
             pickupWindowText: "ASAP",
+            mealSwipes: 2,
             windowStart: nil,
             windowEnd: nil,
             status: .open,
@@ -975,8 +1132,8 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(
             dtoLabels,
             Set([
-                "id", "vendor", "food", "pickupWindowText", "windowStart",
-                "windowEnd", "status", "createdAt", "expiresAt"
+                "id", "vendor", "food", "pickupWindowText", "mealSwipes",
+                "windowStart", "windowEnd", "status", "createdAt", "expiresAt"
             ])
         )
     }
@@ -5819,6 +5976,7 @@ final class ClaimFlowTests: XCTestCase {
             diningSpot: DiningSpot(name: "Crave NYU", address: nil),
             foodDescription: "Rice bowl",
             pickupWindowText: "ASAP",
+            mealSwipes: 2,
             windowStart: nil,
             windowEnd: nil,
             createdAt: Date(timeIntervalSince1970: 0),
@@ -5869,12 +6027,14 @@ final class ClaimFlowTests: XCTestCase {
         claimExpiresAt: Date = Date().addingTimeInterval(15 * 60),
         requestExpiresAt: Date = Date().addingTimeInterval(5 * 60 * 60),
         responseRequestID: String? = nil,
-        responseStatus: String = "claimed"
+        responseStatus: String = "claimed",
+        mealSwipes: Int = 2
     ) -> Data {
         Data("""
         {
           "request": \(requestObject(
             id: responseRequestID ?? requestID,
+            mealSwipes: mealSwipes,
             status: responseStatus,
             expiresAt: iso8601String(requestExpiresAt)
           )),
@@ -5932,6 +6092,10 @@ final class ClaimFlowTests: XCTestCase {
         vendor: String = "Crave NYU",
         food: String = "Rice bowl",
         pickupWindowText: String = "ASAP",
+        // Every request accepted since W3-C1 carries an integer 1-5, on every
+        // accepted shape including the legacy web one, so an ordinary fixture
+        // always supplies it.
+        mealSwipes: Int = 2,
         status: String = "open",
         createdAt: String = "2026-07-20T18:30:00.000Z",
         expiresAt: String = "2026-07-20T23:30:00.000Z"
@@ -5942,6 +6106,7 @@ final class ClaimFlowTests: XCTestCase {
           "vendor": "\(vendor)",
           "food": "\(food)",
           "pickupWindowText": "\(pickupWindowText)",
+          "mealSwipes": \(mealSwipes),
           "windowStart": null,
           "windowEnd": null,
           "status": "\(status)",

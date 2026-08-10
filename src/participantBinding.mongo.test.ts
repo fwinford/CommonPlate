@@ -150,6 +150,7 @@ describeMongo("durable participant bindings", () => {
         food: "Rice bowl",
         pickupName: "Private Pickup Name",
         timing: "asap",
+        mealSwipes: 2,
       },
     });
     await createRequest(creation.req, creation.res);

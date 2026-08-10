@@ -1025,7 +1025,8 @@ final class RequestFetchingTests: XCTestCase {
             food: "Chicken bowl",
             pickupName: "Taylor",
             timing: .asap,
-            windowStart: nil
+            windowStart: nil,
+            mealSwipes: 2
         )
     }
 
@@ -1034,6 +1035,7 @@ final class RequestFetchingTests: XCTestCase {
         vendor: String = "Crave NYU",
         food: String = "Rice bowl",
         pickupWindowText: String = "ASAP",
+        mealSwipes: Int = 2,
         windowStart: String? = nil,
         windowEnd: String? = nil,
         status: String = "open",
@@ -1049,6 +1051,7 @@ final class RequestFetchingTests: XCTestCase {
           "vendor": "\(vendor)",
           "food": "\(food)",
           "pickupWindowText": "\(pickupWindowText)",
+          "mealSwipes": \(mealSwipes),
           "windowStart": \(windowStartJSON),
           "windowEnd": \(windowEndJSON),
           "status": "\(status)",

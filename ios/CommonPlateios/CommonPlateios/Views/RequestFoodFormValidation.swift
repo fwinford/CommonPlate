@@ -14,20 +14,30 @@ struct RequestFoodFormDraft: Equatable {
     var pickupName: String
     var timing: RequestTiming
     var preferredPickupTime: Date
+    /// V1 meal-swipe requirement (W3-C1): an exact integer 1 through 5, chosen
+    /// from a bounded picker rather than typed. Defaults to the picker's
+    /// first offered value, so the field is always complete and never needs
+    /// its own completeness check.
+    var mealSwipes: Int
 
     init(
         selectedDiningSpot: DiningSpot? = nil,
         foodRequest: String = "",
         pickupName: String = "",
         timing: RequestTiming = .asap,
-        preferredPickupTime: Date = Date()
+        preferredPickupTime: Date = Date(),
+        mealSwipes: Int = RequestFoodFormDraft.mealSwipeOptions.first!
     ) {
         self.selectedDiningSpot = selectedDiningSpot
         self.foodRequest = foodRequest
         self.pickupName = pickupName
         self.timing = timing
         self.preferredPickupTime = preferredPickupTime
+        self.mealSwipes = mealSwipes
     }
+
+    /// The exact bounded set the picker may offer and the backend accepts.
+    static let mealSwipeOptions = Array(1...5)
 }
 
 /// Request-form fields in screen order. Only text fields can receive focus;

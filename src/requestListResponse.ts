@@ -7,6 +7,16 @@ export interface PublicRequestDocument {
   vendor: string;
   food: string;
   pickupWindowText: string;
+  /**
+   * V1 meal-swipe requirement (W3-C1). Every shape `POST /api/request`
+   * accepts, including the legacy web one, has required an integer 1-5 since
+   * this slice — that is the production boundary this projection trusts,
+   * not something it re-validates. A document reaching this projection
+   * without one is a malformed/pre-C1 stored row, not a supported outcome of
+   * any accepted submission, and is out of scope for this projection to
+   * paper over.
+   */
+  mealSwipes: number;
   windowStart?: RequestResponseDate | null;
   windowEnd?: RequestResponseDate | null;
   status: string;
@@ -33,6 +43,7 @@ export interface PublicRequestResponse<Status extends string = string> {
   vendor: string;
   food: string;
   pickupWindowText: string;
+  mealSwipes: number;
   windowStart: RequestResponseDate | null;
   windowEnd: RequestResponseDate | null;
   status: Status;
@@ -76,6 +87,7 @@ export function mapPublicRequestFields<Status extends string>(
     vendor: document.vendor,
     food: document.food,
     pickupWindowText: document.pickupWindowText,
+    mealSwipes: document.mealSwipes,
     windowStart: document.windowStart ?? null,
     windowEnd: document.windowEnd ?? null,
     status: document.status,

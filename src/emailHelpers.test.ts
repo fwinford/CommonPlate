@@ -51,6 +51,10 @@ function request(overrides: Record<string, unknown> = {}): IRequest {
     createdAt: new Date("2026-07-26T18:00:00.000Z"),
     updatedAt: new Date("2026-07-26T18:00:00.000Z"),
     expiresAt: new Date("2026-07-26T22:00:00.000Z"),
+    // Every request accepted since W3-C1 carries an integer 1-5, on every
+    // accepted shape including the legacy web one, so an ordinary fixture
+    // always supplies it.
+    mealSwipes: 3,
     ...overrides,
   } as unknown as IRequest;
 }
@@ -123,6 +127,43 @@ describe("helper new-request alert email", () => {
     expect(allHelperContent).not.toContain(claimToken);
     expect(allHelperContent).not.toContain("/fulfill");
     expect(allHelperContent).not.toMatch(/order this|fulfill this|claim/i);
+  });
+
+  it("includes the meal-swipe quantity concisely, in both text and HTML (W3-C1)", async () => {
+    resendSend.mockResolvedValue({});
+
+    await sendNewRequestAlert(subscriber(), request({ mealSwipes: 2 }), {
+      unsubscribeSigningSecret: SIGNING_SECRET,
+    });
+
+    const email = resendSend.mock.calls[0][0] as {
+      html: string;
+      text: string;
+    };
+    expect(email.html).toContain("<strong>Meal swipes:</strong> 2");
+    expect(email.text).toContain("Meal swipes: 2");
+  });
+
+  it("defensively omits the meal-swipe line for a malformed pre-C1 stored request with no quantity", async () => {
+    // Every shape `POST /api/request` accepts, including the legacy web one,
+    // has required an integer 1-5 since W3-C1; a `Request` document with none
+    // is not a supported representation of any accepted submission, only a
+    // stale/malformed stored row. This proves the composer degrades safely
+    // rather than fabricating a value for that impossible state.
+    resendSend.mockResolvedValue({});
+
+    await sendNewRequestAlert(
+      subscriber(),
+      request({ mealSwipes: undefined }),
+      { unsubscribeSigningSecret: SIGNING_SECRET }
+    );
+
+    const email = resendSend.mock.calls[0][0] as {
+      html: string;
+      text: string;
+    };
+    expect(email.html).not.toContain("Meal swipes");
+    expect(email.text).not.toContain("Meal swipes");
   });
 
   it("renders requester markup as text without double escaping", async () => {

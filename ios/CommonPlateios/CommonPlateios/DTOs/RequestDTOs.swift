@@ -43,6 +43,11 @@ struct RequestResponseDTO: Decodable {
     let vendor: String
     let food: String
     let pickupWindowText: String
+    /// V1 meal-swipe requirement (W3-C1). Every shape `POST /api/request`
+    /// accepts, including the legacy web one, has required an integer 1-5
+    /// since this slice, so the backend always returns it; decoding fails on
+    /// a response that omits it rather than this app fabricating a value.
+    let mealSwipes: Int
     let windowStart: Date?
     let windowEnd: Date?
     let status: RequestStatusWire
@@ -98,6 +103,11 @@ struct CreateRequestPayload: Encodable {
     let pickupName: String
     let timing: RequestTimingWire
     let windowStart: Date?
+    /// V1 meal-swipe requirement (W3-C1): an exact integer 1 through 5, chosen
+    /// from `RequestFoodView`'s bounded picker. Always sent — the backend's
+    /// canonical iOS schemas require it — so this app can never construct a
+    /// value outside that bounded set.
+    let mealSwipes: Int
     var installationCredential: String? = nil
 }
 

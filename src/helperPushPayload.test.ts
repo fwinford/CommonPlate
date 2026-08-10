@@ -38,19 +38,27 @@ function fullRequestDocument(overrides: Record<string, unknown> = {}) {
     notificationStatus: "sent",
     expiresAt,
     deleteAt: expiresAt,
+    // Every request accepted since W3-C1 carries an integer 1-5, on every
+    // accepted shape including the legacy web one, so an ordinary fixture
+    // always supplies it.
+    mealSwipes: 3,
     ...overrides,
   } as never;
 }
 
 describe("helper new-request payload public allowlist", () => {
-  it("carries exactly vendor, food, pickup window, and the request id", () => {
+  it("carries exactly vendor, food, pickup window, meal swipes, and the request id", () => {
+    // A normal post-C1 request: every accepted shape requires a valid
+    // quantity, so the ordinary fixture (default `mealSwipes: 3`) carries one
+    // and the allowlist proof reflects that, rather than the malformed/pre-C1
+    // absent-quantity case proved separately below.
     const payload = buildHelperNewRequestPayload(fullRequestDocument());
 
     expect(payload).toEqual({
       aps: {
         alert: {
           title: "New request at Campus Market",
-          body: "Vegetable rice bowl · Jul 28, 1:00 PM – 2:00 PM",
+          body: "Vegetable rice bowl · Jul 28, 1:00 PM – 2:00 PM · Meal swipes: 3",
         },
         sound: "default",
         "interruption-level": "active",
@@ -59,6 +67,31 @@ describe("helper new-request payload public allowlist", () => {
       type: HELPER_NEW_REQUEST_NOTIFICATION_TYPE,
       requestId: requestId.toString(),
     });
+  });
+
+  it("includes the meal-swipe quantity concisely in the alert body (W3-C1)", () => {
+    const payload = buildHelperNewRequestPayload(
+      fullRequestDocument({ mealSwipes: 3 })
+    );
+
+    expect(payload.aps.alert.body).toBe(
+      "Vegetable rice bowl · Jul 28, 1:00 PM – 2:00 PM · Meal swipes: 3"
+    );
+  });
+
+  it("defensively omits the meal-swipe segment for a malformed pre-C1 stored request with no quantity", () => {
+    // Every shape `POST /api/request` accepts, including the legacy web one,
+    // has required an integer 1-5 since W3-C1; a `Request` document with none
+    // is not a supported representation of any accepted submission, only a
+    // stale/malformed stored row. This proves the composer degrades safely
+    // rather than fabricating a value for that impossible state.
+    const payload = buildHelperNewRequestPayload(
+      fullRequestDocument({ mealSwipes: undefined })
+    );
+
+    expect(payload.aps.alert.body).toBe(
+      "Vegetable rice bowl · Jul 28, 1:00 PM – 2:00 PM"
+    );
   });
 
   it("leaks no private field from a document that carries all of them", () => {

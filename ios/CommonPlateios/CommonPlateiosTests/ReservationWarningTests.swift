@@ -820,6 +820,7 @@ final class ReservationWarningTests: XCTestCase {
           "vendor": "Crave NYU",
           "food": "Rice bowl",
           "pickupWindowText": "ASAP",
+          "mealSwipes": 2,
           "windowStart": null,
           "windowEnd": null,
           "status": "\(status)",

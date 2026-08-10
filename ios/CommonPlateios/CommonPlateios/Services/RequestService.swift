@@ -617,6 +617,7 @@ struct RequestService {
             diningSpot: DiningSpot(name: dto.vendor, address: nil),
             foodDescription: dto.food,
             pickupWindowText: dto.pickupWindowText,
+            mealSwipes: dto.mealSwipes,
             windowStart: dto.windowStart,
             windowEnd: dto.windowEnd,
             createdAt: dto.createdAt,

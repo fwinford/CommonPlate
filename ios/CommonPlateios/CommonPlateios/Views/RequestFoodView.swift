@@ -499,6 +499,16 @@ struct RequestFoodView: View {
                     errors: errors,
                     identifier: "request-food-error"
                 )
+
+                // V1 meal-swipe requirement (W3-C1): meal swipes only, no
+                // Dining Dollars. A bounded picker, not free-form entry, so
+                // this app can never submit a value the backend would refuse.
+                Picker("Meal swipes", selection: $draft.mealSwipes) {
+                    ForEach(RequestFoodFormDraft.mealSwipeOptions, id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                }
+                .accessibilityIdentifier("request-meal-swipes-picker")
             }
 
             Section("Pickup") {
@@ -740,6 +750,7 @@ struct RequestFoodView: View {
             pickupName: draft.pickupName,
             timing: draft.timing,
             preferredPickupTime: draft.preferredPickupTime,
+            mealSwipes: draft.mealSwipes,
             now: now,
             calendar: calendar
         )
@@ -918,6 +929,7 @@ struct RequestFoodView: View {
         pickupName: String,
         timing: RequestTiming,
         preferredPickupTime: Date,
+        mealSwipes: Int,
         now: Date,
         calendar: Calendar
     ) throws -> CreateRequestPayload {
@@ -955,7 +967,8 @@ struct RequestFoodView: View {
                 food: trimmedFood,
                 pickupName: trimmedPickupName,
                 timing: .asap,
-                windowStart: nil
+                windowStart: nil,
+                mealSwipes: mealSwipes
             )
         case .later:
             // Only the start. The end of a request's availability is derived
@@ -967,7 +980,8 @@ struct RequestFoodView: View {
                 food: trimmedFood,
                 pickupName: trimmedPickupName,
                 timing: .scheduled,
-                windowStart: preferredPickupTime
+                windowStart: preferredPickupTime,
+                mealSwipes: mealSwipes
             )
         }
     }

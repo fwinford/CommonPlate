@@ -300,6 +300,14 @@ struct FulfillRequestView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
+                    // V1 meal-swipe requirement (W3-C1). Every request
+                    // carries one, so this is never conditional on its
+                    // presence.
+                    Text("Meal swipes: \(request.mealSwipes)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("fulfillment-meal-swipes")
+
                     HStack {
                         Text("Pickup name")
                         Spacer()

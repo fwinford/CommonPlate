@@ -136,6 +136,14 @@ struct ActiveRequestsView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
 
+                    // V1 meal-swipe requirement (W3-C1). Every request
+                    // carries one, so this is never conditional on its
+                    // presence.
+                    Text("Meal swipes: \(claim.request.mealSwipes)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("active-reservation-meal-swipes")
+
                     Text(Self.reservedUntilText(claim.claimExpiresAt))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -419,6 +427,10 @@ struct RequestRowView: View {
                 .lineLimit(2)
 
             Text(request.listTimingDescription)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Text("Meal swipes: \(request.mealSwipes)")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

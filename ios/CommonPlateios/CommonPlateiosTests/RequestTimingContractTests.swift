@@ -167,6 +167,7 @@ final class RequestTimingContractTests: XCTestCase {
                 pickupName: "Taylor",
                 timing: .later,
                 preferredPickupTime: alreadyPassed,
+                mealSwipes: 2,
                 now: now,
                 calendar: NYUCampusTime.calendar
             )
@@ -216,6 +217,7 @@ final class RequestTimingContractTests: XCTestCase {
             pickupName: "Taylor",
             timing: .later,
             preferredPickupTime: inOneMinute,
+            mealSwipes: 2,
             now: now,
             calendar: NYUCampusTime.calendar
         )
@@ -236,6 +238,7 @@ final class RequestTimingContractTests: XCTestCase {
             diningSpot: DiningSpot(name: "Palladium", address: nil),
             foodDescription: "Chicken bowl",
             pickupWindowText: backendText,
+            mealSwipes: 2,
             windowStart: try iso("2026-07-28T22:00:00.000Z"),
             windowEnd: try iso("2026-07-29T01:00:00.000Z"),
             createdAt: try iso("2026-07-28T16:00:00.000Z"),

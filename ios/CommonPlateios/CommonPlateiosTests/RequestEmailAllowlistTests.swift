@@ -174,6 +174,7 @@ final class RequestEmailAllowlistTests: XCTestCase {
             pickupName: "Taylor",
             timing: .asap,
             preferredPickupTime: try date("2026-07-28T17:00:00.000Z"),
+            mealSwipes: 2,
             now: try date("2026-07-28T16:00:00.000Z"),
             calendar: utcCalendar
         )
@@ -332,7 +333,8 @@ final class RequestEmailAllowlistTests: XCTestCase {
             food: "Chicken bowl",
             pickupName: "Taylor",
             timing: .asap,
-            windowStart: nil
+            windowStart: nil,
+            mealSwipes: 2
         )
     }
 
@@ -352,6 +354,7 @@ final class RequestEmailAllowlistTests: XCTestCase {
           "vendor": "Palladium",
           "food": "Chicken bowl",
           "pickupWindowText": "ASAP",
+          "mealSwipes": 2,
           "windowStart": null,
           "windowEnd": null,
           "status": "open",

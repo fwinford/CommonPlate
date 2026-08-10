@@ -214,6 +214,18 @@ export interface IRequest extends Document {
   food: string;
   pickupName: string;
   pickupWindowText: string;
+  /**
+   * V1 meal-swipe requirement (W3-C1): the exact integer count of meal swipes
+   * this request needs, 1 through 5. Requester-owned truth, required by every
+   * accepted `POST /api/request` shape (enforced in `createRequestRoute.ts`,
+   * the authoritative validator) and written once at creation, never
+   * recomputed or defaulted. Not `required` at the schema level so that
+   * fixtures and Mongo suites unrelated to this slice, across many
+   * pre-existing Request documents and test files, are not forced to supply
+   * it; existing database contents are disposable test data, not a migration
+   * target.
+   */
+  mealSwipes?: number;
   email: string;
   windowStart?: Date;
   windowEnd?: Date;
@@ -246,6 +258,15 @@ const RequestSchema = new Schema<IRequest>({
   food: { type: String, required: true, trim: true },
   pickupName: { type: String, required: true, trim: true },
   pickupWindowText: { type: String, required: true, trim: true },
+  mealSwipes: {
+    type: Number,
+    min: 1,
+    max: 5,
+    validate: {
+      validator: Number.isInteger,
+      message: "mealSwipes must be an integer",
+    },
+  },
   email: { type: String, required: true, trim: true, lowercase: true },
   windowStart: { type: Date },
   windowEnd: { type: Date },

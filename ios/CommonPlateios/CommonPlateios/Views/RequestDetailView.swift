@@ -161,6 +161,15 @@ struct RequestDetailView: View {
         activeClaim?.requestID == requestID
     }
 
+    /// The fulfillment route to open once a claim is confirmed or continued:
+    /// always the active claim's own request, never this screen's pre-claim
+    /// value-type copy. Any field confirmed or set at claim time — W3-C1's
+    /// meal-swipe quantity included — must come from here, not from a value
+    /// captured before the claim existed.
+    static func fulfillmentDestination(activeClaim: ActiveClaimPresentation) -> AppRoute {
+        .fulfillment(activeClaim.request)
+    }
+
     static func shouldDismiss(
         for notice: ClaimUnavailableNotice?,
         requestID: String
@@ -199,6 +208,15 @@ struct RequestDetailView: View {
                 Text(request.timingDescription)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+
+                // V1 meal-swipe requirement (W3-C1). Shown before the Reserve
+                // action below, so a helper knows the exact requirement before
+                // committing. Every request carries one, so this is never
+                // conditional on its presence.
+                Text("Meal swipes: \(request.mealSwipes)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("request-meal-swipes")
             }
 
             Section {
@@ -220,8 +238,12 @@ struct RequestDetailView: View {
         // leaves `activeClaim` untouched, so this does not fire and the
         // reservation survives the navigation.
         .onChange(of: store.activeClaim?.requestID) { _, _ in
-            if Self.opensClaimedFlow(activeClaim: store.activeClaim, requestID: request.id) {
-                path = AppRoute.appending(.fulfillment(request), to: path)
+            if let activeClaim = store.activeClaim,
+               Self.opensClaimedFlow(activeClaim: activeClaim, requestID: request.id) {
+                path = AppRoute.appending(
+                    Self.fulfillmentDestination(activeClaim: activeClaim),
+                    to: path
+                )
             }
         }
         // A stale detail screen must never outlive the backend's verdict. The
@@ -296,7 +318,7 @@ struct RequestDetailView: View {
     @ViewBuilder
     private var continueHelpingLink: some View {
         if let activeClaim = store.activeClaim {
-            NavigationLink(value: AppRoute.fulfillment(request)) {
+            NavigationLink(value: Self.fulfillmentDestination(activeClaim: activeClaim)) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Self.continueHelpingTitle)
                     Text(ActiveRequestsView.reservedUntilText(activeClaim.claimExpiresAt))
@@ -330,7 +352,7 @@ struct RequestDetailView: View {
             // Requests, so both levels come off at once and the helper is not
             // returned to a stale detail for a request they never claimed —
             // the same exit the other two entry points get.
-            NavigationLink(value: AppRoute.fulfillment(activeClaim.request)) {
+            NavigationLink(value: Self.fulfillmentDestination(activeClaim: activeClaim)) {
                 Text(Self.goToActiveReservationTitle)
             }
             .accessibilityIdentifier("go-to-active-reservation")

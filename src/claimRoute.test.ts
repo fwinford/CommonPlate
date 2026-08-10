@@ -55,6 +55,10 @@ function document(overrides: Record<string, unknown> = {}) {
     food: "Vegetable rice bowl",
     pickupName: "Private Pickup Name",
     pickupWindowText: "ASAP (available for the next 3 hours)",
+    // Every request accepted since W3-C1 carries an integer 1-5, on every
+    // accepted shape including the legacy web one, so an ordinary fixture
+    // always supplies it.
+    mealSwipes: 4,
     windowStart: null,
     windowEnd: null,
     status: "claimed",
@@ -306,6 +310,7 @@ describe("POST /api/request/:id/claim", () => {
       vendor: "Campus Market",
       food: "Vegetable rice bowl",
       pickupWindowText: "ASAP (available for the next 3 hours)",
+      mealSwipes: 4,
       windowStart: null,
       windowEnd: null,
       status: "claimed",

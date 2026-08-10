@@ -15,6 +15,10 @@ function requestDocument(overrides: Record<string, unknown> = {}) {
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
     pickupWindowText: "1:00 PM – 2:00 PM",
+    // Every request accepted since W3-C1 carries an integer 1-5, on every
+    // accepted shape including the legacy web one, so an ordinary fixture
+    // always supplies it.
+    mealSwipes: 3,
     email: "requester@example.edu",
     requesterPhone: "555-0100",
     requesterPhoneNumber: "555-0101",
@@ -80,6 +84,7 @@ describe("GET /api/request/:id", () => {
         vendor: "Campus Market",
         food: "Vegetable rice bowl",
         pickupWindowText: "1:00 PM – 2:00 PM",
+        mealSwipes: 3,
         windowStart: new Date("2026-07-26T20:00:00.000Z"),
         windowEnd: new Date("2026-07-26T21:00:00.000Z"),
         status: "open",
@@ -97,6 +102,7 @@ describe("GET /api/request/:id", () => {
       "vendor",
       "food",
       "pickupWindowText",
+      "mealSwipes",
       "windowStart",
       "windowEnd",
       "status",
@@ -133,6 +139,23 @@ describe("GET /api/request/:id", () => {
     expect(serializedResponse.request).not.toHaveProperty("_id");
     expect(serializedResponse.request).not.toHaveProperty("__v");
     expect(context.next).not.toHaveBeenCalled();
+  });
+
+  it("defensively serializes no meal-swipe key for a malformed pre-C1 stored request with no quantity", async () => {
+    // Every shape `POST /api/request` accepts, including the legacy web one,
+    // has required an integer 1-5 since W3-C1; a `Request` document with none
+    // is not a supported representation of any accepted submission, only a
+    // stale/malformed stored row. This proves the projection passes that
+    // absence through rather than fabricating a `null` placeholder for it.
+    mockFindById(requestDocument({ mealSwipes: undefined }));
+    const context = routeContext();
+
+    await getPublicRequestDetail(context.req, context.res, context.next);
+
+    const serializedResponse = JSON.parse(
+      JSON.stringify(context.json.mock.calls[0][0])
+    ) as { request: Record<string, unknown> };
+    expect(serializedResponse.request).not.toHaveProperty("mealSwipes");
   });
 
   it("preserves the existing not-found response", async () => {

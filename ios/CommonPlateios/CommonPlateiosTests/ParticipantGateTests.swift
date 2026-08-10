@@ -291,7 +291,8 @@ final class ParticipantGateTests: XCTestCase {
             food: "Chicken bowl",
             pickupName: "Taylor",
             timing: .asap,
-            windowStart: nil
+            windowStart: nil,
+            mealSwipes: 2
         )
     }
 
@@ -321,6 +322,7 @@ final class ParticipantGateTests: XCTestCase {
           "vendor": "Palladium",
           "food": "Chicken bowl",
           "pickupWindowText": "ASAP",
+          "mealSwipes": 2,
           "windowStart": null,
           "windowEnd": null,
           "status": "open",
@@ -338,6 +340,7 @@ final class ParticipantGateTests: XCTestCase {
             "vendor": "Palladium",
             "food": "Chicken bowl",
             "pickupWindowText": "ASAP",
+            "mealSwipes": 2,
             "windowStart": null,
             "windowEnd": null,
             "status": "claimed",
@@ -361,6 +364,7 @@ final class ParticipantGateTests: XCTestCase {
             "vendor": "Palladium",
             "food": "Chicken bowl",
             "pickupWindowText": "ASAP",
+            "mealSwipes": 2,
             "windowStart": null,
             "windowEnd": null,
             "status": "placed",

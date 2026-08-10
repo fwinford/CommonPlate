@@ -706,6 +706,7 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "  Taylor  ",
             timing: .asap,
             preferredPickupTime: Date(timeIntervalSince1970: 0),
+            mealSwipes: 2,
             now: Date(timeIntervalSince1970: 1_000),
             calendar: utcCalendar
         )
@@ -736,6 +737,7 @@ final class RequestCreationViewTests: XCTestCase {
             pickupName: "Taylor",
             timing: .later,
             preferredPickupTime: preferredTime,
+            mealSwipes: 2,
             now: now,
             calendar: utcCalendar
         )
@@ -783,6 +785,7 @@ final class RequestCreationViewTests: XCTestCase {
                 pickupName: "Taylor",
                 timing: .later,
                 preferredPickupTime: try date("2026-07-28T23:31:00.000Z"),
+                mealSwipes: 2,
                 now: now,
                 calendar: utcCalendar
             )
@@ -1183,6 +1186,7 @@ final class RequestCreationViewTests: XCTestCase {
                 pickupName: "Taylor",
                 timing: .later,
                 preferredPickupTime: tomorrowMorning,
+                mealSwipes: 2,
                 now: now,
                 calendar: utcCalendar
             )
@@ -1204,6 +1208,7 @@ final class RequestCreationViewTests: XCTestCase {
                 pickupName: "Taylor",
                 timing: .later,
                 preferredPickupTime: tomorrowMorning,
+                mealSwipes: 2,
                 now: openNow,
                 calendar: utcCalendar
             )
@@ -2052,7 +2057,8 @@ final class RequestCreationViewTests: XCTestCase {
             food: "Chicken bowl",
             pickupName: "Taylor",
             timing: .asap,
-            windowStart: nil
+            windowStart: nil,
+            mealSwipes: 2
         )
     }
 
@@ -2070,6 +2076,7 @@ final class RequestCreationViewTests: XCTestCase {
           "vendor": "Palladium",
           "food": "Chicken bowl",
           "pickupWindowText": "\(pickupWindowText)",
+          "mealSwipes": 2,
           "windowStart": null,
           "windowEnd": null,
           "status": "open",

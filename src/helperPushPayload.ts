@@ -26,6 +26,14 @@ export interface HelperPushRequest {
   vendor: string;
   food: string;
   pickupWindowText: string;
+  /**
+   * V1 meal-swipe requirement (W3-C1). Every shape `POST /api/request`
+   * accepts, including the legacy web one, has required an integer 1-5 since
+   * this slice, so `undefined`/`null` here reaches this builder only from a
+   * malformed/pre-C1 stored `Request` document, never a supported
+   * representation of an accepted submission.
+   */
+  mealSwipes?: number | null;
   expiresAt?: Date | string | null;
 }
 
@@ -59,12 +67,17 @@ export function buildHelperNewRequestPayload(
   const vendor = boundPushText(request.vendor);
   const food = boundPushText(request.food);
   const pickupWindowText = boundPushText(request.pickupWindowText);
+  // Every accepted shape has required this since W3-C1; `undefined`/`null`
+  // here means a malformed/pre-C1 stored document, not a supported outcome of
+  // any accepted submission. The push simply omits the segment for that case.
+  const mealSwipesSegment =
+    request.mealSwipes != null ? ` · Meal swipes: ${request.mealSwipes}` : "";
 
   return {
     aps: {
       alert: {
         title: `New request at ${vendor}`,
-        body: `${food} · ${pickupWindowText}`,
+        body: `${food} · ${pickupWindowText}${mealSwipesSegment}`,
       },
       sound: "default",
       "interruption-level": "active",
