@@ -158,6 +158,16 @@ The local notification title is `"5 minutes remain"`. Its stable identity is der
 
 A reservation-warning tap is routing context, not authority. It routes only after current continuation truth confirms the matching active reservation. A stale warning for reservation A cannot route to newer reservation B. A terminated-app tap can cold-launch CommonPlate, restore the matching reservation through participant authority, and route to it; unknown continuation truth produces temporary-unavailability recovery rather than fabricating absence or a reservation.
 
+### 8.5 Later eligibility notification dispatch
+
+Helper notification initiation follows the event a request becomes helper-eligible, not the event it was created. For an ASAP request, creation and helper eligibility are the same event, so ASAP creation-time behavior is unchanged. For a future Later request, no helper email or helper push initiation occurs before its authoritative `visibleFrom`; when `visibleFrom` arrives and the request becomes effectively helper-eligible, it enters the existing helper-notification lifecycle on the next eligibility sweep.
+
+Notification discovery is not bounded by `createdAt`: an older request is not permanently omitted merely because its creation predates an ordinary lookback, and a still-eligible request remains recoverable after a missed or interrupted sweep. Email and push remain independent, and existing per-recipient (`SendLog`) and per-installation (`PushDelivery`) deduplication remain the sole duplicate-send guards. Existing pause, effective-availability, recipient-eligibility, provider classification/no-retry behavior, payload contracts, and helper push tap routing are unchanged by eligibility-time dispatch.
+
+A pre-existing future Later request created before this behavior existed, once identifiable as having eligibility after creation, is transition-compatible with the eligibility sweep rather than permanently unreachable.
+
+Provider acceptance for eligibility-time dispatch carries the same meaning as elsewhere in this section: submission only, never delivery, reading, or pickup. A real future Later request has been observed end to end: no helper email or push initiation before `visibleFrom`, and eligibility-time initiation — confirmed email submission and physical APNs delivery to an intended installation — after it. That observation establishes correct no-early-dispatch and first-eligible-sweep timing on the observed request; it does not by itself establish that an old-`createdAt` request survives the former lookback omission, which is separately established by real-Mongo integration coverage (`docs/testing.md`).
+
 ## 9. Subscriber lifecycle
 
 The lifecycle is `signup → pending → confirmed → unsubscribed`. Only `confirmed` subscribers are eligible for real-time helper alerts and the hourly digest; `pending` and `unsubscribed` subscribers are excluded by both the alert query and the recent-request path. Signing up again never silently reactivates alerts.
