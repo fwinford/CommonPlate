@@ -194,6 +194,26 @@ final class ParticipantIdentityStore: ObservableObject {
         wasIdentityRevoked = true
     }
 
+    /// Explicit participant-initiated local identity forgetting (W3-I4),
+    /// distinct from `discardRejectedIdentity()`: that applies a backend
+    /// refusal and sets `wasIdentityRevoked` so the next verification screen
+    /// can explain why it is asking again. This is the student's own choice,
+    /// not a refusal, so no such notice is raised — the installation simply
+    /// becomes unverified, exactly as if it had never verified. Removal-
+    /// safety gating (an active reservation, in-flight fulfillment, or an
+    /// unresolved W3-D1 create) is the caller's responsibility; this clears
+    /// only the installation-local participant credential and its
+    /// presentation, reusing the same `storage.clear()` call
+    /// `discardRejectedIdentity()` already uses. Guarded by `flow == nil`
+    /// like `beginEmailReplacement()`, matching the existing precedent that
+    /// Remove Email is never offered while a flow is running.
+    func removeIdentity() {
+        guard flow == nil, identity != nil || authority != nil else { return }
+        storage.clear()
+        identity = nil
+        authority = nil
+    }
+
     // MARK: - Verification flow
 
     /// Opens the verification flow for a participant action that needs it.

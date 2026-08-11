@@ -61,6 +61,12 @@ struct ContentView: View {
     /// like the router's own exactly-once consumption guarantees.
     @State private var isShowingOrderPlacedNotice = false
 
+    /// W3-I4: open only between tapping Remove Email and the mutation
+    /// actually running. Cancel (or dismissing any other way) leaves
+    /// `participantIdentityStore` untouched — the confirmation dialog itself
+    /// has no side effect, only its destructive button does.
+    @State private var isPresentingRemoveEmailConfirmation = false
+
     /// `remoteNotificationRegistrar` must be the same instance
     /// `PushAppDelegate` forwards APNs callbacks into — see
     /// `CommonPlateiosApp.swift` — so, matching every other injected
@@ -296,6 +302,21 @@ struct ContentView: View {
         .alert("Your order was placed.", isPresented: $isShowingOrderPlacedNotice) {
             Button("OK", role: .cancel) {}
         }
+        // W3-I4: Cancel is the dialog's implicit dismissal path too — only
+        // the destructive button below has any effect on
+        // `participantIdentityStore`.
+        .confirmationDialog(
+            Self.removeEmailConfirmationTitle,
+            isPresented: $isPresentingRemoveEmailConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(Self.removeEmailTitle, role: .destructive) {
+                participantIdentityStore.removeIdentity()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(Self.removeEmailConfirmationMessage)
+        }
         // The drain trigger belongs here, not in the button's action above.
         // `.alert(isPresented:)`'s button action runs *before* SwiftUI has
         // actually flipped `isShowingOrderPlacedNotice` back to `false` —
@@ -337,6 +358,22 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .font(.footnote)
                 .accessibilityIdentifier("home-change-email")
+
+                Button(Self.removeEmailTitle) {
+                    isPresentingRemoveEmailConfirmation = true
+                }
+                .buttonStyle(.plain)
+                .font(.footnote)
+                .disabled(isRemoveEmailBlocked)
+                .accessibilityIdentifier("home-remove-email")
+
+                if isRemoveEmailBlocked {
+                    Text(removeEmailBlockedNotice)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("home-remove-email-blocked-notice")
+                }
             }
             .padding(.top, 4)
         } else {
@@ -351,6 +388,68 @@ struct ContentView: View {
     }
 
     static let changeEmailTitle = "Change email"
+    static let removeEmailTitle = "Remove email"
+
+    /// Provisional (Faith reviews exact wording at acceptance, W3-I4).
+    static let removeEmailConfirmationTitle = "Remove this email?"
+    static let removeEmailConfirmationMessage =
+        "You’ll need to verify an NYU email again before posting or helping with a request. Your request and help history is not affected."
+    /// Provisional (Faith reviews exact wording at acceptance, W3-I4). Used
+    /// while this process has not yet established backend-confirmed
+    /// removal-safety truth (cold/relaunch reconciliation still pending) —
+    /// deliberately silent about *which* blocker applies, since none is
+    /// confirmed yet.
+    static let removeEmailNotYetAvailableNotice =
+        "Checking whether your email can be removed. Try again in a moment."
+    /// Provisional (Faith reviews exact wording at acceptance, W3-I4). The
+    /// student has an existing action (H1's own release/finish) that
+    /// resolves this.
+    static let removeEmailBlockedByReservationNotice =
+        "You can’t remove your email while you have an active reservation or an in-progress request. Finish or release that first."
+    /// Provisional (Faith reviews exact wording at acceptance, W3-I4). An
+    /// unresolved W3-D1 create has no release/retry/discard action available
+    /// to the student — it only resolves by CommonPlate's own reconciliation
+    /// or expiry — so this must not instruct one.
+    static let removeEmailBlockedByPendingCreateNotice =
+        "CommonPlate is still confirming a request you submitted. You can remove your email once that finishes."
+
+    /// W3-I4: exactly the A-classified blockers in the accepted removal-safety
+    /// matrix — an active/continuing H1 reservation, in-flight fulfillment,
+    /// and unresolved ambiguous-fulfillment recovery are all reflected by
+    /// `activeClaim` staying non-nil until `clearActiveClaim()` runs (release,
+    /// confirmed terminal outcome, or expiry); an unresolved W3-D1 create is
+    /// `hasUnresolvedCreateAmbiguity`. Both are already-published
+    /// `RequestStore` state. `!hasEstablishedRemovalSafety` additionally
+    /// fails closed for the cold/relaunch window before either signal is
+    /// backend-confirmed: at launch `activeClaim` starts `nil` and
+    /// `hasUnresolvedCreateAmbiguity` starts `false` even when a prior
+    /// process left an H1 reservation or an unresolved D1 create behind,
+    /// because discovering either requires the still-in-flight
+    /// `continueActiveReservationIfNeeded()`/
+    /// `reconcilePendingCreateOperationIfNeeded()` calls `ContentView`'s own
+    /// launch `.task` starts — without this, Remove Email would be
+    /// available during exactly the window those calls exist to close.
+    private var isRemoveEmailBlocked: Bool {
+        !requestStore.hasEstablishedRemovalSafety
+            || requestStore.activeClaim != nil
+            || requestStore.hasUnresolvedCreateAmbiguity
+    }
+
+    /// The truthful blocked-state explanation for whichever reason
+    /// `isRemoveEmailBlocked` is currently `true`, checked in the same
+    /// precedence order. A pending readiness check is reported as such
+    /// rather than guessing at a blocker that may not exist; when both an
+    /// H1 and a D1 blocker are simultaneously present, the H1 copy is shown
+    /// since it is the one the student has an existing action for.
+    private var removeEmailBlockedNotice: String {
+        if !requestStore.hasEstablishedRemovalSafety {
+            return Self.removeEmailNotYetAvailableNotice
+        }
+        if requestStore.activeClaim != nil {
+            return Self.removeEmailBlockedByReservationNotice
+        }
+        return Self.removeEmailBlockedByPendingCreateNotice
+    }
 
     /// The standing statement of the requirement. Deliberately not a call to
     /// verify: there is nothing to verify *for* yet, and asking someone to

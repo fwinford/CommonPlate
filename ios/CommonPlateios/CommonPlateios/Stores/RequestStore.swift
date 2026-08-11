@@ -483,6 +483,36 @@ final class RequestStore: ObservableObject {
     /// matching raw token is held separately in private store-only state.
     @Published private(set) var activeClaim: ActiveClaimPresentation?
 
+    /// W3-I4: whether this process has established, from backend truth or a
+    /// definitively-known in-process transition, whether an H1
+    /// reservation/fulfillment-continuation exists that Remove Email must
+    /// not strand. Starts `false` (fail closed) at cold/relaunch, before
+    /// `continueActiveReservationIfNeeded()` has run. A relaunch read that
+    /// comes back inconclusive (transport/server failure, cancellation,
+    /// contradictory backend state) leaves this `false` for the rest of the
+    /// process rather than guessing safety — matching `activeClaim` itself
+    /// never fabricating absence. A fresh `claim()` or a definitive
+    /// continuation result each establish it directly; nothing ever resets
+    /// it back to `false`, since once known, this process's own live state
+    /// changes keep it accurate on their own.
+    @Published private(set) var hasResolvedReservationStateForRemoval = false
+
+    /// W3-I4: the same fail-closed readiness, for W3-D1's durable
+    /// request-create recovery. Starts `false` at cold/relaunch, before
+    /// `reconcilePendingCreateOperationIfNeeded()` has run; a fresh
+    /// `createRequest()` also establishes it directly. Never reset once
+    /// `true`.
+    @Published private(set) var hasResolvedPendingCreateStateForRemoval = false
+
+    /// W3-I4: combined fail-closed readiness gate for Remove Email. `false`
+    /// until this process has established both halves of the accepted
+    /// removal-safety matrix from backend truth — never merely from the
+    /// relaunch-reconciliation calls having returned, since an inconclusive
+    /// outcome must not be treated as safe.
+    var hasEstablishedRemovalSafety: Bool {
+        hasResolvedReservationStateForRemoval && hasResolvedPendingCreateStateForRemoval
+    }
+
     private let service: RequestService
     /// The app's existing installation credential (Week 3 Day 6 Slice 6E),
     /// read from the same storage `PushSubscriptionStore` uses. Reading it
@@ -753,6 +783,12 @@ final class RequestStore: ObservableObject {
     /// both retire the record without arming the block. Every other outcome
     /// preserves its existing behavior.
     func createRequest(_ payload: CreateRequestPayload) async throws {
+        // A fresh, in-process create attempt is starting: whatever this call
+        // ultimately does (succeed, fail definitively, or arm
+        // `unresolvedCreateError`) fully determines this process's D1 state
+        // from here on, so W3-I4 removal-safety readiness no longer depends
+        // on relaunch reconciliation for it.
+        hasResolvedPendingCreateStateForRemoval = true
         if let unresolvedCreateError {
             createError = unresolvedCreateError
             throw unresolvedCreateError
@@ -865,6 +901,11 @@ final class RequestStore: ObservableObject {
     @discardableResult
     func reconcilePendingCreateOperationIfNeeded() async -> Bool {
         guard !isCreating, let record = operationStorage.load() else {
+            // Either nothing durable remains to reconcile, or a fresh
+            // `createRequest()` already owns this process's D1 state (which
+            // establishes W3-I4 removal-safety readiness itself) — both are
+            // resolved conclusions, not an inconclusive read.
+            hasResolvedPendingCreateStateForRemoval = true
             return false
         }
         guard Self.isValidRecord(record) else {
@@ -873,6 +914,7 @@ final class RequestStore: ObservableObject {
             // would be, since there is nothing here that could ever be
             // reconciled.
             operationStorage.clear()
+            hasResolvedPendingCreateStateForRemoval = true
             return false
         }
         let participantAuthority = participantAuthorityProvider()
@@ -882,17 +924,23 @@ final class RequestStore: ObservableObject {
             // Left in storage untouched: the participant it belongs to may
             // still return this session (or a later one). This session simply
             // cannot act on it, expose it, or fold it into an ordinary create
-            // under a different identity.
+            // under a different identity — which also means it cannot block
+            // *this* principal's Remove Email, so readiness is resolved.
+            hasResolvedPendingCreateStateForRemoval = true
             return false
         }
 
         // Restored state takes over immediately, before the network call:
         // the mere existence of a valid, participant-matched unresolved
         // operation already means "your request may already exist", the same
-        // truth an in-process ambiguous outcome tells this store.
+        // truth an in-process ambiguous outcome tells this store. This also
+        // conclusively determines W3-I4 removal-safety readiness for D1:
+        // `unresolvedCreateError` now already blocks Remove Email regardless
+        // of how the network reconciliation below resolves.
         if unresolvedCreateError == nil {
             unresolvedCreateError = .ambiguousCreateOutcome(underlying: PendingRequestOperationRestored())
         }
+        hasResolvedPendingCreateStateForRemoval = true
         isCreating = true
         createError = nil
         defer { isCreating = false }
@@ -1151,6 +1199,12 @@ final class RequestStore: ObservableObject {
             return .active(activeClaim)
         }
         guard let participantAuthority = participantAuthorityProvider() else {
+            // No credential to ask on behalf of at all — vacuously nothing
+            // for this process to discover, so removal-safety readiness is
+            // already established (moot in practice: Remove Email is only
+            // ever offered while `identity != nil`, which implies authority
+            // is present too).
+            hasResolvedReservationStateForRemoval = true
             return .unknown
         }
         do {
@@ -1201,18 +1255,23 @@ final class RequestStore: ObservableObject {
                 // Order for this request.
                 restorePlacedFulfillmentConfirmationIfNeeded(placed)
                 reservationWarningScheduler.cancelAllWarnings()
+                hasResolvedReservationStateForRemoval = true
                 return .none
             case .none:
                 reservationWarningScheduler.cancelAllWarnings()
+                hasResolvedReservationStateForRemoval = true
                 return .none
             }
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             // Backend truth could not be established (transport, timeout, a
-            // server failure, or a decoding failure). Leaving `activeClaim`
-            // nil and every existing warning untouched is the only truthful
-            // answer here — never invent absence or active state.
+            // server failure, a decoding failure, or contradictory backend
+            // state). Leaving `activeClaim` nil and every existing warning
+            // untouched is the only truthful answer here — never invent
+            // absence or active state — and W3-I4 removal-safety readiness
+            // stays unresolved for the same reason: an inconclusive read
+            // must not be treated as "safe to forget identity".
             applyParticipantVerdict(
                 Self.asServiceError(error),
                 presentedAuthority: participantAuthority
@@ -1613,6 +1672,11 @@ final class RequestStore: ObservableObject {
         presentation: ActiveClaimPresentation,
         authorization: ActiveClaimAuthorization
     ) {
+        // A fresh claim or a definitive continuation restore each fully
+        // determine this process's H1 state going forward (H1 never allows
+        // holding two simultaneous claims), so W3-I4's removal-safety
+        // readiness is established here regardless of which path called in.
+        hasResolvedReservationStateForRemoval = true
         claimLifecycleTask?.cancel()
         invalidateActiveExtensionAttempt()
         activeClaim = presentation
