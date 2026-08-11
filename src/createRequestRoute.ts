@@ -1,8 +1,12 @@
 import type { Request, Response } from "express";
-import type { Types } from "mongoose";
+import mongoose, { type Types } from "mongoose";
 import { Resend } from "resend";
 import { z } from "zod";
-import { Request as MealRequest } from "../models/db.js";
+import {
+  type IRequest,
+  Request as MealRequest,
+  RequestOperation,
+} from "../models/db.js";
 import { escapeHtml } from "./htmlEscape.js";
 import { startHelperNewRequestPush } from "./helperNewRequestPush.js";
 import { isValidRawInstallationCredential } from "./installationCredential.js";
@@ -38,6 +42,211 @@ import {
  * refusal from an unreadable, potentially committed response.
  */
 export const createRequestRateLimiter = createDay4MutationRateLimiter(5);
+
+/**
+ * W3-D1: the exact logical create-operation identity, carried in a header
+ * rather than the body for the same reasons the participant credential is
+ * (`participantAuthorityGate.ts`) — it is not request content, and keeping it
+ * out of the `.strict()` create schemas means every existing shape stays
+ * unchanged. Optional: a caller that sends none gets the exact pre-D1
+ * behavior, so the legacy web form and any iOS build before Pass 2 wiring
+ * remain fully valid.
+ */
+export const OPERATION_IDENTITY_HEADER = "x-commonplate-operation-id";
+
+/** The presented operation identity was absent-but-malformed: present twice,
+ * or present once but not a value the backend will ever accept as an exact
+ * identity. Refused before any read or write, exactly like a malformed
+ * payload field — never guessed at or heuristically repaired. */
+export const INVALID_OPERATION_ID_CODE = "INVALID_OPERATION_ID";
+export const INVALID_OPERATION_ID_MESSAGE =
+  "Invalid request operation identity";
+
+/**
+ * The presented operation identity is already bound to a Request created by a
+ * different participant. Refused generically, with no detail about the
+ * existing request, so the identity cannot be used to discover, reconcile, or
+ * retrieve another participant's private state.
+ */
+export const OPERATION_UNAUTHORIZED_CODE = "OPERATION_UNAUTHORIZED";
+export const OPERATION_UNAUTHORIZED_MESSAGE =
+  "This request cannot be completed with your current verification.";
+
+/**
+ * The presented operation identity was once bound to a Request, but that
+ * Request has passed its bounded recovery horizon (`RequestOperation` in
+ * `models/db.ts`) — it is no longer active/actionable, and MongoDB's TTL may
+ * already have reclaimed the document. This is a terminal, definitive
+ * non-create outcome: it must never fall through to a fresh create merely
+ * because the original Request is gone. A later intentional submission uses
+ * a new operation identity.
+ */
+export const OPERATION_EXPIRED_CODE = "OPERATION_EXPIRED";
+export const OPERATION_EXPIRED_MESSAGE =
+  "This request can no longer be recovered. Submit a new request if you still want one.";
+
+const OPERATION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
+function isValidOperationId(value: string): boolean {
+  return OPERATION_ID_PATTERN.test(value);
+}
+
+/**
+ * Reads the presented operation identity header.
+ *
+ * `undefined` means no identity was presented at all — idempotency was not
+ * requested, and the caller gets ordinary non-idempotent create behavior.
+ * `null` means something was presented that can never be a valid identity —
+ * Express collapses a repeated header into an array, and two identities is not
+ * one exact identity, exactly the same reasoning the participant gate applies
+ * to its own header.
+ */
+function readOperationIdentity(req: Request): string | null | undefined {
+  const header = req.headers?.[OPERATION_IDENTITY_HEADER];
+  if (header === undefined) return undefined;
+  if (typeof header === "string") return header;
+  return null;
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === 11000
+  );
+}
+
+/** Whether a persisted Request's private requester binding is this exact
+ * verified participant — the sole authority check on operation reconciliation. */
+function operationBelongsToParticipant(
+  document: { requesterParticipantId?: unknown },
+  participantId: string
+): boolean {
+  return (
+    document.requesterParticipantId !== undefined &&
+    document.requesterParticipantId !== null &&
+    String(document.requesterParticipantId) === participantId
+  );
+}
+
+type OperationReconciliation =
+  | { outcome: "created"; document: PublicRequestDocument }
+  | { outcome: "unauthorized" }
+  | { outcome: "expired" }
+  | { outcome: "not-found" };
+
+/**
+ * The exact-identity lookup/authority check D1 requires, shared by the
+ * pre-write reconciliation check and the post-write duplicate-key race
+ * fallback below. Never matches on anything but the exact `operationId`
+ * value — no payload, timestamp, or recency ever enters this query.
+ *
+ * The ledger row (`RequestOperation`), not the Request document, is the
+ * durable identity: it survives the Request's own TTL cleanup. A ledger row
+ * whose Request has since been reclaimed means the operation is outside its
+ * bounded recovery horizon — a terminal `"expired"` outcome, never
+ * `"not-found"`, so cleanup of the original Request can never make this exact
+ * identity look like a fresh one.
+ */
+async function reconcileOperation(
+  operationId: string,
+  participantId: string
+): Promise<OperationReconciliation> {
+  const ledgerEntry = await RequestOperation.findOne({ operationId })
+    .select("+participantId +requestId")
+    .lean()
+    .exec();
+  if (!ledgerEntry) return { outcome: "not-found" };
+  if (String(ledgerEntry.participantId) !== participantId) {
+    return { outcome: "unauthorized" };
+  }
+
+  const existing = await MealRequest.findOne({
+    _id: ledgerEntry.requestId,
+  }).select("+requesterParticipantId");
+  if (!existing) return { outcome: "expired" };
+  if (!operationBelongsToParticipant(existing, participantId)) {
+    // Defensive only: the ledger row is the authority check above already
+    // relied on. A mismatch here would mean the ledger and the Request
+    // disagree, which normal operation never produces.
+    return { outcome: "unauthorized" };
+  }
+  return {
+    outcome: "created",
+    document: existing as unknown as PublicRequestDocument,
+  };
+}
+
+/**
+ * The outcome of an operation-scoped create attempt. `"fresh"` means this
+ * exact call won the write and must be treated as an ordinary new creation —
+ * `201`, requester confirmation email, and helper notification dispatch, the
+ * same as a non-idempotent create. `"reconciled"` means this call lost a
+ * concurrent race and is answering with someone else's already-decided
+ * outcome instead, which must be treated exactly like the pre-write
+ * reconciliation check above: a plain reconciliation response (or refusal),
+ * never another `201` and never a second confirmation email or notification
+ * dispatch for a Request this call did not actually create.
+ */
+type CreateWithOperationResult =
+  | { kind: "fresh"; document: PublicRequestDocument }
+  | { kind: "reconciled"; reconciliation: OperationReconciliation };
+
+/**
+ * Reserves the operation identity and creates the Request atomically, so a
+ * process crash between the two writes can never leave a Request that TTL
+ * cleanup could later make "fresh" again by silently freeing its identity —
+ * the exact defect this correction fixes. The ledger insert
+ * (`request_operation_ledger_identity_unique`), not this function, is what
+ * makes "at most one Request per logical operation" true under real
+ * concurrency: a racing insert for the same exact identity loses with a
+ * duplicate-key error, and the whole transaction — Request included — rolls
+ * back with it, leaving nothing to reconcile away.
+ */
+async function createRequestWithOperation(
+  documentFields: Record<string, unknown>,
+  operationId: string,
+  participantId: string
+): Promise<CreateWithOperationResult> {
+  const session = await mongoose.startSession();
+  try {
+    let created: unknown = null;
+    await session.withTransaction(async () => {
+      const [createdDocument] = await MealRequest.create([documentFields], {
+        session,
+      });
+      await RequestOperation.create(
+        [{ operationId, participantId, requestId: createdDocument._id }],
+        { session }
+      );
+      created = createdDocument;
+    });
+    return {
+      kind: "fresh",
+      document: created as unknown as PublicRequestDocument,
+    };
+  } catch (error) {
+    // The concurrent-replay case (W3-D1 required proof: "same operation
+    // identity submitted concurrently -> at most one Request"): this
+    // transaction lost the race on `request_operation_ledger_identity_unique`
+    // against another in-flight create for the same exact operation, and
+    // aborted — including its Request insert. Reconciling here finds the
+    // winner's row and answers with it instead of a spurious failure.
+    if (isDuplicateKeyError(error)) {
+      const reconciliation = await reconcileOperation(
+        operationId,
+        participantId
+      );
+      if (reconciliation.outcome !== "not-found") {
+        return { kind: "reconciled", reconciliation };
+      }
+    }
+    throw error;
+  } finally {
+    await session.endSession();
+  }
+}
 
 const requesterString = z.string().trim().min(1);
 /**
@@ -496,6 +705,61 @@ export async function createRequest(
   }
   const { participantId, principal } = authority.participant;
 
+  // The W3-D1 operation-identity gate runs immediately after participant
+  // authority and before shape validation, quota, or the write: exact
+  // identity — never payload — decides whether this call is a replay, so an
+  // already-resolved operation must reconcile even against a payload that
+  // would otherwise fail validation.
+  const operationHeader = readOperationIdentity(req);
+  if (
+    operationHeader === null ||
+    (operationHeader !== undefined && !isValidOperationId(operationHeader))
+  ) {
+    return res
+      .status(400)
+      .json(errorEnvelope(INVALID_OPERATION_ID_CODE, INVALID_OPERATION_ID_MESSAGE));
+  }
+  const operationId = operationHeader;
+
+  if (operationId !== undefined) {
+    let reconciliation: OperationReconciliation;
+    try {
+      reconciliation = await reconcileOperation(operationId, participantId);
+    } catch {
+      console.error(
+        "[route] Failed to check existing request operation identity"
+      );
+      return res.status(500).json(
+        errorEnvelope("REQUEST_CREATION_FAILED", "Unable to create request")
+      );
+    }
+    if (reconciliation.outcome === "unauthorized") {
+      return res
+        .status(403)
+        .json(
+          errorEnvelope(OPERATION_UNAUTHORIZED_CODE, OPERATION_UNAUTHORIZED_MESSAGE)
+        );
+    }
+    if (reconciliation.outcome === "expired") {
+      // Terminal and definitive: this exact identity once created a Request,
+      // but that Request has passed its bounded recovery horizon. It must
+      // never fall through to a fresh create merely because the original
+      // Request is gone — that would resurrect the exact "cleanup makes an
+      // expired operation fresh again" defect this correction fixes.
+      return res
+        .status(410)
+        .json(errorEnvelope(OPERATION_EXPIRED_CODE, OPERATION_EXPIRED_MESSAGE));
+    }
+    if (reconciliation.outcome === "created") {
+      return res
+        .status(200)
+        .json(buildPublicRequestDetailResponse(reconciliation.document, now));
+    }
+    // "not-found": no Request is bound to this operation yet. Fall through to
+    // ordinary validation and creation below, exactly as an unrecognized
+    // identity should — it is indistinguishable from a first attempt.
+  }
+
   const validation = validateCreateRequest(req.body, now, principal);
   if (!validation.ok) {
     // `INVALID_VENDOR` and `PARTICIPANT_PRINCIPAL_MISMATCH` are each a distinct
@@ -574,7 +838,7 @@ export async function createRequest(
       );
     }
 
-    const document = await MealRequest.create({
+    const documentFields = {
       vendor: validated.vendor,
       food: validated.food,
       pickupName: validated.pickupName,
@@ -607,7 +871,63 @@ export async function createRequest(
       expiresAt,
       deleteAt: expiresAt,
       ...(installationId ? { installationId } : {}),
-    });
+    };
+
+    let document: IRequest;
+    if (operationId !== undefined) {
+      // Reserves the operation identity and creates the Request in one
+      // transaction (`createRequestWithOperation`), so the two writes can
+      // never diverge — no crash window can leave a Request that later TTL
+      // cleanup could make "fresh" again by silently freeing its identity.
+      const result = await createRequestWithOperation(
+        documentFields,
+        operationId,
+        participantId
+      );
+      if (result.kind === "reconciled") {
+        // This exact call lost a concurrent race for the operation identity:
+        // answer with the winner's already-decided outcome, exactly like the
+        // pre-write reconciliation check above — never a second `201`, and
+        // never a second confirmation email or notification dispatch for a
+        // Request this call did not actually create.
+        const { reconciliation } = result;
+        if (reconciliation.outcome === "unauthorized") {
+          return res
+            .status(403)
+            .json(
+              errorEnvelope(
+                OPERATION_UNAUTHORIZED_CODE,
+                OPERATION_UNAUTHORIZED_MESSAGE
+              )
+            );
+        }
+        if (reconciliation.outcome === "expired") {
+          return res
+            .status(410)
+            .json(
+              errorEnvelope(OPERATION_EXPIRED_CODE, OPERATION_EXPIRED_MESSAGE)
+            );
+        }
+        if (reconciliation.outcome === "not-found") {
+          // Unreachable in practice: `createRequestWithOperation` only
+          // reaches reconciliation after a duplicate-key error, which means
+          // some attempt already won and inserted this exact identity.
+          throw new Error(
+            "Unexpected operation reconciliation state after create"
+          );
+        }
+        return res
+          .status(200)
+          .json(buildPublicRequestDetailResponse(reconciliation.document, now));
+      }
+      // `result.document` is `PublicRequestDocument`-shaped (the same
+      // reconciliation type the pre-write check above returns), but it is the
+      // exact document this route just created — the same underlying
+      // `IRequest` every other path here works with.
+      document = result.document as unknown as IRequest;
+    } else {
+      document = await MealRequest.create(documentFields);
+    }
 
     const response = buildPublicRequestDetailResponse(
       document as unknown as PublicRequestDocument,

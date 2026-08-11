@@ -27,8 +27,11 @@ enum RequestStatusWire: String, Decodable {
     }
 }
 
-/// Wire-level timing value accepted by `POST /api/request`.
-enum RequestTimingWire: String, Encodable {
+/// Wire-level timing value accepted by `POST /api/request`. `Codable` (not
+/// just `Encodable`) so it can round-trip through the W3-D1 durable
+/// pending-operation record (`PendingRequestOperationStorage.swift`); nothing
+/// about outbound encoding changes.
+enum RequestTimingWire: String, Codable {
     case asap
     case scheduled
 }

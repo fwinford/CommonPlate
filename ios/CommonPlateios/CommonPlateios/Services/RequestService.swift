@@ -117,6 +117,11 @@ struct RequestService {
     /// `src/participantAuthorityGate.ts`.
     static let participantAuthorityHeader = "x-commonplate-participant"
 
+    /// The header the backend reads the W3-D1 request-create operation
+    /// identity from. It has to match `OPERATION_IDENTITY_HEADER` in
+    /// `src/createRequestRoute.ts`.
+    static let operationIdentityHeader = "x-commonplate-operation-id"
+
     /// Builds the credential header, or none at all.
     ///
     /// An absent credential deliberately sends *no* header rather than an empty
@@ -191,11 +196,24 @@ struct RequestService {
     /// The requester is the verified participant behind `participantAuthority`,
     /// not the payload: the backend derives and binds identity from the
     /// credential and ignores any address the payload happens to carry.
+    ///
+    /// `operationId`, when present, is the W3-D1 exact logical-operation
+    /// identity (`RequestStore` mints and reuses it across every recovery
+    /// attempt for one intentional submission). `nil` sends no identity header
+    /// at all and gets the exact pre-D1, non-idempotent create behavior — this
+    /// default exists so a caller with no operation concept (a direct
+    /// `RequestService` test) does not have to invent one.
     func createRequest(
         _ payload: CreateRequestPayload,
+        operationId: String? = nil,
         participantAuthority: String? = nil
     ) async throws -> FoodRequest {
         try Task.checkCancellation()
+
+        var headers = Self.participantHeaders(participantAuthority)
+        if let operationId {
+            headers[Self.operationIdentityHeader] = operationId
+        }
 
         let response: RequestDetailResponseDTO
         do {
@@ -203,7 +221,7 @@ struct RequestService {
                 path: "/api/request",
                 method: .post,
                 body: payload,
-                headers: Self.participantHeaders(participantAuthority)
+                headers: headers
             )
         } catch is CancellationError {
             throw RequestServiceError.ambiguousCreateOutcome(underlying: CancellationError())

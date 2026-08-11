@@ -68,6 +68,16 @@ private struct ActiveClaimAuthorization {
     let participantAuthority: String?
 }
 
+/// W3-D1: marks an `unresolvedCreateError` armed by restoring a durable
+/// operation record, not by an in-process POST. Carries no information — the
+/// durable record itself, not this marker, is the recovery state — and
+/// exists only so `reconcilePendingCreateOperationIfNeeded` can express "an
+/// unresolved operation exists" through the same
+/// `.ambiguousCreateOutcome(underlying:)` case an in-process ambiguous
+/// attempt uses, which is what lets `RequestFoodView` present both with the
+/// identical truthful copy.
+private struct PendingRequestOperationRestored: Error {}
+
 private struct ClaimAttempt: Equatable {
     let id: UUID
     let requestID: String
@@ -246,6 +256,85 @@ enum ActiveReservationContinuationOutcome {
     case unknown
 }
 
+/// Stable backend W3-D1 request-create operation error codes, matching
+/// `createRequestRoute.ts` exactly. Centralized for the same reason
+/// `ClaimErrorCode` is: handling must not drift into scattered string
+/// literals.
+enum RequestOperationErrorCode {
+    static let invalidOperationId = "INVALID_OPERATION_ID"
+    static let operationUnauthorized = "OPERATION_UNAUTHORIZED"
+    static let operationExpired = "OPERATION_EXPIRED"
+
+    /// Ordinary `POST /api/request` rejections that `createRequestRoute.ts`
+    /// returns from `validateCreateRequest` — after the operation-identity
+    /// gate has already found this identity unrecognized ("not-found"), but
+    /// strictly before the daily-limit read or either write
+    /// (`createRequestWithOperation`/`RequestOperation.create`). Provably no
+    /// Request or ledger row exists for the operation when either of these is
+    /// returned.
+    static let invalidVendor = "INVALID_VENDOR"
+    static let participantPrincipalMismatch = "PARTICIPANT_PRINCIPAL_MISMATCH"
+    /// The generic shape/validation refusal `validateCreateShape` produces —
+    /// also strictly pre-write, for the identical reason.
+    static let invalidRequest = "INVALID_REQUEST"
+    /// The daily-limit refusal, read and returned before either write begins.
+    static let requestLimitReached = "REQUEST_LIMIT_REACHED"
+    /// The route-level create throttle, which runs before the handler and
+    /// therefore before the operation lookup or either create write.
+    static let rateLimited = "RATE_LIMITED"
+
+    /// Every backend answer that definitively resolves an operation as *not*
+    /// creating a Request and that can never be recovered by resubmitting the
+    /// same identity — as opposed to `.ambiguousCreateOutcome`, which stays
+    /// open. `operationUnauthorized` belongs here too: once the backend has
+    /// refused an identity as bound to someone else, replaying it again can
+    /// only repeat that refusal, so there is nothing left to keep durable
+    /// state open for.
+    ///
+    /// The validation and quota ordinary-rejection codes belong here for the
+    /// same reason:
+    /// `createRequestRoute.ts` returns every one of them before any
+    /// Request/`RequestOperation` write is attempted for this operation, so
+    /// they are exactly as definitive as the three operation-identity codes
+    /// above — a stale durable record behind one of them must not survive to
+    /// be replayed after conditions change (e.g. quota resetting the next
+    /// day) or to permanently block a later intentional create.
+    ///
+    /// `REQUEST_CREATION_FAILED` is deliberately excluded: `createRequestRoute.ts`
+    /// returns that same code from paths that can follow a write attempt
+    /// (the outer catch wraps the write, requester-confirmation, and
+    /// notification-dispatch section), so it cannot be trusted as proof no
+    /// write occurred. `RequestService.createRequest` still decodes it as an
+    /// ordinary `.serverError` — pre-existing, accepted immediate-retry
+    /// presentation this fix does not change — but because it is absent
+    /// here, the durable record survives it rather than being retired as if
+    /// creation had been definitively ruled out.
+    static func isDefinitiveNonCreate(_ code: String) -> Bool {
+        code == invalidOperationId
+            || code == operationUnauthorized
+            || code == operationExpired
+            || code == invalidVendor
+            || code == participantPrincipalMismatch
+            || code == invalidRequest
+            || code == requestLimitReached
+            || code == rateLimited
+    }
+
+    /// The write-uncertain counterpart to `isDefinitiveNonCreate`: a decoded
+    /// `.serverError` whose code is not definitive non-create, so the exact
+    /// operation's write outcome remains unknown. `RATE_LIMITED` belongs to
+    /// the definitive set above; a bare HTTP 404 is the separate
+    /// `RequestServiceError.notFound` case and is retired directly by the
+    /// fresh-create catch. `REQUEST_CREATION_FAILED` is currently the only
+    /// readable `.serverError` code `createRequestRoute.ts` can return from a
+    /// path that may follow a write attempt.
+    static let requestCreationFailed = "REQUEST_CREATION_FAILED"
+
+    static func isWriteUncertain(_ code: String) -> Bool {
+        code == requestCreationFailed
+    }
+}
+
 /// Stable backend claim and extension error codes, centralized so handling
 /// cannot drift into scattered string literals.
 enum ClaimErrorCode {
@@ -326,10 +415,16 @@ final class RequestStore: ObservableObject {
     @Published private(set) var isCreating = false
     @Published private(set) var createError: RequestServiceError?
 
-    /// `POST /api/request` has no client operation identity. After an ambiguous
-    /// result, this process-local guard blocks every later create to prevent
-    /// duplicates; it clears only when the store is destroyed. Durable recovery
-    /// requires backend idempotency and reconciliation.
+    /// W3-D1: after an ambiguous `POST /api/request` result — including one
+    /// restored from durable storage at relaunch — this guard blocks every
+    /// later *fresh* create, so a lost response can never produce a second
+    /// logical operation. It is armed by `createRequest` and by
+    /// `reconcilePendingCreateOperationIfNeeded`, and retired only by an
+    /// authoritative backend outcome for the exact operation it names:
+    /// created (`201`/reconciled `200`), `OPERATION_EXPIRED`,
+    /// `INVALID_OPERATION_ID`, or `OPERATION_UNAUTHORIZED`. It is never
+    /// cleared just because the operation could not be reconciled this
+    /// attempt — that leaves it exactly as armed as it already was.
     @Published private(set) var unresolvedCreateError: RequestServiceError?
 
     /// Read-only projection of the process-lifetime create block, for views
@@ -412,6 +507,12 @@ final class RequestStore: ObservableObject {
     /// `ReservationWarningScheduling` for why this stays UIKit/
     /// UserNotifications-free here.
     private let reservationWarningScheduler: ReservationWarningScheduling
+    /// W3-D1's durable unresolved-create record. In-memory by default
+    /// (`InMemoryPendingRequestOperationStorage`) so every pre-D1 call site
+    /// and test keeps compiling unchanged; `ContentView` passes the real
+    /// `UserDefaultsPendingRequestOperationStorage` for actual cross-launch
+    /// durability.
+    private let operationStorage: PendingRequestOperationStorage
     private var fetchGeneration = 0
     private var collectionRevision = 0
     private var activeClaimAuthorization: ActiveClaimAuthorization?
@@ -465,13 +566,15 @@ final class RequestStore: ObservableObject {
         installationCredentialProvider: @escaping () -> String,
         participantAuthorityProvider: @escaping () -> String?,
         participantAuthorityRejected: @escaping () -> Void,
-        reservationWarningScheduler: ReservationWarningScheduling = NoOpReservationWarningScheduler()
+        reservationWarningScheduler: ReservationWarningScheduling = NoOpReservationWarningScheduler(),
+        operationStorage: PendingRequestOperationStorage = InMemoryPendingRequestOperationStorage()
     ) {
         self.service = service
         self.installationCredentialProvider = installationCredentialProvider
         self.participantAuthorityProvider = participantAuthorityProvider
         self.participantAuthorityRejected = participantAuthorityRejected
         self.reservationWarningScheduler = reservationWarningScheduler
+        self.operationStorage = operationStorage
     }
 
     /// Applies a backend verdict on the credential just presented.
@@ -622,9 +725,27 @@ final class RequestStore: ObservableObject {
     /// when the service reports an ambiguous create outcome. Returns normally
     /// only after the confirmed request has been added to local state.
     ///
-    /// Only `ambiguousCreateOutcome` arms the process-lifetime block. Decoded
-    /// server errors and the non-envelope 404 path are treated as definitive
-    /// and do not arm it.
+    /// W3-D1: mints one fresh operation identity for this exact intentional
+    /// submission and persists the durable recovery record for it
+    /// immediately before sending — after this point the operation may reach
+    /// the backend, so the record must already be safe to survive
+    /// termination. A decoded definitive non-create (`INVALID_OPERATION_ID`,
+    /// `OPERATION_EXPIRED`, `OPERATION_UNAUTHORIZED`, and the ordinary
+    /// pre-write rejection codes `RequestOperationErrorCode.isDefinitiveNonCreate`
+    /// recognizes) retires the durable record, exactly like ordinary success
+    /// does, so a later intentional submission mints its own new identity
+    /// rather than being blocked by one that can never resolve.
+    /// `ambiguousCreateOutcome` and any write-uncertain decoded server
+    /// response (`RequestOperationErrorCode.isWriteUncertain` — currently
+    /// only a readable `REQUEST_CREATION_FAILED`) instead arm the
+    /// unresolved-create block, mirroring
+    /// `reconcilePendingCreateOperationIfNeeded`'s own default: the backend
+    /// may have written this exact operation, so nothing may mint a
+    /// replacement identity or overwrite its durable record until
+    /// authoritative reconciliation resolves it. A bare 404 and the
+    /// `RATE_LIMITED` middleware refusal are also definitive non-creates:
+    /// both retire the record without arming the block. Every other outcome
+    /// preserves its existing behavior.
     func createRequest(_ payload: CreateRequestPayload) async throws {
         if let unresolvedCreateError {
             createError = unresolvedCreateError
@@ -643,18 +764,48 @@ final class RequestStore: ObservableObject {
         // (including `RequestFoodView`'s own tests) unaware of it.
         var submittedPayload = payload
         submittedPayload.installationCredential = installationCredentialProvider()
+        // Read here, immediately before sending, rather than captured at
+        // init: an identity replaced by Change Email mid-session must bind
+        // the request to the principal that is current now.
         let participantAuthority = participantAuthorityProvider()
+        let operationId = UUID().uuidString
+        if let participantAuthority,
+           let participantIdentifier = Self.participantIdentifier(fromAuthority: participantAuthority) {
+            operationStorage.save(
+                PendingRequestOperationRecord(
+                    operationId: operationId,
+                    participantIdentifier: participantIdentifier,
+                    vendor: submittedPayload.vendor,
+                    food: submittedPayload.food,
+                    pickupName: submittedPayload.pickupName,
+                    timing: submittedPayload.timing,
+                    windowStart: submittedPayload.windowStart,
+                    mealSwipes: submittedPayload.mealSwipes
+                )
+            )
+        }
         do {
             let created = try await service.createRequest(
                 submittedPayload,
-                // Read here, immediately before sending, rather than captured
-                // at init: an identity replaced by Change Email mid-session
-                // must bind the request to the principal that is current now.
+                operationId: operationId,
                 participantAuthority: participantAuthority
             )
+            operationStorage.clear()
             advanceCollectionRevision()
             applyConfirmed(created)
         } catch is CancellationError {
+            // `RequestService.createRequest` only ever lets a raw
+            // `CancellationError` reach here from its own leading
+            // `Task.checkCancellation()` — before headers, body encoding, or
+            // any `URLSession` call exist. Every cancellation at or after
+            // that point is instead wrapped as
+            // `.ambiguousCreateOutcome(underlying: CancellationError())` and
+            // handled below. This is therefore a proven pre-transmission
+            // cancellation of the record just saved above: no ambiguous
+            // server mutation exists, so the record this attempt wrote must
+            // be retired rather than left to be replayed as an unintended
+            // submission on a later relaunch.
+            operationStorage.clear()
             throw CancellationError()
         } catch {
             let serviceError = Self.asServiceError(error)
@@ -663,11 +814,183 @@ final class RequestStore: ObservableObject {
                 serviceError,
                 presentedAuthority: participantAuthority
             )
-            if case .ambiguousCreateOutcome = serviceError {
+            switch serviceError {
+            case .ambiguousCreateOutcome:
                 unresolvedCreateError = serviceError
+            case .notFound:
+                // This service case is reserved for a route-level HTTP 404:
+                // no create handler ran, so this exact operation did not
+                // create anything and must not survive for relaunch replay.
+                operationStorage.clear()
+            case .serverError(let code, _) where RequestOperationErrorCode.isDefinitiveNonCreate(code):
+                operationStorage.clear()
+            case .serverError(let code, _) where RequestOperationErrorCode.isWriteUncertain(code):
+                // The write result is not proven — e.g. a readable
+                // `REQUEST_CREATION_FAILED`, which `createRequestRoute.ts`
+                // can return from a path that follows a write attempt. Arm
+                // the block exactly like an ambiguous transport outcome, so
+                // a same-session retry cannot mint a replacement operation
+                // that silently overwrites this operation's durable record.
+                unresolvedCreateError = serviceError
+            default:
+                // Do not broaden either classification: other received
+                // outcomes retain their existing behavior.
+                break
             }
             throw serviceError
         }
+    }
+
+    /// W3-D1 relaunch reconciliation. Restores a durable unresolved
+    /// request-create operation left over from a previous process (or an
+    /// earlier ambiguous attempt still unresolved this session) and
+    /// reconciles it against authoritative backend truth, using the exact
+    /// same operation identity and submitted fields as the original attempt —
+    /// never a newly minted identity and never a re-derived payload.
+    ///
+    /// Safe to call more than once — a no-op once nothing durable remains, and
+    /// a no-op while a create is already in flight. Never exposes or acts on
+    /// restored state that is malformed or bound to a different participant
+    /// than the one currently verified: `.isValidRecord` and the
+    /// participant-identifier comparison below are the only shape/authority
+    /// checks this performs, and neither ever repairs or reinterprets what it
+    /// finds. Returns `true` only once the restored operation has been
+    /// confirmed created.
+    @discardableResult
+    func reconcilePendingCreateOperationIfNeeded() async -> Bool {
+        guard !isCreating, let record = operationStorage.load() else {
+            return false
+        }
+        guard Self.isValidRecord(record) else {
+            // Never guessed at or repaired: unusable restored state is
+            // retired outright, exactly like a definitive non-create outcome
+            // would be, since there is nothing here that could ever be
+            // reconciled.
+            operationStorage.clear()
+            return false
+        }
+        let participantAuthority = participantAuthorityProvider()
+        guard let participantAuthority,
+              let currentIdentifier = Self.participantIdentifier(fromAuthority: participantAuthority),
+              currentIdentifier == record.participantIdentifier else {
+            // Left in storage untouched: the participant it belongs to may
+            // still return this session (or a later one). This session simply
+            // cannot act on it, expose it, or fold it into an ordinary create
+            // under a different identity.
+            return false
+        }
+
+        // Restored state takes over immediately, before the network call:
+        // the mere existence of a valid, participant-matched unresolved
+        // operation already means "your request may already exist", the same
+        // truth an in-process ambiguous outcome tells this store.
+        if unresolvedCreateError == nil {
+            unresolvedCreateError = .ambiguousCreateOutcome(underlying: PendingRequestOperationRestored())
+        }
+        isCreating = true
+        createError = nil
+        defer { isCreating = false }
+
+        // Re-read here, immediately before sending, exactly like the fresh
+        // path: the record itself never carries this — it is store-owned
+        // installation identity, not part of the operation's durable
+        // identity — so a recovered create restores the *current*
+        // association rather than reconstructing a stale one.
+        var recoveredPayload = Self.payload(from: record)
+        recoveredPayload.installationCredential = installationCredentialProvider()
+
+        do {
+            let created = try await service.createRequest(
+                recoveredPayload,
+                operationId: record.operationId,
+                participantAuthority: participantAuthority
+            )
+            operationStorage.clear()
+            unresolvedCreateError = nil
+            advanceCollectionRevision()
+            applyConfirmed(created)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            let serviceError = Self.asServiceError(error)
+            applyParticipantVerdict(
+                serviceError,
+                presentedAuthority: participantAuthority
+            )
+            switch serviceError {
+            case .notFound:
+                // The create route is absent at this base URL, so no handler
+                // ran and this restored operation cannot have been created by
+                // this response. Retire it like the fresh-create path does.
+                operationStorage.clear()
+                unresolvedCreateError = nil
+            case .serverError(let code, _) where RequestOperationErrorCode.isDefinitiveNonCreate(code):
+                operationStorage.clear()
+                unresolvedCreateError = nil
+            default:
+                // Still unresolved: transport/decoding failures and every
+                // other outcome leave both the durable record and the block
+                // exactly as armed as they already were, so a later attempt —
+                // automatic or the next relaunch — can reconcile the same
+                // exact operation again.
+                unresolvedCreateError = serviceError
+            }
+            return false
+        }
+    }
+
+    /// The participant-identity segment of a verified authority credential —
+    /// the same leading component `ParticipantAuthorityShape` parses — never
+    /// the bearer authority itself. Used only to compare a restored W3-D1
+    /// record against the currently verified participant; never sent
+    /// anywhere and never usable on its own as a credential.
+    private static func participantIdentifier(fromAuthority authority: String) -> String? {
+        guard let separator = authority.firstIndex(of: ".") else { return nil }
+        let identifier = String(authority[authority.startIndex..<separator])
+        return identifier.isEmpty ? nil : identifier
+    }
+
+    private static let operationIdCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
+
+    /// Mirrors the backend's own `[A-Za-z0-9._-]{1,128}` operation-identity
+    /// shape (`createRequestRoute.ts`) so a corrupted or foreign value in
+    /// durable storage is never treated as recoverable.
+    private static func isValidOperationId(_ value: String) -> Bool {
+        (1...128).contains(value.count)
+            && value.unicodeScalars.allSatisfy(operationIdCharacters.contains)
+    }
+
+    /// Whether a restored durable record is well-formed enough to reconcile
+    /// at all — shape only, never a guess at what a malformed record "meant".
+    private static func isValidRecord(_ record: PendingRequestOperationRecord) -> Bool {
+        guard isValidOperationId(record.operationId),
+              !record.participantIdentifier.isEmpty,
+              !record.vendor.isEmpty,
+              !record.food.isEmpty,
+              !record.pickupName.isEmpty,
+              (1...5).contains(record.mealSwipes) else {
+            return false
+        }
+        switch record.timing {
+        case .asap:
+            return record.windowStart == nil
+        case .scheduled:
+            return record.windowStart != nil
+        }
+    }
+
+    private static func payload(from record: PendingRequestOperationRecord) -> CreateRequestPayload {
+        CreateRequestPayload(
+            vendor: record.vendor,
+            food: record.food,
+            pickupName: record.pickupName,
+            timing: record.timing,
+            windowStart: record.windowStart,
+            mealSwipes: record.mealSwipes
+        )
     }
 
     /// Publishes the pickup name and stores the raw token only after a confirmed

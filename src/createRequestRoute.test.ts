@@ -31,11 +31,19 @@ import {
   Installation,
   Request as MealRequest,
   Participant,
+  RequestOperation,
 } from "../models/db.js";
 import {
   ASAP_WINDOW_TEXT,
   createRequest,
   createRequestRateLimiter,
+  INVALID_OPERATION_ID_CODE,
+  INVALID_OPERATION_ID_MESSAGE,
+  OPERATION_EXPIRED_CODE,
+  OPERATION_EXPIRED_MESSAGE,
+  OPERATION_IDENTITY_HEADER,
+  OPERATION_UNAUTHORIZED_CODE,
+  OPERATION_UNAUTHORIZED_MESSAGE,
 } from "./createRequestRoute.js";
 import {
   PARTICIPANT_AUTHORITY_HEADER,
@@ -170,11 +178,21 @@ beforeEach(() => {
     .mockResolvedValue(0 as never);
   createDocument = vi
     .spyOn(MealRequest, "create")
-    .mockImplementation(async (input) =>
-      persistedDocument(
+    .mockImplementation(async (input) => {
+      // `MealRequest.create` is called two ways: the plain single-object form
+      // (no operation identity), and the array + session transactional form
+      // W3-D1's operation-scoped create uses (`Model.create(docs[], options)`).
+      // Mirroring both keeps this one shared double usable by every describe
+      // block in this file.
+      if (Array.isArray(input)) {
+        return [persistedDocument(input[0] as Record<string, unknown>)] as unknown as Awaited<
+          ReturnType<typeof MealRequest.create>
+        >;
+      }
+      return persistedDocument(
         input as unknown as Record<string, unknown>
-      ) as unknown as Awaited<ReturnType<typeof MealRequest.create>>
-    ) as ReturnType<typeof vi.spyOn>;
+      ) as unknown as Awaited<ReturnType<typeof MealRequest.create>>;
+    }) as ReturnType<typeof vi.spyOn>;
   consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -2491,5 +2509,397 @@ describe("POST /api/request rate limiting is a definitive pre-write refusal", ()
         server.close((error) => (error ? reject(error) : resolve()))
       );
     }
+  });
+});
+
+describe("POST /api/request durable create-operation identity (W3-D1)", () => {
+  const otherParticipantId = new mongoose.Types.ObjectId(
+    "64c0000000000000000000b2"
+  );
+
+  function headersWithOperation(
+    operationId: string | string[],
+    overrides: Record<string, string | string[]> = {}
+  ) {
+    return {
+      [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority,
+      [OPERATION_IDENTITY_HEADER]: operationId,
+      ...overrides,
+    };
+  }
+
+  /**
+   * `createRequestWithOperation` opens a real `mongoose.startSession()` and
+   * runs the Request-plus-ledger insert inside `session.withTransaction`
+   * (W3-D1). The default double just runs the work once, the same pattern
+   * `claimRoute.test.ts` and `fulfillmentRoute.test.ts` already establish, so
+   * a test that only cares about the resulting Request/ledger writes does not
+   * also have to stand up its own session.
+   */
+  let sessionMock: {
+    withTransaction: ReturnType<typeof vi.fn>;
+    endSession: ReturnType<typeof vi.fn>;
+  };
+
+  function mockSession() {
+    sessionMock = {
+      withTransaction: vi.fn(async (work: () => Promise<void>) => {
+        await work();
+      }),
+      endSession: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(mongoose, "startSession").mockResolvedValue(
+      sessionMock as never
+    );
+    return sessionMock;
+  }
+
+  /** Stubs `RequestOperation.findOne(...).select(...).lean().exec()` for one
+   * or more successive lookups, in call order, matching how
+   * `reconcileOperation` reads the durable ledger. */
+  function stubLedgerLookups(
+    ...results: Array<Record<string, unknown> | null>
+  ) {
+    const spy = vi.spyOn(RequestOperation, "findOne");
+    for (const result of results) {
+      spy.mockReturnValueOnce({
+        select: () => ({
+          lean: () => ({ exec: vi.fn().mockResolvedValue(result) }),
+        }),
+      } as unknown as ReturnType<typeof RequestOperation.findOne>);
+    }
+    return spy;
+  }
+
+  /** Stubs `MealRequest.findOne(...).select(...)` for one or more successive
+   * lookups, matching the ledger-to-Request follow-up `reconcileOperation`
+   * performs once a ledger row is found. */
+  function stubRequestLookups(
+    ...results: Array<Record<string, unknown> | null>
+  ) {
+    const spy = vi.spyOn(MealRequest, "findOne");
+    for (const result of results) {
+      spy.mockReturnValueOnce({
+        select: vi.fn().mockResolvedValue(result),
+      } as unknown as ReturnType<typeof MealRequest.findOne>);
+    }
+    return spy;
+  }
+
+  function ledgerRow(overrides: Record<string, unknown> = {}) {
+    return {
+      operationId: "op-generic",
+      participantId,
+      requestId,
+      ...overrides,
+    };
+  }
+
+  function existingOperationDocument(
+    overrides: Record<string, unknown> = {}
+  ) {
+    return {
+      _id: requestId,
+      vendor: "Palladium",
+      food: "Vegetable rice bowl",
+      pickupWindowText: ASAP_WINDOW_TEXT,
+      mealSwipes: 2,
+      windowStart: undefined,
+      windowEnd: undefined,
+      status: "open",
+      createdAt,
+      visibleFrom: createdAt,
+      expiresAt: asapExpiresAt,
+      requesterParticipantId: participantId,
+      ...overrides,
+    };
+  }
+
+  let createLedgerEntry: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    mockSession();
+    createLedgerEntry = vi
+      .spyOn(RequestOperation, "create")
+      .mockResolvedValue([{}] as never);
+  });
+
+  it("creates one Request and persists the operation identity only in the durable ledger, on a first, genuinely new operation", async () => {
+    stubLedgerLookups(null);
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-first-attempt-1")
+    );
+
+    await createRequest(context.req, context.res);
+
+    // The Request document itself carries no operation identity — only the
+    // ledger does, so cleanup of the Request can never free the identity for
+    // reuse.
+    expect(createDocument).toHaveBeenCalledWith(
+      [expect.not.objectContaining({ operationId: expect.anything() })],
+      expect.objectContaining({ session: sessionMock })
+    );
+    expect(createLedgerEntry).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          operationId: "op-first-attempt-1",
+          // The route resolves the verified participant to its stringified
+          // principal id (`participantAuthorityGate.ts`), never the raw
+          // `ObjectId` — the ledger row carries that same string.
+          participantId: String(participantId),
+        }),
+      ],
+      expect.objectContaining({ session: sessionMock })
+    );
+    expect(context.status).toHaveBeenCalledWith(201);
+  });
+
+  it("reconciles a sequential replay to the already-created Request without creating another or re-checking quota", async () => {
+    stubLedgerLookups(ledgerRow({ operationId: "op-replay-1" }));
+    stubRequestLookups(existingOperationDocument());
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-replay-1")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(createLedgerEntry).not.toHaveBeenCalled();
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(200);
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ id: String(requestId) }),
+      })
+    );
+  });
+
+  it("creates at most one Request when two concurrent attempts race the same operation identity", async () => {
+    // The pre-write ledger lookup finds nothing, so this attempt reaches the
+    // transactional write. The ledger insert then loses the unique-index
+    // race, exactly as it would against a real concurrent insert, and the
+    // race-fallback reconciliation's ledger + Request lookups find the
+    // winner's row.
+    stubLedgerLookups(null, ledgerRow({ operationId: "op-concurrent-1" }));
+    stubRequestLookups(existingOperationDocument());
+    createLedgerEntry.mockRejectedValueOnce(
+      Object.assign(new Error("duplicate key"), { code: 11000 })
+    );
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-concurrent-1")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createDocument).toHaveBeenCalledTimes(1);
+    expect(context.status).toHaveBeenCalledWith(200);
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ id: String(requestId) }),
+      })
+    );
+  });
+
+  it("creates a distinct Request for a second, genuinely distinct operation identity with an identical payload", async () => {
+    stubLedgerLookups(null);
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-distinct-2")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createLedgerEntry).toHaveBeenCalledWith(
+      [expect.objectContaining({ operationId: "op-distinct-2" })],
+      expect.anything()
+    );
+    expect(context.status).toHaveBeenCalledWith(201);
+  });
+
+  it("refuses cross-participant replay without creating a Request or exposing the existing one", async () => {
+    stubLedgerLookups(
+      ledgerRow({
+        operationId: "op-owned-by-someone-else",
+        participantId: otherParticipantId,
+      })
+    );
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-owned-by-someone-else")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(403);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: OPERATION_UNAUTHORIZED_CODE,
+        message: OPERATION_UNAUTHORIZED_MESSAGE,
+      },
+    });
+  });
+
+  it("refuses the same cross-participant collision when it surfaces as a create-time race", async () => {
+    stubLedgerLookups(
+      null,
+      ledgerRow({
+        operationId: "op-raced-by-someone-else",
+        participantId: otherParticipantId,
+      })
+    );
+    createLedgerEntry.mockRejectedValueOnce(
+      Object.assign(new Error("duplicate key"), { code: 11000 })
+    );
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-raced-by-someone-else")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(403);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: OPERATION_UNAUTHORIZED_CODE,
+        message: OPERATION_UNAUTHORIZED_MESSAGE,
+      },
+    });
+  });
+
+  it("resolves a terminal expired/unrecoverable outcome, and creates zero Requests, once the recovered Request is gone", async () => {
+    stubLedgerLookups(ledgerRow({ operationId: "op-expired-1" }));
+    stubRequestLookups(null);
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-expired-1")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(createLedgerEntry).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(410);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: OPERATION_EXPIRED_CODE,
+        message: OPERATION_EXPIRED_MESSAGE,
+      },
+    });
+  });
+
+  it("keeps repeating the terminal expired outcome for the same exact identity, never falling through to a fresh create", async () => {
+    stubLedgerLookups(
+      ledgerRow({ operationId: "op-expired-repeat" }),
+      ledgerRow({ operationId: "op-expired-repeat" })
+    );
+    stubRequestLookups(null, null);
+
+    const first = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-expired-repeat")
+    );
+    await createRequest(first.req, first.res);
+    expect(first.status).toHaveBeenCalledWith(410);
+
+    const second = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-expired-repeat")
+    );
+    await createRequest(second.req, second.res);
+    expect(second.status).toHaveBeenCalledWith(410);
+
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "empty string", value: "" },
+    { label: "disallowed characters", value: "op id with spaces" },
+    { label: "over the length bound", value: "o".repeat(129) },
+  ])(
+    "refuses a malformed operation identity ($label) before any read or write",
+    async ({ value }) => {
+      const lookup = stubLedgerLookups(null);
+      const context = routeContext(
+        canonicalAsap(),
+        headersWithOperation(value)
+      );
+
+      await createRequest(context.req, context.res);
+
+      expect(lookup).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(context.status).toHaveBeenCalledWith(400);
+      expect(context.json).toHaveBeenCalledWith({
+        error: {
+          code: INVALID_OPERATION_ID_CODE,
+          message: INVALID_OPERATION_ID_MESSAGE,
+        },
+      });
+    }
+  );
+
+  it("refuses a repeated operation-identity header the same way, without guessing which value was meant", async () => {
+    const lookup = stubLedgerLookups(null);
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation(["op-a", "op-b"])
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: INVALID_OPERATION_ID_CODE,
+        message: INVALID_OPERATION_ID_MESSAGE,
+      },
+    });
+  });
+
+  it("still refuses a definitively invalid payload the same way when an operation identity is present, and does not poison it for a later corrected create", async () => {
+    stubLedgerLookups(null);
+    const context = routeContext(
+      canonicalAsap({ vendor: "   " }),
+      headersWithOperation("op-invalid-payload-1")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: { code: "INVALID_REQUEST", message: "Invalid request payload" },
+    });
+
+    // The corrected retry uses a new operation identity, exactly as the
+    // contract requires, and is unaffected by the earlier rejection.
+    stubLedgerLookups(null);
+    const retry = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-invalid-payload-2")
+    );
+    await createRequest(retry.req, retry.res);
+    expect(createDocument).toHaveBeenCalledTimes(1);
+    expect(retry.status).toHaveBeenCalledWith(201);
+  });
+
+  it("proceeds with ordinary, non-idempotent behavior when no operation identity is presented", async () => {
+    const lookup = vi.spyOn(RequestOperation, "findOne");
+    const context = routeContext(canonicalAsap());
+
+    await createRequest(context.req, context.res);
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(sessionMock.withTransaction).not.toHaveBeenCalled();
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.not.objectContaining({ operationId: expect.anything() })
+    );
+    expect(context.status).toHaveBeenCalledWith(201);
   });
 });

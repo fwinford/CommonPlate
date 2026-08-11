@@ -263,6 +263,30 @@ Final complete iOS evidence: **CommonPlateiosTests — 689 passed / 0 failed / T
 
 **Physical acceptance.** Faith completed the W3-N2 physical acceptance walkthrough on a physical iPhone and reported the behavior worked as expected. The walkthrough covered: physical Apple notification-permission behavior; push enable reaching authoritative On; push disable reaching authoritative Off; relaunch preserving accepted push-management truth; ambiguous push recovery/retry behavior as exercised in the walkthrough; participant-authorized in-app email unsubscribe; later signup returning to Check Your Email rather than stale Off; and email/push channel independence. This walkthrough does not establish verified email delivery or reading, a production APNs delivery environment, TestFlight signing/configuration, or production backend reachability — those remain separate provider/release gates (`docs/system-contract.md` section 11).
 
+### Durable Request-Creation Recovery (W3-D1) coverage
+
+W3-D1 is accepted. Backend coverage proves exact-operation idempotency and reconciliation for `POST /api/request`: sequential and concurrent replay of one operation identity converge on the same authoritative Request and create no duplicate; a backend commit followed by a lost/unreadable response reconciles to the already-created Request; a definitively rejected operation (`400 INVALID_OPERATION_ID`, `403 OPERATION_UNAUTHORIZED`, and the ordinary pre-write validation/quota/rate-limit refusals) creates no Request and permits a later intentional submission with a fresh identity; replay of an already-created operation consumes no additional daily quota while a genuinely distinct create still does; cross-participant reconciliation is refused generically with no private detail disclosed; the operation tombstone (`RequestOperation`) survives Request removal; presenting an identity whose Request has passed its recovery horizon resolves as terminal `410 OPERATION_EXPIRED` and creates zero Requests; and a fresh intentional operation after expiry creates normally under existing validation and quota rules. `src/createRequestRoute.test.ts` and `src/createRequestRoute.mongo.test.ts` cover this; `models/db.ts` adds the `RequestOperation` ledger and its unique operation-identity index.
+
+iOS coverage (`RequestCreateDurableOperationTests.swift`, `PendingRequestOperationStorage.swift`) proves: a fresh operation identity is minted and its durable recovery record — participant-bound, carrying the exact submitted request fields, and never a raw participant credential — is persisted before transmission begins; the process-lifetime create block is armed only by an ambiguous outcome or a write-uncertain decoded response (`REQUEST_CREATION_FAILED`), never by a definitive non-create; a definitive non-create (including `OPERATION_EXPIRED`, `INVALID_OPERATION_ID`, `OPERATION_UNAUTHORIZED`, and the ordinary pre-write rejection codes) retires the durable record so a later intentional submission mints its own identity; a proven pre-transmission cancellation retires the record it just wrote; and launch reconciliation restores and reuses the exact persisted operation identity and payload rather than reconstructing it heuristically.
+
+At acceptance:
+
+* TypeScript/backend typecheck: passed.
+* Complete non-Mongo backend suite: passed at the current recorded D1 run.
+* Real-Mongo D1 suite (`src/createRequestRoute.mongo.test.ts`): passed, covering exact-operation replay, concurrency, participant isolation, quota non-double-consumption, the operation tombstone surviving Request removal, terminal expiry/non-resurrection, and a fresh operation after expiry.
+* `npm run ci-check` and `git diff --check`: passed.
+* `RequestCreateDurableOperationTests`: **21 passed, 0 failed**.
+* Complete `CommonPlateiosTests`: **710 passed, 0 failed, 0 skipped**, with a valid inspectable `.xcresult`.
+* An independent HIGH-risk review completed with all MUST-FIX findings corrected; a final narrow independent rereview was CLEAN.
+
+**Accepted verification limitation.** The integrated physical-iPhone D1 runtime scenarios were **not executed before acceptance**. Faith explicitly accepted W3-D1 with this remaining physical-runtime limitation. The automated, simulator, and backend evidence above must **not** be described as proving: actual physical-device process termination at the post-commit/pre-retirement boundary; real physical-device relaunch sequencing; real physical-device network interruption behavior; or visible physical-device convergence after that termination boundary. The remaining unperformed scenarios are:
+
+1. backend commits operation X to Request A → physical app terminates before retiring X → relaunch → the same X reconciles to the same A without creating a duplicate;
+2. the physical client handles a terminal expired operation X without resurrecting a Request;
+3. a fresh intentional operation Y, submitted after X has become terminal, creates normally.
+
+A separate attempt at a simulator-integrated (non-physical) proof was made and was **blocked by environment/tooling**, not by a D1 correctness defect: the preserved physical-test `APIConfiguration.swift` LAN value was unreachable from the development machine's then-current subnet, and the repository-connected verification agent lacked GUI-input/interactive-LLDB capability needed to drive Simulator UI and hold a deterministic post-commit/pre-retirement breakpoint. That blocked attempt is neither PASS nor FAIL and did not discover a D1 correctness defect. Faith has accepted this limitation for W3-D1 V1 closeout; see `docs/system-contract.md` section 11.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -382,17 +406,19 @@ These results are reference evidence, not a substitute for rerunning affected ch
 
 | Check | Result |
 | --- | --- |
-| `npm run typecheck` | Passed in the N2 closeout |
-| `npm test` | Passed in the N2 closeout, after the signup-privacy correction (exact non-Mongo total not reliably recoverable; last recorded exact total was the C1 closeout's 1,317 passed / 275 Mongo-gated skipped) |
-| `npm run test:mongo` | Passed in the N2 closeout: 283 passed across 18 files |
+| `npm run typecheck` | Passed at the D1 closeout |
+| `npm test` | Passed at the D1 closeout (exact non-Mongo total not reliably recoverable; last recorded exact total was the C1 closeout's 1,317 passed / 275 Mongo-gated skipped) |
+| `npm run test:mongo` | Passed at the D1 closeout, including `src/createRequestRoute.mongo.test.ts` (exact suite total not reliably recoverable beyond the N2 closeout's 283 passed across 18 files) |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | N2 closeout: 689 passed; 0 failed; TEST SUCCEEDED |
-| `npm run build:client` | Passed; no tracked bundle diff (C1 closeout; no browser-client source changed in N2) |
+| `CommonPlateiosTests` | D1 closeout: 710 passed; 0 failed; 0 skipped; valid inspectable `.xcresult` |
+| `npm run build:client` | Passed; no tracked bundle diff (C1 closeout; no browser-client source changed in N2 or D1) |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
 W3-C1 physical acceptance (meal-swipe quantity visible in Active Requests, Request Detail, active-reservation presentation, fulfillment/order context, and helper new-request notification/email) is recorded above and in `docs/system-contract.md` section 6.2. It does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
+
+W3-D1 automated/independent-review evidence (exact-operation idempotency and reconciliation, the bounded-recovery operation tombstone, and durable iOS unresolved-operation persistence and reconciliation) is recorded above and in `docs/system-contract.md` section 6.3. **W3-D1 was accepted without the integrated physical-iPhone runtime scenarios described above.** That remaining physical-runtime proof is an accepted verification limitation, not evidence that the behavior was physically proven; it does not establish Release/Archive/TestFlight signing or environment behavior either, which remains open (section 11 of the same document).
 
 W3-H1 physical-device acceptance is recorded above. It closes H1's reservation-lifecycle device gate only; it does not close the Release/Archive/TestFlight APNs environment gate.
 

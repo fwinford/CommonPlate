@@ -105,7 +105,12 @@ struct ContentView: View {
                 installationCredentialProvider: installationStorage.installationCredential,
                 participantAuthorityProvider: { identityStore.currentAuthority() },
                 participantAuthorityRejected: { identityStore.discardRejectedIdentity() },
-                reservationWarningScheduler: UNUserNotificationCenterReservationWarningScheduler()
+                reservationWarningScheduler: UNUserNotificationCenterReservationWarningScheduler(),
+                // The app's real durable storage (W3-D1), so an unresolved
+                // request-create operation survives app/process termination.
+                // Tests inject an isolated suite or an in-memory double
+                // instead, matching every other real-storage argument here.
+                operationStorage: UserDefaultsPendingRequestOperationStorage(defaults: .standard)
             )
         )
         _alertSubscriptionStore = StateObject(
@@ -205,6 +210,12 @@ struct ContentView: View {
             notificationRouter.updateApplicationSceneActivity(isActive: isActive)
             requestStore.updateApplicationVisibility(isVisible: isActive)
             _ = try? await requestStore.continueActiveReservationIfNeeded()
+            // W3-D1 cold-launch/relaunch reconciliation: resumes and
+            // reconciles an unresolved request-create operation left over
+            // from a previous process, using the exact same operation
+            // identity and submitted fields as the original attempt. A no-op
+            // whenever nothing durable remains.
+            _ = await requestStore.reconcilePendingCreateOperationIfNeeded()
         }
         .onChange(of: scenePhase) { _, phase in
             let isActive = phase == .active

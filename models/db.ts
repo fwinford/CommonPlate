@@ -388,6 +388,77 @@ RequestSchema.index(
   }
 );
 
+/* ========================== RequestOperation =========================== */
+// The durable exact-identity ledger behind bounded W3-D1 request-create
+// recovery. Deliberately its own collection rather than a field on `Request`
+// (the Pass 1 design): `Request` is TTL-deleted (`deleteAt`) once a request
+// stops being active/actionable, and Pass 1 stored the only durable
+// `operationId` record on that same document. Deleting the Request silently
+// freed its identity for reuse — the exact "cleanup makes an expired
+// operation fresh again" defect the amended contract forbids.
+//
+// This ledger row is never reclaimed by that TTL, so an operation's identity
+// stays distinguishable from "genuinely new" long after its Request is gone.
+// It is a minimal identity tombstone, not request history: no request
+// content lives here, only the exact operation identity, the participant
+// that owns it, and a pointer to the Request it created.
+// `POST /api/request` follows that pointer at read time — if the referenced
+// Request document still exists, the operation is still recoverable; once
+// MongoDB's TTL has reclaimed it, presenting the same identity again
+// resolves as terminal expired/unrecoverable instead of falling through to a
+// fresh create. Rows are kept indefinitely rather than on their own TTL: each
+// is a handful of bytes, and the alternative — freeing them after some
+// duration — would eventually let the exact defect above resurface, only
+// delayed rather than fixed.
+export interface IRequestOperation extends Document {
+  operationId: string;
+  participantId: Types.ObjectId;
+  requestId: Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const RequestOperationSchema = new Schema<IRequestOperation>(
+  {
+    operationId: { type: String, required: true, trim: true },
+    // Private lookup/authority fields, `select: false` like their `Request`
+    // counterparts: never a public read target and never returned by an
+    // ordinary query on this collection.
+    participantId: {
+      type: Schema.Types.ObjectId,
+      ref: "Participant",
+      required: true,
+      select: false,
+    },
+    requestId: {
+      type: Schema.Types.ObjectId,
+      ref: "Request",
+      required: true,
+      select: false,
+    },
+  },
+  { timestamps: true }
+);
+
+// The sole uniqueness/concurrency primitive behind "at most one Request per
+// logical operation": a create first reserves this row inside the same
+// transaction that creates the Request, and a concurrent racer for the same
+// exact identity loses this insert with a duplicate-key error. Not sparse —
+// unlike the retired `Request.operationId` index — because every row here
+// corresponds to exactly one succeeded create; there is no legacy/absent case
+// to keep separate from a shared `undefined`.
+RequestOperationSchema.index(
+  { operationId: 1 },
+  { unique: true, name: "request_operation_ledger_identity_unique" }
+);
+
+export const RequestOperation =
+  (mongoose.models.RequestOperation as mongoose.Model<IRequestOperation>) ||
+  mongoose.model<IRequestOperation>(
+    "RequestOperation",
+    RequestOperationSchema
+  );
+
 /* ============================ Fulfillment ============================= */
 export interface IFulfillment extends Document {
   requestId: mongoose.Types.ObjectId;
