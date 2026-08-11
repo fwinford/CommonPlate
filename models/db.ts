@@ -388,6 +388,19 @@ RequestSchema.index(
   }
 );
 
+// Supports W3-H2 fulfillment re-entry: "does this verified participant have
+// no active reservation but most recently place a still-existing request".
+// Partial on `status: "placed"` for the same reason as the index above, and
+// ordered by `placedAt` descending so the most recent placement is the first
+// match without an in-memory sort.
+RequestSchema.index(
+  { helperParticipantId: 1, status: 1, placedAt: -1 },
+  {
+    name: "request_helper_placed_participation",
+    partialFilterExpression: { status: "placed" },
+  }
+);
+
 /* ========================== RequestOperation =========================== */
 // The durable exact-identity ledger behind bounded W3-D1 request-create
 // recovery. Deliberately its own collection rather than a field on `Request`
@@ -457,6 +470,75 @@ export const RequestOperation =
   mongoose.model<IRequestOperation>(
     "RequestOperation",
     RequestOperationSchema
+  );
+
+/* ========================= RequestParticipation ========================= */
+// The durable, append-only one-successful-participation ledger behind W3-H2:
+// once verified participant P has successfully acquired reservation
+// authority over request R, P can never successfully acquire R again —
+// durably, across releases, expiry, devices, reinstalls, and identity
+// replacement.
+//
+// Deliberately its own collection, following the `RequestOperation`
+// precedent above, rather than a field on `Request`: `Request.
+// helperParticipantId` is only current-holder state (overwritten on reclaim,
+// `$unset` on release in `claimRoute.ts`), never history, and a field would
+// be cleared by the exact operations this record has to survive.
+//
+// A row is written once, atomically inside the same transaction that grants
+// a claim (`claimRequest`, `src/claimRoute.ts`), immediately after the
+// conditional grant commits, and is never updated or deleted by release,
+// expiry, or reacquisition attempts. `claimRequest` consults this collection
+// before its own conditional grant filter, so a participant who already
+// holds a row for this exact request is refused before any mutation runs.
+//
+// No TTL: historical participation naturally stops mattering once `Request`
+// itself is reclaimed by its own `deleteAt` TTL — a fresh `Request._id` is
+// never reused, so a row referencing a since-deleted request can never match
+// a later claim attempt. Rows are kept indefinitely, like `RequestOperation`,
+// rather than on their own retention window.
+export interface IRequestParticipation extends Document {
+  requestId: Types.ObjectId;
+  participantId: Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const RequestParticipationSchema = new Schema<IRequestParticipation>(
+  {
+    // Private lookup fields, `select: false` like their `Request`/
+    // `RequestOperation` counterparts: never a public read target.
+    requestId: {
+      type: Schema.Types.ObjectId,
+      ref: "Request",
+      required: true,
+      select: false,
+    },
+    participantId: {
+      type: Schema.Types.ObjectId,
+      ref: "Participant",
+      required: true,
+      select: false,
+    },
+  },
+  { timestamps: true }
+);
+
+// The sole uniqueness/concurrency primitive behind "P can never successfully
+// acquire R again": the claim grant transaction inserts this row exactly
+// once per (requestId, participantId), and a reacquisition attempt that
+// raced past the pre-check still loses this insert with a duplicate-key
+// error, aborting the whole transaction alongside it.
+RequestParticipationSchema.index(
+  { requestId: 1, participantId: 1 },
+  { unique: true, name: "request_participation_identity_unique" }
+);
+
+export const RequestParticipation =
+  (mongoose.models.RequestParticipation as mongoose.Model<IRequestParticipation>) ||
+  mongoose.model<IRequestParticipation>(
+    "RequestParticipation",
+    RequestParticipationSchema
   );
 
 /* ============================ Fulfillment ============================= */

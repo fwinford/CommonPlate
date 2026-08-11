@@ -1203,7 +1203,11 @@ final class ClaimFlowTests: XCTestCase {
             ("REQUEST_EXPIRED", 410),
             ("REQUEST_INSUFFICIENT_TIME", 409),
             ("REQUEST_ALREADY_PLACED", 409),
-            ("REQUEST_NOT_FOUND", 404)
+            ("REQUEST_NOT_FOUND", 404),
+            // W3-H2: a stale Reserve tap on a request this participant already
+            // successfully held once before. Reuses this exact presentation —
+            // no new copy — per the accepted marketplace-presentation contract.
+            ("REQUEST_ALREADY_PARTICIPATED", 409)
         ]
 
         for entry in unavailableCodes {

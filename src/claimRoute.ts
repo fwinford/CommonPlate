@@ -1,7 +1,11 @@
 import type { NextFunction, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import mongoose from "mongoose";
-import { Participant, Request as MealRequest } from "../models/db.js";
+import {
+  Participant,
+  Request as MealRequest,
+  RequestParticipation,
+} from "../models/db.js";
 import {
   buildPublicRequestDetailResponse,
   type PublicRequestDocument,
@@ -41,6 +45,17 @@ export const HELPER_ALREADY_HAS_ACTIVE_RESERVATION_CODE =
   "HELPER_ALREADY_HAS_ACTIVE_RESERVATION";
 export const HELPER_ALREADY_HAS_ACTIVE_RESERVATION_MESSAGE =
   "You already have an active reservation. Finish or release it before starting another.";
+
+// W3-H2: once a verified participant has successfully acquired this exact
+// request, they can never successfully acquire it again — not after release,
+// not after passive expiry, not from another device or reinstall. Distinct
+// from `HELPER_ALREADY_HAS_ACTIVE_RESERVATION` above: that refusal is about a
+// *different* request the caller is still holding; this one is about this
+// exact request's own durable history with this caller, and applies even
+// when the caller currently holds no reservation at all.
+export const REQUEST_ALREADY_PARTICIPATED_CODE = "REQUEST_ALREADY_PARTICIPATED";
+export const REQUEST_ALREADY_PARTICIPATED_MESSAGE =
+  "You've already helped with this request and can't reserve it again.";
 
 interface ClaimDiagnosticDocument {
   status?: string;
@@ -150,6 +165,22 @@ class ConditionalClaimFailure extends Error {}
  */
 class ActiveReservationConflict extends Error {}
 
+/**
+ * The target request was successfully claimed, but this exact verified
+ * participant already holds a durable one-successful-participation record for
+ * it (W3-H2). Rolled back with the rest of the transaction exactly like
+ * `ActiveReservationConflict`: a reacquisition never ends up granted.
+ */
+class AlreadyParticipatedConflict extends Error {}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return (
+    Boolean(error) &&
+    typeof error === "object" &&
+    (error as { code?: unknown }).code === 11000
+  );
+}
+
 interface ClaimedRequestDocument extends PublicRequestDocument {
   pickupName: string;
   claimExpiresAt: Date;
@@ -223,6 +254,27 @@ export async function claimRequest(
 
         if (existingActiveReservation) {
           throw new ActiveReservationConflict();
+        }
+
+        // The W3-H2 one-successful-participation invariant, consulted before
+        // the conditional grant below: a participant who has ever
+        // successfully acquired this exact request is refused regardless of
+        // the request's current status (open, claimed, or claim-expired) or
+        // who granted this read the request last. Read inside the same
+        // transaction/session as the grant that follows, and backstopped by
+        // the unique-index insert after a successful grant below — so a
+        // reacquisition can never be granted even if this pre-check and the
+        // insert somehow disagreed.
+        const existingParticipation = await RequestParticipation.findOne(
+          { requestId: id, participantId },
+          { _id: 1 },
+          { session }
+        )
+          .lean()
+          .exec();
+
+        if (existingParticipation) {
+          throw new AlreadyParticipatedConflict();
         }
 
         const document = await MealRequest.findOneAndUpdate(
@@ -301,6 +353,23 @@ export async function claimRequest(
           throw new ActiveReservationConflict();
         }
 
+        // The durable W3-H2 participation record, written atomically in the
+        // same transaction as the grant it belongs to. A duplicate-key error
+        // here means a concurrent transaction already recorded this exact
+        // (request, participant) pair — the final backstop for the pre-check
+        // above — and aborts this entire grant along with it.
+        try {
+          await RequestParticipation.create(
+            [{ requestId: document._id, participantId }],
+            { session }
+          );
+        } catch (participationError) {
+          if (isDuplicateKeyError(participationError)) {
+            throw new AlreadyParticipatedConflict();
+          }
+          throw participationError;
+        }
+
         claimedDocument = document as unknown as ClaimedRequestDocument;
       },
       {
@@ -331,6 +400,14 @@ export async function claimRequest(
         409,
         HELPER_ALREADY_HAS_ACTIVE_RESERVATION_CODE,
         HELPER_ALREADY_HAS_ACTIVE_RESERVATION_MESSAGE
+      );
+    }
+    if (error instanceof AlreadyParticipatedConflict) {
+      return sendDay4Error(
+        res,
+        409,
+        REQUEST_ALREADY_PARTICIPATED_CODE,
+        REQUEST_ALREADY_PARTICIPATED_MESSAGE
       );
     }
     if (error instanceof ConditionalClaimFailure) {

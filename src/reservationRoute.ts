@@ -29,7 +29,20 @@ interface ActiveReservationDocument extends PublicRequestDocument {
 }
 
 /**
- * `GET /api/participant/active-reservation` (W3-H1 continuation).
+ * A request this participant most recently placed, still existing within its
+ * `PLACED_RETENTION_MS` retention horizon (W3-H2 fulfillment re-entry).
+ * `notificationStatus` mirrors the persisted lifecycle value; `"pending"` and
+ * absent both mean the outcome never settled (e.g. the process ended before
+ * `recordNotificationOutcome` ran) and are reported the same way `fulfillRequest`
+ * already treats an unsettled outcome — as unknown, never guessed.
+ */
+interface PlacedParticipationDocument extends PublicRequestDocument {
+  notificationStatus?: "pending" | "sent" | "failed";
+}
+
+/**
+ * `GET /api/participant/active-reservation` (W3-H1 continuation, extended by
+ * W3-H2 fulfillment re-entry).
  *
  * Resolves "does this verified participant currently hold an active
  * reservation, and which one" directly from `Request.helperParticipantId` —
@@ -39,6 +52,17 @@ interface ActiveReservationDocument extends PublicRequestDocument {
  * Never returns the raw claim token: it was never persisted, and continuation
  * consumes participant authority for extend/release instead. Client
  * presentation state is not authoritative; this response is what is.
+ *
+ * When this participant holds no active claimed reservation, the same
+ * authoritative read additionally reports whether they most recently placed
+ * a still-existing request (W3-H2): `Request.status === "placed"` plus this
+ * `helperParticipantId` binding, retained until the existing `deleteAt`/
+ * `PLACED_RETENTION_MS` TTL, is already durable proof that "this participant
+ * placed this request" — `Fulfillment` carries no `participantId` and is not
+ * the right anchor. This never recreates reservation authority and never
+ * implies a second external order is available: it is a read of settled
+ * placement truth only, so a relaunched client can restore Got It/
+ * already-placed presentation instead of silently discarding it.
  */
 export async function getActiveReservation(
   req: Request,
@@ -50,32 +74,70 @@ export async function getActiveReservation(
   }
 
   const now = new Date();
+  const participantId = new mongoose.Types.ObjectId(
+    authority.participant.participantId
+  );
   try {
     const document = await MealRequest.findOne({
-      helperParticipantId: new mongoose.Types.ObjectId(
-        authority.participant.participantId
-      ),
+      helperParticipantId: participantId,
       status: "claimed",
       claimExpiresAt: { $gt: now },
     })
       .lean()
       .exec();
 
-    if (!document) {
-      return res.json({ reservation: null });
+    if (document) {
+      const reservation = document as unknown as ActiveReservationDocument;
+      const publicResponse = buildPublicRequestDetailResponse(
+        reservation,
+        now
+      );
+      return res.json({
+        reservation: {
+          request: publicResponse.request,
+          pickupName: reservation.pickupName,
+          claimExpiresAt: reservation.claimExpiresAt,
+          claimExtendedAt: reservation.claimExtendedAt ?? null,
+        },
+        placement: null,
+      });
     }
-    const reservation = document as unknown as ActiveReservationDocument;
 
+    // `deleteAt` is authoritative retention, not the physical TTL sweep: Mongo's
+    // TTL monitor runs on its own interval and does not delete a document the
+    // instant `deleteAt` passes, so an unfiltered query here could resurrect a
+    // request whose retention horizon has already elapsed merely because the
+    // physical delete has not run yet. Compared against backend `now`, the same
+    // instant already used for the active-claim read above.
+    const placed = await MealRequest.findOne(
+      {
+        helperParticipantId: participantId,
+        status: "placed",
+        deleteAt: { $gt: now },
+      },
+      undefined,
+      { sort: { placedAt: -1 } }
+    )
+      .lean()
+      .exec();
+
+    if (!placed) {
+      return res.json({ reservation: null, placement: null });
+    }
+    const placedDocument = placed as unknown as PlacedParticipationDocument;
     const publicResponse = buildPublicRequestDetailResponse(
-      reservation,
+      placedDocument,
       now
     );
     return res.json({
-      reservation: {
+      reservation: null,
+      placement: {
         request: publicResponse.request,
-        pickupName: reservation.pickupName,
-        claimExpiresAt: reservation.claimExpiresAt,
-        claimExtendedAt: reservation.claimExtendedAt ?? null,
+        notification:
+          placedDocument.notificationStatus === "sent" ||
+          placedDocument.notificationStatus === "failed"
+            ? { status: placedDocument.notificationStatus }
+            : null,
       },
     });
   } catch {

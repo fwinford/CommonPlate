@@ -106,6 +106,7 @@ import {
   ParticipantVerification,
   PushDelivery,
   Request as MealRequest,
+  RequestParticipation,
   Subscriber,
 } from "./models/db.js";
 import rateLimit from "express-rate-limit";
@@ -116,6 +117,10 @@ import {
   RequestListDocument,
 } from "./src/requestListResponse.js";
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
+import {
+  filterRequestListForParticipant,
+  resolveOptionalParticipantAuthority,
+} from "./src/requestParticipation.js";
 import {
   createRequest,
   createRequestRateLimiter,
@@ -413,12 +418,20 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
       .lean()
       .exec();
 
-    res.json(
-      buildPublicRequestListResponse(
-        docs as unknown as RequestListDocument[],
-        now
-      )
+    // W3-H2 marketplace presentation: a request this verified participant has
+    // ever successfully held must no longer appear in their own eligible
+    // list once they no longer hold it. Browsing stays open to anyone
+    // (W3-I1), so an absent or unusable credential here degrades to the
+    // unfiltered anonymous list rather than refusing the read; every other
+    // eligible participant's own list is unaffected, because the filter is
+    // always scoped to exactly the resolved caller's own participant id.
+    const participant = await resolveOptionalParticipantAuthority(req);
+    const visibleDocs = await filterRequestListForParticipant(
+      docs as unknown as RequestListDocument[],
+      participant
     );
+
+    res.json(buildPublicRequestListResponse(visibleDocs, now));
   } catch (err) {
     next(err);
   }
@@ -544,6 +557,11 @@ await PushDelivery.createIndexes();
 // codes live for one inbox instead of superseding the first.
 await Participant.createIndexes();
 await ParticipantVerification.createIndexes();
+// Do not accept claim traffic until the database has established the
+// one-successful-participation-per-(request, participant) uniqueness
+// guarantee (W3-H2). Without it, `claimRequest`'s pre-check and insert are
+// only a best-effort race guard, not a durable invariant.
+await RequestParticipation.createIndexes();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   const PUBLIC_BASE = process.env.BASE_URL || `http://localhost:${PORT}`;

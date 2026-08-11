@@ -6,6 +6,34 @@
 //
 import SwiftUI
 
+/// Keys the W3-H2 stale-detail eligibility `.task` so SwiftUI cancels and
+/// restarts the read whenever the request changes, or whenever the
+/// authoritative participant identity changes (e.g. Change Email completing
+/// while this screen is open) — a result resolved for a superseded identity
+/// must never be applied to the replacement one. Not `private`: shared with
+/// `RequestDetailView.renderedEligibility(resolved:currentKey:)` below and
+/// exercised directly by focused tests, matching this file's existing
+/// pattern of testable `static func` helpers (`opensClaimedFlow`,
+/// `shouldDismiss`).
+struct StaleParticipationTaskKey: Equatable {
+    let requestID: String
+    let identity: ParticipantIdentityPresentation?
+}
+
+/// A `StaleParticipationEligibility` result, bound to the exact
+/// `(requestID, verified identity)` key it was resolved for. Storing the key
+/// alongside the result — rather than the result alone — is what lets
+/// rendering itself, not just the async read, refuse to honor a result that
+/// belongs to a principal that is no longer current: the moment
+/// `identityStore.identity` changes, `RequestDetailView` recomputes the
+/// current key on its very next render and this stored result stops
+/// matching it, synchronously and before the replacement identity's own
+/// `.task` read has even had a chance to complete.
+struct ResolvedStaleParticipation: Equatable {
+    let key: StaleParticipationTaskKey
+    let eligibility: RequestStore.StaleParticipationEligibility
+}
+
 /// How a claim attempt is presented to the helper. Backend codes are mapped
 /// deliberately, with a fallback for anything unrecognized, per the error
 /// contract in docs/system-contract.md. The stable code itself stays on
@@ -87,7 +115,12 @@ enum ClaimPresentationError: Equatable {
             case ClaimErrorCode.requestExpired,
                  ClaimErrorCode.requestInsufficientTime,
                  ClaimErrorCode.requestAlreadyPlaced,
-                 ClaimErrorCode.requestNotFound:
+                 ClaimErrorCode.requestNotFound,
+                 // W3-H2: a stale Reserve tap on a request this participant
+                 // already successfully held once before. Reuses this exact
+                 // presentation — no new copy — per the accepted
+                 // marketplace-presentation contract.
+                 ClaimErrorCode.requestAlreadyParticipated:
                 return .noLongerAvailable
             case ClaimErrorCode.requestNotYetAvailable:
                 return .notYetAvailable
@@ -150,6 +183,77 @@ struct RequestDetailView: View {
     @ObservedObject var verificationCoordinator:
         ParticipantActionVerificationCoordinator
     @Binding var path: [AppRoute]
+
+    /// The last W3-H2 stale-detail eligibility result the `.task` below
+    /// actually resolved, bound to the exact key it was resolved for. `nil`
+    /// before any read completes. Never read directly by the body — see
+    /// `staleParticipationEligibility` below, which is what actually gates
+    /// rendering and is what refuses to honor a result once it no longer
+    /// matches the current request/identity key.
+    @State private var resolvedStaleParticipation: ResolvedStaleParticipation?
+
+    /// This screen's current W3-H2 stale-detail eligibility key: exactly the
+    /// request and the verified participant identity currently in effect.
+    /// Recomputed on every render, so a change to `identityStore.identity`
+    /// (e.g. Change Email completing) invalidates a stored result the very
+    /// next render — synchronously, without waiting for a new `.task` read.
+    private var staleParticipationKey: StaleParticipationTaskKey {
+        StaleParticipationTaskKey(requestID: request.id, identity: identityStore.identity)
+    }
+
+    /// The rendered W3-H2 stale-detail eligibility: `.unresolved` — never
+    /// actionable — unless `resolvedStaleParticipation` was resolved for
+    /// exactly the current `staleParticipationKey`. This is what keeps a
+    /// result resolved for one verified principal from ever exposing Reserve
+    /// under a different one, even transiently: no asynchronous coordination
+    /// is required for correctness here, because this check runs on every
+    /// render, including the very first one after identity changes and
+    /// before its own `.task` read has had a chance to complete. Only a
+    /// confirmed `.eligible` answer, for the current key, ever exposes
+    /// Reserve; a failed, superseded, or mismatched-key read reads as
+    /// `.unresolved` rather than being treated as permission.
+    /// `claimRequest`'s own conditional grant remains the authoritative
+    /// backstop regardless of this state.
+    private var staleParticipationEligibility: RequestStore.StaleParticipationEligibility {
+        Self.renderedEligibility(resolved: resolvedStaleParticipation, currentKey: staleParticipationKey)
+    }
+
+    /// The pure identity-key gate itself, factored out of the computed
+    /// property above so it can be exercised directly by focused tests
+    /// (`RequestDetailStaleParticipationTests.swift`) rather than only
+    /// through source inspection — the same testable-`static-func` pattern
+    /// this file already uses for `opensClaimedFlow` and `shouldDismiss`.
+    /// `.unresolved` whenever `resolved` is `nil` or was resolved for a
+    /// different key than `currentKey`; otherwise the resolved eligibility
+    /// itself.
+    static func renderedEligibility(
+        resolved: ResolvedStaleParticipation?,
+        currentKey: StaleParticipationTaskKey
+    ) -> RequestStore.StaleParticipationEligibility {
+        guard let resolved, resolved.key == currentKey else {
+            return .unresolved
+        }
+        return resolved.eligibility
+    }
+
+    /// The W3-H2 stale-detail action boundary: `startClaim()` below must
+    /// consult this — not merely trust that an already-materialized Reserve
+    /// button implies permission — before starting verification or a claim.
+    /// Deliberately calls `renderedEligibility(resolved:currentKey:)` above,
+    /// not a separately reimplemented comparison: the render gate and the
+    /// action gate must always agree, and `currentKey` is derived fresh from
+    /// live state at the moment of the call, not a value captured when the
+    /// button was drawn. This is what makes a button materialized for
+    /// principal A harmless the instant identity changes to principal B —
+    /// SwiftUI's next render, `.task` cancellation, and any async read are
+    /// all irrelevant to this property; only the synchronous key comparison
+    /// at the moment of the tap is.
+    static func canStartClaim(
+        resolved: ResolvedStaleParticipation?,
+        currentKey: StaleParticipationTaskKey
+    ) -> Bool {
+        renderedEligibility(resolved: resolved, currentKey: currentKey) == .eligible
+    }
 
     /// The single rule for entering the claimant-only flow: a confirmed claim
     /// for *this* request exists in memory. There is no loading, optimistic, or
@@ -226,11 +330,43 @@ struct RequestDetailView: View {
                     // a way back into the reservation they already hold.
                     continueHelpingLink
                 } else {
-                    claimSection
+                    switch staleParticipationEligibility {
+                    case .unresolved:
+                        // Not yet known, or a failed/superseded read — never
+                        // treated as permission to Reserve. Nothing renders
+                        // here rather than inventing new "checking…" copy;
+                        // the `.task` below re-resolves this whenever the
+                        // request or the authoritative identity changes.
+                        EmptyView()
+                    case .alreadyParticipated:
+                        // W3-H2 stale detail Reserve truth: this verified
+                        // participant already successfully held this exact
+                        // request once before and can never reacquire it.
+                        // Reuses the existing refused-reservation copy — no
+                        // new explanatory text — per the accepted
+                        // marketplace-presentation contract.
+                        Text(Self.noLongerAvailableNotice)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("claim-error")
+                    case .eligible:
+                        claimSection
+                    }
                 }
             }
         }
         .navigationTitle("Request")
+        .task(id: staleParticipationKey) {
+            // The key is captured before the asynchronous read starts, and
+            // re-derived (not reused) after it completes: `identityStore` is
+            // a live reference, so re-reading `staleParticipationKey` below
+            // reflects whatever is authoritative *now*, not what it was when
+            // this task began. A result is only ever written for the exact
+            // key it was resolved for.
+            let key = staleParticipationKey
+            let result = await store.resolveStaleParticipationEligibility(for: request.id)
+            guard !Task.isCancelled, key == staleParticipationKey else { return }
+            resolvedStaleParticipation = ResolvedStaleParticipation(key: key, eligibility: result)
+        }
         // Confirmed claim success is the only thing that opens the flow, and it
         // opens it by pushing a route rather than by flipping a presentation
         // flag this screen would then have to keep in sync with store state.
@@ -475,6 +611,18 @@ struct RequestDetailView: View {
     }
 
     private func startClaim() {
+        // W3-H2 stale-detail action boundary: an already-materialized Reserve
+        // button is not itself permission. Re-derives the current key and
+        // re-checks it against whatever was actually resolved, at the exact
+        // moment of the tap — synchronously, independent of whether SwiftUI
+        // has committed a re-render since identity last changed. A button
+        // drawn for a principal who has since been replaced (Change Email
+        // completing) becomes a no-op the instant that replacement happens,
+        // not merely once the next render or `.task` catches up.
+        guard Self.canStartClaim(resolved: resolvedStaleParticipation, currentKey: staleParticipationKey) else {
+            return
+        }
+
         // The helper gate. Nothing is reserved and no request is sent for an
         // unverified helper: the reservation would be refused by the backend
         // anyway, and taking a real student's meal out of everyone else's reach

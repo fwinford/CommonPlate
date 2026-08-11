@@ -101,7 +101,7 @@ describeMongo("real MongoDB active-reservation continuation (W3-H1)", () => {
     await getActiveReservation(context.req, context.res);
 
     expect(context.statusCode).toBe(200);
-    expect(context.body).toEqual({ reservation: null });
+    expect(context.body).toEqual({ reservation: null, placement: null });
   });
 
   it("resolves the active reservation bound to the verified helper, without a raw claim token", async () => {
@@ -156,7 +156,7 @@ describeMongo("real MongoDB active-reservation continuation (W3-H1)", () => {
     const context = routeContext();
     await getActiveReservation(context.req, context.res);
 
-    expect(context.body).toEqual({ reservation: null });
+    expect(context.body).toEqual({ reservation: null, placement: null });
   });
 
   it("requires participant verification", async () => {
@@ -165,5 +165,220 @@ describeMongo("real MongoDB active-reservation continuation (W3-H1)", () => {
     await getActiveReservation(context.req, context.res);
 
     expect(context.statusCode).toBe(401);
+  });
+
+  describe("W3-H2 fulfillment re-entry", () => {
+    it("restores placed-by-me truth once the reservation is gone, with a settled notification outcome", async () => {
+      const now = new Date();
+      const request = await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Grain bowl",
+        pickupName: "Placed Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        placedAt: new Date(now.getTime() - 5 * 60 * 1000),
+        orderNumber: "70154321",
+        etaText: "15 minutes",
+        notificationStatus: "sent",
+        helperParticipantId,
+      });
+
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      expect(context.body.reservation).toBeNull();
+      expect(context.body.placement.request.id).toBe(String(request._id));
+      expect(context.body.placement.request.status).toBe("placed");
+      expect(context.body.placement.notification).toEqual({ status: "sent" });
+      // Never a path back to reservation authority or a second order: no
+      // claim-private field of any kind may appear in this read.
+      expect(JSON.stringify(context.body)).not.toMatch(
+        /pickupName|claimToken|claimExpiresAt/
+      );
+    });
+
+    it("reports a still-pending notification outcome as unknown rather than guessing", async () => {
+      const now = new Date();
+      await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Grain bowl",
+        pickupName: "Placed Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        placedAt: new Date(now.getTime() - 5 * 60 * 1000),
+        orderNumber: "70154322",
+        etaText: "15 minutes",
+        notificationStatus: "pending",
+        helperParticipantId,
+      });
+
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+
+      expect(context.body.placement.notification).toBeNull();
+    });
+
+    it("reports the most recent placement when this participant placed more than one still-existing request", async () => {
+      const now = new Date();
+      await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Older bowl",
+        pickupName: "Older Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        placedAt: new Date(now.getTime() - 30 * 60 * 1000),
+        orderNumber: "70154323",
+        etaText: "15 minutes",
+        notificationStatus: "sent",
+        helperParticipantId,
+      });
+      const mostRecent = await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Newer bowl",
+        pickupName: "Newer Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        placedAt: new Date(now.getTime() - 5 * 60 * 1000),
+        orderNumber: "70154324",
+        etaText: "10 minutes",
+        notificationStatus: "sent",
+        helperParticipantId,
+      });
+
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+
+      expect(context.body.placement.request.id).toBe(String(mostRecent._id));
+    });
+
+    it("never restores placement for a different participant's placed request", async () => {
+      const now = new Date();
+      await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Grain bowl",
+        pickupName: "Someone Else's Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        placedAt: new Date(now.getTime() - 5 * 60 * 1000),
+        orderNumber: "70154325",
+        etaText: "15 minutes",
+        notificationStatus: "sent",
+        helperParticipantId: new mongoose.Types.ObjectId(),
+      });
+
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+
+      expect(context.body).toEqual({ reservation: null, placement: null });
+    });
+
+    it("excludes a placed request whose retention horizon has already elapsed even though the document still physically exists", async () => {
+      // Models Mongo's TTL monitor not having physically deleted the document
+      // yet: `deleteAt` is already in the past, but the row is still there.
+      // Authoritative retention must be decided by comparing `deleteAt` to
+      // backend `now`, never by whether the physical sweep has run.
+      const now = new Date();
+      await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Stale bowl",
+        pickupName: "Stale Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() - 60 * 1000),
+        placedAt: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000),
+        orderNumber: "70154399",
+        etaText: "15 minutes",
+        notificationStatus: "sent",
+        helperParticipantId,
+      });
+
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+
+      expect(context.body).toEqual({ reservation: null, placement: null });
+    });
+
+    it("still restores a placement exactly at its retention boundary as within horizon, and excludes one exactly past it", async () => {
+      const now = new Date();
+      await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Boundary bowl",
+        pickupName: "Boundary Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() - 60 * 1000),
+        deleteAt: now,
+        placedAt: new Date(now.getTime() - 60 * 1000),
+        orderNumber: "70154400",
+        etaText: "15 minutes",
+        notificationStatus: "sent",
+        helperParticipantId,
+      });
+
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+
+      // `deleteAt: { $gt: now }` excludes a row exactly at `now`, matching the
+      // exclusive TTL boundary MongoDB itself uses to reclaim the document.
+      expect(context.body).toEqual({ reservation: null, placement: null });
+    });
+
+    it("prefers an active reservation over a still-existing prior placement", async () => {
+      const now = new Date();
+      await MealRequest.create({
+        vendor: "Placed Cafe",
+        food: "Grain bowl",
+        pickupName: "Placed Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "placed",
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        placedAt: new Date(now.getTime() - 5 * 60 * 1000),
+        orderNumber: "70154326",
+        etaText: "15 minutes",
+        notificationStatus: "sent",
+        helperParticipantId,
+      });
+      const activeRequest = await MealRequest.create({
+        vendor: "Continuation Cafe",
+        food: "Noodle bowl",
+        pickupName: "Active Pickup",
+        pickupWindowText: "ASAP",
+        email: "requester@example.edu",
+        status: "claimed",
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        deleteAt: new Date(now.getTime() + 60 * 60 * 1000),
+        claimedAt: now,
+        claimExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
+        claimTokenDigest: "e".repeat(64),
+        helperParticipantId,
+      });
+
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+
+      expect(context.body.reservation.request.id).toBe(String(activeRequest._id));
+      expect(context.body.placement).toBeNull();
+    });
   });
 });

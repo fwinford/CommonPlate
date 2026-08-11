@@ -342,6 +342,10 @@ enum ClaimErrorCode {
     static let requestNotFound = "REQUEST_NOT_FOUND"
     static let requestAlreadyClaimed = "REQUEST_ALREADY_CLAIMED"
     static let requestAlreadyPlaced = "REQUEST_ALREADY_PLACED"
+    /// W3-H2: this verified participant already successfully held this exact
+    /// request once before and can never reacquire it, even though the
+    /// request itself may currently be open again for other helpers.
+    static let requestAlreadyParticipated = "REQUEST_ALREADY_PARTICIPATED"
     static let requestExpired = "REQUEST_EXPIRED"
     /// A scheduled request whose start has not arrived. Distinct from
     /// `requestExpired`: nothing has run out, it has not begun.
@@ -634,7 +638,9 @@ final class RequestStore: ObservableObject {
         }
 
         do {
-            let fetchedRequests = try await service.fetchActiveRequests()
+            let fetchedRequests = try await service.fetchActiveRequests(
+                participantAuthority: participantAuthorityProvider()
+            )
             guard generation == fetchGeneration,
                   startingCollectionRevision == collectionRevision else {
                 return
@@ -1148,15 +1154,9 @@ final class RequestStore: ObservableObject {
             return .unknown
         }
         do {
-            guard let reservation = try await service.fetchActiveReservation(
+            let state = try await service.fetchParticipantReservationState(
                 participantAuthority: participantAuthority
-            ) else {
-                if let activeClaim {
-                    return .active(activeClaim)
-                }
-                reservationWarningScheduler.cancelAllWarnings()
-                return .none
-            }
+            )
             // Re-checked after the `await`: a concurrent `claim()` (unlikely,
             // but not impossible if this races a fresh user-initiated claim)
             // must not be overwritten by a continuation read that started
@@ -1164,33 +1164,48 @@ final class RequestStore: ObservableObject {
             if let activeClaim {
                 return .active(activeClaim)
             }
-            let presentation = ActiveClaimPresentation(
-                request: reservation.request,
-                pickupName: reservation.pickupName,
-                claimExpiresAt: reservation.claimExpiresAt,
-                claimExtendedAt: reservation.claimExtendedAt,
-                isExtensionAvailable: Self.extensionIsAvailable(
+            switch state {
+            case .reservation(let reservation):
+                let presentation = ActiveClaimPresentation(
+                    request: reservation.request,
+                    pickupName: reservation.pickupName,
                     claimExpiresAt: reservation.claimExpiresAt,
                     claimExtendedAt: reservation.claimExtendedAt,
-                    requestExpiresAt: reservation.request.expiresAt
+                    isExtensionAvailable: Self.extensionIsAvailable(
+                        claimExpiresAt: reservation.claimExpiresAt,
+                        claimExtendedAt: reservation.claimExtendedAt,
+                        requestExpiresAt: reservation.request.expiresAt
+                    )
                 )
-            )
-            beginActiveClaim(
-                presentation: presentation,
-                authorization: ActiveClaimAuthorization(
-                    claimID: UUID(),
-                    requestID: reservation.request.id,
-                    // The raw token was never persisted; continuation
-                    // authorizes further actions on this claim (extend,
-                    // release) with participant authority instead.
-                    claimToken: nil,
-                    // Capture the exact credential whose successful read
-                    // established ownership. A later Change Email affects
-                    // future participant actions, not this reservation.
-                    participantAuthority: participantAuthority
+                beginActiveClaim(
+                    presentation: presentation,
+                    authorization: ActiveClaimAuthorization(
+                        claimID: UUID(),
+                        requestID: reservation.request.id,
+                        // The raw token was never persisted; continuation
+                        // authorizes further actions on this claim (extend,
+                        // release) with participant authority instead.
+                        claimToken: nil,
+                        // Capture the exact credential whose successful read
+                        // established ownership. A later Change Email affects
+                        // future participant actions, not this reservation.
+                        participantAuthority: participantAuthority
+                    )
                 )
-            )
-            return .active(presentation)
+                return .active(presentation)
+            case .placed(let placed):
+                // W3-H2 fulfillment re-entry: no active reservation, but this
+                // participant most recently placed a still-existing request.
+                // Restores Got It/already-placed presentation only — never
+                // reservation authority, and never a path back to Place
+                // Order for this request.
+                restorePlacedFulfillmentConfirmationIfNeeded(placed)
+                reservationWarningScheduler.cancelAllWarnings()
+                return .none
+            case .none:
+                reservationWarningScheduler.cancelAllWarnings()
+                return .none
+            }
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -1203,6 +1218,97 @@ final class RequestStore: ObservableObject {
                 presentedAuthority: participantAuthority
             )
             return .unknown
+        }
+    }
+
+    /// Restores Got It/already-placed presentation from the W3-H2
+    /// fulfillment re-entry read, mirroring `applyConfirmedFulfillment`'s own
+    /// mapping from a settled notification outcome. Never overwrites an
+    /// existing confirmation this process already produced — that can only
+    /// be more current than a relaunch-time backend read.
+    private func restorePlacedFulfillmentConfirmationIfNeeded(
+        _ placed: PlacedReservationOutcome
+    ) {
+        guard fulfillmentConfirmation == nil else { return }
+
+        let kind: FulfillmentConfirmationKind
+        switch placed.notificationStatus {
+        case .sent:
+            kind = .notificationSent
+        case .failed:
+            kind = .notificationFailed
+        case nil:
+            kind = .emailStatusUnknown
+        }
+        fulfillmentConfirmation = FulfillmentConfirmation(
+            id: UUID(),
+            requestID: placed.request.id,
+            vendor: placed.request.diningSpot.name,
+            foodDescription: placed.request.foodDescription,
+            kind: kind
+        )
+        if let notificationStatus = placed.notificationStatus {
+            confirmedFulfillmentOutcome = FulfillOutcome(
+                request: placed.request,
+                notificationStatus: notificationStatus
+            )
+        }
+    }
+
+    /// W3-H2 stale detail Reserve truth. Deliberately three states, not a
+    /// `Bool`: `.unresolved` covers both "still finding out" and "could not
+    /// find out" (a failed/unreadable read is never treated as authoritative
+    /// permission to Reserve), so a caller only ever offers Reserve for the
+    /// single state that actually confirms it — never by defaulting an
+    /// unknown to permissive.
+    enum StaleParticipationEligibility: Equatable {
+        /// Not yet known, or the read that would have resolved it failed or
+        /// was itself superseded by a newer authoritative identity. Never
+        /// actionable.
+        case unresolved
+        /// Confirmed: this exact verified participant has never held this
+        /// request. Reserve may render, subject to every other existing rule
+        /// (H1 continuation, verification gate, pause, etc).
+        case eligible
+        /// Confirmed: this exact verified participant already successfully
+        /// held this request once. Reserve must never render.
+        case alreadyParticipated
+    }
+
+    /// Resolves `StaleParticipationEligibility` for `requestID` against
+    /// current backend truth — never fabricated from local state, and never
+    /// cached across calls, so a caller that needs a fresh answer for a
+    /// changed identity gets one.
+    ///
+    /// No participant identity presented at all (browsing stays open to
+    /// anyone, W3-I1) resolves immediately to `.eligible`: there is no
+    /// participation history to ask about yet, and this is the same
+    /// permissive answer this screen gave before W3-H2 existed.
+    ///
+    /// Stale-response guard: the participant authority in effect *before*
+    /// this read is captured and compared against the authority in effect
+    /// *after* it completes. If they differ — a Change Email completed while
+    /// this read was in flight — the result belongs to a principal that is
+    /// no longer authoritative and is discarded as `.unresolved` rather than
+    /// silently authorizing the replacement identity. `claimRequest`'s own
+    /// conditional grant remains the real backstop regardless of this read.
+    func resolveStaleParticipationEligibility(
+        for requestID: String
+    ) async -> StaleParticipationEligibility {
+        guard let participantAuthority = participantAuthorityProvider() else {
+            return .eligible
+        }
+        do {
+            let alreadyParticipated = try await service.fetchAlreadyParticipated(
+                id: requestID,
+                participantAuthority: participantAuthority
+            )
+            guard participantAuthorityProvider() == participantAuthority else {
+                return .unresolved
+            }
+            return alreadyParticipated ? .alreadyParticipated : .eligible
+        } catch {
+            return .unresolved
         }
     }
 
@@ -1929,7 +2035,15 @@ final class RequestStore: ObservableObject {
             case ClaimErrorCode.requestExpired,
                  ClaimErrorCode.requestInsufficientTime,
                  ClaimErrorCode.requestAlreadyPlaced,
-                 ClaimErrorCode.requestNotFound:
+                 ClaimErrorCode.requestNotFound,
+                 // W3-H2: a stale Reserve tap on a request this participant
+                 // already successfully held once before. Grouped with the
+                 // others rather than given a new presentation — the next
+                 // step is identical (leave and return to a refreshed
+                 // list), and the accepted marketplace-presentation
+                 // contract permits reusing this exact refused-reservation
+                 // pattern instead of new explanatory copy.
+                 ClaimErrorCode.requestAlreadyParticipated:
                 return .noLongerAvailable
             default:
                 return nil

@@ -65,9 +65,15 @@ struct RequestListResponseDTO: Decodable {
 }
 
 /// Shared shape for single-request responses: detail fetch and create both
-/// return `{ request: {...} }`.
+/// return `{ request: {...} }`. `alreadyParticipated` (W3-H2 stale detail
+/// Reserve truth) is present and `true` only on a detail fetch made with a
+/// verified participant credential that already holds a durable
+/// one-successful-participation record for this exact request; absent for
+/// every other caller, including anonymous browsing and `POST /api/request`'s
+/// own reuse of this same wrapper shape, which `decodeIfPresent` tolerates.
 struct RequestDetailResponseDTO: Decodable {
     let request: RequestResponseDTO
+    let alreadyParticipated: Bool?
 }
 
 /// `GET /api/public-actions` → `{ "paused": boolean }`. Read-only and ungated.
@@ -199,9 +205,44 @@ struct ActiveReservationDetailsDTO: Decodable {
     }
 }
 
-/// `{ reservation: null }` when the verified participant holds none.
+/// The claimant-private half of a W3-H2 fulfillment re-entry read: a request
+/// this participant most recently placed, still existing within its
+/// retention horizon. `notification` is `nil` when the outcome never settled
+/// (mirrors `notificationStatus == nil` in `RequestStore.applyConfirmedFulfillment`)
+/// — never guessed as sent or failed.
+struct PlacedReservationDetailsDTO: Decodable {
+    let request: RequestResponseDTO
+    let notification: NotificationStatusDTO?
+
+    private enum CodingKeys: String, CodingKey {
+        case request
+        case notification
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let request = try container.decode(RequestResponseDTO.self, forKey: .request)
+        guard request.status == .placed else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .request,
+                in: container,
+                debugDescription: "A placement re-entry read must embed a placed request"
+            )
+        }
+
+        self.request = request
+        notification = try container.decodeIfPresent(NotificationStatusDTO.self, forKey: .notification)
+    }
+}
+
+/// `{ reservation: null, placement: null }` when the verified participant
+/// holds neither an active reservation nor a still-existing placement.
+/// `placement` is only meaningful when `reservation` is `nil` — a held
+/// reservation always takes priority — and is absent from every response
+/// this app sent before W3-H2, which `decodeIfPresent` tolerates.
 struct ActiveReservationResponseDTO: Decodable {
     let reservation: ActiveReservationDetailsDTO?
+    let placement: PlacedReservationDetailsDTO?
 }
 
 // MARK: - Fulfillment

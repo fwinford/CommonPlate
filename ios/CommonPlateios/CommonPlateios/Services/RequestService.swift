@@ -98,6 +98,27 @@ struct ActiveReservationOutcome {
     let claimExtendedAt: Date?
 }
 
+/// The claimant-private fulfillment re-entry truth for a verified participant
+/// who holds no active claimed reservation (W3-H2): a request they most
+/// recently placed, still existing within its retention horizon.
+/// `notificationStatus` is `nil` when the outcome never settled — never
+/// guessed as sent or failed.
+struct PlacedReservationOutcome {
+    let request: FoodRequest
+    let notificationStatus: NotificationDeliveryStatus?
+}
+
+/// Backend truth for `GET /api/participant/active-reservation` (W3-H1
+/// continuation, extended by W3-H2 fulfillment re-entry): a verified
+/// participant may currently hold an active claimed reservation, may hold
+/// none but have most recently placed a still-existing request, or may hold
+/// neither.
+enum ParticipantReservationState {
+    case reservation(ActiveReservationOutcome)
+    case placed(PlacedReservationOutcome)
+    case none
+}
+
 /// Result of a successful fulfillment, mirroring the backend's fulfill response shape.
 /// Core placement success (`request`) is independent of notification delivery.
 struct FulfillOutcome {
@@ -135,11 +156,18 @@ struct RequestService {
     }
 
     /// `GET /api/requests`
-    func fetchActiveRequests() async throws -> [FoodRequest] {
+    ///
+    /// Browsing stays open to anyone (W3-I1), so `participantAuthority` is
+    /// optional and sent only when this device already holds one. When
+    /// present, the backend additionally removes any request this verified
+    /// participant has ever successfully held from their own list (W3-H2
+    /// marketplace presentation) — every other caller's list is unaffected.
+    func fetchActiveRequests(participantAuthority: String? = nil) async throws -> [FoodRequest] {
         do {
             let response: RequestListResponseDTO = try await client.send(
                 path: "/api/requests",
-                method: .get
+                method: .get,
+                headers: Self.participantHeaders(participantAuthority)
             )
             return try response.requests.map(Self.mapPublicRequest)
         } catch is CancellationError {
@@ -163,6 +191,36 @@ struct RequestService {
             )
             try Self.validateResponseRequestID(response.request.id, expected: id)
             return try Self.mapPublicRequest(response.request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
+    /// Participant-aware `GET /api/request/:id` (W3-H2 stale detail Reserve
+    /// truth). Reports whether the verified participant behind
+    /// `participantAuthority` already holds a durable one-successful-
+    /// participation record for this exact request, so a detail screen
+    /// reached through stale navigation can withdraw its Reserve affordance
+    /// instead of only discovering the refusal after a tap.
+    ///
+    /// Deliberately separate from `fetchRequest` above: that method's two
+    /// existing callers (ambiguous-fulfillment confirmation and helper
+    /// notification tap-routing) need no participation truth, and must not
+    /// gain a dependency on this field's presence or decoding.
+    func fetchAlreadyParticipated(
+        id: String,
+        participantAuthority: String
+    ) async throws -> Bool {
+        do {
+            let response: RequestDetailResponseDTO = try await client.send(
+                path: "/api/request/\(id)",
+                method: .get,
+                headers: Self.participantHeaders(participantAuthority)
+            )
+            try Self.validateResponseRequestID(response.request.id, expected: id)
+            return response.alreadyParticipated ?? false
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -429,13 +487,19 @@ struct RequestService {
         }
     }
 
-    /// `GET /api/participant/active-reservation` (W3-H1 continuation).
+    /// `GET /api/participant/active-reservation` (W3-H1 continuation,
+    /// extended by W3-H2 fulfillment re-entry).
+    ///
     /// Resolves the verified participant's current active reservation from
-    /// backend truth, or `nil` if they hold none. Never fabricates a
-    /// reservation from local state — only a confirmed backend answer, or a
-    /// thrown error the caller must treat as "truth not established", is
-    /// returned.
-    func fetchActiveReservation(participantAuthority: String) async throws -> ActiveReservationOutcome? {
+    /// backend truth; when they hold none, the same read additionally
+    /// resolves whether they most recently placed a still-existing request,
+    /// so a relaunched client can restore Got It/already-placed presentation
+    /// instead of silently discarding it. Never fabricates either from local
+    /// state — only a confirmed backend answer, or a thrown error the caller
+    /// must treat as "truth not established", is returned.
+    func fetchParticipantReservationState(
+        participantAuthority: String
+    ) async throws -> ParticipantReservationState {
         try Task.checkCancellation()
 
         let response: ActiveReservationResponseDTO
@@ -451,16 +515,23 @@ struct RequestService {
             throw Self.translate(error)
         }
 
-        guard let reservation = response.reservation else {
-            return nil
+        if let reservation = response.reservation {
+            let request = try Self.mapPublicRequest(reservation.request)
+            return .reservation(ActiveReservationOutcome(
+                request: request,
+                pickupName: reservation.pickupName,
+                claimExpiresAt: reservation.claimExpiresAt,
+                claimExtendedAt: reservation.claimExtendedAt
+            ))
         }
-        let request = try Self.mapPublicRequest(reservation.request)
-        return ActiveReservationOutcome(
-            request: request,
-            pickupName: reservation.pickupName,
-            claimExpiresAt: reservation.claimExpiresAt,
-            claimExtendedAt: reservation.claimExtendedAt
-        )
+        if let placement = response.placement {
+            let request = try Self.mapPublicRequest(placement.request)
+            return .placed(PlacedReservationOutcome(
+                request: request,
+                notificationStatus: placement.notification?.status
+            ))
+        }
+        return .none
     }
 
     /// `POST /api/request/:id/fulfill`

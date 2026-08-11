@@ -10,7 +10,11 @@ import {
   it,
   vi,
 } from "vitest";
-import { Request as MealRequest, Participant } from "../models/db.js";
+import {
+  Request as MealRequest,
+  Participant,
+  RequestParticipation,
+} from "../models/db.js";
 import {
   PARTICIPANT_AUTHORITY_HEADER,
   PARTICIPANT_AUTHORITY_INVALID_CODE,
@@ -228,6 +232,34 @@ function mockExistingActiveReservation(result: unknown = null) {
 }
 
 /**
+ * The W3-H2 durable one-successful-participation pre-check `claimRequest`
+ * performs inside its transaction before the conditional grant: has this
+ * exact verified participant already successfully held this exact request.
+ * Defaults to "none found" so every existing claim case, which is not itself
+ * exercising this behavior, is unaffected by it.
+ */
+function mockExistingParticipation(result: unknown = null) {
+  return vi.spyOn(RequestParticipation, "findOne").mockReturnValue({
+    lean: () => ({
+      exec: vi.fn().mockResolvedValue(result),
+    }),
+  } as unknown as ReturnType<typeof RequestParticipation.findOne>);
+}
+
+/**
+ * The durable W3-H2 participation record `claimRequest` writes inside its
+ * transaction immediately after a successful grant. Defaults to an ordinary
+ * successful insert so every existing claim case is unaffected by it.
+ */
+function mockParticipationInsert(
+  implementation: () => Promise<unknown> = () => Promise.resolve([{}])
+) {
+  return vi
+    .spyOn(RequestParticipation, "create")
+    .mockImplementation(implementation as never);
+}
+
+/**
  * The reservation-lock mirror/clear `extendClaim` and `releaseClaim` run
  * inside their transactions (W3-H1). Defaults to a harmless success so
  * cases not exercising this behavior directly are unaffected by it.
@@ -249,6 +281,8 @@ beforeEach(() => {
   mockReservationLockResult({ _id: helperParticipantId });
   mockReservationLockMutation();
   mockExistingActiveReservation();
+  mockExistingParticipation();
+  mockParticipationInsert();
   // Release captures this Request version once before entering its
   // transaction; failure-classification cases override the same read with
   // the state they need to explain.

@@ -2,6 +2,11 @@ import type { NextFunction, Request, Response } from "express";
 import mongoose from "mongoose";
 import { Request as MealRequest } from "../models/db.js";
 import { sendDay4Error } from "./day4Errors.js";
+import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
+import {
+  findParticipatedRequestIds,
+  resolveOptionalParticipantAuthority,
+} from "./requestParticipation.js";
 import {
   isVisibleNow,
   REQUEST_NOT_YET_AVAILABLE_CODE,
@@ -17,6 +22,17 @@ export async function getPublicRequestDetail(
   res: Response,
   next: NextFunction
 ): Promise<Response | void> {
+  // W3-H2: this response is now caller-specific (`alreadyParticipated` can
+  // differ per verified participant for the identical request id), so no
+  // shared or private HTTP cache may ever store or reuse one caller's
+  // answer for another. Set first, ahead of every return path below —
+  // including the 400/404/409 refusals and the error-delegated 500 — so
+  // none of them can be cached either. `Vary` on the participant-authority
+  // header is defense in depth alongside `no-store`, for any intermediary
+  // that inspects it before honoring `no-store`.
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Vary", PARTICIPANT_AUTHORITY_HEADER);
+
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(String(id))) {
@@ -58,12 +74,34 @@ export async function getPublicRequestDetail(
       );
     }
 
-    return res.json(
-      buildPublicRequestDetailResponse(
-        document as unknown as PublicRequestDocument,
-        now
-      )
+    const response = buildPublicRequestDetailResponse(
+      document as unknown as PublicRequestDocument,
+      now
     );
+
+    // W3-H2 stale detail Reserve truth: browsing stays open to anyone
+    // (W3-I1), so an absent or unusable credential here degrades to the
+    // ordinary public response rather than refusing the read. When the
+    // caller does present a verified participant identity, this is the same
+    // durable participation truth `/api/requests` already filters its own
+    // list by (`findParticipatedRequestIds`) — a stale detail screen reached
+    // through direct navigation, a deep link, or a not-yet-refreshed list can
+    // now be told this participant already successfully held this exact
+    // request, so it can withdraw the Reserve affordance instead of only
+    // discovering the refusal after a tap. `claimRequest`'s own conditional
+    // grant remains the authoritative backstop regardless of this flag.
+    const participant = await resolveOptionalParticipantAuthority(req);
+    if (participant) {
+      const participatedIds = await findParticipatedRequestIds(
+        participant.participantId,
+        [document._id]
+      );
+      if (participatedIds.has(String(document._id))) {
+        return res.json({ ...response, alreadyParticipated: true });
+      }
+    }
+
+    return res.json(response);
   } catch (err) {
     next(err);
   }
