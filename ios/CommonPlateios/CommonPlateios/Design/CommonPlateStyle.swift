@@ -54,6 +54,12 @@ enum CommonPlateStyle {
     /// while the label's system type stays proportionate to display moments.
     enum Control {
         static let minimumHeight: CGFloat = 48
+        static let majorActionMinimumHeight: CGFloat = 52
+        /// On ordinary phones this is intentionally about four-fifths of the
+        /// usable content width, so R1's major actions feel substantial but
+        /// not like full-width form controls. Smaller/Dynamic Type layouts
+        /// naturally use their available width instead of clipping.
+        static let majorActionMaximumWidth: CGFloat = 292
     }
 }
 

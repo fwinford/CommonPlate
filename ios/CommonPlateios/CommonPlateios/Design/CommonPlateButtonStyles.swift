@@ -18,6 +18,26 @@ extension View {
         buttonStyle(CommonPlateSoftActionStyle())
     }
 
+    /// The R1 major-action family is intentionally narrower and more tactile
+    /// than ordinary form/actions. Keeping this separate prevents a visual
+    /// polish pass from silently changing controls owned by other slices.
+    func commonPlateMajorPrimaryAction() -> some View {
+        buttonStyle(CommonPlateMajorFilledActionStyle())
+    }
+
+    func commonPlateMajorSecondaryAction() -> some View {
+        buttonStyle(CommonPlateMajorSoftActionStyle())
+    }
+
+    /// The centered width shared by R1's major primary and secondary actions.
+    /// The outer inset keeps the controls intentionally narrower on phones;
+    /// the cap preserves that proportion on wider layouts without imposing an
+    /// unsafe fixed width on small screens or wrapped Dynamic Type labels.
+    func commonPlateMajorActionFrame() -> some View {
+        frame(maxWidth: CommonPlateStyle.Control.majorActionMaximumWidth)
+            .frame(maxWidth: .infinity)
+    }
+
     /// A destructive action presented inline among lower-emphasis actions
     /// (e.g. alongside a tertiary action in a native identity section), not
     /// as a standalone screen-level control. It is a restrained outline/text
@@ -71,6 +91,59 @@ private struct CommonPlateSoftActionStyle: ButtonStyle {
     }
 }
 
+/// R1's only elevated controls. The low-opacity shadow is intentional
+/// separation from the canvas, not a card/floating-button treatment.
+private struct CommonPlateMajorFilledActionStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(isEnabled ? Color.white : Color.primary)
+            .commonPlateMajorActionLabelLayout()
+            .background(
+                RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                    .fill(isEnabled ? Color.accentColor : Color.gray.opacity(0.28))
+            )
+            .shadow(color: .black.opacity(isEnabled ? 0.18 : 0), radius: 4, y: 2)
+            .scaleEffect(configuration.isPressed && isEnabled && !reduceMotion ? 0.985 : 1)
+            .opacity(configuration.isPressed && isEnabled ? 0.88 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct CommonPlateMajorSoftActionStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary)
+            .commonPlateMajorActionLabelLayout()
+            .background(
+                RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                    .fill(isEnabled ? Color.accentColor.opacity(0.12) : Color.gray.opacity(0.16))
+            )
+            .shadow(color: .black.opacity(isEnabled ? 0.18 : 0), radius: 4, y: 2)
+            .scaleEffect(configuration.isPressed && isEnabled && !reduceMotion ? 0.985 : 1)
+            .opacity(configuration.isPressed && isEnabled ? 0.88 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Flat R1 tertiary actions retain their hierarchy while still answering a
+/// tap immediately. Reduce Motion needs no special branch because no geometry
+/// changes in this treatment.
+struct CommonPlateFlatActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.62 : 1)
+            .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
+    }
+}
+
 private extension View {
     /// Buttons keep a comfortable 48-point minimum at ordinary text sizes,
     /// but never an exact height: wrapping accessibility labels may grow the
@@ -85,6 +158,18 @@ private extension View {
             .frame(
                 maxWidth: .infinity,
                 minHeight: CommonPlateStyle.Control.minimumHeight
+            )
+    }
+
+    func commonPlateMajorActionLabelLayout() -> some View {
+        multilineTextAlignment(.center)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, CommonPlateStyle.Spacing.l)
+            .padding(.vertical, CommonPlateStyle.Spacing.m)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: CommonPlateStyle.Control.majorActionMinimumHeight
             )
     }
 }

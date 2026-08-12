@@ -80,23 +80,10 @@ final class RequestFoodEntryTests: XCTestCase {
         XCTAssertNil(store.flow)
     }
 
-    /// The exact physical-device regression this MUST-FIX finding describes.
-    /// SwiftUI's sheet-presentation modifier also invokes the presented
-    /// binding's `set(false)` the instant its own `get` flips to `false` on
-    /// its own — which successful verification does, with no user swipe or
-    /// Cancel tap involved (`isPresentingEntryVerification`'s `get` reads
-    /// `!identityStore.isVerified && !hasEnteredForm`, and verification
-    /// success alone makes that `false`). The previous implementation
-    /// treated every `set(false)` as a real cancellation and popped
-    /// `.requestFood` off the path — bouncing the requester out of Request
-    /// Food immediately after verification had already succeeded and
-    /// persisted, exactly matching Faith's physical observation that a
-    /// second "I Need Food" tap was required. This drives a real navigation
-    /// path through that exact boundary rather than only asserting
-    /// `isVerified == true`.
-    func testSuccessfulVerificationDismissalDoesNotPopRequestFoodFromThePath() async {
+    /// Successful verification switches the one Home-owned presentation from
+    /// verification to the form; it must not invoke the Cancel exit callback.
+    func testSuccessfulVerificationDoesNotInvokeTheCancelExitPath() async {
         let store = makeIdentityStore()
-        var path: [AppRoute] = [.requestFood]
 
         store.beginVerificationIfNeeded()
         await completeVerification(store)
@@ -105,52 +92,9 @@ final class RequestFoodEntryTests: XCTestCase {
             isVerified: store.isVerified
         )
         XCTAssertTrue(hasEnteredForm)
-
-        // The exact predicate `isPresentingEntryVerification`'s `set` closure
-        // applies. It must refuse to treat this dismissal as a cancellation.
-        let shouldCancel = RequestFoodEntryView.shouldTreatSheetDismissalAsCancellation(
-            isVerified: store.isVerified,
-            hasEnteredForm: hasEnteredForm
-        )
-        XCTAssertFalse(shouldCancel)
-
-        // Applying that predicate exactly as the fixed `set` closure does:
-        // the path-popping cancellation path must not run, so the real
-        // `[AppRoute]` path this screen shares with `ContentView` is
-        // unaffected by the dismissal SwiftUI performed on its own.
-        if shouldCancel {
-            path = RequestFoodEntryView.pathAfterCancellingEntry(path)
-        }
-
-        XCTAssertEqual(path, [.requestFood])
         XCTAssertEqual(
             RequestFoodEntryView.presentation(isVerified: store.isVerified, hasEnteredForm: hasEnteredForm),
             .form
-        )
-    }
-
-    /// A dismissal that happens before any verification has ever succeeded is
-    /// still a real cancellation, and must still be able to pop the path —
-    /// the fix narrows the guard, it does not remove genuine cancellation.
-    func testGenuineDismissalBeforeAnyVerificationStillCancels() {
-        XCTAssertTrue(
-            RequestFoodEntryView.shouldTreatSheetDismissalAsCancellation(
-                isVerified: false,
-                hasEnteredForm: false
-            )
-        )
-    }
-
-    /// Once this session has ever admitted the form, a dismissal must never
-    /// be treated as a cancellation again, even if authority was
-    /// subsequently lost — that mid-form loss is `RequestFoodView`'s own
-    /// recovery to own, not a reason to pop this screen's path.
-    func testDismissalAfterAdmissionIsNeverTreatedAsCancellationEvenAfterLaterAuthorityLoss() {
-        XCTAssertFalse(
-            RequestFoodEntryView.shouldTreatSheetDismissalAsCancellation(
-                isVerified: false,
-                hasEnteredForm: true
-            )
         )
     }
 
@@ -183,30 +127,18 @@ final class RequestFoodEntryTests: XCTestCase {
         XCTAssertEqual(RequestFoodEntryView.presentation(isVerified: store.isVerified), .verification)
     }
 
-    /// Cancelling entry verification has no filled draft to protect, so it
-    /// also leaves Request Food rather than reopening the same empty gate.
-    func testCancellingEntryVerificationPopsRequestFoodFromThePath() {
-        XCTAssertEqual(
-            RequestFoodEntryView.pathAfterCancellingEntry([.requestFood]),
-            []
-        )
-        XCTAssertEqual(
-            RequestFoodEntryView.pathAfterCancellingEntry([.activeRequests, .requestFood]),
-            [.activeRequests]
-        )
-    }
+    func testCancellingEntryVerificationRetiresTheFlowAndRequestsHomeOwnedDismissal() {
+        let store = makeIdentityStore()
+        var exitRequests = 0
+        store.beginVerificationIfNeeded()
 
-    /// A stale callback for a destination this screen no longer owns (e.g. the
-    /// path already moved on) must not pop something else.
-    func testCancellingEntryVerificationIsANoOpWhenRequestFoodIsNotOnTop() {
-        XCTAssertEqual(
-            RequestFoodEntryView.pathAfterCancellingEntry([.activeRequests]),
-            [.activeRequests]
-        )
-        XCTAssertEqual(
-            RequestFoodEntryView.pathAfterCancellingEntry([]),
-            []
-        )
+        RequestFoodEntryView.cancelEntryVerification(identityStore: store) {
+            exitRequests += 1
+        }
+
+        XCTAssertNil(store.flow)
+        XCTAssertEqual(exitRequests, 1)
+        XCTAssertEqual(AppRoute.appending(.requestFood, to: []), [.requestFood])
     }
 
     // MARK: - Already-verified and restored identity enter directly

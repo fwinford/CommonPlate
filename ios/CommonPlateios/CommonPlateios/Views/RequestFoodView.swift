@@ -207,7 +207,6 @@ struct RequestFoodView: View {
     /// a lapsed `Later` selection produced.
     static let localRejectionPointerNotice = "Check the highlighted fields above."
 
-    @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: RequestStore
     /// Observed, not owned: the verified identity outlives this screen, and the
     /// gate below has to see the same one every other participant action does.
@@ -221,6 +220,7 @@ struct RequestFoodView: View {
     /// so navigation replacement (including notification routing) cannot let a
     /// still-mounted stale form post after verification.
     @Binding var path: [AppRoute]
+    let onExit: () -> Void
 
     @State private var draft = RequestFoodFormDraft()
     @State private var validationPresentation = RequestFoodValidationPresentation()
@@ -358,7 +358,7 @@ struct RequestFoodView: View {
 
                 if presentation.showsReturnHomeAction {
                     Button("Back to Home") {
-                        dismiss()
+                        onExit()
                     }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("request-ambiguous-dismiss")
@@ -444,7 +444,7 @@ struct RequestFoodView: View {
                 .fontWeight(.bold)
 
             Button("Back to Home") {
-                dismiss()
+                onExit()
             }
             .buttonStyle(.borderedProminent)
         }
@@ -503,18 +503,28 @@ struct RequestFoodView: View {
                 // V1 meal-swipe requirement (W3-C1): meal swipes only, no
                 // Dining Dollars. A bounded picker, not free-form entry, so
                 // this app can never submit a value the backend would refuse.
-                Picker("Meal swipes", selection: $draft.mealSwipes) {
+                Picker("Meal swipes needed", selection: $draft.mealSwipes) {
                     ForEach(RequestFoodFormDraft.mealSwipeOptions, id: \.self) { count in
                         Text("\(count)").tag(count)
                     }
                 }
                 .accessibilityIdentifier("request-meal-swipes-picker")
+
+                Text("Choose how many meal swipes your Grubhub order requires.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("Pickup") {
-                TextField("Name to use for the order", text: $draft.pickupName)
+                TextField("Pickup name", text: $draft.pickupName)
                     .focused($focusedField, equals: .pickupName)
                     .accessibilityHint(Text(fieldError(.pickupName, errors: errors) ?? ""))
+
+                Text("Enter the name you want the Grubhub order placed under.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 fieldErrorText(
                     .pickupName,
@@ -624,7 +634,7 @@ struct RequestFoodView: View {
                     // the entered values stay untouched until they choose it.
                     if presentation.showsReturnHomeAction {
                         Button("Back to Home") {
-                            dismiss()
+                            onExit()
                         }
                         .accessibilityIdentifier("request-ambiguous-dismiss")
                     }

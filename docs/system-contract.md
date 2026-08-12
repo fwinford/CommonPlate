@@ -33,6 +33,39 @@ quiet inline code-lifetime help, not stacked form/section cards or decorative
 containers. These presentation rules do not change identity or verification
 runtime semantics.
 
+### 1.2 Accepted Home and requester presentation (W4-R1)
+
+On a fresh installation, iOS presents one educational CommonPlate-at-NYU
+entry with the slogan `Extra swipes. More meals.`, the accepted explanation of
+CommonPlate's two paths, and exactly two choices: `I need a meal` and `I have
+extra meal swipes`. The choice is presentation-only: it creates no role,
+account, authority, or later-action restriction. Each choice opens its exact
+four-step walkthrough; Continue completes the local onboarding presentation
+record and arrives at the same recurring Home. From recurring Home, `How
+CommonPlate works` reopens either walkthrough without changing completion or
+participant identity and returns to that Home.
+
+Recurring Home presents `Request a meal`, `Find a request`, and the secondary
+`Request alerts` action, followed by the utility/identity group. When a usable
+verified participant identity exists, Home shows one masked verified address,
+Change email, and Remove email; when it does not, Home does not fabricate an
+address or require a standing verification explainer. Actions requiring
+participant authority continue to present the existing verification flow on
+entry. Request Food remains the existing requester flow: an unverified entry
+uses the native participant-verification presentation before the form, and a
+successful verification continues directly into the form without a second
+participant-email field. The requester form's accepted timing, meal-swipe,
+pickup-name, submission, refusal, and ambiguity semantics are unchanged.
+
+The first-launch ticket → arrow → bowl motif remains the accepted small,
+secondary motif and adapts its appearance for the current system appearance.
+Back controls retain stable native-looking chevron geometry and accessible
+Back behavior across supported text sizes. Change email remains a quiet inline
+action with an at-least-44-point touch target. Home and both walkthroughs retain
+their accepted responsive, scrolling, Dynamic Type, dark-appearance, and
+Reduce Motion fallbacks; functional walkthrough titles use system typography,
+while Quiet Fraunces remains limited to accepted brand/display moments.
+
 Routine/passive states default to native or inline treatment; important
 non-failure states may use restrained inline emphasis; success is lightweight
 by default; and no universal banner/card state system is implied. Outcome
@@ -97,7 +130,7 @@ Remove Email is a distinct app-level action from Change Email and requires expli
 
 Remove Email is refuse-only while participant-bound work or recovery makes forgetting unsafe, and remains unavailable until the app has established removal safety for the current process. An active H1 reservation or participant-authorized fulfillment state, including unresolved ambiguous-fulfillment recovery, blocks removal. An unresolved W3-D1 request-create recovery also blocks removal. Unknown or inconclusive H1 reconciliation fails closed rather than allowing removal. I4 performs no assisted release, fulfillment mutation, D1 mutation, or backend identity deletion.
 
-Verified participant identity is app-level CommonPlate identity, not Request Food content. Home presents the currently verified participant identity (masked) or, when no identity exists yet, the standing verification requirement, and provides the Change Email entry from that same app-level surface; this is the sole identity-presentation source. Change Email preserves the current verified authority until the replacement address successfully verifies, consistent with the device-lifecycle properties above.
+Verified participant identity is app-level CommonPlate identity, not Request Food content. Home presents the currently verified participant identity when one exists and provides the accepted app-level identity controls; this is the sole identity-presentation source. When no usable verified participant identity exists, Home need not present a standing verification explainer; actions that require verified participant authority present the existing verification flow on entry. Change Email preserves the current verified authority until the replacement address successfully verifies, consistent with the device-lifecycle properties above.
 
 Participant verification and Change Email present their existing lifecycle action-first: NYU email → Send code → code entry → Verify, with the field and its action leading and supporting eligibility/purpose/replacement/revoked explanation visually secondary beneath. No verification-code, resend, expiry, credential, participant-principal, persistence, or authorization behavior is changed by this presentation.
 
@@ -124,6 +157,8 @@ Fulfillment requires a valid, unexpired active reservation authorized by its raw
 Fulfillment `INTERNAL_FAILURE` is ambiguous. iOS performs one read-only request-status check, then permits at most one exact-payload CommonPlate-only resend using the retained in-memory submission and its exact original authorization (raw token or reservation-scoped participant authority). It never instructs the helper to place another external order.
 
 After a confirmed placement, iOS retains the fulfillment result and blocks a new claim until the helper acknowledges it with Got It. Reservation continuation and release do not bypass that acknowledgement guard.
+
+Fulfillment remains request/claim-bound: the requester placement email is addressed to the requester's own submitted address, tied to this specific request and its committed placement, never to a general participant contact channel. For a verified-helper placement, that email's `Reply-To` may carry the claim-bound helper's own verified email address, so the requester can coordinate directly with the helper about that order. Where the accepted implementation cannot establish a verified helper address for the placement (the pre-W3-I1 compatibility path in section 3.1), no `Reply-To` address is fabricated or substituted; the email is sent without one. V1 therefore does not guarantee that participants' real email addresses remain mutually hidden from one another. Private, request-scoped email relay and mutual participant-address privacy (W3-M1) are deferred to V2/post-pilot; product and privacy-facing copy must describe this V1 direct-coordination behavior truthfully rather than promising hidden addresses.
 
 ### 5.1 Helper participation continuity (W3-H2)
 

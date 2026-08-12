@@ -297,6 +297,12 @@ At acceptance: `npm run typecheck` passed; `npm test` passed 1,378 tests with 32
 
 **Accepted verification limitation.** The repository has no iOS UI-test target, so the literal SwiftUI stale-detail render/tap scheduling sequence — a visible Reserve affordance disabling itself on screen, and an actual tap being gated in real `RequestDetailView` rendering — was not driven end-to-end through UI automation or physical-device interaction. The accepted evidence instead covers: current-key-aware production eligibility/action logic directly (`RequestDetailStaleParticipationTests.swift`); production `startClaim` action-boundary wiring; backend authoritative reacquisition refusal; real-Mongo persistence/concurrency proof for the participation ledger and its unique index; participant-scoped list/detail behavior and privacy isolation; the complete `CommonPlateiosTests` target; and independent HIGH-risk review plus focused rereviews ending CLEAN. This is an accepted verification limitation, not a failed or pending correctness check, and must not be described as UI-test or physical-device proof.
 
+### Remove Verified Identity (W3-I4) coverage
+
+W3-I4 is accepted. Focused `RemoveEmailTests` reached 19/19 and the complete `CommonPlateiosTests` target reached 763/763 with 0 failures before the final literal-only copy correction; that correction was verified by source/diff inspection and `git diff --check` passed. An independent rereview established that the H1/D1 cold-launch race identified against the removal-safety gating was closed, that unknown/inconclusive removal-safety states fail closed rather than allowing removal, and that the ambiguous-fulfillment-recovery blocking case is a meaningful blocker rather than a redundant one.
+
+**Accepted verification limitation.** The final focused `RemoveEmailTests` rerun against the literal-only copy correction was attempted twice but could not execute because CoreSimulator became unavailable (`CoreSimulatorService connection became invalid`; `Unable to find a device matching the provided destination specifier`). This final focused test state is not claimed as passed; it is an accepted environmental verification limitation, consistent with the pattern already used for W3-I1/W3-H1/W3-D1/W3-H2. Physical-device Keychain-deletion proof was likewise not established and is accepted as unperformed on the same basis.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -410,6 +416,28 @@ rendered/user-visible verification evidence that automation and source tests
 cannot substitute for; it does not establish Release/Archive/TestFlight or
 production-environment behavior.
 
+### W4-R1 Home and requester experience coverage
+
+The focused onboarding/brand/foundation suites passed **20 tests, 0 failed**.
+The complete `CommonPlateiosTests` target passed **795 tests, 0 failed, 0
+skipped, TEST SUCCEEDED**. `git diff --check` passed. The fresh independent
+review found no MUST FIX, SHOULD FIX, or contract conflict and concluded that
+the implementation was ready for visual verification. Faith then completed
+the requested visual walkthrough and accepted the observed first-launch,
+walkthrough, recurring Home, requester-entry, responsive-control, and
+accessibility-size presentation and interaction behavior.
+
+The automated and source-focused tests establish onboarding persistence and
+replay state, exact copy and ordering, route wiring, control-size seams,
+typography scope, requester presentation labels, and preservation of the
+existing identity/requester behavior. They do not establish VoiceOver reading
+order, provider delivery or notification reading, Release/Archive/TestFlight
+signing or environment behavior, or any configuration-specific result that
+was not rendered or exercised. Faith's visual acceptance is the evidence for
+the observed rendered and interaction behavior; it does not extend those
+environmental or provider claims. The separately authorized verification
+Cancel → X correction remains outside the R1 evidence and acceptance record.
+
 ## 10. Test-file organization
 
 Add new Week 3 iOS tests in new focused files where practical. Do not keep extending `ClaimFlowTests.swift` merely because it already contains related tests. Preserve existing test files rather than splitting them during unrelated feature work, and keep one endpoint and one user-flow slice per test change. This does not prescribe a new test framework or UI-test target.
@@ -467,7 +495,7 @@ W3-N2 physical-device acceptance (push enable/disable reaching authoritative On/
 
 The non-Eastern `DatePicker` timezone proof required for W3-R1 (see section 9) is likewise device evidence, not part of the automated suite above.
 
-W3-I4 acceptance evidence: focused `RemoveEmailTests` reached 19/19 and the complete `CommonPlateiosTests` target reached 763/763 with 0 failures before the final literal-only copy correction. The correction was source/diff verified and `git diff --check` passed. Its focused rerun was attempted twice but could not execute because CoreSimulator became unavailable (`CoreSimulatorService connection became invalid`; `Unable to find a device matching the provided destination specifier`). The final focused test state is therefore not claimed as passed; this is an accepted environmental verification limitation. The independent rereview established that the H1/D1 cold-launch race was closed, unknown states fail closed, and the ambiguous-fulfillment regression is meaningful.
+W3-I4 acceptance evidence and its accepted CoreSimulator verification limitation are recorded above (Remove Verified Identity (W3-I4) coverage) and in `docs/system-contract.md` section 3.1.
 
 W3-H2 durable one-successful-participation enforcement, marketplace/detail privacy isolation, and fulfillment re-entry evidence is recorded above and in `docs/system-contract.md` section 5.1. **W3-H2 was accepted without an iOS UI-test target**, so the literal SwiftUI stale-detail render/tap scheduling sequence was not driven end-to-end through UI automation or physical-device interaction; production predicate/action logic and wiring are covered by unit/source-level tests and the full iOS target instead. That remaining limitation is accepted, not a failed or pending check, and must not be described as UI-test or physical-device proof; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 

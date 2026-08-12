@@ -18,6 +18,9 @@ enum AppRoute: Hashable {
     case requestFood
     case activeRequests
     case alerts
+    /// The completed-onboarding replay chooser. Keeping it in the same typed
+    /// path as Privacy & Safety gives its chevron row the same native push.
+    case onboardingChooser
     case privacySafety
     /// The public request screen. Carries the request by value because the
     /// backend removes a placed request from the list, so an ID that had to be
@@ -66,7 +69,7 @@ extension AppRoute {
             switch route {
             case .requestDetail(let request), .fulfillment(let request):
                 return request.id == requestID
-            case .requestFood, .activeRequests, .alerts, .privacySafety:
+            case .requestFood, .activeRequests, .alerts, .onboardingChooser, .privacySafety:
                 return false
             }
         }

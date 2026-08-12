@@ -266,11 +266,11 @@ final class ParticipantGateTests: XCTestCase {
         XCTAssertTrue(helperNotice.contains("nothing is reserved"))
     }
 
-    func testHomeStatesTheRequirementWithoutAskingForAnAddress() {
-        let notice = ContentView.verificationRequirementNotice.lowercased()
-        XCTAssertTrue(notice.contains("verify"))
-        XCTAssertFalse(notice.contains("enter"))
-        XCTAssertFalse(notice.contains("@"))
+    func testHomeDoesNotPreannounceVerificationBeforeAnActionNeedsIt() throws {
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
+        XCTAssertFalse(source.contains(
+            "You’ll verify an NYU email once before posting or helping with a request."
+        ))
     }
 
     // MARK: - Fixtures
@@ -390,5 +390,14 @@ final class ParticipantGateTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return try XCTUnwrap(formatter.date(from: value))
+    }
+
+    private func fileSource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
     }
 }

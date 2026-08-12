@@ -31,9 +31,11 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         )
         XCTAssertFalse(source.contains("Capsule"))
         XCTAssertTrue(source.contains("commonPlateActionLabelLayout()"))
+        XCTAssertTrue(source.contains("func commonPlateMajorActionFrame()"))
+        XCTAssertTrue(source.contains("frame(maxWidth: CommonPlateStyle.Control.majorActionMaximumWidth)"))
         XCTAssertTrue(source.contains("lineLimit(nil)"))
         XCTAssertTrue(source.contains("fixedSize(horizontal: false, vertical: true)"))
-        XCTAssertTrue(source.contains("padding(.horizontal, CommonPlateStyle.Spacing.l)"))
+        XCTAssertTrue(source.contains("padding(.horizontal, CommonPlateStyle.Spacing.l)"), "Ordinary actions keep their existing inset.")
         XCTAssertTrue(source.contains("padding(.vertical, CommonPlateStyle.Spacing.m)"))
         XCTAssertTrue(source.contains("maxWidth: .infinity"))
         XCTAssertTrue(source.contains("minHeight: CommonPlateStyle.Control.minimumHeight"))
@@ -46,9 +48,20 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         XCTAssertTrue(tokens.contains("enum Radius"))
         XCTAssertTrue(tokens.contains("static let standard: CGFloat"))
         XCTAssertTrue(tokens.contains("static let minimumHeight: CGFloat"))
+        XCTAssertTrue(tokens.contains("static let majorActionMinimumHeight: CGFloat = 52"))
+        XCTAssertTrue(tokens.contains("static let majorActionMaximumWidth: CGFloat = 292"))
+
+        XCTAssertTrue(source.contains("func commonPlateMajorPrimaryAction()"))
+        XCTAssertTrue(source.contains("func commonPlateMajorSecondaryAction()"))
+        XCTAssertTrue(source.contains("font(.title3.weight(.semibold))"))
+        XCTAssertTrue(source.contains("shadow(color: .black.opacity(isEnabled ? 0.18 : 0), radius: 4, y: 2)"))
+        XCTAssertTrue(source.contains("scaleEffect(configuration.isPressed && isEnabled && !reduceMotion ? 0.985 : 1)"))
+        XCTAssertTrue(source.contains("opacity(configuration.isPressed && isEnabled ? 0.88 : 1)"))
+        XCTAssertTrue(source.contains("struct CommonPlateFlatActionButtonStyle: ButtonStyle"))
+        XCTAssertTrue(source.contains("opacity(configuration.isPressed ? 0.62 : 1)"))
     }
 
-    func testHomeKeepsTheEstablishedMaskedIdentityAndDestructiveRemovalPresentation() throws {
+    func testHomeKeepsTheAcceptedMaskedIdentityAndDestructiveRemovalPresentation() throws {
         let section = try declarationSource(
             startMarker: "private var participantIdentitySection: some View {",
             endMarker: "static let changeEmailTitle"
@@ -59,12 +72,40 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         XCTAssertTrue(section.contains("home-change-email"))
         XCTAssertTrue(section.contains("home-remove-email"))
         XCTAssertTrue(section.contains("commonPlateDestructiveAction()"))
-        XCTAssertTrue(section.contains("Label(\"Verified as \\(identity.masked)\", systemImage: \"checkmark.circle.fill\")"))
-        XCTAssertEqual(section.components(separatedBy: "Divider()").count - 1, 2)
+        XCTAssertTrue(section.contains("Label(identity.masked, systemImage: \"checkmark.circle.fill\")"))
+        XCTAssertTrue(section.contains("ViewThatFits(in: .horizontal)"))
+        XCTAssertEqual(section.components(separatedBy: "Divider()").count - 1, 0)
         XCTAssertFalse(section.contains("commonPlateGroupedSurface"))
         XCTAssertFalse(section.contains("CommonPlateStyle.Color.warmSurface"))
 
         XCTAssertTrue(section.contains("Button(Self.removeEmailTitle, role: .destructive)"))
+
+        let changeEmail = try declarationSource(
+            startMarker: "private var changeEmailButton: some View {",
+            endMarker: "private var removeEmailButton: some View {"
+        )
+        XCTAssertTrue(changeEmail.contains(".commonPlateTertiaryAction()"))
+        XCTAssertTrue(changeEmail.contains(".frame(minHeight: 44)"))
+        XCTAssertTrue(changeEmail.contains(".contentShape(Rectangle())"))
+        XCTAssertFalse(changeEmail.contains("commonPlatePrimaryAction"))
+        XCTAssertFalse(changeEmail.contains("commonPlateSecondaryAction"))
+        XCTAssertFalse(changeEmail.contains("background("))
+
+        let home = try declarationSource(
+            startMarker: "private func recurringHome(brandHasSettled: Bool) -> some View {",
+            endMarker: "/// The remembered verified identity"
+        )
+        XCTAssertTrue(home.contains("Text(\"Request alerts\")"))
+        let alertsStart = try XCTUnwrap(home.range(of: "NavigationLink(value: AppRoute.alerts)"))
+        let alertsEnd = try XCTUnwrap(home.range(of: ".padding(.top", range: alertsStart.upperBound..<home.endIndex))
+        let alertsAction = String(home[alertsStart.lowerBound..<alertsEnd.lowerBound])
+        XCTAssertTrue(alertsAction.contains("alignment: .center"))
+        XCTAssertFalse(alertsAction.contains("chevron.right"))
+        XCTAssertFalse(home.contains("Text(\"More\")"))
+        XCTAssertFalse(home.contains("Get alerts for new requests"))
+        XCTAssertTrue(home.contains("CommonPlateStyle.Color.warmSurface"))
+        XCTAssertEqual(home.components(separatedBy: "Divider()").count - 1, 1)
+        XCTAssertFalse(home.contains("You’ll verify an NYU email once before posting or helping with a request."))
     }
 
     func testHomeUsesHelperWhenItNamesTheHelpingRole() throws {
@@ -77,13 +118,13 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
         XCTAssertTrue(source.contains("ScrollView {"))
 
-        let requestFood = try XCTUnwrap(source.range(of: "NavigationLink(\"I need food\""))
-        let help = try XCTUnwrap(source.range(of: "NavigationLink(\"Help with a request\""))
+        let requestFood = try XCTUnwrap(source.range(of: "Text(\"Request a meal\")"))
+        let help = try XCTUnwrap(source.range(of: "Text(\"Find a request\")"))
         let identity = try XCTUnwrap(source.range(of: "participantIdentitySection"))
-        let privacy = try XCTUnwrap(source.range(of: "NavigationLink(\"Privacy & Safety\""))
+        let privacy = try XCTUnwrap(source.range(of: "UtilityActionRow(title: \"Privacy & Safety\")"))
         XCTAssertLessThan(requestFood.lowerBound, help.lowerBound)
-        XCTAssertLessThan(help.lowerBound, identity.lowerBound)
-        XCTAssertLessThan(identity.lowerBound, privacy.lowerBound)
+        XCTAssertLessThan(help.lowerBound, privacy.lowerBound)
+        XCTAssertLessThan(privacy.lowerBound, identity.lowerBound)
     }
 
     func testVerificationUsesDirectScrollableHierarchyWithoutGroupedSurfaces() throws {

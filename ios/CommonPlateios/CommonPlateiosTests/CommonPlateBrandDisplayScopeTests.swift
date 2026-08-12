@@ -14,18 +14,23 @@ import XCTest
 
 final class CommonPlateBrandDisplayScopeTests: XCTestCase {
     func testHomeUsesBrandDisplayExactlyOnceForTheWordmark() throws {
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
-        let occurrences = source.components(separatedBy: "commonPlateBrandDisplay").count - 1
+        let home = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
+        XCTAssertTrue(home.contains("CommonPlateBrandHeader()"))
+        let headerStart = try XCTUnwrap(source.range(of: "struct CommonPlateBrandHeader: View {"))
+        let headerEnd = try XCTUnwrap(source.range(of: "struct CommonPlateWarmGhostBackButton: View {"))
+        let header = String(source[headerStart.lowerBound..<headerEnd.lowerBound])
+        let occurrences = header.components(separatedBy: "commonPlateBrandDisplay").count - 1
         XCTAssertEqual(occurrences, 1, "expected exactly one commonPlateBrandDisplay use on Home")
 
         // Scoped: the usage must sit on the "CommonPlate" wordmark line, not
         // "at NYU" or any other Home text, so a future edit that moves it
         // elsewhere on the same screen still fails this test.
-        guard let brandRange = source.range(of: "Text(\"CommonPlate\")") else {
+        guard let brandRange = header.range(of: "Text(\"CommonPlate\")") else {
             XCTFail("expected the CommonPlate wordmark Text to still exist")
             return
         }
-        let afterWordmark = source[brandRange.upperBound...]
+        let afterWordmark = header[brandRange.upperBound...]
         guard let nextTextRange = afterWordmark.range(of: "Text(\"at NYU\")") else {
             XCTFail("expected the \"at NYU\" Text to still follow the wordmark")
             return

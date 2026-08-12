@@ -4,6 +4,8 @@ struct ContentView: View {
     /// What the connected claim-to-placement flow does. Placement records an
     /// external order the helper has already completed; notification is a
     /// separate email attempt and is never described as delivery or reading.
+    /// Retained as a non-UI source of truth for the existing lifecycle tests;
+    /// the student-facing explainer is now `OnboardingExperienceView`.
     static let howItWorksSteps = [
         "1. A student posts a food request from an NYU dining spot.",
         "2. A helper with extra meal swipes chooses a request to help with.",
@@ -30,6 +32,10 @@ struct ContentView: View {
     /// Subscriber truth, and this store's confirmed Off result is session-only
     /// and establishes no future On.
     @StateObject private var participantEmailUnsubscribeStore: ParticipantEmailUnsubscribeStore
+    /// Local presentation preference only. It deliberately has no connection
+    /// to participant identity, credentials, or backend authority.
+    @StateObject private var onboardingStore: OnboardingPresentationStore
+    @StateObject private var onboardingFlowCoordinator: OnboardingFlowCoordinator
     /// Participant identity keeps its own state owner (W3-I1). It is not
     /// subscription state and not installation state: it is the one thing in
     /// the app that represents a person, every participant action reads it, and
@@ -49,11 +55,21 @@ struct ContentView: View {
     /// once this view is ready to navigate.
     @ObservedObject private var notificationRouter: HelperNotificationRouter
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The one navigation stack in the app, owned here so any screen inside it
     /// can leave a finished flow by rewriting the path rather than by asking a
     /// view below it to dismiss.
     @State private var path: [AppRoute] = []
+    /// A presentation-only handoff for major actions that start a task. Unlike
+    /// `path` and onboarding completion, this never establishes app truth.
+    @State private var flowPresentation: FlowPresentation?
+    /// Request Food is one native presentation owned by Home, rather than a
+    /// navigation destination that presents a second sheet on top of itself.
+    /// Its local route remains available to the existing requester
+    /// continuation machinery without creating a visible root-stack screen.
+    @State private var isRequestFoodPresented = false
+    @State private var requestFoodPresentationPath: [AppRoute] = []
 
     /// The one-time Home notice a requester-fulfillment push tap presents
     /// (Week 3 Day 6 Slice 6E). Distinct from every helper-flow notice: it
@@ -142,79 +158,72 @@ struct ContentView: View {
                 service: ParticipantEmailUnsubscribeService(client: client)
             )
         )
+        let onboardingStore = OnboardingPresentationStore(
+            storage: UserDefaultsOnboardingPresentationStorage(defaults: .standard)
+        )
+        _onboardingStore = StateObject(wrappedValue: onboardingStore)
+        _onboardingFlowCoordinator = StateObject(
+            wrappedValue: OnboardingFlowCoordinator(presentationStore: onboardingStore)
+        )
     }
 
     var body: some View {
-        NavigationStack(path: $path) {
-            ScrollView {
-                VStack(spacing: CommonPlateStyle.Spacing.l) {
-                // CommonPlate is the durable brand; "at NYU" is truthful V1
-                // campus context only — not a selector (W4-F1).
-                VStack(spacing: CommonPlateStyle.Spacing.xs) {
-                    // The one F1-owned display/brand moment (W4-F1 Faith
-                    // decision): Quiet Fraunces, not system SF. Everything
-                    // else on this screen, including "at NYU" immediately
-                    // below, stays in system typography.
-                    Text("CommonPlate")
-                        .font(.commonPlateBrandDisplay(.largeTitle))
-
-                    Text("at NYU")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color.accentColor)
-                }
-
-                Text("Need food, or have extra meal swipes you can use to help?")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-
-                NavigationLink("I need food", value: AppRoute.requestFood)
-                    .frame(maxWidth: 280)
-                    .commonPlatePrimaryAction()
-
-                NavigationLink("Help with a request", value: AppRoute.activeRequests)
-                    .frame(maxWidth: 280)
-                    .commonPlateSecondaryAction()
-
-                Text("Want to help later?")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, CommonPlateStyle.Spacing.s)
-
-                // Stays deliberately broad. Today it opens the email screen;
-                // naming it for email would have to be undone the moment there
-                // is more than one way to be notified.
-                NavigationLink("Notify me", value: AppRoute.alerts)
-                    .frame(maxWidth: 280)
-                    .commonPlateSecondaryAction()
-
-                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
-                    Text("How it works")
-                        .font(.headline)
-
-                    ForEach(Self.howItWorksSteps, id: \.self) { step in
-                        Text(step)
+        ZStack {
+            NavigationStack(path: $path) {
+                Group {
+                    if onboardingStore.hasCompletedOnboarding {
+                        recurringHome(brandHasSettled: true)
+                    } else {
+                        OnboardingExperienceView(onStartFlow: startWalkthroughFlow)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, CommonPlateStyle.Spacing.m)
-
-                Divider()
-                    .padding(.top, CommonPlateStyle.Spacing.m)
-
-                participantIdentitySection
-
-                    NavigationLink("Privacy & Safety", value: AppRoute.privacySafety)
-                        .frame(maxWidth: 280)
-                        .commonPlateTertiaryAction()
+                .navigationDestination(item: $onboardingFlowCoordinator.selectedIntent) { intent in
+                    SoftFlowEnterDestination(
+                        reduceMotion: reduceMotion,
+                        shouldAnimate: flowPresentation == .walkthrough(intent)
+                    ) {
+                        OnboardingWalkthroughView(intent: intent) {
+                            completeOnboardingFromWalkthrough()
+                        } onBack: {
+                            onboardingFlowCoordinator.selectedIntent = nil
+                        }
+                    } onFinished: {
+                        finishSoftFlowEntrance(.walkthrough(intent))
+                    }
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.top, CommonPlateStyle.Spacing.m)
-                .padding()
+                .navigationDestination(for: AppRoute.self) { route in
+                    SoftFlowEnterDestination(
+                        reduceMotion: reduceMotion,
+                        shouldAnimate: flowPresentation == .route(route)
+                    ) {
+                        destination(for: route)
+                    } onFinished: {
+                        finishSoftFlowEntrance(.route(route))
+                    }
+                }
             }
-            .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
-            .navigationDestination(for: AppRoute.self) { route in
-                destination(for: route)
+
+            if let intent = onboardingFlowCoordinator.completionPresentationIntent {
+                SoftBrandSettlePresentation(
+                    intent: intent,
+                    reduceMotion: reduceMotion,
+                    home: { brandHasSettled in
+                        recurringHome(brandHasSettled: brandHasSettled)
+                    },
+                    onFinished: onboardingFlowCoordinator.finishCompletionPresentation
+                )
+                .zIndex(1)
             }
+
+        }
+        .sheet(isPresented: $isRequestFoodPresented, onDismiss: finishRequestFoodPresentation) {
+            RequestFoodEntryView(
+                store: requestStore,
+                identityStore: participantIdentityStore,
+                verificationCoordinator: participantActionVerificationCoordinator,
+                path: $requestFoodPresentationPath,
+                onExit: dismissRequestFoodPresentation
+            )
         }
         // Cold-launch and relaunch-after-termination continuation (W3-H1):
         // reconstructs "do I have an active reservation" from backend truth,
@@ -346,6 +355,303 @@ struct ContentView: View {
             guard !isVisible else { return }
             presentNextRequesterFulfillmentNoticeIfPossible()
         }
+        .onChange(of: path) { _, newPath in
+            if case .route(let route)? = flowPresentation, newPath.last != route {
+                flowPresentation = nil
+            }
+            onboardingFlowCoordinator.replayNavigationChanged(
+                isChooserInPath: newPath.contains(.onboardingChooser)
+            )
+        }
+        .onChange(of: onboardingFlowCoordinator.selectedIntent) { _, intent in
+            if case .walkthrough? = flowPresentation, intent == nil {
+                flowPresentation = nil
+            }
+        }
+    }
+
+    /// The completion presentation is deliberately independent of the
+    /// coordinator's synchronous completion state. The wrapper begins Home's
+    /// arrival as the outgoing walkthrough fades, so the user sees one soft
+    /// settle rather than a navigation pop followed by a second transition.
+    private func recurringHome(brandHasSettled: Bool) -> some View {
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: CommonPlateStyle.Spacing.l) {
+                    CommonPlateBrandHeader()
+                        // This is intentionally only a slight extension of
+                        // the screen-wide completion arrival.
+                        .opacity(brandHasSettled ? 1 : 0)
+                        .offset(y: brandHasSettled || reduceMotion ? 0 : 2)
+                        .animation(brandLandingAnimation, value: brandHasSettled)
+
+                    Spacer(minLength: CommonPlateStyle.Spacing.l)
+
+                    VStack(spacing: CommonPlateStyle.Spacing.xs) {
+                        VStack(spacing: CommonPlateStyle.Spacing.m) {
+                            Button {
+                                startRouteFlow(.requestFood)
+                            } label: {
+                                Text("Request a meal")
+                            }
+                            .commonPlateMajorPrimaryAction()
+                            .commonPlateMajorActionFrame()
+                            Button {
+                                startRouteFlow(.activeRequests)
+                            } label: {
+                                Text("Find a request")
+                            }
+                            .commonPlateMajorSecondaryAction()
+                            .commonPlateMajorActionFrame()
+                        }
+
+                        NavigationLink(value: AppRoute.alerts) {
+                            Text("Request alerts")
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: 44,
+                                    alignment: .center
+                                )
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(CommonPlateFlatActionButtonStyle())
+                    }
+                    .frame(maxWidth: 520)
+
+                    Spacer(minLength: CommonPlateStyle.Spacing.l)
+
+                    utilityAndIdentityGroup
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, CommonPlateStyle.Spacing.l)
+                .padding(.top, CommonPlateStyle.Spacing.l)
+                .padding(.bottom, CommonPlateStyle.Spacing.xs)
+                .frame(minHeight: geometry.size.height, alignment: .top)
+            }
+        }
+        .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
+    }
+
+    private var brandLandingAnimation: Animation {
+        if reduceMotion {
+            return .easeInOut(duration: 0.17)
+        }
+        return .timingCurve(0.22, 0.78, 0.24, 1, duration: 0.47)
+    }
+
+    private var utilityAndIdentityGroup: some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+            NavigationLink(value: AppRoute.onboardingChooser) {
+                UtilityActionRow(title: "How CommonPlate works")
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("home-how-commonplate-works")
+
+            NavigationLink(value: AppRoute.privacySafety) {
+                UtilityActionRow(title: "Privacy & Safety")
+            }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if participantIdentityStore.identity != nil {
+                Divider()
+                    .padding(.top, -CommonPlateStyle.Spacing.s)
+                    .padding(.bottom, CommonPlateStyle.Spacing.xs)
+
+                participantIdentitySection
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, CommonPlateStyle.Spacing.l)
+        .padding(.vertical, CommonPlateStyle.Spacing.m)
+        .background(
+            CommonPlateStyle.Color.warmSurface,
+            in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+        )
+    }
+
+    private struct UtilityActionRow: View {
+        let title: String
+
+        var body: some View {
+            HStack(spacing: CommonPlateStyle.Spacing.s) {
+                Text(title)
+                    .font(.body.weight(.semibold))
+                Spacer(minLength: CommonPlateStyle.Spacing.s)
+                Image(systemName: "chevron.right")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, minHeight: CommonPlateStyle.Control.minimumHeight)
+            .contentShape(Rectangle())
+        }
+    }
+
+    /// A completion-only overlay that keeps the outgoing walkthrough and the
+    /// already-correct Home alive in the same render pass. Navigation and
+    /// persistence finish before this appears; it owns only the visible handoff.
+    private struct SoftBrandSettlePresentation<Home: View>: View {
+        let intent: OnboardingIntent
+        let reduceMotion: Bool
+        @ViewBuilder let home: (Bool) -> Home
+        let onFinished: () -> Void
+
+        @State private var hasArrived = false
+
+        var body: some View {
+            ZStack {
+                home(hasArrived)
+                    .opacity(hasArrived ? 1 : 0)
+                    .offset(y: hasArrived || reduceMotion ? 0 : 9)
+                    .animation(homeArrivalAnimation, value: hasArrived)
+
+                OnboardingWalkthroughView(intent: intent, onContinue: {})
+                    .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
+                    .opacity(hasArrived ? 0 : 1)
+                    .offset(y: hasArrived || reduceMotion ? 0 : -7)
+                    .animation(walkthroughExitAnimation, value: hasArrived)
+            }
+            .allowsHitTesting(false)
+            .onAppear {
+                guard !hasArrived else { return }
+                withAnimation(completionAnimation, completionCriteria: .logicallyComplete) {
+                    hasArrived = true
+                } completion: {
+                    onFinished()
+                }
+            }
+        }
+
+        private var homeArrivalAnimation: Animation {
+            if reduceMotion {
+                return .easeInOut(duration: 0.17)
+            }
+            return .timingCurve(0.22, 0.78, 0.24, 1, duration: 0.43)
+        }
+
+        private var walkthroughExitAnimation: Animation {
+            reduceMotion
+                ? .easeInOut(duration: 0.17)
+                : .easeInOut(duration: 0.31)
+        }
+
+        private var completionAnimation: Animation {
+            reduceMotion
+                ? .easeInOut(duration: 0.17)
+                : .timingCurve(0.22, 0.78, 0.24, 1, duration: 0.47)
+        }
+    }
+
+    private enum FlowPresentation: Hashable {
+        case walkthrough(OnboardingIntent)
+        case route(AppRoute)
+    }
+
+    private func startWalkthroughFlow(_ intent: OnboardingIntent) {
+        guard flowPresentation == nil else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            flowPresentation = .walkthrough(intent)
+            onboardingFlowCoordinator.selectedIntent = intent
+        }
+    }
+
+    private func startRouteFlow(_ route: AppRoute) {
+        guard route != .requestFood else {
+            startRequestFoodPresentation()
+            return
+        }
+        guard flowPresentation == nil else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            flowPresentation = .route(route)
+            path = AppRoute.appending(route, to: path)
+        }
+    }
+
+    private func startRequestFoodPresentation() {
+        guard !isRequestFoodPresented else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            requestFoodPresentationPath = [.requestFood]
+        }
+        // This state change is intentionally outside that transaction: the
+        // sheet is Request Food's single native visible entrance.
+        isRequestFoodPresented = true
+    }
+
+    private func dismissRequestFoodPresentation() {
+        isRequestFoodPresented = false
+    }
+
+    private func finishRequestFoodPresentation() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            requestFoodPresentationPath = []
+        }
+    }
+
+    private func finishSoftFlowEntrance(_ presentation: FlowPresentation) {
+        guard flowPresentation == presentation else { return }
+        flowPresentation = nil
+    }
+
+    /// A lighter sibling to Soft Brand Settle for actions that begin work.
+    /// The real in-stack destination is inserted before this runs. It is never
+    /// rendered as a temporary overlay and exchanged for a second copy.
+    private struct SoftFlowEnterDestination<Destination: View>: View {
+        let reduceMotion: Bool
+        let shouldAnimate: Bool
+        @ViewBuilder let destination: () -> Destination
+        let onFinished: () -> Void
+
+        @State private var hasEntered: Bool
+
+        init(
+            reduceMotion: Bool,
+            shouldAnimate: Bool,
+            @ViewBuilder destination: @escaping () -> Destination,
+            onFinished: @escaping () -> Void
+        ) {
+            self.reduceMotion = reduceMotion
+            self.shouldAnimate = shouldAnimate
+            self.destination = destination
+            self.onFinished = onFinished
+            _hasEntered = State(initialValue: !shouldAnimate)
+        }
+
+        var body: some View {
+            ZStack {
+                CommonPlateStyle.Color.baseCanvas.ignoresSafeArea()
+                destination()
+                    .opacity(hasEntered ? 1 : 0)
+                    .offset(y: hasEntered || reduceMotion ? 0 : 6)
+                    .animation(animation, value: hasEntered)
+                    .allowsHitTesting(hasEntered)
+                    .onAppear {
+                        guard shouldAnimate, !hasEntered else { return }
+                        withAnimation(animation, completionCriteria: .logicallyComplete) {
+                            hasEntered = true
+                        } completion: {
+                            onFinished()
+                        }
+                    }
+            }
+        }
+
+        private var animation: Animation {
+            reduceMotion
+                ? .easeInOut(duration: 0.17)
+                : .timingCurve(0.22, 0.78, 0.24, 1, duration: 0.28)
+        }
     }
 
     /// The remembered verified identity, and the way to replace it (W3-I1).
@@ -358,32 +664,16 @@ struct ContentView: View {
     @ViewBuilder
     private var participantIdentitySection: some View {
         if let identity = participantIdentityStore.identity {
-            VStack(alignment: .leading, spacing: 0) {
-                Label("Verified as \(identity.masked)", systemImage: "checkmark.circle.fill")
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+                Label(identity.masked, systemImage: "checkmark.circle.fill")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .padding(.bottom, CommonPlateStyle.Spacing.s)
                     .accessibilityIdentifier("home-verified-identity")
 
-                Divider()
-
-                Button(Self.changeEmailTitle) {
-                    participantIdentityStore.beginEmailReplacement()
+                ViewThatFits(in: .horizontal) {
+                    identityActions(axis: .horizontal)
+                    identityActions(axis: .vertical)
                 }
-                .commonPlateTertiaryAction()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, CommonPlateStyle.Spacing.s)
-                .accessibilityIdentifier("home-change-email")
-
-                Divider()
-
-                Button(Self.removeEmailTitle, role: .destructive) {
-                    isPresentingRemoveEmailConfirmation = true
-                }
-                .commonPlateDestructiveAction()
-                .padding(.top, CommonPlateStyle.Spacing.s)
-                .disabled(isRemoveEmailBlocked)
-                .accessibilityIdentifier("home-remove-email")
 
                 if isRemoveEmailBlocked {
                     CommonPlateInlineStatus(
@@ -395,15 +685,44 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            Text(Self.verificationRequirementNotice)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, CommonPlateStyle.Spacing.xs)
-                .accessibilityIdentifier("home-verification-requirement")
         }
+    }
+
+    @ViewBuilder
+    private func identityActions(axis: Axis) -> some View {
+        if axis == .horizontal {
+            HStack(spacing: CommonPlateStyle.Spacing.s) {
+                changeEmailButton
+                Text("·").foregroundStyle(.secondary)
+                removeEmailButton
+            }
+        } else {
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+                changeEmailButton
+                removeEmailButton
+            }
+        }
+    }
+
+    private var changeEmailButton: some View {
+        Button(Self.changeEmailTitle) {
+            participantIdentityStore.beginEmailReplacement()
+        }
+        .commonPlateTertiaryAction()
+        // Keep the quiet inline text treatment while making the whole local
+        // layout rect a minimum 44-point target.
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+        .accessibilityIdentifier("home-change-email")
+    }
+
+    private var removeEmailButton: some View {
+        Button(Self.removeEmailTitle, role: .destructive) {
+            isPresentingRemoveEmailConfirmation = true
+        }
+        .commonPlateDestructiveAction()
+        .disabled(isRemoveEmailBlocked)
+        .accessibilityIdentifier("home-remove-email")
     }
 
     static let changeEmailTitle = "Change email"
@@ -505,13 +824,6 @@ struct ContentView: View {
         return .uncertain
     }
 
-    /// The standing statement of the requirement. Deliberately not a call to
-    /// verify: there is nothing to verify *for* yet, and asking someone to
-    /// prove an address before they have decided to use the app would be the
-    /// account signup this product does not have.
-    static let verificationRequirementNotice =
-        "You’ll verify an NYU email once before posting or helping with a request."
-
     /// Open while a flow is running and Home is the surface presenting it. The
     /// request and reservation screens present their own gates, so this is
     /// scoped to the replacement flow Home actually started — otherwise a gate
@@ -589,12 +901,7 @@ struct ContentView: View {
     private func destination(for route: AppRoute) -> some View {
         switch route {
         case .requestFood:
-            RequestFoodEntryView(
-                store: requestStore,
-                identityStore: participantIdentityStore,
-                verificationCoordinator: participantActionVerificationCoordinator,
-                path: $path
-            )
+            EmptyView()
         case .activeRequests:
             ActiveRequestsView(store: requestStore)
         case .alerts:
@@ -604,6 +911,16 @@ struct ContentView: View {
                 unsubscribeStore: participantEmailUnsubscribeStore,
                 identityStore: participantIdentityStore
             )
+        case .onboardingChooser:
+            OnboardingExperienceView(
+                onStartFlow: startWalkthroughFlow,
+                onBack: { path.removeLast() }
+            )
+                .navigationBarBackButtonHidden(true)
+                .toolbar(.hidden, for: .navigationBar)
+                .onAppear {
+                    onboardingFlowCoordinator.beginReplay()
+                }
         case .privacySafety:
             PrivacySafetyView()
         case .requestDetail(let request):
@@ -616,6 +933,29 @@ struct ContentView: View {
             )
         case .fulfillment(let request):
             FulfillRequestView(request: request, store: requestStore, path: $path)
+        }
+    }
+
+    private func completeOnboardingFromWalkthrough() {
+        // Product truth changes now, independently of the presentation-only
+        // Soft Brand Settle. Disabling native stack animation prevents a pop
+        // from taking ownership while the overlay performs the visible exit.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            onboardingFlowCoordinator.continueFromWalkthrough()
+            path = []
+        }
+    }
+
+    /// Request Food owns a vertical Soft Flow transition. Removing its typed
+    /// route without a native pop keeps Home stable beneath that one motion.
+    private func finishPrimaryRoute(_ route: AppRoute) {
+        guard path.last == route else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            _ = path.removeLast()
         }
     }
 }
