@@ -1,0 +1,116 @@
+//
+//  CommonPlateButtonStyles.swift
+//  CommonPlateios
+//
+// Shared primary/secondary/destructive action conventions (W4-F1). These
+// name an intended hierarchy; they change no button's action, availability,
+// or destination.
+import SwiftUI
+
+extension View {
+    /// The screen's one primary action.
+    func commonPlatePrimaryAction() -> some View {
+        buttonStyle(CommonPlateFilledActionStyle())
+    }
+
+    /// A secondary, still-first-class action alongside a primary one.
+    func commonPlateSecondaryAction() -> some View {
+        buttonStyle(CommonPlateSoftActionStyle())
+    }
+
+    /// A destructive action presented inline among lower-emphasis actions
+    /// (e.g. alongside a tertiary action in a native identity section), not
+    /// as a standalone screen-level control. It is a restrained outline/text
+    /// treatment, never filled red, and resolves neutral gray when disabled.
+    func commonPlateDestructiveAction() -> some View {
+        buttonStyle(CommonPlateDestructiveButtonStyle())
+    }
+
+    /// A tertiary, low-emphasis action (e.g. a footer link) that must not
+    /// visually compete with the screen's primary/secondary actions.
+    func commonPlateTertiaryAction() -> some View {
+        buttonStyle(.plain)
+            .font(.footnote)
+            .modifier(CommonPlateTextActionColor(enabledColor: .accentColor))
+    }
+}
+
+/// Shared rectangular action construction. A moderate 12-point continuous
+/// radius keeps controls soft without letting a large native control turn
+/// into a capsule. Both label and geometry are system-native in spirit, while
+/// their proportions intentionally harmonize with the quieter display type.
+private struct CommonPlateFilledActionStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(.semibold))
+            .foregroundStyle(isEnabled ? Color.white : Color.primary)
+            .commonPlateActionLabelLayout()
+            .background(
+                RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                    .fill(isEnabled ? Color.accentColor : Color.gray.opacity(0.28))
+            )
+            .opacity(configuration.isPressed && isEnabled ? 0.82 : 1)
+    }
+}
+
+private struct CommonPlateSoftActionStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(.semibold))
+            .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary)
+            .commonPlateActionLabelLayout()
+            .background(
+                RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                    .fill(isEnabled ? Color.accentColor.opacity(0.12) : Color.gray.opacity(0.16))
+            )
+            .opacity(configuration.isPressed && isEnabled ? 0.82 : 1)
+    }
+}
+
+private extension View {
+    /// Buttons keep a comfortable 48-point minimum at ordinary text sizes,
+    /// but never an exact height: wrapping accessibility labels may grow the
+    /// control vertically. Internal padding belongs inside the shared style so
+    /// every consumer has enough room before its outer layout constrains it.
+    func commonPlateActionLabelLayout() -> some View {
+        multilineTextAlignment(.center)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, CommonPlateStyle.Spacing.l)
+            .padding(.vertical, CommonPlateStyle.Spacing.m)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: CommonPlateStyle.Control.minimumHeight
+            )
+    }
+}
+
+private struct CommonPlateTextActionColor: ViewModifier {
+    let enabledColor: Color
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(isEnabled ? enabledColor : .secondary)
+    }
+}
+
+private struct CommonPlateDestructiveButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(.medium))
+            .foregroundStyle(isEnabled ? Color.red : .secondary)
+            .frame(minHeight: CommonPlateStyle.Control.minimumHeight, alignment: .leading)
+            .padding(.horizontal, CommonPlateStyle.Spacing.m)
+            .background(
+                RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                    .stroke(isEnabled ? Color.red : .gray, lineWidth: 1)
+            )
+            .opacity(configuration.isPressed && isEnabled ? 0.7 : 1)
+    }
+}

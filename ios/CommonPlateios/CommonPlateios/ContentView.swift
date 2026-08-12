@@ -6,7 +6,7 @@ struct ContentView: View {
     /// separate email attempt and is never described as delivery or reading.
     static let howItWorksSteps = [
         "1. A student posts a food request from an NYU dining spot.",
-        "2. Another student with extra meal swipes chooses a request to help with.",
+        "2. A helper with extra meal swipes chooses a request to help with.",
         "3. The helper places the Grubhub order, then records the order number and pickup time.",
         "4. CommonPlate attempts to email the student the pickup details."
     ]
@@ -146,10 +146,22 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            VStack(spacing: 20) {
-                Text("CommonPlate")
-                    .font(.largeTitle)
-                    .fontWeight(.bold)
+            ScrollView {
+                VStack(spacing: CommonPlateStyle.Spacing.l) {
+                // CommonPlate is the durable brand; "at NYU" is truthful V1
+                // campus context only — not a selector (W4-F1).
+                VStack(spacing: CommonPlateStyle.Spacing.xs) {
+                    // The one F1-owned display/brand moment (W4-F1 Faith
+                    // decision): Quiet Fraunces, not system SF. Everything
+                    // else on this screen, including "at NYU" immediately
+                    // below, stays in system typography.
+                    Text("CommonPlate")
+                        .font(.commonPlateBrandDisplay(.largeTitle))
+
+                    Text("at NYU")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.accentColor)
+                }
 
                 Text("Need food, or have extra meal swipes you can use to help?")
                     .multilineTextAlignment(.center)
@@ -157,25 +169,25 @@ struct ContentView: View {
 
                 NavigationLink("I need food", value: AppRoute.requestFood)
                     .frame(maxWidth: 280)
-                    .buttonStyle(.borderedProminent)
+                    .commonPlatePrimaryAction()
 
                 NavigationLink("Help with a request", value: AppRoute.activeRequests)
                     .frame(maxWidth: 280)
-                    .buttonStyle(.bordered)
+                    .commonPlateSecondaryAction()
 
                 Text("Want to help later?")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .padding(.top, 8)
+                    .padding(.top, CommonPlateStyle.Spacing.s)
 
                 // Stays deliberately broad. Today it opens the email screen;
                 // naming it for email would have to be undone the moment there
                 // is more than one way to be notified.
                 NavigationLink("Notify me", value: AppRoute.alerts)
                     .frame(maxWidth: 280)
-                    .buttonStyle(.bordered)
+                    .commonPlateSecondaryAction()
 
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
                     Text("How it works")
                         .font(.headline)
 
@@ -184,22 +196,22 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 12)
+                .padding(.top, CommonPlateStyle.Spacing.m)
 
                 Divider()
-                    .padding(.top, 12)
+                    .padding(.top, CommonPlateStyle.Spacing.m)
 
                 participantIdentitySection
 
-                NavigationLink("Privacy & Safety", value: AppRoute.privacySafety)
-                    .frame(maxWidth: 280)
-                    .buttonStyle(.plain)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    NavigationLink("Privacy & Safety", value: AppRoute.privacySafety)
+                        .frame(maxWidth: 280)
+                        .commonPlateTertiaryAction()
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, CommonPlateStyle.Spacing.m)
+                .padding()
             }
-
-            .padding(.top, 12)
-            .padding()
+            .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
             .navigationDestination(for: AppRoute.self) { route in
                 destination(for: route)
             }
@@ -346,43 +358,50 @@ struct ContentView: View {
     @ViewBuilder
     private var participantIdentitySection: some View {
         if let identity = participantIdentityStore.identity {
-            VStack(spacing: 4) {
-                Text("Verified as \(identity.masked)")
+            VStack(alignment: .leading, spacing: 0) {
+                Label("Verified as \(identity.masked)", systemImage: "checkmark.circle.fill")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .padding(.bottom, CommonPlateStyle.Spacing.s)
                     .accessibilityIdentifier("home-verified-identity")
+
+                Divider()
 
                 Button(Self.changeEmailTitle) {
                     participantIdentityStore.beginEmailReplacement()
                 }
-                .buttonStyle(.plain)
-                .font(.footnote)
+                .commonPlateTertiaryAction()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, CommonPlateStyle.Spacing.s)
                 .accessibilityIdentifier("home-change-email")
 
-                Button(Self.removeEmailTitle) {
+                Divider()
+
+                Button(Self.removeEmailTitle, role: .destructive) {
                     isPresentingRemoveEmailConfirmation = true
                 }
-                .buttonStyle(.plain)
-                .font(.footnote)
+                .commonPlateDestructiveAction()
+                .padding(.top, CommonPlateStyle.Spacing.s)
                 .disabled(isRemoveEmailBlocked)
                 .accessibilityIdentifier("home-remove-email")
 
                 if isRemoveEmailBlocked {
-                    Text(removeEmailBlockedNotice)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .accessibilityIdentifier("home-remove-email-blocked-notice")
+                    CommonPlateInlineStatus(
+                        kind: removeEmailBlockedStatusKind,
+                        message: removeEmailBlockedNotice
+                    )
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("home-remove-email-blocked-notice")
                 }
             }
-            .padding(.top, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Text(Self.verificationRequirementNotice)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 4)
+                .padding(.top, CommonPlateStyle.Spacing.xs)
                 .accessibilityIdentifier("home-verification-requirement")
         }
     }
@@ -449,6 +468,41 @@ struct ContentView: View {
             return Self.removeEmailBlockedByReservationNotice
         }
         return Self.removeEmailBlockedByPendingCreateNotice
+    }
+
+    /// The shared semantic-state (W4-F1) treatment for whichever reason
+    /// `removeEmailBlockedNotice` currently reports. Presentation only — it
+    /// decides no blocking behavior itself, only how an already-decided
+    /// reason looks.
+    private var removeEmailBlockedStatusKind: CommonPlateStatusKind {
+        Self.removeEmailBlockedStatusKind(
+            hasEstablishedRemovalSafety: requestStore.hasEstablishedRemovalSafety,
+            hasActiveClaim: requestStore.activeClaim != nil
+        )
+    }
+
+    /// The pure mapping behind `removeEmailBlockedStatusKind`, extracted as a
+    /// `static func` (matching the existing `ParticipantVerificationView`
+    /// pure-predicate pattern) so it is directly testable without
+    /// instantiating `ContentView`'s full store dependency graph. Mirrors
+    /// `removeEmailBlockedNotice`'s exact precedence: the cold/relaunch
+    /// readiness check reads as in-progress work (`.loading`); an active
+    /// reservation/request reads as this action being temporarily
+    /// unavailable, not gone (`.unavailable`); otherwise (the remaining
+    /// blocked case is always an unresolved W3-D1 create, since this is only
+    /// consulted while `isRemoveEmailBlocked` is true) an unresolved create
+    /// is exactly a mutation-outcome-uncertain state (`.uncertain`).
+    static func removeEmailBlockedStatusKind(
+        hasEstablishedRemovalSafety: Bool,
+        hasActiveClaim: Bool
+    ) -> CommonPlateStatusKind {
+        if !hasEstablishedRemovalSafety {
+            return .loading
+        }
+        if hasActiveClaim {
+            return .unavailable
+        }
+        return .uncertain
     }
 
     /// The standing statement of the requirement. Deliberately not a call to

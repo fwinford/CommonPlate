@@ -6,6 +6,42 @@ CommonPlate currently supports one journey: **create → list → claim → fulf
 
 Current scope excludes authentication, chat, maps, payments, cancellation, pickup confirmation, and any no-show lifecycle. The legacy web fulfillment page remains disabled and cannot place an order.
 
+### 1.1 Accepted visual foundation (W4-F1)
+
+CommonPlate's shared iOS presentation is native-first **Subtle Warmth**: a
+restrained warm-neutral page canvas, bounded warm surfaces only where grouping
+is genuinely useful, selective CommonPlate purple, and character primarily
+through typography, spacing, hierarchy, and restrained color. Standard
+shadows/elevation, card-per-fact, pill-everything, and purple-everywhere are
+not part of the shared language. Home and participant verification use one
+coherent page-level canvas rather than distinct full-page treatments.
+
+Quiet Fraunces is reserved for CommonPlate brand and rare human-facing display
+moments, with graceful system fallback; SF/system type remains for functional
+and operational UI and all typography remains compatible with Dynamic Type.
+Shared actions distinguish strong filled-purple primary actions, soft-purple
+secondary actions, plain-purple-text tertiary actions, restrained red
+destructive actions, and clearly inactive neutral disabled actions. Controls
+remain moderately rounded rectangles that can grow or wrap without clipping.
+
+Verified identity remains a simple native section with the masked address, one
+clear verification indication, Change Email, and a visibly destructive Remove
+Email action; final Home composition and placement remain requester-slice
+owned. Participant verification is a more visibly branded but direct,
+scrollable flow with standard Cancel, field-to-primary-action hierarchy, and
+quiet inline code-lifetime help, not stacked form/section cards or decorative
+containers. These presentation rules do not change identity or verification
+runtime semantics.
+
+Routine/passive states default to native or inline treatment; important
+non-failure states may use restrained inline emphasis; success is lightweight
+by default; and no universal banner/card state system is implied. Outcome
+uncertainty remains distinct from failure, using a calm blue-gray semantic
+family, and every state remains distinguishable by more than color alone.
+Actionable-state action choice and layout remain with the owning flow. User
+facing role nouns are `student` and `helper`; motion and haptics are restrained,
+meaningful, non-gamified, and Reduce Motion aware.
+
 ## 2. Request lifecycle and availability
 
 | Persisted state | Meaning | Effective availability |

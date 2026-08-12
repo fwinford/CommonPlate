@@ -375,11 +375,40 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted baseline is **550 passed, 0 failed, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target. The increase includes the accepted W3-I1 participant-identity coverage described in section 4.
+The current accepted W4-F1 complete-iOS proof is **785 passed, 0 failed, 0 skipped, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
 
 Automated routing tests (this target included) prove tap-routing logic against stubbed backend resolution; they do not by themselves prove real APNs terminated-launch handoff on a device. Physical-device proof was required for helper terminated-launch tap routing and for requester-fulfillment push, and both have now passed on a physical iPhone. Release/Archive/TestFlight signing and environment behavior is unrelated evidence and remains a separate, still-open environmental gate (see `docs/system-contract.md` section 11).
 
 Automated and source-text assertions can prove that `RequestFoodView` installs the NYU/New York timezone and calendar into the SwiftUI environment; they cannot prove what a real `DatePicker` renders on a device actually configured to a different timezone. W3-R1 required physical-device verification on a non-Eastern device for exactly that reason: an iPhone configured to Phoenix time (no DST offset from New York for part of the year) displayed the intended NYU/New York wall-clock selection of 10:30 PM rather than device-local Phoenix time, and submitted `windowStart = 2026-08-09T02:30:00.000Z`, `visibleFrom = 2026-08-09T02:30:00.000Z`, and `expiresAt = 2026-08-09T05:30:00.000Z`; the requester email rendered `Aug 8, 10:30 PM – Aug 9, 1:30 AM`. This is device evidence, not part of the automated `CommonPlateiosTests` count above, and it predates and is unaffected by the later presentation-contract correction, which does not touch timezone rendering or submission code.
+
+### W4-F1 Product Truth & Visual Foundation acceptance
+
+For W4-F1 iOS changes, run focused affected suites using the section 9 command
+with the applicable repeated `-only-testing:CommonPlateiosTests/<TestClass>`
+filters, then run the complete `CommonPlateiosTests` command unchanged. The
+final production tree passed focused W4-F1/affected suites at **166 passed, 0
+failed, 0 skipped** and the complete target at **785 passed, 0 failed, 0
+skipped, TEST SUCCEEDED**. Both final `xcodebuild test` commands succeeded;
+their build/test processing also validated the required app resources,
+embedded Fraunces registration, and semantic-color assets. `git diff --check`
+and the staged diff check passed where run.
+
+Rendered simulator evidence covered Home at normal Dynamic Type (fully visible
+action labels, coherent hierarchy and shape), largest accessibility Dynamic
+Type (labels grew/wrapped without clipping and Home remained vertically
+scrollable), and dark appearance (legible, differentiated hierarchy/colors).
+The final simulator could not programmatically navigate to the verification
+email/code stages: the host GUI had no usable input/accessibility route and
+the app has no existing UI-test or deep-link route that presents that sheet
+without changing behavior. This documentation does not claim final rendered
+simulator verification-stage screenshots; source/tests establish structural
+verification behavior instead.
+
+Faith performed the final physical-device walkthrough, said it looked good,
+and explicitly accepted W4-F1. That physical acceptance supplies the final
+rendered/user-visible verification evidence that automation and source tests
+cannot substitute for; it does not establish Release/Archive/TestFlight or
+production-environment behavior.
 
 ## 10. Test-file organization
 

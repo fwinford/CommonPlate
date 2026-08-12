@@ -1,0 +1,68 @@
+//
+//  CommonPlateBrandDisplayScopeTests.swift
+//  CommonPlateiosTests
+//
+// Focused W4-F1 coverage that `commonPlateBrandDisplay` stays exactly as
+// selective as Faith's decision requires: reserved for the one rare brand
+// moment F1 owns (the "CommonPlate" wordmark on Home), never spread across
+// functional UI. Read via source inspection — matching the existing
+// `ParticipantVerificationHierarchyTests` pattern — since there is no
+// UI-test target to render and inspect the real view tree.
+import Foundation
+import XCTest
+@testable import CommonPlateios
+
+final class CommonPlateBrandDisplayScopeTests: XCTestCase {
+    func testHomeUsesBrandDisplayExactlyOnceForTheWordmark() throws {
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
+        let occurrences = source.components(separatedBy: "commonPlateBrandDisplay").count - 1
+        XCTAssertEqual(occurrences, 1, "expected exactly one commonPlateBrandDisplay use on Home")
+
+        // Scoped: the usage must sit on the "CommonPlate" wordmark line, not
+        // "at NYU" or any other Home text, so a future edit that moves it
+        // elsewhere on the same screen still fails this test.
+        guard let brandRange = source.range(of: "Text(\"CommonPlate\")") else {
+            XCTFail("expected the CommonPlate wordmark Text to still exist")
+            return
+        }
+        let afterWordmark = source[brandRange.upperBound...]
+        guard let nextTextRange = afterWordmark.range(of: "Text(\"at NYU\")") else {
+            XCTFail("expected the \"at NYU\" Text to still follow the wordmark")
+            return
+        }
+        let betweenWordmarkAndSubtitle = afterWordmark[..<nextTextRange.lowerBound]
+        XCTAssertTrue(
+            betweenWordmarkAndSubtitle.contains("commonPlateBrandDisplay"),
+            "expected commonPlateBrandDisplay to style the CommonPlate wordmark specifically"
+        )
+    }
+
+    /// Verification is the other approved rare display moment: its human
+    /// heading, not its fields or action labels, uses Quiet Fraunces.
+    func testParticipantVerificationUsesBrandDisplayOnlyForItsHeadline() throws {
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/ParticipantVerificationView.swift")
+        XCTAssertEqual(source.components(separatedBy: "commonPlateBrandDisplay").count - 1, 1)
+        let header = try declarationSource(
+            "private var verificationBrandHeader: some View {",
+            in: source
+        )
+        XCTAssertTrue(header.contains("Text(\n                store.flow?.purpose"))
+        XCTAssertTrue(header.contains("commonPlateBrandDisplay(.title2)"))
+    }
+
+    private func fileSource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // CommonPlateiosTests
+            .deletingLastPathComponent() // CommonPlateios
+            .deletingLastPathComponent() // ios
+            .deletingLastPathComponent() // repository root
+        let url = root.appendingPathComponent(relativePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "expected \(relativePath) at \(url.path)")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func declarationSource(_ startMarker: String, in source: String) throws -> String {
+        let start = try XCTUnwrap(source.range(of: startMarker))
+        return String(source[start.lowerBound...])
+    }
+}

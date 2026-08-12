@@ -58,29 +58,28 @@ struct ParticipantVerificationView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                switch store.flow?.stage {
-                case .enteringEmail, .none:
-                    emailSection
-                case .awaitingCode(let address, _, _):
-                    codeSection(address: address)
-                }
+            ScrollView {
+                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xl) {
+                    verificationBrandHeader
 
-                if let error = store.verificationError {
-                    Section {
-                        Text(error.message)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
+                    switch store.flow?.stage {
+                    case .enteringEmail, .none:
+                        emailSection
+                    case .awaitingCode(let address, _, _):
+                        codeSection(address: address)
+                    }
+
+                    if let error = store.verificationError {
+                        CommonPlateInlineStatus(kind: .error, message: error.message)
                             .accessibilityIdentifier("participant-verification-error")
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, CommonPlateStyle.Spacing.l)
+                .padding(.vertical, CommonPlateStyle.Spacing.xl)
             }
-            .navigationTitle(
-                store.flow?.purpose == .emailReplacement
-                    ? Self.replacementTitle
-                    : Self.title
-            )
-            .navigationBarTitleDisplayMode(.inline)
+            .scrollDismissesKeyboard(.interactively)
+            .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -92,9 +91,31 @@ struct ParticipantVerificationView: View {
         }
     }
 
+    /// Verification is an approved, rare trust/entry moment for CommonPlate
+    /// character. The brand/display type remains here; fields, controls, and
+    /// explanatory copy below deliberately remain system typography.
+    private var verificationBrandHeader: some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
+            Text("CommonPlate at NYU")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+
+            Text(
+                store.flow?.purpose == .emailReplacement
+                    ? Self.replacementTitle
+                    : Self.title
+            )
+            .font(.commonPlateBrandDisplay(.title2))
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("participant-verification-brand-header")
+    }
+
     @ViewBuilder
     private var emailSection: some View {
-        Section {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
             // Primary action first (W3-I3): the field and Send code are what
             // this screen is for, so they lead. Everything below is
             // supporting explanation, visually secondary, and never gates or
@@ -124,18 +145,23 @@ struct ParticipantVerificationView: View {
                 }
             }
             // Bordered-prominent + large control (W3-I3 physical-device
-            // correction): the plain in-row button style this shared with
-            // every other row read as one more line of text, not the
-            // screen's actual primary action. Full-width for the same
-            // reason "Send code" needed a stronger visual claim than its own
-            // label width gave it.
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            // correction), now the shared primary-action convention (W4-F1):
+            // the plain in-row button style this shared with every other row
+            // read as one more line of text, not the screen's actual primary
+            // action. Full-width for the same reason "Send code" needed a
+            // stronger visual claim than its own label width gave it.
+            .commonPlatePrimaryAction()
             .disabled(!Self.canSendCode(email: email, isRequesting: store.isRequestingCode))
             .accessibilityIdentifier("participant-verification-send")
-        }
 
-        Section {
+            Text(Self.codeLifetimeNotice)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("participant-verification-code-lifetime")
+
+            Divider()
+
             Text(NYUEmailPolicy.requiredMessage)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -164,7 +190,7 @@ struct ParticipantVerificationView: View {
     }
 
     private func codeSection(address: String) -> some View {
-        Section {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
             Text(Self.codeSentNotice(email: address))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -197,11 +223,10 @@ struct ParticipantVerificationView: View {
                         .frame(maxWidth: .infinity)
                 }
             }
-            // Same bordered-prominent/full-width correction as Send code
+            // Same shared primary-action convention (W4-F1) as Send code
             // above, for the same reason: this is the code-entry state's one
             // primary action, and the plain in-row style did not read as one.
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .commonPlatePrimaryAction()
             .disabled(
                 !Self.canSubmitCode(
                     code: code,
@@ -218,6 +243,8 @@ struct ParticipantVerificationView: View {
             .accessibilityIdentifier("participant-verification-resend")
         }
     }
+
+    static let codeLifetimeNotice = "Your code expires in 10 minutes."
 
     /// Local completeness and eligibility only. The backend applies the
     /// identical allowlist and remains authoritative; this exists so an
