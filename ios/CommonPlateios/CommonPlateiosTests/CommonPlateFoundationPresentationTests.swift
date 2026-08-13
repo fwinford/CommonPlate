@@ -160,8 +160,19 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         XCTAssertFalse(header.contains("Section"))
         XCTAssertFalse(header.contains("commonPlateGroupedSurface"))
         XCTAssertFalse(email.contains("commonPlateGroupedSurface"))
-        XCTAssertTrue(source.contains("ToolbarItem(placement: .cancellationAction)"))
-        XCTAssertTrue(source.contains("Button(\"Cancel\")"))
+        let dismissalControl = try declarationSource(
+            startMarker: ".toolbar {",
+            endMarker: "    /// Verification is an approved",
+            in: "ios/CommonPlateios/CommonPlateios/Views/ParticipantVerificationView.swift"
+        )
+        XCTAssertTrue(dismissalControl.contains("ToolbarItem(placement: .topBarLeading)"))
+        XCTAssertTrue(dismissalControl.contains("Button(action: cancel)"))
+        XCTAssertTrue(dismissalControl.contains("Image(systemName: \"xmark\")"))
+        XCTAssertTrue(dismissalControl.contains(".font(.system(size: 17, weight: .semibold))"))
+        XCTAssertTrue(dismissalControl.contains(".frame(width: 44, height: 44)"))
+        XCTAssertTrue(dismissalControl.contains(".background(CommonPlateStyle.Color.warmSurface, in: Circle())"))
+        XCTAssertTrue(dismissalControl.contains(".accessibilityLabel(\"Close email verification\")"))
+        XCTAssertFalse(dismissalControl.contains("Button(\"Cancel\")"))
         XCTAssertTrue(source.contains("case .awaitingCode(let address, _, _):\n                        codeSection(address: address)"))
         XCTAssertFalse(code.contains("Form {"))
         XCTAssertFalse(code.contains("Section {"))

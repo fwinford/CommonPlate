@@ -81,10 +81,20 @@ struct ParticipantVerificationView: View {
             .scrollDismissesKeyboard(.interactively)
             .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        cancel()
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: cancel) {
+                        Image(systemName: "xmark")
+                            // The fixed circle owns the symbol geometry, so
+                            // Dynamic Type cannot enlarge this quiet dismissal
+                            // control while nearby text remains accessible.
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 44, height: 44)
+                            .background(CommonPlateStyle.Color.warmSurface, in: Circle())
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(CommonPlateWarmGhostDismissButtonStyle())
+                    .accessibilityLabel("Close email verification")
                     .accessibilityIdentifier("participant-verification-cancel")
                 }
             }
@@ -263,5 +273,13 @@ struct ParticipantVerificationView: View {
         guard !isSubmitting, !isRequesting else { return false }
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.count == 6 && trimmed.allSatisfy(\.isNumber)
+    }
+}
+
+private struct CommonPlateWarmGhostDismissButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

@@ -438,6 +438,18 @@ the observed rendered and interaction behavior; it does not extend those
 environmental or provider claims. The separately authorized verification
 Cancel → X correction remains outside the R1 evidence and acceptance record.
 
+### W4-C1 R1 carryover reconciliation
+
+Request Food reconciliation required no additional implementation because the
+accepted R1 behavior already satisfied it. The only C1 correction replaced the
+verification-modal `Cancel` presentation with the accepted top-leading
+`xmark`; the cancellation action, destination, and lifecycle behavior are
+unchanged. Focused proof passed **21 tests, 0 failed, 0 skipped**. The complete
+`CommonPlateiosTests` target passed **795 tests, 0 failed, 0 skipped, TEST
+SUCCEEDED**. Independent review was CLEAN. These source-level presentation
+tests are not rendered UI proof; the correction is limited to presentation and
+does not alter the verification lifecycle.
+
 ## 10. Test-file organization
 
 Add new Week 3 iOS tests in new focused files where practical. Do not keep extending `ClaimFlowTests.swift` merely because it already contains related tests. Preserve existing test files rather than splitting them during unrelated feature work, and keep one endpoint and one user-flow slice per test change. This does not prescribe a new test framework or UI-test target.
@@ -477,7 +489,7 @@ These results are reference evidence, not a substitute for rerunning affected ch
 | `npm test` | Passed at the H2 closeout: 1,378 passed, 321 Mongo-gated skipped |
 | `npm run test:mongo` | Passed at the H2 closeout: 321 passed across 22 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | H2 closeout: 744 passed; 0 failed; TEST SUCCEEDED |
+| `CommonPlateiosTests` | W4-C1 accepted baseline: 795 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
 | `npm run build:client` | Passed; no tracked bundle diff (C1 closeout; no browser-client source changed in N2, D1, or H2) |
 | `git diff --check` | Passed |
 
