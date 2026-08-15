@@ -25,3 +25,14 @@ struct SubscribePayload: Encodable {
 struct SubscribeAcceptedDTO: Decodable {
     let message: String?
 }
+
+/// Response for `GET /api/participant/email-alerts/state` (W4-N0) → HTTP 200
+/// `{ "email": { "active": Bool } }`. The only truth this route exposes: no
+/// Subscriber id, credential, or lifecycle field is ever present here, per
+/// `src/emailAlertStateRoute.ts`.
+struct EmailAlertStateResponseDTO: Decodable {
+    struct Email: Decodable {
+        let active: Bool
+    }
+    let email: Email
+}

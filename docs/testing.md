@@ -303,6 +303,18 @@ W3-I4 is accepted. Focused `RemoveEmailTests` reached 19/19 and the complete `Co
 
 **Accepted verification limitation.** The final focused `RemoveEmailTests` rerun against the literal-only copy correction was attempted twice but could not execute because CoreSimulator became unavailable (`CoreSimulatorService connection became invalid`; `Unable to find a device matching the provided destination specifier`). This final focused test state is not claimed as passed; it is an accepted environmental verification limitation, consistent with the pattern already used for W3-I1/W3-H1/W3-D1/W3-H2. Physical-device Keychain-deletion proof was likewise not established and is accepted as unperformed on the same basis.
 
+### Email Request Alert State Authority (W4-N0) coverage
+
+W4-N0 is accepted. Backend coverage (`src/emailAlertState.test.ts`, `src/emailAlertState.mongo.test.ts`, `src/emailAlertStateRoute.test.ts`) proves: the read derives its principal only from `resolveParticipantAuthority`, refusing missing/invalid authority before any Subscriber lookup; no caller-supplied query, body, or header field can select a different address; another participant's Subscriber state cannot affect or be exposed to the caller; absent, pending, and unsubscribed Subscriber rows all read `active: false` and only `status: "confirmed"` reads `active: true`; the read performs no mutation on any path; a database failure answers `503` rather than a false `active: false`; the response carries only `{ "email": { "active": boolean } }` with no Subscriber id, credential, or lifecycle field; and `Cache-Control: private, no-store` / `Vary: x-commonplate-participant` are present on success, authority-refusal, and lookup-failure responses alike. `src/emailAlertState.mongo.test.ts` proves the absent/pending/confirmed/unsubscribed lifecycle mapping and read-only behavior against real MongoDB, in its own `commonplate_email_alert_state_test` database, following the same per-suite-database `Subscriber` isolation convention documented in section 5 below.
+
+iOS coverage (`EmailAlertStateStoreTests.swift`) proves: no credential issues no network call and leaves state `.unknown`; authoritative backend On/Off map exactly to `.active`/`.inactive`; authorization, transport, and decoding failures all leave state `.unknown` rather than a fabricated Off; a response or an authority-invalid rejection resolved under a participant authority that a later Change Email has since replaced is discarded rather than applied to, or retiring, the replacement identity — including when the newer participant's own refresh has already completed, and when the newer participant's refresh is still in flight concurrently with the superseded one; repeated refreshes for the same still-current participant remain coherent; and only `PARTICIPANT_AUTHORITY_INVALID` for the still-current credential invokes the existing participant-authority rejection path, matching `RequestStore.applyParticipantVerdict`.
+
+At acceptance: `npm run typecheck` passed; focused backend N0 suites passed **18/18**; complete `npm test` passed **1,406 passed, 328 Mongo-gated skipped**; `npm run test:mongo` passed **328 tests across 23 files** (against the N0 query/persistence implementation, which a later comment-only correction left unchanged); focused `EmailAlertStateStoreTests` passed **18/18**; complete `CommonPlateiosTests` passed **857 passed, 0 failed, 0 skipped, TEST SUCCEEDED**; `git diff --check` passed. An initial independent HIGH-risk review returned three MUST FIX findings (participant-specific cache isolation, iOS state remaining bound to the current participant across a Change Email race, and current-only authority-rejection retirement) and one SHOULD FIX (a misleading backend comment conflating N0's confirmed-only state with send/delivery eligibility); all four were corrected, and a fresh focused rereview was CLEAN.
+
+A `ReservationWarningTests.testReleaseSucceedsBeforeTheWarningEverFires` timing flake surfaced twice during the fix-round complete-target runs. It was investigated: the test passed standalone in both the pre-fix and post-fix trees, passed as part of its full suite against the unmodified pre-fix tree, and passed again in its full suite and in the complete target against the post-fix tree with no further code change. It does not touch `EmailAlertStateStore`, `EmailAlertStateService`, or any other N0 file. This is recorded as pre-existing `Task.sleep`/`waitUntil` polling flakiness in that unrelated suite, not an N0 defect, and is not a new accepted verification limitation for N0.
+
+No N0-specific physical-device or environmental proof is required or outstanding.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -485,12 +497,12 @@ These results are reference evidence, not a substitute for rerunning affected ch
 
 | Check | Result |
 | --- | --- |
-| `npm run typecheck` | Passed at the H2 closeout |
-| `npm test` | Passed at the H2 closeout: 1,378 passed, 321 Mongo-gated skipped |
-| `npm run test:mongo` | Passed at the H2 closeout: 321 passed across 22 files |
+| `npm run typecheck` | Passed at the W4-N0 closeout |
+| `npm test` | Passed at the W4-N0 closeout: 1,406 passed, 328 Mongo-gated skipped |
+| `npm run test:mongo` | Passed at the W4-N0 closeout: 328 passed across 23 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | W4-C1 accepted baseline: 795 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
-| `npm run build:client` | Passed; no tracked bundle diff (C1 closeout; no browser-client source changed in N2, D1, or H2) |
+| `CommonPlateiosTests` | W4-N0 accepted baseline: 857 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
+| `npm run build:client` | Passed; no tracked bundle diff (C1 closeout; no browser-client source changed in N2, D1, H2, or N0) |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
@@ -508,6 +520,8 @@ W3-N2 physical-device acceptance (push enable/disable reaching authoritative On/
 The non-Eastern `DatePicker` timezone proof required for W3-R1 (see section 9) is likewise device evidence, not part of the automated suite above.
 
 W3-I4 acceptance evidence and its accepted CoreSimulator verification limitation are recorded above (Remove Verified Identity (W3-I4) coverage) and in `docs/system-contract.md` section 3.1.
+
+W4-N0 acceptance evidence (authorization/privacy/cache-isolation for the participant-authorized Email Request Alert state read, current-participant stale-authority fencing, and Subscriber-lifecycle-to-state mapping) is recorded above (Email Request Alert State Authority (W4-N0) coverage) and in `docs/system-contract.md` section 9.10. No physical-device or environmental proof was required; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
 W3-H2 durable one-successful-participation enforcement, marketplace/detail privacy isolation, and fulfillment re-entry evidence is recorded above and in `docs/system-contract.md` section 5.1. **W3-H2 was accepted without an iOS UI-test target**, so the literal SwiftUI stale-detail render/tap scheduling sequence was not driven end-to-end through UI automation or physical-device interaction; production predicate/action logic and wiring are covered by unit/source-level tests and the full iOS target instead. That remaining limitation is accepted, not a failed or pending check, and must not be described as UI-test or physical-device proof; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 

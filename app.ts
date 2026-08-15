@@ -150,6 +150,11 @@ import {
   activeReservationRateLimiter,
   getActiveReservation,
 } from "./src/reservationRoute.js";
+import {
+  EMAIL_ALERT_STATE_ROUTE_PATH,
+  emailAlertStateRateLimiter,
+  getEmailAlertState,
+} from "./src/emailAlertStateRoute.js";
 import { readClaimTokenHmacSecret } from "./src/claimToken.js";
 import { assertUnsubscribeSigningSecretForActivation } from "./src/unsubscribeCredential.js";
 import { assertApnsConfigurationForActivation } from "./src/apnsConfig.js";
@@ -493,6 +498,15 @@ app.get(
   ACTIVE_RESERVATION_ROUTE_PATH,
   activeReservationRateLimiter,
   getActiveReservation
+);
+
+// W4-N0: a read of the caller's own current Email Request Alert state, not a
+// new mutation, so it is not paused by `PUBLIC_ACTIONS_PAUSED` — matching
+// `GET /api/participant/active-reservation` immediately above.
+app.get(
+  EMAIL_ALERT_STATE_ROUTE_PATH,
+  emailAlertStateRateLimiter,
+  getEmailAlertState
 );
 
 // A valid active claim is the only authorization for placement. This route is
