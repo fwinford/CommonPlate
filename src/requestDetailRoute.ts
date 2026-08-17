@@ -5,7 +5,7 @@ import { sendDay4Error } from "./day4Errors.js";
 import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
 import {
   findParticipatedRequestIds,
-  resolveOptionalParticipantAuthority,
+  resolveCallerForBrowse,
 } from "./requestParticipation.js";
 import {
   isVisibleNow,
@@ -43,7 +43,15 @@ export async function getPublicRequestDetail(
     // status of the response, so the two cannot disagree about the same read.
     const now = new Date();
 
-    const document = await MealRequest.findById(id).lean().exec();
+    // `+requesterParticipantId` (W4-H2): `select: false` on the schema like
+    // every other private field, so deriving the caller-relative ownership
+    // signal below requires selecting it explicitly — exactly as
+    // `GET /api/requests` already does. It is read only through
+    // `callerOwnershipFor` and never copied onto the response.
+    const document = await MealRequest.findById(id)
+      .select("+requesterParticipantId")
+      .lean()
+      .exec();
     if (!document) {
       return res.status(404).json({ error: "Request not found" });
     }
@@ -74,9 +82,16 @@ export async function getPublicRequestDetail(
       );
     }
 
+    // Resolved once, ahead of the response build: the same authority decides
+    // both the W4-H2 caller-relative ownership signal below and the W3-H2
+    // `alreadyParticipated` signal further down, so the two can never
+    // describe different callers for one read.
+    const { participant, ownershipContext } = await resolveCallerForBrowse(req);
+
     const response = buildPublicRequestDetailResponse(
       document as unknown as PublicRequestDocument,
-      now
+      now,
+      ownershipContext
     );
 
     // W3-H2 stale detail Reserve truth: browsing stays open to anyone
@@ -90,7 +105,6 @@ export async function getPublicRequestDetail(
     // request, so it can withdraw the Reserve affordance instead of only
     // discovering the refusal after a tap. `claimRequest`'s own conditional
     // grant remains the authoritative backstop regardless of this flag.
-    const participant = await resolveOptionalParticipantAuthority(req);
     if (participant) {
       const participatedIds = await findParticipatedRequestIds(
         participant.participantId,

@@ -403,6 +403,22 @@ final class RequestStore: ObservableObject {
     @Published private(set) var initialFetchError: RequestServiceError?
     @Published private(set) var refreshError: RequestServiceError?
 
+    /// True once an initial (never-yet-succeeded) fetch has actually finished
+    /// and failed at least one time. `initialFetchError` alone cannot signal
+    /// this to a view: `fetchRequests()` clears it back to `nil` the instant a
+    /// retry begins, at the same synchronous point that also sets
+    /// `hasAttemptedRequestFetch = true` and `isLoadingInitialRequests = true`
+    /// — so a first-ever attempt in flight and a retry-after-failure in
+    /// flight publish an otherwise identical snapshot of every other property
+    /// above. `HomeExchangeView` needs to tell those apart so a retry stays
+    /// on the already-resolved Exchange Unavailable presentation instead of
+    /// regressing to the bare initial-loading one. Reset to `false` only by a
+    /// later success, matching `hasSuccessfullyFetchedRequests`'s own
+    /// one-directional shape; harmless to leave `true` after success since
+    /// callers only ever consult it while `hasSuccessfullyFetchedRequests`
+    /// is still `false`.
+    @Published private(set) var hasFailedInitialFetchAtLeastOnce = false
+
     /// Fail-closed availability of request creation. Starts `.unknown` so a
     /// screen that has not yet probed cannot reveal the requester form.
     @Published private(set) var requestCreationAvailability: RequestCreationAvailability = .unknown
@@ -549,6 +565,11 @@ final class RequestStore: ObservableObject {
     private let operationStorage: PendingRequestOperationStorage
     private var fetchGeneration = 0
     private var collectionRevision = 0
+    /// The participant authority whose caller-relative ownership the current
+    /// `requests` collection carries (W4-H2). `nil` means no current-authority
+    /// ownership evidence backs the collection, so every entry is
+    /// `.unresolved` and fails closed.
+    private var ownershipAuthority: String?
     private var activeClaimAuthorization: ActiveClaimAuthorization?
     private var activeClaimAttempt: ClaimAttempt?
     private var activeClaimExtensionAttempt: ClaimExtensionAttempt?
@@ -639,6 +660,56 @@ final class RequestStore: ObservableObject {
         isLoadingInitialRequests || isRefreshingRequests
     }
 
+    /// Re-resolves one request's caller-relative ownership against the
+    /// participant authority that is current *now* (W4-H2).
+    ///
+    /// A `FoodRequest` carried by navigation holds whatever ownership was
+    /// resolved when it was materialized — possibly under an anonymous
+    /// session, or under a participant since replaced. Before any helper
+    /// mutation may proceed on the strength of "not your request", that
+    /// conclusion has to be re-established for whoever is current.
+    ///
+    /// Fails closed: any transport, decode, or authority failure returns
+    /// `.unresolved` rather than a guess, and a participant change during the
+    /// read invalidates the answer it was about to give.
+    func resolveOwnership(requestID: String) async -> RequestOwnership {
+        let requestingAuthority = participantAuthorityProvider()
+        do {
+            let request = try await service.fetchRequest(
+                id: requestID,
+                participantAuthority: requestingAuthority
+            )
+            guard participantAuthorityProvider() == requestingAuthority else {
+                return .unresolved
+            }
+            return request.ownership
+        } catch {
+            return .unresolved
+        }
+    }
+
+    /// Invalidates caller-relative ownership the instant the current
+    /// participant authority stops matching the one that produced it, then
+    /// reloads through the one authoritative path (W4-H2).
+    ///
+    /// This runs *before* the reload rather than relying on the reload to
+    /// repair the window: between a successful verification, Change Email, or
+    /// Remove Email and the arrival of replacement truth, the previous
+    /// participant's `own`/`notOwn` conclusions are not the new participant's.
+    /// Public request data is preserved — the board does not blank — but
+    /// helper actionability fails closed until ownership resolves for whoever
+    /// is current now.
+    ///
+    /// Creates no second request-list truth owner: it only downgrades an
+    /// ownership field and delegates the reload to `fetchRequests()`.
+    func reconcileOwnershipForCurrentAuthority() async {
+        if participantAuthorityProvider() != ownershipAuthority {
+            ownershipAuthority = nil
+            requests = requests.map { $0.withOwnership(.unresolved) }
+        }
+        await fetchRequests()
+    }
+
     /// `GET /api/requests`. Before the first successful response this is an
     /// initial load (including retries after an initial failure). Later calls
     /// are refreshes that preserve the current collection until success.
@@ -667,16 +738,40 @@ final class RequestStore: ObservableObject {
             }
         }
 
+        // W4-H2: caller-relative ownership is meaningful only for the exact
+        // authority that produced it, so the authority is captured here and
+        // re-checked below rather than only being read at send time. Without
+        // this, an anonymous or participant-A list result that lands after
+        // verification or a successful Change Email would install A-relative
+        // ownership as B's truth — labelling B's own request helpable, or
+        // suppressing Reserve on a request B may legitimately help.
+        let requestingAuthority = participantAuthorityProvider()
         do {
             let fetchedRequests = try await service.fetchActiveRequests(
-                participantAuthority: participantAuthorityProvider()
+                participantAuthority: requestingAuthority
             )
             guard generation == fetchGeneration,
                   startingCollectionRevision == collectionRevision else {
                 return
             }
+            guard participantAuthorityProvider() == requestingAuthority else {
+                // The participant changed while this was in flight. The public
+                // request data is still usable, but its caller-relative
+                // ownership belongs to a principal who is no longer current,
+                // so it is applied only in the fail-closed `.unresolved`
+                // state. The identity change itself triggers a fresh fetch
+                // (see `reconcileOwnershipForCurrentAuthority`), which is what
+                // establishes ownership for the new participant.
+                requests = fetchedRequests.map { $0.withOwnership(.unresolved) }
+                ownershipAuthority = nil
+                hasSuccessfullyFetchedRequests = true
+                hasFailedInitialFetchAtLeastOnce = false
+                return
+            }
             requests = fetchedRequests
+            ownershipAuthority = requestingAuthority
             hasSuccessfullyFetchedRequests = true
+            hasFailedInitialFetchAtLeastOnce = false
             if isRefresh {
                 refreshError = nil
             } else {
@@ -693,6 +788,7 @@ final class RequestStore: ObservableObject {
                 refreshError = Self.asServiceError(error)
             } else {
                 initialFetchError = Self.asServiceError(error)
+                hasFailedInitialFetchAtLeastOnce = true
             }
         }
     }
@@ -717,9 +813,20 @@ final class RequestStore: ObservableObject {
     /// outcome.
     func resolveHelperNotificationRequest(id: String) async throws -> HelperNotificationResolution {
         try Task.checkCancellation()
+        // W4-H2: the detail route derives caller-relative ownership for the
+        // authority presented here, so that answer is authoritative only
+        // while the same authority is current. A participant change mid-flight
+        // makes the returned `own`/`notOwn` a conclusion about someone else.
+        let requestingAuthority = participantAuthorityProvider()
         do {
-            let request = try await service.fetchRequest(id: id)
-            return request.status == .open ? .available(request) : .unavailable
+            let request = try await service.fetchRequest(
+                id: id,
+                participantAuthority: requestingAuthority
+            )
+            let resolved = participantAuthorityProvider() == requestingAuthority
+                ? request
+                : request.withOwnership(.unresolved)
+            return resolved.status == .open ? .available(resolved) : .unavailable
         } catch is CancellationError {
             throw CancellationError()
         } catch RequestServiceError.notFound {
@@ -834,7 +941,7 @@ final class RequestStore: ObservableObject {
             )
             operationStorage.clear()
             advanceCollectionRevision()
-            applyConfirmed(created)
+            applyConfirmed(created, createdUnderAuthority: participantAuthority)
         } catch is CancellationError {
             // `RequestService.createRequest` only ever lets a raw
             // `CancellationError` reach here from its own leading
@@ -962,7 +1069,13 @@ final class RequestStore: ObservableObject {
             operationStorage.clear()
             unresolvedCreateError = nil
             advanceCollectionRevision()
-            applyConfirmed(created)
+            // W4-H2: a reconciled D1 create is the same authenticated
+            // knowledge as a fresh one — this exact authority created this
+            // exact request — so it carries the same immediate ownership.
+            // The equality check inside `applyConfirmed` still withholds it
+            // if the authority changed while reconciliation was in flight;
+            // ownership is never inferred from the request id alone.
+            applyConfirmed(created, createdUnderAuthority: participantAuthority)
             return true
         } catch is CancellationError {
             return false
@@ -2731,11 +2844,36 @@ final class RequestStore: ObservableObject {
         collectionRevision += 1
     }
 
-    private func applyConfirmed(_ request: FoodRequest) {
-        if let index = requests.firstIndex(where: { $0.id == request.id }) {
-            requests[index] = request
+    /// Ingests a request confirmed by a POST whose response shape carries no
+    /// caller-relative ownership, so `request.ownership` arrives
+    /// `.unresolved`.
+    ///
+    /// `createdUnderAuthority` is the participant authority that performed
+    /// the authenticated create. When it is still current, this is not a
+    /// heuristic: `POST /api/request` refuses an unverified caller and binds
+    /// `requesterParticipantId` to exactly that principal, so a success
+    /// returned to that same still-current authority is direct knowledge
+    /// that the request is theirs. That lets Home label it `YOUR REQUEST`
+    /// and withhold Reserve immediately, instead of presenting the
+    /// requester's own brand-new request as helpable until the next list
+    /// fetch happens to re-derive ownership.
+    ///
+    /// If the authority changed while the create was in flight, the
+    /// A-relative conclusion is not applied for B — ownership stays
+    /// `.unresolved` and fails closed until B's own read resolves it.
+    private func applyConfirmed(
+        _ request: FoodRequest,
+        createdUnderAuthority: String? = nil
+    ) {
+        var confirmed = request
+        if let createdUnderAuthority,
+           participantAuthorityProvider() == createdUnderAuthority {
+            confirmed = request.withOwnership(.own)
+        }
+        if let index = requests.firstIndex(where: { $0.id == confirmed.id }) {
+            requests[index] = confirmed
         } else {
-            requests.append(request)
+            requests.append(confirmed)
         }
     }
 

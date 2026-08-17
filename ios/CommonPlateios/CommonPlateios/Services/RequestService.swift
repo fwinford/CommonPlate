@@ -169,7 +169,16 @@ struct RequestService {
                 method: .get,
                 headers: Self.participantHeaders(participantAuthority)
             )
-            return try response.requests.map(Self.mapPublicRequest)
+            // `GET /api/requests` derives caller-relative ownership for the
+            // authority this call presented, so its answer is authoritative
+            // for that authority — including the affirmative-signal-absent
+            // case, which means "not this caller's own request".
+            return try response.requests.map {
+                try Self.mapPublicRequest(
+                    $0,
+                    ownership: Self.resolvedOwnership($0, presentedAuthority: participantAuthority)
+                )
+            }
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -183,14 +192,31 @@ struct RequestService {
     /// an ambiguous fulfillment POST to see whether placement can be
     /// confirmed, and by helper new-request notification tap-routing to
     /// resolve whether the tapped request is still available.
-    func fetchRequest(id: String) async throws -> FoodRequest {
+    ///
+    /// `participantAuthority` is optional and, like `fetchActiveRequests`,
+    /// sent only when this device already holds one — so the mapped
+    /// `FoodRequest.isOwnRequest` reflects the resolving caller's own
+    /// current identity for the notification-tap-routing caller (the only
+    /// one that renders it), rather than always defaulting to "not own" the
+    /// way an unconditionally anonymous call would.
+    func fetchRequest(id: String, participantAuthority: String? = nil) async throws -> FoodRequest {
         do {
             let response: RequestDetailResponseDTO = try await client.send(
                 path: "/api/request/\(id)",
-                method: .get
+                method: .get,
+                headers: Self.participantHeaders(participantAuthority)
             )
             try Self.validateResponseRequestID(response.request.id, expected: id)
-            return try Self.mapPublicRequest(response.request)
+            // `GET /api/request/:id` now derives the same caller-relative
+            // ownership the list does (W4-H2 detail projection), so a detail
+            // read is authoritative for the authority it presented.
+            return try Self.mapPublicRequest(
+                response.request,
+                ownership: Self.resolvedOwnership(
+                    response.request,
+                    presentedAuthority: participantAuthority
+                )
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -306,7 +332,7 @@ struct RequestService {
         }
 
         do {
-            let request = try Self.mapPublicRequest(response.request)
+            let request = try Self.mapPublicRequest(response.request, ownership: .unresolved)
             try Self.validateResponseStatus(request.status, expected: .open)
             return request
         } catch {
@@ -355,7 +381,7 @@ struct RequestService {
 
         do {
             try Self.validateResponseRequestID(response.request.id, expected: id)
-            let request = try Self.mapPublicRequest(response.request)
+            let request = try Self.mapPublicRequest(response.request, ownership: .unresolved)
             try Self.validateResponseStatus(request.status, expected: .claimed)
             guard !response.claim.claimToken.isEmpty else {
                 throw APIClientError.decoding(
@@ -516,7 +542,7 @@ struct RequestService {
         }
 
         if let reservation = response.reservation {
-            let request = try Self.mapPublicRequest(reservation.request)
+            let request = try Self.mapPublicRequest(reservation.request, ownership: .unresolved)
             return .reservation(ActiveReservationOutcome(
                 request: request,
                 pickupName: reservation.pickupName,
@@ -525,7 +551,7 @@ struct RequestService {
             ))
         }
         if let placement = response.placement {
-            let request = try Self.mapPublicRequest(placement.request)
+            let request = try Self.mapPublicRequest(placement.request, ownership: .unresolved)
             return .placed(PlacedReservationOutcome(
                 request: request,
                 notificationStatus: placement.notification?.status
@@ -583,7 +609,7 @@ struct RequestService {
 
         do {
             try Self.validateResponseRequestID(response.request.id, expected: id)
-            let request = try Self.mapPublicRequest(response.request)
+            let request = try Self.mapPublicRequest(response.request, ownership: .unresolved)
             try Self.validateResponseStatus(request.status, expected: .placed)
             return FulfillOutcome(request: request, notificationStatus: response.notification.status)
         } catch {
@@ -639,7 +665,7 @@ struct RequestService {
 
         do {
             try Self.validateResponseRequestID(response.request.id, expected: id)
-            let request = try Self.mapPublicRequest(response.request)
+            let request = try Self.mapPublicRequest(response.request, ownership: .unresolved)
             try Self.validateResponseStatus(request.status, expected: .placed)
             return FulfillOutcome(request: request, notificationStatus: response.notification.status)
         } catch {
@@ -700,7 +726,16 @@ struct RequestService {
     /// An unrecognized wire status value throws (via `RequestStatusWire`'s
     /// `Decodable` conformance failing at decode time) rather than silently
     /// mapping to an incorrect lifecycle state.
-    private static func mapPublicRequest(_ dto: RequestResponseDTO) throws -> FoodRequest {
+    /// `ownership` is required rather than defaulted (W4-H2): only a caller
+    /// that knows the response actually carries current-authority
+    /// caller-relative ownership may claim a resolved answer. Every other
+    /// endpoint must pass `.unresolved`, so an absent `isOwnRequest` on a
+    /// response shape that never derives ownership can no longer become an
+    /// actionable "not own".
+    private static func mapPublicRequest(
+        _ dto: RequestResponseDTO,
+        ownership: RequestOwnership
+    ) throws -> FoodRequest {
         return FoodRequest(
             id: dto.id,
             diningSpot: DiningSpot(name: dto.vendor, address: nil),
@@ -711,8 +746,45 @@ struct RequestService {
             windowEnd: dto.windowEnd,
             createdAt: dto.createdAt,
             expiresAt: dto.expiresAt,
-            status: dto.status.domainStatus
+            status: dto.status.domainStatus,
+            ownership: ownership
         )
+    }
+
+    /// Ownership as answered by a route that genuinely derives it
+    /// (`GET /api/requests`, `GET /api/request/:id`).
+    ///
+    /// Deliberately *not* `dto.isOwnRequest ?? false`. Field absence is not
+    /// one fact, and which fact it is depends on something only this client
+    /// knows: whether it presented a participant credential at all.
+    ///
+    /// - No credential presented → the caller is browsing anonymously.
+    ///   Creating a request requires participant authority
+    ///   (`createRequestRoute.ts` refuses an unverified caller outright), so
+    ///   an anonymous session owns nothing, and `.notOwn` is correct *for as
+    ///   long as the caller stays anonymous*. That conclusion must not
+    ///   survive into a verified authority — `RequestDetailView` invalidates
+    ///   it on any identity transition.
+    /// - Credential presented, field `true`/`false` → the server resolved it
+    ///   and stated the answer.
+    /// - Credential presented, field absent → the server could not resolve
+    ///   the presented authority. Ownership is unknown; fail closed.
+    private static func resolvedOwnership(
+        _ dto: RequestResponseDTO,
+        presentedAuthority: String?
+    ) -> RequestOwnership {
+        guard presentedAuthority?.isEmpty == false else {
+            // Anonymous. A server that nonetheless affirms ownership is
+            // contradicting the contract (it cannot know whose request this
+            // is without a credential), so that is treated as unknown rather
+            // than believed.
+            return dto.isOwnRequest == true ? .unresolved : .notOwn
+        }
+        switch dto.isOwnRequest {
+        case .some(true): return .own
+        case .some(false): return .notOwn
+        case .none: return .unresolved
+        }
     }
 
     /// Translates a client/transport failure into the product-safe error surface.

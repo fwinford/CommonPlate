@@ -89,6 +89,11 @@ struct AlertSignupView: View {
     /// Read only for its current authority credential at the moment of the
     /// tap — this view holds no identity state of its own.
     @ObservedObject var identityStore: ParticipantIdentityStore
+    /// Overrides the accepted-state `Done` action. Defaults to `nil`, which
+    /// falls back to `dismiss()` — the existing behavior for both of this
+    /// view's current presentations (the `.alerts` push destination and the
+    /// Home/Settings Request Alerts overlay).
+    var onDone: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isEmailFocused: Bool
 
@@ -118,8 +123,6 @@ struct AlertSignupView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .navigationTitle(Self.title)
-        .navigationBarTitleDisplayMode(.inline)
     }
 
     private var form: some View {
@@ -131,6 +134,12 @@ struct AlertSignupView: View {
             Text(Self.explanation)
                 .foregroundStyle(.secondary)
 
+            expandedEntry
+        }
+    }
+
+    private var expandedEntry: some View {
+        VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(Self.fieldLabel)
                     .font(.subheadline)
@@ -181,6 +190,19 @@ struct AlertSignupView: View {
         }
     }
 
+    /// The approved Figma's Check Email step replaces a plain emoji envelope
+    /// with a simple purple outlined envelope — the app's native `envelope`
+    /// glyph reads as that same quiet outlined line-art `CommonPlateStyle`
+    /// already uses for every other icon (`gearshape`, `checkmark.circle.fill`,
+    /// `xmark`), so no new asset is needed. Shown only for the Check Email
+    /// step, not the Email Alerts Off step, matching the approved design.
+    private var checkEmailIcon: some View {
+        Image(systemName: "envelope")
+            .font(.system(size: 26, weight: .regular))
+            .foregroundStyle(Color.accentColor)
+            .accessibilityHidden(true)
+    }
+
     private var acceptedState: some View {
         VStack(alignment: .leading, spacing: 16) {
             if unsubscribeStore.emailAlertsOff {
@@ -190,6 +212,8 @@ struct AlertSignupView: View {
                 Text(Self.emailAlertsOffBody)
                     .foregroundStyle(.secondary)
             } else {
+                checkEmailIcon
+
                 Text(Self.checkEmailTitle)
                     .font(.title2)
                     .fontWeight(.semibold)
@@ -226,7 +250,11 @@ struct AlertSignupView: View {
             .frame(maxWidth: .infinity)
 
             Button(Self.doneTitle) {
-                dismiss()
+                if let onDone {
+                    onDone()
+                } else {
+                    dismiss()
+                }
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)

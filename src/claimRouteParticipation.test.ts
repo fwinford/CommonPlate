@@ -24,6 +24,8 @@ import {
   claimRequest,
   REQUEST_ALREADY_PARTICIPATED_CODE,
   REQUEST_ALREADY_PARTICIPATED_MESSAGE,
+  REQUEST_OWN_REQUEST_CODE,
+  REQUEST_OWN_REQUEST_MESSAGE,
 } from "./claimRoute.js";
 import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
 
@@ -149,6 +151,23 @@ function mockExistingParticipation(result: unknown = null) {
   } as unknown as ReturnType<typeof RequestParticipation.findOne>);
 }
 
+/**
+ * The W4-H2 self-claim ownership pre-check `claimRequest` performs inside its
+ * transaction before the participation check: is this exact verified
+ * participant the request's own requester. Defaults to "no owner on record"
+ * so every existing claim case, which is not itself exercising this
+ * behavior, is unaffected by it.
+ */
+function mockOwnershipCheck(result: unknown = document()) {
+  return vi.spyOn(MealRequest, "findById").mockReturnValue({
+    select: () => ({
+      lean: () => ({
+        exec: vi.fn().mockResolvedValue(result),
+      }),
+    }),
+  } as unknown as ReturnType<typeof MealRequest.findById>);
+}
+
 function mockParticipationInsert(
   implementation: () => Promise<unknown> = () => Promise.resolve([{}])
 ) {
@@ -180,6 +199,7 @@ beforeEach(() => {
   mockExistingActiveReservation();
   mockExistingParticipation();
   mockParticipationInsert();
+  mockOwnershipCheck();
 });
 
 afterEach(() => {
@@ -291,6 +311,74 @@ describe("W3-H2 one-successful-participation invariant", () => {
 
   it("still allows an eligible participant with no participation record to claim normally", async () => {
     mockExistingParticipation(null);
+    const claimed = document();
+    mockAtomicResult(claimed);
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(context.status).not.toHaveBeenCalled();
+    expect(responseBody(context).claim.pickupName).toBe("Private Pickup Name");
+  });
+});
+
+describe("W4-H2 self-claim guard", () => {
+  it("refuses a verified participant attempting to claim their own request, before the conditional grant", async () => {
+    mockOwnershipCheck(
+      document({ requesterParticipantId: helperParticipantId })
+    );
+    const atomic = mockAtomicResult(document());
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(409);
+    expect(responseBody(context)).toEqual({
+      error: {
+        code: REQUEST_OWN_REQUEST_CODE,
+        message: REQUEST_OWN_REQUEST_MESSAGE,
+        fields: null,
+      },
+    });
+    // Refused before any attempt to grant the claim — no reservation side
+    // effect for the rejected self-claim.
+    expect(atomic).not.toHaveBeenCalled();
+    expect(JSON.stringify(responseBody(context))).not.toMatch(
+      /pickupName|claimToken|Private Pickup/
+    );
+  });
+
+  it("creates no participation record for a refused self-claim", async () => {
+    mockOwnershipCheck(
+      document({ requesterParticipantId: helperParticipantId })
+    );
+    const insert = mockParticipationInsert();
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("still allows a different verified participant to claim the same request normally", async () => {
+    const otherRequesterParticipantId = new mongoose.Types.ObjectId(
+      "64d0000000000000000000e2"
+    );
+    mockOwnershipCheck(
+      document({ requesterParticipantId: otherRequesterParticipantId })
+    );
+    const claimed = document();
+    mockAtomicResult(claimed);
+    const context = routeContext();
+
+    await claimRequest(context.req, context.res);
+
+    expect(context.status).not.toHaveBeenCalled();
+    expect(responseBody(context).claim.pickupName).toBe("Private Pickup Name");
+  });
+
+  it("allows claiming a request with no recorded requester (legacy/pre-I1 row)", async () => {
+    mockOwnershipCheck(document({ requesterParticipantId: undefined }));
     const claimed = document();
     mockAtomicResult(claimed);
     const context = routeContext();

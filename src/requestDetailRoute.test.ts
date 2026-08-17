@@ -55,10 +55,15 @@ function requestDocument(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Mirrors the route's real query chain. `.select("+requesterParticipantId")`
+// (W4-H2) is what makes the caller-relative ownership signal derivable at all,
+// so the mock has to model it rather than skipping straight to `.lean()`.
 function mockFindById(result: unknown): void {
   vi.spyOn(MealRequest, "findById").mockReturnValue({
-    lean: () => ({
-      exec: vi.fn().mockResolvedValue(result),
+    select: () => ({
+      lean: () => ({
+        exec: vi.fn().mockResolvedValue(result),
+      }),
     }),
   } as unknown as ReturnType<typeof MealRequest.findById>);
 }
@@ -477,8 +482,10 @@ describe("GET /api/request/:id", () => {
   it("preserves error delegation to the repository error handler", async () => {
     const databaseError = new Error("database unavailable");
     vi.spyOn(MealRequest, "findById").mockReturnValue({
-      lean: () => ({
-        exec: vi.fn().mockRejectedValue(databaseError),
+      select: () => ({
+        lean: () => ({
+          exec: vi.fn().mockRejectedValue(databaseError),
+        }),
       }),
     } as unknown as ReturnType<typeof MealRequest.findById>);
     const context = routeContext();
@@ -711,8 +718,10 @@ describe("GET /api/request/:id", () => {
 
     it("sets the same headers before an error is delegated to the shared handler", async () => {
       vi.spyOn(MealRequest, "findById").mockReturnValue({
-        lean: () => ({
-          exec: vi.fn().mockRejectedValue(new Error("database unavailable")),
+        select: () => ({
+          lean: () => ({
+            exec: vi.fn().mockRejectedValue(new Error("database unavailable")),
+          }),
         }),
       } as unknown as ReturnType<typeof MealRequest.findById>);
       const context = routeContext();

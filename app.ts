@@ -116,10 +116,11 @@ import {
   buildPublicRequestListResponse,
   RequestListDocument,
 } from "./src/requestListResponse.js";
+import { PARTICIPANT_AUTHORITY_HEADER } from "./src/participantAuthorityGate.js";
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
 import {
   filterRequestListForParticipant,
-  resolveOptionalParticipantAuthority,
+  resolveCallerForBrowse,
 } from "./src/requestParticipation.js";
 import {
   createRequest,
@@ -418,7 +419,13 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
     // - ASAP items (no windowStart or windowStart within next hour) come first, ordered by createdAt ascending (earliest first)
     // - Scheduled items come after, ordered by windowStart ascending
     const now = new Date();
+    // `+requesterParticipantId` (W4-H2): the field is `select: false` on the
+    // schema like every other private field; explicitly selecting it here is
+    // required to derive the caller-relative ownership signal below.
+    // `mapPublicRequestFields` never reads or copies it, so it never reaches
+    // the public wire response.
     const docs = await MealRequest.find(buildEffectiveAvailabilityFilter(now))
+      .select("+requesterParticipantId")
       .limit(200)
       .lean()
       .exec();
@@ -430,13 +437,24 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
     // unfiltered anonymous list rather than refusing the read; every other
     // eligible participant's own list is unaffected, because the filter is
     // always scoped to exactly the resolved caller's own participant id.
-    const participant = await resolveOptionalParticipantAuthority(req);
+    // W4-H2: one resolution serves both the W3-H2 participation filter and
+    // the caller-relative ownership context, which needs to tell an absent
+    // credential apart from an unusable one.
+    const { participant, ownershipContext } = await resolveCallerForBrowse(req);
     const visibleDocs = await filterRequestListForParticipant(
       docs as unknown as RequestListDocument[],
       participant
     );
 
-    res.json(buildPublicRequestListResponse(visibleDocs, now));
+    // This response is now caller-specific for a verified participant
+    // (W4-H2: `isOwnRequest` can differ per caller for the identical
+    // request), so it must never be cached or reused across callers.
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Vary", PARTICIPANT_AUTHORITY_HEADER);
+
+    res.json(
+      buildPublicRequestListResponse(visibleDocs, now, ownershipContext)
+    );
   } catch (err) {
     next(err);
   }

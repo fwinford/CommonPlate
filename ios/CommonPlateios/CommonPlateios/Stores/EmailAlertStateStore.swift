@@ -48,6 +48,15 @@ final class EmailAlertStateStore: ObservableObject {
     /// replaced is in flight, so only a *repeated* call for the same
     /// already-in-flight authority is deduplicated.
     @Published private var inFlightAuthorities: Set<String> = []
+    /// Review triage (finding 5): a `refresh()` call that arrives while a
+    /// same-authority read is already in flight must not be silently
+    /// dropped — a caller reconciling truth after a meaningful boundary
+    /// (Email Off/unsubscribe, Request Alerts overlay dismissal) may be
+    /// calling precisely because the in-flight read started *before* that
+    /// boundary and cannot be trusted to reflect it. Recorded here instead,
+    /// and honored with exactly one more read once the in-flight one
+    /// finishes — see `performRefresh(authority:)`.
+    private var pendingReconciliation: Set<String> = []
 
     private let service: EmailAlertStateService
     /// Read at the start and end of every refresh, and again on every
@@ -114,25 +123,48 @@ final class EmailAlertStateStore: ObservableObject {
             resolved = nil
             return
         }
-        guard !inFlightAuthorities.contains(authority) else { return }
+        guard !inFlightAuthorities.contains(authority) else {
+            pendingReconciliation.insert(authority)
+            return
+        }
+        await performRefresh(authority: authority)
+    }
+
+    /// The one place that actually issues a read. `refresh()` above either
+    /// starts this directly or, while a same-authority read is already in
+    /// flight, records the need for one — honored below once that read
+    /// finishes. The follow-up read only ever starts after the one before
+    /// it has fully returned, so results for the same authority are always
+    /// applied in the order they were issued; no additional generation
+    /// fence is needed beyond the existing per-authority tag on `resolved`.
+    private func performRefresh(authority: String) async {
         inFlightAuthorities.insert(authority)
         defer { inFlightAuthorities.remove(authority) }
 
         do {
             let active = try await service.fetchEmailAlertState(authority: authority)
-            guard participantAuthorityProvider() == authority else { return }
-            resolved = ResolvedState(authority: authority, value: active ? .active : .inactive)
-        } catch is CancellationError {
-            return
-        } catch let error as EmailAlertStateError {
-            guard participantAuthorityProvider() == authority else { return }
-            if case .authorityInvalid = error {
-                participantAuthorityRejected()
+            if participantAuthorityProvider() == authority {
+                resolved = ResolvedState(authority: authority, value: active ? .active : .inactive)
             }
-            resolved = nil
+        } catch is CancellationError {
+            // No state change; a pending reconciliation for this authority,
+            // if any, is still honored below.
+        } catch let error as EmailAlertStateError {
+            if participantAuthorityProvider() == authority {
+                if case .authorityInvalid = error {
+                    participantAuthorityRejected()
+                }
+                resolved = nil
+            }
         } catch {
-            guard participantAuthorityProvider() == authority else { return }
-            resolved = nil
+            if participantAuthorityProvider() == authority {
+                resolved = nil
+            }
+        }
+
+        if pendingReconciliation.remove(authority) != nil,
+           participantAuthorityProvider() == authority {
+            await performRefresh(authority: authority)
         }
     }
 }

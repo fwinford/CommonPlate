@@ -22,6 +22,13 @@ enum AppRoute: Hashable {
     /// path as Privacy & Safety gives its chevron row the same native push.
     case onboardingChooser
     case privacySafety
+    /// W4-H2's one shared secondary utility route, reached from Home's gear.
+    /// Owns compact identity presentation, the Request Alerts management row
+    /// (`.alerts`), and About & Help destination rows.
+    case settings
+    /// W4-H2 About & Help destination row. Minimal placeholder content —
+    /// final trust/support content belongs to T1.
+    case support
     /// The public request screen. Carries the request by value because the
     /// backend removes a placed request from the list, so an ID that had to be
     /// looked up again would resolve to nothing at exactly the moment it matters.
@@ -69,7 +76,8 @@ extension AppRoute {
             switch route {
             case .requestDetail(let request), .fulfillment(let request):
                 return request.id == requestID
-            case .requestFood, .activeRequests, .alerts, .onboardingChooser, .privacySafety:
+            case .requestFood, .activeRequests, .alerts, .onboardingChooser,
+                 .privacySafety, .settings, .support:
                 return false
             }
         }

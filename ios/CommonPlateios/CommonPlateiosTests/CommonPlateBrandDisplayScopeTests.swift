@@ -13,13 +13,18 @@ import XCTest
 @testable import CommonPlateios
 
 final class CommonPlateBrandDisplayScopeTests: XCTestCase {
+    /// W4-H2: the wordmark moved from R1's centered `CommonPlateBrandHeader()`
+    /// to a left-aligned header row (title + Settings gear) inside
+    /// `HomeExchangeView`, since the exchange board's Figma-approved layout
+    /// has no room for a full-width centered brand block above the board.
+    /// The scope invariant itself — exactly one `commonPlateBrandDisplay`
+    /// use, specifically on the "CommonPlate" wordmark — still applies.
     func testHomeUsesBrandDisplayExactlyOnceForTheWordmark() throws {
-        let home = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
-        XCTAssertTrue(home.contains("CommonPlateBrandHeader()"))
-        let headerStart = try XCTUnwrap(source.range(of: "struct CommonPlateBrandHeader: View {"))
-        let headerEnd = try XCTUnwrap(source.range(of: "struct CommonPlateWarmGhostBackButton: View {"))
-        let header = String(source[headerStart.lowerBound..<headerEnd.lowerBound])
+        let home = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
+        let header = try declarationSource(
+            "private var header: some View {",
+            in: home
+        )
         let occurrences = header.components(separatedBy: "commonPlateBrandDisplay").count - 1
         XCTAssertEqual(occurrences, 1, "expected exactly one commonPlateBrandDisplay use on Home")
 

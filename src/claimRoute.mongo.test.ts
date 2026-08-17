@@ -13,6 +13,7 @@ import { Participant, Request as MealRequest } from "../models/db.js";
 import {
   CLAIM_EXTENSION_MS,
   HELPER_ALREADY_HAS_ACTIVE_RESERVATION_CODE,
+  REQUEST_OWN_REQUEST_CODE,
   claimRequest,
   extendClaim,
   releaseClaim,
@@ -244,6 +245,51 @@ describeMongo("real MongoDB claim atomicity", () => {
       winners[0].body.claim.claimToken
     );
     expect(stored).not.toHaveProperty("claimToken");
+  });
+
+  it("authoritatively refuses a verified participant claiming their own request (W4-H2)", async () => {
+    const now = new Date();
+    const deadline = new Date(now.getTime() + 60 * 60 * 1000);
+    const request = await MealRequest.create({
+      vendor: "Concurrency Cafe",
+      food: "Rice bowl",
+      pickupName: "Only Winner Sees This",
+      pickupWindowText: "ASAP",
+      email: "requester@example.edu",
+      status: "open",
+      expiresAt: deadline,
+      deleteAt: deadline,
+      requesterParticipantId: helperParticipantId,
+    });
+
+    const attempt = routeContext(String(request._id));
+    await claimRequest(attempt.req, attempt.res);
+
+    expect(attempt.statusCode).toBe(409);
+    expect(attempt.body?.error?.code).toBe(REQUEST_OWN_REQUEST_CODE);
+    expect(JSON.stringify(attempt.body)).not.toMatch(
+      /pickupName|claimToken|Only Winner/
+    );
+
+    // No reservation side effect for the rejected self-claim, and no
+    // durable participation record either.
+    const stored = await MealRequest.collection.findOne({
+      _id: request._id as mongoose.Types.ObjectId,
+    });
+    expect(stored?.status).toBe("open");
+    expect(stored?.claimTokenDigest).toBeUndefined();
+
+    // A different eligible participant can still claim it normally.
+    const otherAttempt = routeContext(
+      String(request._id),
+      undefined,
+      secondParticipantAuthority
+    );
+    await claimRequest(otherAttempt.req, otherAttempt.res);
+    expect(otherAttempt.statusCode).toBe(200);
+    expect(otherAttempt.body?.claim?.pickupName).toBe(
+      "Only Winner Sees This"
+    );
   });
 
   it("allows exactly one of two concurrent extension attempts", async () => {

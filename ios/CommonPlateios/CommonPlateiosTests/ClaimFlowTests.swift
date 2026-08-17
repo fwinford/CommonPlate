@@ -1126,14 +1126,16 @@ final class ClaimFlowTests: XCTestCase {
             windowEnd: nil,
             status: .open,
             createdAt: Date(),
-            expiresAt: Date().addingTimeInterval(60)
+            expiresAt: Date().addingTimeInterval(60),
+            isOwnRequest: nil
         )
         let dtoLabels = Set(Mirror(reflecting: dto).children.compactMap(\.label))
         XCTAssertEqual(
             dtoLabels,
             Set([
                 "id", "vendor", "food", "pickupWindowText", "mealSwipes",
-                "windowStart", "windowEnd", "status", "createdAt", "expiresAt"
+                "windowStart", "windowEnd", "status", "createdAt", "expiresAt",
+                "isOwnRequest"
             ])
         )
     }

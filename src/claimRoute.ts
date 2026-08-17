@@ -57,6 +57,15 @@ export const REQUEST_ALREADY_PARTICIPATED_CODE = "REQUEST_ALREADY_PARTICIPATED";
 export const REQUEST_ALREADY_PARTICIPATED_MESSAGE =
   "You've already helped with this request and can't reserve it again.";
 
+// W4-H2: a verified participant can never successfully acquire a reservation
+// on their own request. Distinct from `REQUEST_ALREADY_PARTICIPATED` above,
+// which is about this caller's own prior *helper* history on the request;
+// this is about the caller being the request's own requester, and applies
+// regardless of whether they have ever attempted to help with it.
+export const REQUEST_OWN_REQUEST_CODE = "REQUEST_OWN_REQUEST";
+export const REQUEST_OWN_REQUEST_MESSAGE =
+  "You can't help with your own request.";
+
 interface ClaimDiagnosticDocument {
   status?: string;
   visibleFrom?: Date | null;
@@ -173,6 +182,13 @@ class ActiveReservationConflict extends Error {}
  */
 class AlreadyParticipatedConflict extends Error {}
 
+/**
+ * The target request is the caller's own request (W4-H2). Rolled back with
+ * the rest of the transaction, exactly like `AlreadyParticipatedConflict`: a
+ * self-claim is never granted.
+ */
+class SelfClaimConflict extends Error {}
+
 function isDuplicateKeyError(error: unknown): boolean {
   return (
     Boolean(error) &&
@@ -254,6 +270,31 @@ export async function claimRequest(
 
         if (existingActiveReservation) {
           throw new ActiveReservationConflict();
+        }
+
+        // The W4-H2 self-claim guard, consulted inside the same
+        // transaction/session as the grant that follows: a verified
+        // participant can never successfully acquire a reservation on their
+        // own request. `requesterParticipantId` is immutable after creation
+        // (only `createRequestRoute` ever writes it), so this read is the
+        // authoritative answer for the entire transaction — nothing else can
+        // change it out from under this check. `+requesterParticipantId` is
+        // required because the field is `select: false` on the schema.
+        const ownershipCheck = await MealRequest.findById(
+          id,
+          null,
+          { session }
+        )
+          .select("+requesterParticipantId")
+          .lean()
+          .exec();
+
+        if (
+          ownershipCheck?.requesterParticipantId &&
+          String(ownershipCheck.requesterParticipantId) ===
+            authority.participant.participantId
+        ) {
+          throw new SelfClaimConflict();
         }
 
         // The W3-H2 one-successful-participation invariant, consulted before
@@ -408,6 +449,14 @@ export async function claimRequest(
         409,
         REQUEST_ALREADY_PARTICIPATED_CODE,
         REQUEST_ALREADY_PARTICIPATED_MESSAGE
+      );
+    }
+    if (error instanceof SelfClaimConflict) {
+      return sendDay4Error(
+        res,
+        409,
+        REQUEST_OWN_REQUEST_CODE,
+        REQUEST_OWN_REQUEST_MESSAGE
       );
     }
     if (error instanceof ConditionalClaimFailure) {

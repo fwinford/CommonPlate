@@ -112,11 +112,16 @@ final class OnboardingPresentationTests: XCTestCase {
     func testHomeReplaysTheSameExperienceWithoutChangingCompletionOrIdentity() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
         let onboarding = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
+        // W4-H2: the "How CommonPlate Works" entry point relocated from
+        // Home's inline utility group to the shared Settings route; the
+        // replay wiring itself (`onboardingChooser` destination/coordinator)
+        // is unchanged and remains owned by `ContentView`.
+        let settings = try fileSource("ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift")
 
         XCTAssertTrue(source.contains("if onboardingStore.hasCompletedOnboarding"))
-        XCTAssertTrue(source.contains("UtilityActionRow(title: \"How CommonPlate works\")"))
+        XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.onboardingChooser)"))
+        XCTAssertTrue(settings.contains("\"How CommonPlate Works\""))
         XCTAssertTrue(source.contains("onboardingFlowCoordinator.beginReplay()"))
-        XCTAssertTrue(source.contains("NavigationLink(value: AppRoute.onboardingChooser)"))
         XCTAssertTrue(source.contains("case .onboardingChooser:"))
         XCTAssertTrue(source.contains(".onAppear {\n                    onboardingFlowCoordinator.beginReplay()"))
         XCTAssertFalse(source.contains(".simultaneousGesture"))
@@ -180,24 +185,21 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertFalse(source.contains("subtitle:"))
     }
 
-    func testHomeUsesTheFinalTwoZoneComposition() throws {
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
+    /// W4-H2 supersedes R1's two-zone static composition with the live
+    /// exchange board (E1). This now proves the board-first replacement
+    /// structure instead of the retired zone layout.
+    func testHomeUsesTheBoardFirstExchangeComposition() throws {
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
         XCTAssertTrue(source.contains("GeometryReader { geometry in"))
-        XCTAssertTrue(source.contains("CommonPlateBrandHeader()"))
-        XCTAssertTrue(source.contains("private var utilityAndIdentityGroup: some View"))
-        XCTAssertTrue(source.contains("Spacer(minLength: CommonPlateStyle.Spacing.l)"))
-        XCTAssertTrue(source.contains("Spacer(minLength: CommonPlateStyle.Spacing.s)"))
         XCTAssertTrue(source.contains(".frame(minHeight: geometry.size.height, alignment: .top)"))
-        XCTAssertTrue(source.contains(".frame(maxWidth: 520)"))
-        XCTAssertTrue(source.contains("Text(\"Request alerts\")"))
-        XCTAssertTrue(source.contains(".buttonStyle(CommonPlateFlatActionButtonStyle())"))
-        XCTAssertTrue(source.contains(".padding(.bottom, CommonPlateStyle.Spacing.xs)"))
-        XCTAssertTrue(source.contains(".padding(.top, -CommonPlateStyle.Spacing.s)"))
-        XCTAssertTrue(source.contains("if participantIdentityStore.identity != nil"))
+        XCTAssertTrue(source.contains("continueHelpingSection"))
+        XCTAssertTrue(source.contains("boardSection"))
+        XCTAssertTrue(source.contains("home-request-a-meal"))
         XCTAssertFalse(source.contains("HomeActionRow"))
         XCTAssertFalse(source.contains("Text(\"More\")"))
         XCTAssertFalse(source.contains("Get alerts for new requests"))
+        XCTAssertFalse(source.contains("Find a request"))
     }
 
     func testCompletionTransitionUsesTheSelectedSoftBrandSettleAndPreservesReduceMotion() throws {
@@ -230,6 +232,11 @@ final class OnboardingPresentationTests: XCTestCase {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
         let onboarding = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
         let requestEntry = try fileSource("ios/CommonPlateios/CommonPlateios/Views/RequestFoodEntryView.swift")
+        // W4-H2: both entry points relocated from Home to the shared
+        // Settings route; the destination-building switch itself
+        // (`case .onboardingChooser:` / `case .privacySafety:`) stays in
+        // `ContentView` and is unchanged.
+        let settings = try fileSource("ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift")
 
         XCTAssertTrue(source.contains("SoftFlowEnterDestination"))
         XCTAssertTrue(source.contains("case walkthrough(OnboardingIntent)"))
@@ -248,8 +255,8 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertFalse(requestEntry.contains(".sheet(isPresented: isPresentingEntryVerification"))
         XCTAssertFalse(source.contains("flowDestination(for:"))
         XCTAssertFalse(source.contains("if let flowPresentation {"))
-        XCTAssertTrue(source.contains("NavigationLink(value: AppRoute.onboardingChooser)"))
-        XCTAssertTrue(source.contains("NavigationLink(value: AppRoute.privacySafety)"))
+        XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.onboardingChooser)"))
+        XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.privacySafety)"))
         XCTAssertTrue(source.contains(".toolbar(.hidden, for: .navigationBar)"))
         XCTAssertTrue(onboarding.contains(".overlay(alignment: .topLeading)"))
         XCTAssertTrue(onboarding.contains("navigationBarBackButtonHidden(onBack != nil)"))

@@ -294,17 +294,60 @@ final class EmailAlertStateStoreTests: XCTestCase {
 
     // MARK: - Concurrency guard
 
-    func testConcurrentRefreshWhileOneIsInFlightDoesNotIssueASecondRequest() async {
+    /// Review triage (finding 5): a `refresh()` call that arrives while a
+    /// same-authority read is already in flight must not be silently
+    /// dropped — it is recorded and honored with exactly one more read once
+    /// the in-flight one finishes, rather than trusting an answer that may
+    /// predate a boundary this call exists to observe. This supersedes the
+    /// prior pinned behavior of discarding the second call outright (that
+    /// discard was itself the finding-5 defect), so this now issues two
+    /// requests, and the second (later-applied) answer is the one that
+    /// ultimately wins.
+    func testConcurrentRefreshWhileOneIsInFlightQueuesRatherThanDiscardsTheSecondCall() async {
         let store = makeStore(authority: { "the-authority-credential" })
         EmailAlertStateURLProtocol.enqueue(.response(data: activeBody(true), delay: 0.1))
+        EmailAlertStateURLProtocol.enqueue(.response(data: activeBody(false)))
 
         async let first: Void = store.refresh()
         try? await Task.sleep(nanoseconds: 10_000_000)
         async let second: Void = store.refresh()
         _ = await (first, second)
 
-        XCTAssertEqual(EmailAlertStateURLProtocol.capturedRequests.count, 1)
-        XCTAssertEqual(store.state, .active)
+        XCTAssertEqual(EmailAlertStateURLProtocol.capturedRequests.count, 2)
+        XCTAssertEqual(
+            store.state,
+            .inactive,
+            "the queued follow-up read is issued strictly after the in-flight one finishes, so it applies last"
+        )
+    }
+
+    /// The exact finding-5 scenario: a reconciliation `refresh()` requested
+    /// right after a meaningful boundary (e.g. an Off mutation or Request
+    /// Alerts overlay dismissal) while an older, pre-boundary read is still
+    /// in flight must still end up establishing truth *as of* that
+    /// boundary — not silently discarded, and not left showing the stale
+    /// pre-boundary answer forever.
+    func testAPostBoundaryReconciliationRefreshIsNotDiscardedWhileAnOlderReadIsInFlight() async {
+        let store = makeStore(authority: { "the-authority-credential" })
+        // The pre-boundary read (e.g. one already in flight from Settings
+        // appearing) is slow and would resolve to a now-stale "On".
+        EmailAlertStateURLProtocol.enqueue(.response(data: activeBody(true), delay: 0.1))
+        let preBoundaryRead = Task { await store.refresh() }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+
+        // The boundary itself (e.g. Email Off committing) and the
+        // reconciliation `refresh()` call it requires.
+        EmailAlertStateURLProtocol.enqueue(.response(data: activeBody(false)))
+        await store.refresh()
+
+        _ = await preBoundaryRead.value
+
+        XCTAssertEqual(EmailAlertStateURLProtocol.capturedRequests.count, 2)
+        XCTAssertEqual(
+            store.state,
+            .inactive,
+            "the post-boundary reconciliation read must be the one truth ultimately reflects"
+        )
     }
 
     // MARK: - Resolved state stays bound to the current participant

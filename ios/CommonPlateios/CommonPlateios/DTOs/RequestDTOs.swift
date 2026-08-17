@@ -56,6 +56,14 @@ struct RequestResponseDTO: Decodable {
     let status: RequestStatusWire
     let createdAt: Date
     let expiresAt: Date
+    /// W4-H2 participant-scoped ownership projection. Present and `true` only
+    /// on a list fetch made with a verified participant credential, on
+    /// exactly that participant's own request; absent for every other
+    /// request and every other caller, including anonymous browsing —
+    /// matching `alreadyParticipated`'s existing affirmative-only shape.
+    /// `nil` for every response shape that never carries it (detail, create,
+    /// claim, fulfill), which `decodeIfPresent` tolerates.
+    let isOwnRequest: Bool?
 }
 
 // MARK: - Response wrappers

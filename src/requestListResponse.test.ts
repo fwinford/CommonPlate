@@ -272,6 +272,105 @@ describe("buildPublicRequestListResponse", () => {
     expect(serializedRequest).not.toHaveProperty("_id");
     expect(serializedRequest).not.toHaveProperty("__v");
   });
+
+  describe("W4-H2 participant-scoped ownership projection", () => {
+    const resolved = (participantId: string) =>
+      ({ kind: "resolved", participantId }) as const;
+
+    it("states isOwnRequest: true for the caller's own request", () => {
+      const response = buildPublicRequestListResponse(
+        [requestDocument({ requesterParticipantId: "caller-1" })],
+        serverNow,
+        resolved("caller-1")
+      );
+
+      expect(response.requests[0].isOwnRequest).toBe(true);
+    });
+
+    // A resolved caller can be told either way. Omitting the field here would
+    // make "definitely not yours" indistinguishable from "ownership unknown",
+    // which is exactly what let an unusable credential read as permission.
+    it("states isOwnRequest: false for another verified participant's request", () => {
+      const response = buildPublicRequestListResponse(
+        [requestDocument({ requesterParticipantId: "someone-else" })],
+        serverNow,
+        resolved("caller-1")
+      );
+
+      expect(response.requests[0].isOwnRequest).toBe(false);
+    });
+
+    it("states isOwnRequest: false when a resolved caller's request carries no binding", () => {
+      const response = buildPublicRequestListResponse(
+        [requestDocument({ requesterParticipantId: undefined })],
+        serverNow,
+        resolved("caller-1")
+      );
+
+      expect(response.requests[0].isOwnRequest).toBe(false);
+    });
+
+    it("omits isOwnRequest for an anonymous caller", () => {
+      const response = buildPublicRequestListResponse(
+        [requestDocument({ requesterParticipantId: "caller-1" })],
+        serverNow,
+        { kind: "anonymous" }
+      );
+
+      expect(response.requests[0]).not.toHaveProperty("isOwnRequest");
+    });
+
+    // A credential was presented and could not be resolved. Ownership is
+    // genuinely unknown, so the wire must say nothing rather than "false".
+    it("omits isOwnRequest when the presented authority could not be resolved", () => {
+      const response = buildPublicRequestListResponse(
+        [requestDocument({ requesterParticipantId: "caller-1" })],
+        serverNow,
+        { kind: "unresolved" }
+      );
+
+      expect(response.requests[0]).not.toHaveProperty("isOwnRequest");
+    });
+
+    it("never leaks the raw requesterParticipantId onto the wire response", () => {
+      const response = buildPublicRequestListResponse(
+        [requestDocument({ requesterParticipantId: "caller-1" })],
+        serverNow,
+        resolved("caller-1")
+      );
+
+      expect(response.requests[0]).not.toHaveProperty(
+        "requesterParticipantId"
+      );
+      expect(JSON.stringify(response)).not.toContain("caller-1");
+    });
+
+    it("distinguishes ownership per request within the same response", () => {
+      const response = buildPublicRequestListResponse(
+        [
+          requestDocument({
+            _id: "request-1",
+            requesterParticipantId: "caller-1",
+          }),
+          requestDocument({
+            _id: "request-2",
+            requesterParticipantId: "someone-else",
+            windowStart: null,
+            windowEnd: null,
+          }),
+        ],
+        serverNow,
+        resolved("caller-1")
+      );
+
+      expect(response.requests.find((r) => r.id === "request-1")?.isOwnRequest).toBe(
+        true
+      );
+      expect(response.requests.find((r) => r.id === "request-2")?.isOwnRequest).toBe(
+        false
+      );
+    });
+  });
 });
 
 describe("buildPublicRequestDetailResponse", () => {

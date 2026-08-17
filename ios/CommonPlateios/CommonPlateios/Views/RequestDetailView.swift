@@ -34,6 +34,22 @@ struct ResolvedStaleParticipation: Equatable {
     let eligibility: RequestStore.StaleParticipationEligibility
 }
 
+/// A caller-relative ownership answer bound to the exact
+/// `(requestID, verified identity)` key it was resolved for (W4-H2) — the
+/// direct analogue of `ResolvedStaleParticipation` above, and for the same
+/// reason.
+///
+/// The `FoodRequest` this screen renders arrives as a navigation value, so it
+/// carries whatever ownership was resolved when it was materialized. That may
+/// have been an anonymous browse (`.notOwn` — correct while anonymous) or a
+/// participant since replaced. Storing the key alongside the answer is what
+/// lets rendering itself refuse to honor ownership belonging to a principal
+/// who is no longer current.
+struct ResolvedRequestOwnership: Equatable {
+    let key: StaleParticipationTaskKey
+    let ownership: RequestOwnership
+}
+
 /// How a claim attempt is presented to the helper. Backend codes are mapped
 /// deliberately, with a fallback for anything unrecognized, per the error
 /// contract in docs/system-contract.md. The stable code itself stays on
@@ -174,6 +190,9 @@ struct RequestDetailView: View {
     /// request is actually gone — that is `noLongerAvailableNotice`.
     static let temporarilyUnavailableNotice = "This request is temporarily unavailable. Try again."
 
+    /// W4-H2: shown in place of Reserve on the requester's own request.
+    static let ownRequestNotice = "This is your request. You can’t help with your own request."
+
     let request: FoodRequest
     @ObservedObject var store: RequestStore
     /// Observed, not owned. Browsing this screen needs no identity; reserving
@@ -191,6 +210,34 @@ struct RequestDetailView: View {
     /// rendering and is what refuses to honor a result once it no longer
     /// matches the current request/identity key.
     @State private var resolvedStaleParticipation: ResolvedStaleParticipation?
+
+    /// The last W4-H2 ownership answer resolved under the current authority,
+    /// bound to its key. `nil` until an authoritative detail read completes.
+    @State private var resolvedOwnership: ResolvedRequestOwnership?
+
+    /// The key in effect when this screen's `request` navigation value was
+    /// materialized, captured once on appearance. Its ownership is honored
+    /// only while this key is still current.
+    @State private var materializedOwnershipKey: StaleParticipationTaskKey?
+
+    /// A helper tapped Help before verifying, and verification has since
+    /// succeeded. The claim may not simply proceed on the anonymous session's
+    /// `.notOwn`: ownership and participation must first be re-established for
+    /// the participant that now exists. This records the intent so the flow
+    /// continues once they are — or stops, if the newly verified participant
+    /// turns out to be this request's own requester.
+    @State private var isAwaitingPostVerificationClaim = false
+
+    /// The rendered W4-H2 ownership for this screen — see
+    /// `renderedOwnership(resolved:materializedKey:materializedOwnership:currentKey:)`.
+    private var currentOwnership: RequestOwnership {
+        Self.renderedOwnership(
+            resolved: resolvedOwnership,
+            materializedKey: materializedOwnershipKey,
+            materializedOwnership: request.ownership,
+            currentKey: staleParticipationKey
+        )
+    }
 
     /// This screen's current W3-H2 stale-detail eligibility key: exactly the
     /// request and the verified participant identity currently in effect.
@@ -253,6 +300,46 @@ struct RequestDetailView: View {
         currentKey: StaleParticipationTaskKey
     ) -> Bool {
         renderedEligibility(resolved: resolved, currentKey: currentKey) == .eligible
+    }
+
+    /// The W4-H2 ownership gate, in the same shape as
+    /// `renderedEligibility(resolved:currentKey:)` and for the same reason.
+    ///
+    /// The materialized `request.ownership` is honored only while the identity
+    /// it was resolved under is still current. That is what preserves the
+    /// accepted anonymous browse-then-verify funnel — an anonymous browser
+    /// keeps seeing `.notOwn` and can still tap Help — while guaranteeing that
+    /// the same `.notOwn` cannot survive into the verified authority that
+    /// replaces it. Anything else is `.unresolved` until an authoritative
+    /// reload answers for whoever is current.
+    static func renderedOwnership(
+        resolved: ResolvedRequestOwnership?,
+        materializedKey: StaleParticipationTaskKey?,
+        materializedOwnership: RequestOwnership,
+        currentKey: StaleParticipationTaskKey
+    ) -> RequestOwnership {
+        if let resolved, resolved.key == currentKey { return resolved.ownership }
+        if let materializedKey, materializedKey == currentKey { return materializedOwnership }
+        return .unresolved
+    }
+
+    /// The action-boundary form of the gate above: only an ownership
+    /// established as `.notOwn` for the identity current *at the moment of
+    /// the call* may reach the claim mutation. `.own` and `.unresolved` both
+    /// refuse. The backend's atomic self-claim guard remains the final
+    /// mutation authority; this stops the client from ever attempting it.
+    static func canClaimForOwnership(
+        resolved: ResolvedRequestOwnership?,
+        materializedKey: StaleParticipationTaskKey?,
+        materializedOwnership: RequestOwnership,
+        currentKey: StaleParticipationTaskKey
+    ) -> Bool {
+        renderedOwnership(
+            resolved: resolved,
+            materializedKey: materializedKey,
+            materializedOwnership: materializedOwnership,
+            currentKey: currentKey
+        ) == .notOwn
     }
 
     /// The single rule for entering the claimant-only flow: a confirmed claim
@@ -329,6 +416,25 @@ struct RequestDetailView: View {
                     // again would only produce a refusal, so this screen becomes
                     // a way back into the reservation they already hold.
                     continueHelpingLink
+                } else if currentOwnership == .own {
+                    // W4-H2: authoritative backend ownership truth. The owner
+                    // of a request can never expose or execute Reserve/Help
+                    // for it — the backend's atomic self-claim guard is the
+                    // authority; this is defense-in-depth presentation.
+                    Text(Self.ownRequestNotice)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("own-request-notice")
+                } else if currentOwnership == .unresolved {
+                    // W4-H2 fail-closed: no current-authority server evidence
+                    // establishes whether this is the caller's own request —
+                    // the response carried no ownership metadata, or the
+                    // authority that produced it is no longer current. That is
+                    // never permission to Reserve. Nothing renders here rather
+                    // than inventing new "checking…" copy, exactly as the
+                    // `.unresolved` participation case below already does; the
+                    // `.task` that re-resolves on identity/request change
+                    // settles it.
+                    EmptyView()
                 } else {
                     switch staleParticipationEligibility {
                     case .unresolved:
@@ -366,6 +472,36 @@ struct RequestDetailView: View {
             let result = await store.resolveStaleParticipationEligibility(for: request.id)
             guard !Task.isCancelled, key == staleParticipationKey else { return }
             resolvedStaleParticipation = ResolvedStaleParticipation(key: key, eligibility: result)
+            continuePostVerificationClaimIfReady()
+        }
+        // W4-H2 ownership, resolved on exactly the same key and with exactly
+        // the same fencing discipline as the participation read above. This is
+        // what re-establishes "is this my own request?" for the participant
+        // who is current now — after a verification, a Change Email, or a
+        // Remove Email — rather than carrying an answer resolved for someone
+        // else. A result is written only for the key it was resolved for, so a
+        // late answer for a superseded identity can never become current
+        // truth.
+        .task(id: staleParticipationKey) {
+            // Ownership is only knowable for a participant. Leaving this
+            // unresolved while anonymous would suppress Reserve for every
+            // anonymous browser and break the accepted browse-then-verify
+            // funnel; the materialized anonymous `.notOwn` already covers
+            // that case, and stops applying the moment identity changes.
+            guard identityStore.identity != nil else { return }
+            let key = staleParticipationKey
+            let ownership = await store.resolveOwnership(requestID: request.id)
+            guard !Task.isCancelled, key == staleParticipationKey else { return }
+            resolvedOwnership = ResolvedRequestOwnership(key: key, ownership: ownership)
+            continuePostVerificationClaimIfReady()
+        }
+        .onAppear {
+            // The identity this screen's navigation value was materialized
+            // under. Captured once; its ownership is honored only while this
+            // key is still current.
+            if materializedOwnershipKey == nil {
+                materializedOwnershipKey = staleParticipationKey
+            }
         }
         // Confirmed claim success is the only thing that opens the flow, and it
         // opens it by pushing a route rather than by flipping a presentation
@@ -410,7 +546,16 @@ struct RequestDetailView: View {
                 return
             }
             // The coordinator clears before returning the exact request ID.
-            performClaim()
+            //
+            // W4-H2: this is the same-principal reverification hole. The
+            // helper may have browsed anonymously — where `.notOwn` was a
+            // correct reading — and then verified as the very participant who
+            // owns this request. Claiming straight from that stale anonymous
+            // conclusion asks the backend to let someone reserve their own
+            // meal. `currentOwnership` is already `.unresolved` on this render
+            // (the identity key just changed), so record the intent and let
+            // the re-resolution below decide.
+            isAwaitingPostVerificationClaim = true
         }
         .onChange(of: path) { _, currentPath in
             verificationCoordinator.helperNavigationChanged(
@@ -637,11 +782,49 @@ struct RequestDetailView: View {
         performClaim()
     }
 
+    /// The last gate before the claim mutation. Deliberately re-derives both
+    /// gates from live state rather than trusting that an already-materialized
+    /// Reserve button, or an earlier UI path, implies permission.
     private func performClaim() {
+        guard Self.canClaimForOwnership(
+            resolved: resolvedOwnership,
+            materializedKey: materializedOwnershipKey,
+            materializedOwnership: request.ownership,
+            currentKey: staleParticipationKey
+        ) else {
+            // `.own` or `.unresolved`. No request is sent: the backend would
+            // refuse a self-claim anyway, and an unresolved answer is not
+            // permission. The owner treatment renders instead.
+            isAwaitingPostVerificationClaim = false
+            return
+        }
+        isAwaitingPostVerificationClaim = false
         Task {
             // The store owns duplicate-submit protection and error state; a
             // rejected duplicate never reaches the network.
             try? await store.claim(requestID: request.id)
+        }
+    }
+
+    /// Resumes a Help tap that was interrupted by verification, once — and
+    /// only once — ownership and participation have both been re-established
+    /// for the participant who now exists.
+    private func continuePostVerificationClaimIfReady() {
+        guard isAwaitingPostVerificationClaim else { return }
+        switch currentOwnership {
+        case .unresolved:
+            // Still waiting on an authoritative answer; keep the intent.
+            return
+        case .own:
+            // The newly verified participant owns this request. The flow ends
+            // here — no claim is attempted, and the owner treatment renders.
+            isAwaitingPostVerificationClaim = false
+        case .notOwn:
+            guard Self.canStartClaim(
+                resolved: resolvedStaleParticipation,
+                currentKey: staleParticipationKey
+            ) else { return }
+            performClaim()
         }
     }
 }

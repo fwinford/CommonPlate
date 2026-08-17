@@ -61,28 +61,27 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         XCTAssertTrue(source.contains("opacity(configuration.isPressed ? 0.62 : 1)"))
     }
 
-    func testHomeKeepsTheAcceptedMaskedIdentityAndDestructiveRemovalPresentation() throws {
+    /// W4-H2: this presentation relocated from Home to the shared Settings
+    /// route (compact identity, left Change Email, right destructive Remove
+    /// Email). The masked-identity/destructive-removal invariants this test
+    /// previously proved against `ContentView` now apply to `SettingsView`.
+    func testSettingsKeepsTheAcceptedMaskedIdentityAndDestructiveRemovalPresentation() throws {
         let section = try declarationSource(
-            startMarker: "private var participantIdentitySection: some View {",
-            endMarker: "static let changeEmailTitle"
+            startMarker: "private var identitySection: some View {",
+            endMarker: "@ViewBuilder\n    private func identityActions",
+            in: "ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift"
         )
 
         XCTAssertTrue(section.contains("identity.masked"))
-        XCTAssertTrue(section.contains("home-verified-identity"))
-        XCTAssertTrue(section.contains("home-change-email"))
-        XCTAssertTrue(section.contains("home-remove-email"))
-        XCTAssertTrue(section.contains("commonPlateDestructiveAction()"))
+        XCTAssertTrue(section.contains("settings-verified-identity"))
         XCTAssertTrue(section.contains("Label(identity.masked, systemImage: \"checkmark.circle.fill\")"))
         XCTAssertTrue(section.contains("ViewThatFits(in: .horizontal)"))
-        XCTAssertEqual(section.components(separatedBy: "Divider()").count - 1, 0)
         XCTAssertFalse(section.contains("commonPlateGroupedSurface"))
-        XCTAssertFalse(section.contains("CommonPlateStyle.Color.warmSurface"))
-
-        XCTAssertTrue(section.contains("Button(Self.removeEmailTitle, role: .destructive)"))
 
         let changeEmail = try declarationSource(
             startMarker: "private var changeEmailButton: some View {",
-            endMarker: "private var removeEmailButton: some View {"
+            endMarker: "private var removeEmailButton: some View {",
+            in: "ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift"
         )
         XCTAssertTrue(changeEmail.contains(".commonPlateTertiaryAction()"))
         XCTAssertTrue(changeEmail.contains(".frame(minHeight: 44)"))
@@ -91,21 +90,77 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         XCTAssertFalse(changeEmail.contains("commonPlateSecondaryAction"))
         XCTAssertFalse(changeEmail.contains("background("))
 
-        let home = try declarationSource(
-            startMarker: "private func recurringHome(brandHasSettled: Bool) -> some View {",
-            endMarker: "/// The remembered verified identity"
+        let removeEmail = try declarationSource(
+            startMarker: "private var removeEmailButton: some View {",
+            endMarker: "static let changeEmailTitle",
+            in: "ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift"
         )
-        XCTAssertTrue(home.contains("Text(\"Request alerts\")"))
-        let alertsStart = try XCTUnwrap(home.range(of: "NavigationLink(value: AppRoute.alerts)"))
-        let alertsEnd = try XCTUnwrap(home.range(of: ".padding(.top", range: alertsStart.upperBound..<home.endIndex))
-        let alertsAction = String(home[alertsStart.lowerBound..<alertsEnd.lowerBound])
-        XCTAssertTrue(alertsAction.contains("alignment: .center"))
-        XCTAssertFalse(alertsAction.contains("chevron.right"))
-        XCTAssertFalse(home.contains("Text(\"More\")"))
-        XCTAssertFalse(home.contains("Get alerts for new requests"))
-        XCTAssertTrue(home.contains("CommonPlateStyle.Color.warmSurface"))
-        XCTAssertEqual(home.components(separatedBy: "Divider()").count - 1, 1)
-        XCTAssertFalse(home.contains("You’ll verify an NYU email once before posting or helping with a request."))
+        XCTAssertTrue(removeEmail.contains("Button(Self.removeEmailTitle, role: .destructive)"))
+        XCTAssertTrue(removeEmail.contains("settings-remove-email"))
+        XCTAssertTrue(removeEmail.contains("commonPlateDestructiveAction()"))
+    }
+
+    /// W4-H2 Settings fidelity pass: the approved Figma drops identity out of
+    /// a grouped card entirely and strips About & Help's explanatory
+    /// subtitles, replacing the oversized warm/yellowish card with a plain
+    /// native row surface. Request Alerts keeps its subtitle and its
+    /// existing accepted `.alerts` destination unchanged — this pass adds
+    /// visual fidelity only, no new Email/Push toggle semantics.
+    func testSettingsFidelityDropsIdentityCardStripsAboutHelpSubtitlesAndKeepsRequestAlertsBehavior() throws {
+        let identity = try declarationSource(
+            startMarker: "private var identitySection: some View {",
+            endMarker: "@ViewBuilder\n    private func identityActions",
+            in: "ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift"
+        )
+        XCTAssertFalse(identity.contains("CommonPlateStyle.Color.warmSurface"))
+
+        let aboutHelp = try declarationSource(
+            startMarker: "private var aboutAndHelpSection: some View {",
+            endMarker: "private func sectionHeading",
+            in: "ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift"
+        )
+        XCTAssertFalse(aboutHelp.contains("CommonPlateStyle.Color.warmSurface"))
+        XCTAssertFalse(aboutHelp.contains("How requesting and helping fit together"))
+        XCTAssertFalse(aboutHelp.contains("Understand the exchange’s safety boundaries"))
+        XCTAssertFalse(aboutHelp.contains("Get help with CommonPlate"))
+        XCTAssertTrue(aboutHelp.contains("SettingsRow(title: \"How CommonPlate Works\")"))
+        XCTAssertTrue(aboutHelp.contains("SettingsRow(title: \"Privacy & Safety\")"))
+        XCTAssertTrue(aboutHelp.contains("SettingsRow(title: \"Support\")"))
+
+        let requestAlerts = try declarationSource(
+            startMarker: "private var requestAlertsSection: some View {",
+            endMarker: "// MARK: - About & Help",
+            in: "ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift"
+        )
+        // Final H2 visual alignment FIX (supersedes both the prior "Request
+        // Alerts remains inline in Settings for later management" wording
+        // and the intermediate compact "Set up"/"Manage" row): Settings
+        // presents Email/Push as the approved Figma `Control / Toggle` rows,
+        // not the embedded `AlertSignupView` form and not a `NavigationLink`
+        // destination — turning a toggle on opens the existing focused
+        // overlay instead.
+        XCTAssertFalse(requestAlerts.contains("NavigationLink(value: AppRoute.alerts)"))
+        XCTAssertFalse(requestAlerts.contains("subtitle: \"Manage how CommonPlate can alert you\""))
+        XCTAssertFalse(requestAlerts.contains("AlertSignupView("))
+        XCTAssertTrue(requestAlerts.contains("Toggle(title, isOn: isOn)"))
+
+        let settings = try fileSource("ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift")
+        XCTAssertTrue(settings.contains("title: \"Email\""))
+        XCTAssertTrue(settings.contains("title: \"Push\""))
+    }
+
+    /// W4-H2: Home is now the live exchange board, not a static launcher.
+    /// Request a Meal remains persistently available and Settings remains
+    /// reachable from the gear — this replaces the old two-zone-composition
+    /// proof, which asserted structure H2 explicitly supersedes.
+    func testHomeExchangeKeepsRequestAMealPersistentAndSettingsReachable() throws {
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
+
+        XCTAssertTrue(source.contains("home-request-a-meal"))
+        XCTAssertTrue(source.contains("NavigationLink(value: AppRoute.settings)"))
+        XCTAssertTrue(source.contains(".safeAreaInset(edge: .bottom)"))
+        XCTAssertFalse(source.contains("Find a request"))
+        XCTAssertFalse(source.contains("AppRoute.activeRequests"))
     }
 
     func testHomeUsesHelperWhenItNamesTheHelpingRole() throws {
@@ -114,22 +169,28 @@ final class CommonPlateFoundationPresentationTests: XCTestCase {
         XCTAssertFalse(source.contains("Another student with extra meal swipes chooses a request to help with."))
     }
 
+    /// W4-H2: Home is now the board-first exchange — there is no "Find a
+    /// request" launcher step, and identity/Privacy & Safety relocated to
+    /// Settings. This proves the new content order instead: the board
+    /// heading precedes the persistent Request a Meal action, which remains
+    /// reachable via native vertical overflow (`safeAreaInset`, not a fixed
+    /// absolute layout).
     func testHomeHasNativeVerticalOverflowWithoutChangingContentOrder() throws {
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
         XCTAssertTrue(source.contains("ScrollView {"))
+        XCTAssertTrue(source.contains(".safeAreaInset(edge: .bottom)"))
 
-        let requestFood = try XCTUnwrap(source.range(of: "Text(\"Request a meal\")"))
-        let help = try XCTUnwrap(source.range(of: "Text(\"Find a request\")"))
-        let identity = try XCTUnwrap(source.range(of: "participantIdentitySection"))
-        let privacy = try XCTUnwrap(source.range(of: "UtilityActionRow(title: \"Privacy & Safety\")"))
-        XCTAssertLessThan(requestFood.lowerBound, help.lowerBound)
-        XCTAssertLessThan(help.lowerBound, privacy.lowerBound)
-        XCTAssertLessThan(privacy.lowerBound, identity.lowerBound)
+        let header = try XCTUnwrap(source.range(of: "private var header: some View"))
+        let board = try XCTUnwrap(source.range(of: "private var boardSection: some View"))
+        let requestMeal = try XCTUnwrap(source.range(of: "private var requestMealButton: some View"))
+        XCTAssertLessThan(header.lowerBound, board.lowerBound)
+        XCTAssertLessThan(board.lowerBound, requestMeal.lowerBound)
     }
 
     func testVerificationUsesDirectScrollableHierarchyWithoutGroupedSurfaces() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/ParticipantVerificationView.swift")
-        let homeSource = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
+        // W4-H2: Home's full-page canvas now lives in `HomeExchangeView`.
+        let homeSource = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
         let header = try declarationSource(
             startMarker: "private var verificationBrandHeader: some View {",
             endMarker: "@ViewBuilder\n    private var emailSection: some View {",

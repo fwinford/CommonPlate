@@ -5,6 +5,7 @@ import {
   resolveParticipantAuthority,
   type ResolvedParticipant,
 } from "./participantAuthorityGate.js";
+import type { CallerOwnershipContext } from "./requestListResponse.js";
 
 /**
  * Resolves the caller's verified participant identity when one is presented,
@@ -20,6 +21,45 @@ export async function resolveOptionalParticipantAuthority(
 ): Promise<ResolvedParticipant | null> {
   const resolution = await resolveParticipantAuthority(req);
   return resolution.ok ? resolution.participant : null;
+}
+
+/**
+ * Resolves the caller once for a browse-style route, keeping both answers that
+ * route needs (W4-H2).
+ *
+ * `resolveOptionalParticipantAuthority` collapses every refusal into `null`,
+ * which is correct for the W3-H2 participation filter — an unusable credential
+ * should degrade to the anonymous list rather than refuse the read — but it
+ * loses the distinction caller-relative ownership depends on. "No credential
+ * was presented" and "a credential was presented and could not be resolved"
+ * are different facts: only the first makes "not your request" a safe reading.
+ *
+ * The gate already separates them (`refusal: "missing"` versus
+ * `"invalid"`/`"unavailable"`), so this reads that existing verdict rather
+ * than changing participant authentication. One resolution serves both
+ * outputs, so no route pays for a second lookup.
+ */
+export async function resolveCallerForBrowse(req: Request): Promise<{
+  participant: ResolvedParticipant | null;
+  ownershipContext: CallerOwnershipContext;
+}> {
+  const resolution = await resolveParticipantAuthority(req);
+  if (resolution.ok) {
+    return {
+      participant: resolution.participant,
+      ownershipContext: {
+        kind: "resolved",
+        participantId: resolution.participant.participantId,
+      },
+    };
+  }
+  return {
+    participant: null,
+    ownershipContext:
+      resolution.refusal === "missing"
+        ? { kind: "anonymous" }
+        : { kind: "unresolved" },
+  };
 }
 
 /**

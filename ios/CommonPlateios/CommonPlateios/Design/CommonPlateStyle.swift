@@ -18,17 +18,56 @@ enum CommonPlateStyle {
     /// `.buttonStyle(.borderedProminent)`, which already read the same brand
     /// asset — these are the few cases that need the value directly.
     enum Color {
-        /// The shared native base canvas for full-page F1 screens. Keeping
-        /// this semantic rather than tinting it lets Home and verification
-        /// retain one quiet, warm-neutral system foundation; brand character
-        /// comes from hierarchy and the restrained accent, not a page wash.
-        static let baseCanvas = SwiftUI.Color(uiColor: .systemBackground)
+        /// The shared base canvas for full-page F1/H2 screens. Uses the
+        /// approved H2 Figma page-background token
+        /// (`var(--h2-color-background)`, `#fbf9f6`) rather than plain
+        /// `.systemBackground`: stark system white was the exact "still
+        /// feels incredibly white" simulator finding, and this asset is what
+        /// actually carries Subtle Warmth's "warm-neutral system foundation"
+        /// the old doc comment here already claimed but the literal system
+        /// color never provided. Deliberately distinct from, and quieter
+        /// than, `warmSurface`'s bounded-block tint — this is the page wash
+        /// `warmSurface`'s own doc comment says it must not become. The dark
+        /// appearance reuses `warmSurface`'s existing accepted dark value (no
+        /// separate dark direction exists in the current Figma, which is
+        /// light-mode only); brand character still comes from hierarchy and
+        /// the restrained accent, not a page wash.
+        static let baseCanvas = SwiftUI.Color("CommonPlateBaseCanvas")
+
+        /// W4-H2 Settings fidelity: a plain, native "cleaner/lighter" row
+        /// card — the approved Figma's About & Help / Request Alerts row
+        /// grouping — distinct from `warmSurface`'s deliberate warm-neutral
+        /// tint, which this area does not use.
+        static let settingsRowSurface = SwiftUI.Color(uiColor: .secondarySystemBackground)
 
         /// A restrained warm-neutral surface for a bounded, grouped block of
         /// related content. Not a global background wash or a per-fact card
         /// fill. Native identity/settings sections intentionally do not use
         /// this treatment.
         static let warmSurface = SwiftUI.Color("CommonPlateWarmSurface")
+
+        /// W4-H2 live-exchange request card surface/border — the approved
+        /// Figma `--h2-color-surface-request` / `--h2-color-border-request`
+        /// tokens. Distinct from `warmSurface`: the exchange board's ordinary
+        /// request cards use a slightly different warm tone than a generic
+        /// grouped-content block.
+        static let requestCardSurface = SwiftUI.Color(
+            red: 245.0 / 255, green: 239.0 / 255, blue: 232.0 / 255
+        )
+        static let requestCardBorder = SwiftUI.Color(
+            red: 231.0 / 255, green: 221.0 / 255, blue: 212.0 / 255
+        )
+
+        /// W4-H2 Continue Helping active-reservation card surface/border —
+        /// the approved Figma `--h2-color-surface-helping` /
+        /// `--h2-color-border-helping` tokens, distinguishing an active
+        /// reservation from an ordinary open request at a glance.
+        static let helpingCardSurface = SwiftUI.Color(
+            red: 238.0 / 255, green: 229.0 / 255, blue: 242.0 / 255
+        )
+        static let helpingCardBorder = SwiftUI.Color(
+            red: 225.0 / 255, green: 210.0 / 255, blue: 230.0 / 255
+        )
     }
 
     /// A small spacing scale. Prefer these over ad hoc padding numbers on
@@ -60,6 +99,26 @@ enum CommonPlateStyle {
         /// not like full-width form controls. Smaller/Dynamic Type layouts
         /// naturally use their available width instead of clipping.
         static let majorActionMaximumWidth: CGFloat = 292
+    }
+
+    /// W4-H2 shared Empty/Unavailable state-presentation grammar (Figma
+    /// nodes 34:90, 35:90): both states center their title/body content
+    /// inside this width so they read as two states of the same board
+    /// rather than two different layouts.
+    enum Metrics {
+        static let stateContentWidth: CGFloat = 322
+        /// Approved Figma Settings page margin (`o5VXC3QZWs4w9tQ8drVRC4`,
+        /// node `82:255`): 18pt on each side — measurably narrower than the
+        /// general-purpose `Spacing.l` (20pt) token, which read as slightly
+        /// too wide/spread against the Figma Design in Faith's simulator
+        /// review.
+        static let settingsPageInset: CGFloat = 18
+        /// Approved Figma Settings row-content inset, applied on top of
+        /// `settingsPageInset` so row text/controls land at the Figma-exact
+        /// 34pt from the screen edge (18 + 16) — e.g. the identity email,
+        /// Request Alerts row labels/toggles, and About & Help row titles
+        /// all measure to this same combined inset in the approved Design.
+        static let settingsRowInset: CGFloat = 16
     }
 }
 

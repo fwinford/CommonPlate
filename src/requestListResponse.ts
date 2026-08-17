@@ -30,6 +30,15 @@ export interface PublicRequestDocument {
   visibleFrom?: RequestResponseDate | null;
   expiresAt: RequestResponseDate;
   claimExpiresAt?: RequestResponseDate | null;
+  /**
+   * W4-H2 participant-scoped ownership projection. Present on a document only
+   * when the caller's query explicitly selected it
+   * (`.select("+requesterParticipantId")`); never itself part of any public
+   * wire response — the list and detail builders read it only through
+   * `isCallerOwnRequest` to derive `isOwnRequest`, and never copy the raw id
+   * onto a response.
+   */
+  requesterParticipantId?: unknown;
 }
 
 export interface RequestListDocument
@@ -49,6 +58,15 @@ export interface PublicRequestResponse<Status extends string = string> {
   status: Status;
   createdAt: RequestResponseDate;
   expiresAt: RequestResponseDate;
+  /**
+   * W4-H2: present and `true` only for the exact verified participant whose
+   * resolved authority produced this list response, on exactly their own
+   * request. Absent for every other request in the same response and for
+   * every anonymous/unresolved caller — never an explicit `false` — matching
+   * the existing `alreadyParticipated` (W3-H2 detail) precedent of only
+   * conveying an affirmative caller-relative signal.
+   */
+  isOwnRequest?: boolean;
 }
 
 /**
@@ -63,6 +81,50 @@ export interface PublicRequestListResponse {
 
 export interface PublicRequestDetailResponse {
   request: PublicRequestResponse;
+}
+
+/**
+ * Who, if anyone, this response's caller-relative ownership is being computed
+ * for (W4-H2). The three cases are deliberately distinct on the wire:
+ *
+ * - `resolved` — a verified participant. Ownership is knowable, so the
+ *   response states it either way (`true` or `false`).
+ * - `anonymous` — no credential was presented at all. Creating a request
+ *   requires participant authority, so an anonymous session owns nothing;
+ *   the field is omitted and the client reads that, together with its own
+ *   knowledge that it sent no credential, as "not own for an anonymous
+ *   browser".
+ * - `unresolved` — a credential *was* presented but could not be resolved
+ *   (invalid, superseded, or a lookup/configuration failure). Ownership is
+ *   genuinely unknown, the field is omitted, and the client must fail closed.
+ *
+ * Collapsing `unresolved` into `anonymous` is what previously let an
+ * unusable credential read as an authoritative "not your request".
+ */
+export type CallerOwnershipContext =
+  | { kind: "anonymous" }
+  | { kind: "unresolved" }
+  | { kind: "resolved"; participantId: string };
+
+/**
+ * The single caller-relative ownership comparison (W4-H2), shared by the list
+ * and detail projections so the sensitive `requesterParticipantId` comparison
+ * exists in exactly one place.
+ *
+ * Returns the exact value to serialize: `true`/`false` for a resolved caller,
+ * and `undefined` — meaning "omit the field" — whenever ownership is not
+ * knowable. The internal context enum is never serialized, and the raw
+ * `requesterParticipantId` is never returned to any caller of this function.
+ */
+export function callerOwnershipFor(
+  document: { requesterParticipantId?: unknown },
+  context: CallerOwnershipContext
+): boolean | undefined {
+  if (context.kind !== "resolved") return undefined;
+  return (
+    Boolean(document.requesterParticipantId) &&
+    String(document.requesterParticipantId) === context.participantId
+  );
 }
 
 function dateValue(value: RequestResponseDate | null | undefined): number {
@@ -104,17 +166,27 @@ export function mapPublicRequestFields<Status extends string>(
  */
 export function buildPublicRequestDetailResponse(
   document: PublicRequestDocument,
-  serverNow: Date
+  serverNow: Date,
+  /**
+   * Who this response's ownership is computed for (W4-H2). Never changes the
+   * request content or status — only whether the response also states
+   * `isOwnRequest`, exactly as the list projection does. Detail previously
+   * derived no ownership at all, which left an owner's own request
+   * indistinguishable on this route from a stranger's.
+   */
+  ownershipContext: CallerOwnershipContext = { kind: "anonymous" }
 ): PublicRequestDetailResponse {
   const mapped = mapPublicRequestFields(document);
-  return {
-    request: {
-      ...mapped,
-      status: isEffectivelyAvailable(document, serverNow)
-        ? "open"
-        : mapped.status,
-    },
+  const request: PublicRequestResponse = {
+    ...mapped,
+    status: isEffectivelyAvailable(document, serverNow) ? "open" : mapped.status,
   };
+  // `undefined` means omit — ownership is not knowable for this caller. The
+  // raw `requesterParticipantId` never reaches the wire
+  // (`mapPublicRequestFields` does not read it).
+  const isOwnRequest = callerOwnershipFor(document, ownershipContext);
+  if (isOwnRequest === undefined) return { request };
+  return { request: { ...request, isOwnRequest } };
 }
 
 /**
@@ -130,7 +202,13 @@ export function buildPublicRequestDetailResponse(
  */
 export function buildPublicRequestListResponse(
   documents: RequestListDocument[],
-  serverNow: Date
+  serverNow: Date,
+  /**
+   * Who this response's ownership is computed for (W4-H2). Never changes
+   * membership or order — only whether an already-included request also
+   * states `isOwnRequest`.
+   */
+  ownershipContext: CallerOwnershipContext = { kind: "anonymous" }
 ): PublicRequestListResponse {
   const hourLater = serverNow.getTime() + 60 * 60 * 1000;
   const available = documents.filter((document) =>
@@ -157,10 +235,19 @@ export function buildPublicRequestListResponse(
   });
 
   return {
-    requests: available.slice(0, 20).map((document) => ({
-      ...mapPublicRequestFields(document),
-      // Derived from effective availability, never written back to the record.
-      status: "open" as const,
-    })),
+    requests: available.slice(0, 20).map((document) => {
+      const mapped = {
+        ...mapPublicRequestFields(document),
+        // Derived from effective availability, never written back to the record.
+        status: "open" as const,
+      };
+      // W4-H2: stated either way for a resolved caller, omitted when
+      // ownership is not knowable. `requesterParticipantId` itself is never
+      // copied onto the response above (`mapPublicRequestFields` does not
+      // read it), so this is the sole place ownership truth reaches the wire.
+      const isOwnRequest = callerOwnershipFor(document, ownershipContext);
+      if (isOwnRequest === undefined) return mapped;
+      return { ...mapped, isOwnRequest };
+    }),
   };
 }

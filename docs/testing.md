@@ -315,6 +315,16 @@ A `ReservationWarningTests.testReleaseSucceedsBeforeTheWarningEverFires` timing 
 
 No N0-specific physical-device or environmental proof is required or outstanding.
 
+### Home & Navigation Architecture (W4-H2) coverage
+
+W4-H2 is accepted. Backend coverage proves the expanded ownership/self-claim contract: participant-scoped request-list ownership projection (verified owner receives an affirmative ownership signal for their own eligible open request only; another verified participant and anonymous/unresolved callers receive no participant-specific ownership truth for it; own requests are not filtered out of the list; `requesterParticipantId`, requester email, and other private identity never enter the response; existing public-list privacy projection and participant-aware filtering remain intact) and the authoritative backend self-claim guard inside the existing atomic conditional claim mutation (direct self-claim is refused using the existing conflict-style error envelope, creates no reservation/helper-binding/participation side effect, and leaves another eligible participant's claim, existing one-active-reservation behavior, and claim visibility/expiry/atomicity unaffected). iOS coverage proves `FoodRequest` ownership truth (own/notOwn/unresolved) driven only by authoritative backend signal rather than an installation-local heuristic, the approved YOUR REQUEST presentation, owner-side withholding of the Help/Reserve action, and unresolved ownership failing closed for actionability; Home root/navigation, live-board entry and ASAP-then-scheduled ordering, `Continue Helping` continuation, Low Activity/Empty/Unavailable presentation, Settings navigation and identity presentation, verified/unverified Request Alerts entry and verification-return continuation, and the native-`.refreshable`-only functional refresh contract (initial-load and manual-refresh 5-second deadlines, recovery-only checkmark, stale-response/generation safety, and baseline Reduce Motion correctness) recorded in `docs/system-contract.md` section 1.3.
+
+At the final ownership rereview: `npm run typecheck` passed; focused backend ownership/detail/privacy/self-claim suites passed **90 passed, 23 Mongo-gated skipped in that focused run**; complete `npm test` passed **1,424 passed, 328 Mongo-gated skipped**; `npm run test:mongo` passed **328 passed across 23 files**. Focused iOS ownership suites passed **40 passed**: `RequestOwnershipLifecycleTests` — 15, `RequestOwnershipAuthorityContextTests` — 16, `RequestOwnershipReconciliationTests` — 5, `RequestOwnershipTests` — 4. The latest complete iOS run after the ownership implementation, `CommonPlateiosTests`, passed **914 passed, 0 failed, TEST SUCCEEDED**.
+
+**Final rereview scope.** The final independent rereviewer did not independently rerun the complete 914-test `CommonPlateiosTests` target; it inspected the prior current-tree complete result above and reran the focused ownership evidence (the 90 backend and 40 iOS totals above) fresh. Do not describe the complete 914-test run as having been independently rerun at the final rereview; it is the most recent complete-target result on the accepted tree, not evidence reproduced by that final review pass.
+
+**Known, accepted limitations.** The repository has no iOS UI-test target: the unresolved-ownership UI branch (help/reserve withheld while ownership resolves) is proven through production ownership-resolution predicate/action-boundary logic and the complete iOS target rather than through UI automation or physical-device interaction. Backend detail ownership is proven through production handler/builder behavior with mocked persistence for the unit layer, plus real-Mongo coverage for the list/claim mutation, rather than a fully mounted HTTP+Mongo detail request end to end. The current authored refresh visual/motion polish (pull-cue choreography, easing, arrow-to-symbol transform quality, spinner/symbol treatment) is not acceptance proof of anything beyond H2's functional refresh contract; it is a known, accepted visual/experience limitation deferred to W4-H3 (`docs/system-contract.md` section 1.3), not a defect. A Simulator-only defect (native `.refreshable` not activating under Simulator's indirect-pointer/trackpad input path; see the current weekly spec's W4-H2 section) was investigated but could not be resolved further without a physical device; the repository/session contains no record of a physical-iPhone reproduction-or-rule-out walkthrough for this specific defect, and this is not claimed as performed.
+
 ## 5. Mongo integration tests
 
 Run:
@@ -370,7 +380,7 @@ The expected form is `/Applications/Xcode.app/Contents/Developer`. Correct it wh
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ```
 
-The project is `ios/CommonPlateios/CommonPlateios.xcodeproj`; its shared scheme is `CommonPlateios` and its unit-test target is `CommonPlateiosTests`. The project targets iOS 26.5, so use Xcode with the required SDK and simulator runtime.
+The project is `ios/CommonPlateios/CommonPlateios.xcodeproj`; its shared scheme is `CommonPlateios` and its unit-test target is `CommonPlateiosTests`. The project's `IPHONEOS_DEPLOYMENT_TARGET` is 17.6; accepted test runs have executed against an iOS 26.5 simulator runtime, so use Xcode with a matching installed simulator runtime available. iOS 26.5 is the simulator runtime used for verification, not the deployment target.
 
 ## 8. Discovering an available simulator
 
@@ -497,12 +507,12 @@ These results are reference evidence, not a substitute for rerunning affected ch
 
 | Check | Result |
 | --- | --- |
-| `npm run typecheck` | Passed at the W4-N0 closeout |
-| `npm test` | Passed at the W4-N0 closeout: 1,406 passed, 328 Mongo-gated skipped |
-| `npm run test:mongo` | Passed at the W4-N0 closeout: 328 passed across 23 files |
+| `npm run typecheck` | Passed at the W4-H2 final ownership rereview |
+| `npm test` | Passed at the W4-H2 final ownership rereview: 1,424 passed, 328 Mongo-gated skipped |
+| `npm run test:mongo` | Passed at the W4-H2 final ownership rereview: 328 passed across 23 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build) |
-| `CommonPlateiosTests` | W4-N0 accepted baseline: 857 passed; 0 failed; 0 skipped; TEST SUCCEEDED |
-| `npm run build:client` | Passed; no tracked bundle diff (C1 closeout; no browser-client source changed in N2, D1, H2, or N0) |
+| `CommonPlateiosTests` | Latest complete run, after the W4-H2 ownership implementation: 914 passed; 0 failed; TEST SUCCEEDED. The final W4-H2 rereview did not itself rerun this complete target — see the W4-H2 coverage subsection above. |
+| `npm run build:client` | Passed; no tracked bundle diff (no browser-client source changed in N2, D1, H2, or N0) |
 | `git diff --check` | Passed |
 
 Physical-device proof (helper terminated-launch tap routing; requester-fulfillment push to Home with the one-time notice) has passed on a physical iPhone and is recorded as accepted runtime truth in `docs/system-contract.md` sections 8.2–8.3. It is device evidence, not part of the automated suite above, and it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
@@ -520,6 +530,8 @@ W3-N2 physical-device acceptance (push enable/disable reaching authoritative On/
 The non-Eastern `DatePicker` timezone proof required for W3-R1 (see section 9) is likewise device evidence, not part of the automated suite above.
 
 W3-I4 acceptance evidence and its accepted CoreSimulator verification limitation are recorded above (Remove Verified Identity (W3-I4) coverage) and in `docs/system-contract.md` section 3.1.
+
+W4-H2 acceptance evidence (participant-scoped request-list ownership projection, the authoritative backend self-claim guard, iOS ownership presentation/action-gating, and the functional Home/navigation/refresh contract) is recorded above (Home & Navigation Architecture (W4-H2) coverage) and in `docs/system-contract.md` section 1.3. Faith accepted H2's functional pull-to-refresh behavior; the repository/session contains no explicit record of a physical-iPhone reproduction-or-rule-out walkthrough for the Simulator-only native-`.refreshable`-activation defect noted in the current weekly spec's W4-H2 section, and this documentation does not claim that verification occurred. It does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document). The current authored refresh visual/motion presentation is explicitly not part of H2's acceptance evidence; it is deferred to W4-H3 and is not accepted as final.
 
 W4-N0 acceptance evidence (authorization/privacy/cache-isolation for the participant-authorized Email Request Alert state read, current-participant stale-authority fencing, and Subscriber-lifecycle-to-state mapping) is recorded above (Email Request Alert State Authority (W4-N0) coverage) and in `docs/system-contract.md` section 9.10. No physical-device or environmental proof was required; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 

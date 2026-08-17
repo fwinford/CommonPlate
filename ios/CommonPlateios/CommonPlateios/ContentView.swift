@@ -32,6 +32,12 @@ struct ContentView: View {
     /// Subscriber truth, and this store's confirmed Off result is session-only
     /// and establishes no future On.
     @StateObject private var participantEmailUnsubscribeStore: ParticipantEmailUnsubscribeStore
+    /// The one state owner for the W4-N0 authoritative Email Request Alert
+    /// state read (`GET /api/participant/email-alerts/state`). Entirely
+    /// separate from `alertSubscriptionStore` (signup presentation history)
+    /// and `participantEmailUnsubscribeStore` (the Off mutation): this is the
+    /// only source Settings' Email toggle may read On/Off from.
+    @StateObject private var emailAlertStateStore: EmailAlertStateStore
     /// Local presentation preference only. It deliberately has no connection
     /// to participant identity, credentials, or backend authority.
     @StateObject private var onboardingStore: OnboardingPresentationStore
@@ -76,12 +82,6 @@ struct ContentView: View {
     /// carries no request identity and is shown only once per tap, exactly
     /// like the router's own exactly-once consumption guarantees.
     @State private var isShowingOrderPlacedNotice = false
-
-    /// W3-I4: open only between tapping Remove Email and the mutation
-    /// actually running. Cancel (or dismissing any other way) leaves
-    /// `participantIdentityStore` untouched — the confirmation dialog itself
-    /// has no side effect, only its destructive button does.
-    @State private var isPresentingRemoveEmailConfirmation = false
 
     /// `remoteNotificationRegistrar` must be the same instance
     /// `PushAppDelegate` forwards APNs callbacks into — see
@@ -156,6 +156,13 @@ struct ContentView: View {
         _participantEmailUnsubscribeStore = StateObject(
             wrappedValue: ParticipantEmailUnsubscribeStore(
                 service: ParticipantEmailUnsubscribeService(client: client)
+            )
+        )
+        _emailAlertStateStore = StateObject(
+            wrappedValue: EmailAlertStateStore(
+                service: EmailAlertStateService(client: client),
+                participantAuthorityProvider: { identityStore.currentAuthority() },
+                participantAuthorityRejected: { identityStore.discardRejectedIdentity() }
             )
         )
         let onboardingStore = OnboardingPresentationStore(
@@ -323,21 +330,6 @@ struct ContentView: View {
         .alert("Your order was placed.", isPresented: $isShowingOrderPlacedNotice) {
             Button("OK", role: .cancel) {}
         }
-        // W3-I4: Cancel is the dialog's implicit dismissal path too — only
-        // the destructive button below has any effect on
-        // `participantIdentityStore`.
-        .confirmationDialog(
-            Self.removeEmailConfirmationTitle,
-            isPresented: $isPresentingRemoveEmailConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button(Self.removeEmailTitle, role: .destructive) {
-                participantIdentityStore.removeIdentity()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(Self.removeEmailConfirmationMessage)
-        }
         // The drain trigger belongs here, not in the button's action above.
         // `.alert(isPresented:)`'s button action runs *before* SwiftUI has
         // actually flipped `isShowingOrderPlacedNotice` back to `false` —
@@ -370,68 +362,26 @@ struct ContentView: View {
         }
     }
 
-    /// The completion presentation is deliberately independent of the
-    /// coordinator's synchronous completion state. The wrapper begins Home's
-    /// arrival as the outgoing walkthrough fades, so the user sees one soft
-    /// settle rather than a navigation pop followed by a second transition.
+    /// W4-H2: the live CommonPlate exchange supersedes R1's recurring static
+    /// launcher as Home's recurring content. The completion presentation is
+    /// deliberately independent of the coordinator's synchronous completion
+    /// state — the wrapper begins Home's arrival as the outgoing walkthrough
+    /// fades, so the user sees one soft settle rather than a navigation pop
+    /// followed by a second transition; that fade-in behavior is preserved
+    /// here unchanged, now applied to the exchange view instead of a single
+    /// brand header.
     private func recurringHome(brandHasSettled: Bool) -> some View {
-        GeometryReader { geometry in
-            ScrollView {
-                VStack(spacing: CommonPlateStyle.Spacing.l) {
-                    CommonPlateBrandHeader()
-                        // This is intentionally only a slight extension of
-                        // the screen-wide completion arrival.
-                        .opacity(brandHasSettled ? 1 : 0)
-                        .offset(y: brandHasSettled || reduceMotion ? 0 : 2)
-                        .animation(brandLandingAnimation, value: brandHasSettled)
-
-                    Spacer(minLength: CommonPlateStyle.Spacing.l)
-
-                    VStack(spacing: CommonPlateStyle.Spacing.xs) {
-                        VStack(spacing: CommonPlateStyle.Spacing.m) {
-                            Button {
-                                startRouteFlow(.requestFood)
-                            } label: {
-                                Text("Request a meal")
-                            }
-                            .commonPlateMajorPrimaryAction()
-                            .commonPlateMajorActionFrame()
-                            Button {
-                                startRouteFlow(.activeRequests)
-                            } label: {
-                                Text("Find a request")
-                            }
-                            .commonPlateMajorSecondaryAction()
-                            .commonPlateMajorActionFrame()
-                        }
-
-                        NavigationLink(value: AppRoute.alerts) {
-                            Text("Request alerts")
-                                .font(.body.weight(.medium))
-                                .foregroundStyle(Color.accentColor)
-                                .frame(
-                                    maxWidth: .infinity,
-                                    minHeight: 44,
-                                    alignment: .center
-                                )
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(CommonPlateFlatActionButtonStyle())
-                    }
-                    .frame(maxWidth: 520)
-
-                    Spacer(minLength: CommonPlateStyle.Spacing.l)
-
-                    utilityAndIdentityGroup
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, CommonPlateStyle.Spacing.l)
-                .padding(.top, CommonPlateStyle.Spacing.l)
-                .padding(.bottom, CommonPlateStyle.Spacing.xs)
-                .frame(minHeight: geometry.size.height, alignment: .top)
-            }
-        }
-        .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
+        HomeExchangeView(
+            store: requestStore,
+            identityStore: participantIdentityStore,
+            alertSubscriptionStore: alertSubscriptionStore,
+            pushSubscriptionStore: pushSubscriptionStore,
+            unsubscribeStore: participantEmailUnsubscribeStore,
+            onRequestMeal: { startRouteFlow(.requestFood) }
+        )
+        .opacity(brandHasSettled ? 1 : 0)
+        .offset(y: brandHasSettled || reduceMotion ? 0 : 2)
+        .animation(brandLandingAnimation, value: brandHasSettled)
     }
 
     private var brandLandingAnimation: Animation {
@@ -439,56 +389,6 @@ struct ContentView: View {
             return .easeInOut(duration: 0.17)
         }
         return .timingCurve(0.22, 0.78, 0.24, 1, duration: 0.47)
-    }
-
-    private var utilityAndIdentityGroup: some View {
-        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-            NavigationLink(value: AppRoute.onboardingChooser) {
-                UtilityActionRow(title: "How CommonPlate works")
-            }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityIdentifier("home-how-commonplate-works")
-
-            NavigationLink(value: AppRoute.privacySafety) {
-                UtilityActionRow(title: "Privacy & Safety")
-            }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            if participantIdentityStore.identity != nil {
-                Divider()
-                    .padding(.top, -CommonPlateStyle.Spacing.s)
-                    .padding(.bottom, CommonPlateStyle.Spacing.xs)
-
-                participantIdentitySection
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, CommonPlateStyle.Spacing.l)
-        .padding(.vertical, CommonPlateStyle.Spacing.m)
-        .background(
-            CommonPlateStyle.Color.warmSurface,
-            in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
-        )
-    }
-
-    private struct UtilityActionRow: View {
-        let title: String
-
-        var body: some View {
-            HStack(spacing: CommonPlateStyle.Spacing.s) {
-                Text(title)
-                    .font(.body.weight(.semibold))
-                Spacer(minLength: CommonPlateStyle.Spacing.s)
-                Image(systemName: "chevron.right")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .foregroundStyle(.primary)
-            .frame(maxWidth: .infinity, minHeight: CommonPlateStyle.Control.minimumHeight)
-            .contentShape(Rectangle())
-        }
     }
 
     /// A completion-only overlay that keeps the outgoing walkthrough and the
@@ -654,163 +554,15 @@ struct ContentView: View {
         }
     }
 
-    /// The remembered verified identity, and the way to replace it (W3-I1).
-    ///
-    /// Shown masked: enough for the student to confirm which of their addresses
-    /// this device is acting as, without printing a full address onto a screen
-    /// someone may be reading over their shoulder. When there is no identity
-    /// this states the requirement instead, so the first gate on a request or a
-    /// reservation is not the first time anyone hears about it.
-    @ViewBuilder
-    private var participantIdentitySection: some View {
-        if let identity = participantIdentityStore.identity {
-            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
-                Label(identity.masked, systemImage: "checkmark.circle.fill")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("home-verified-identity")
-
-                ViewThatFits(in: .horizontal) {
-                    identityActions(axis: .horizontal)
-                    identityActions(axis: .vertical)
-                }
-
-                if isRemoveEmailBlocked {
-                    CommonPlateInlineStatus(
-                        kind: removeEmailBlockedStatusKind,
-                        message: removeEmailBlockedNotice
-                    )
-                    .multilineTextAlignment(.center)
-                    .accessibilityIdentifier("home-remove-email-blocked-notice")
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private func identityActions(axis: Axis) -> some View {
-        if axis == .horizontal {
-            HStack(spacing: CommonPlateStyle.Spacing.s) {
-                changeEmailButton
-                Text("·").foregroundStyle(.secondary)
-                removeEmailButton
-            }
-        } else {
-            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
-                changeEmailButton
-                removeEmailButton
-            }
-        }
-    }
-
-    private var changeEmailButton: some View {
-        Button(Self.changeEmailTitle) {
-            participantIdentityStore.beginEmailReplacement()
-        }
-        .commonPlateTertiaryAction()
-        // Keep the quiet inline text treatment while making the whole local
-        // layout rect a minimum 44-point target.
-        .frame(minHeight: 44)
-        .contentShape(Rectangle())
-        .accessibilityIdentifier("home-change-email")
-    }
-
-    private var removeEmailButton: some View {
-        Button(Self.removeEmailTitle, role: .destructive) {
-            isPresentingRemoveEmailConfirmation = true
-        }
-        .commonPlateDestructiveAction()
-        .disabled(isRemoveEmailBlocked)
-        .accessibilityIdentifier("home-remove-email")
-    }
-
-    static let changeEmailTitle = "Change email"
-    static let removeEmailTitle = "Remove email"
-
-    /// Provisional (Faith reviews exact wording at acceptance, W3-I4).
-    static let removeEmailConfirmationTitle = "Remove this email?"
-    static let removeEmailConfirmationMessage =
-        "You’ll need to verify an NYU email again before posting or helping with a request. Your request and help history is not affected."
-    /// Provisional (Faith reviews exact wording at acceptance, W3-I4). Used
-    /// while this process has not yet established backend-confirmed
-    /// removal-safety truth (cold/relaunch reconciliation still pending) —
-    /// deliberately silent about *which* blocker applies, since none is
-    /// confirmed yet.
-    static let removeEmailNotYetAvailableNotice =
-        "Checking whether your email can be removed. Try again in a moment."
-    /// Provisional (Faith reviews exact wording at acceptance, W3-I4). The
-    /// student has an existing action (H1's own release/finish) that
-    /// resolves this.
-    static let removeEmailBlockedByReservationNotice =
-        "You can’t remove your email while you have an active reservation or an in-progress request. Finish or release that first."
-    /// Provisional (Faith reviews exact wording at acceptance, W3-I4). An
-    /// unresolved W3-D1 create has no release/retry/discard action available
-    /// to the student — it only resolves by CommonPlate's own reconciliation
-    /// or expiry — so this must not instruct one.
-    static let removeEmailBlockedByPendingCreateNotice =
-        "CommonPlate is still confirming a request you submitted. You can remove your email once that finishes."
-
-    /// W3-I4: exactly the A-classified blockers in the accepted removal-safety
-    /// matrix — an active/continuing H1 reservation, in-flight fulfillment,
-    /// and unresolved ambiguous-fulfillment recovery are all reflected by
-    /// `activeClaim` staying non-nil until `clearActiveClaim()` runs (release,
-    /// confirmed terminal outcome, or expiry); an unresolved W3-D1 create is
-    /// `hasUnresolvedCreateAmbiguity`. Both are already-published
-    /// `RequestStore` state. `!hasEstablishedRemovalSafety` additionally
-    /// fails closed for the cold/relaunch window before either signal is
-    /// backend-confirmed: at launch `activeClaim` starts `nil` and
-    /// `hasUnresolvedCreateAmbiguity` starts `false` even when a prior
-    /// process left an H1 reservation or an unresolved D1 create behind,
-    /// because discovering either requires the still-in-flight
-    /// `continueActiveReservationIfNeeded()`/
-    /// `reconcilePendingCreateOperationIfNeeded()` calls `ContentView`'s own
-    /// launch `.task` starts — without this, Remove Email would be
-    /// available during exactly the window those calls exist to close.
-    private var isRemoveEmailBlocked: Bool {
-        !requestStore.hasEstablishedRemovalSafety
-            || requestStore.activeClaim != nil
-            || requestStore.hasUnresolvedCreateAmbiguity
-    }
-
-    /// The truthful blocked-state explanation for whichever reason
-    /// `isRemoveEmailBlocked` is currently `true`, checked in the same
-    /// precedence order. A pending readiness check is reported as such
-    /// rather than guessing at a blocker that may not exist; when both an
-    /// H1 and a D1 blocker are simultaneously present, the H1 copy is shown
-    /// since it is the one the student has an existing action for.
-    private var removeEmailBlockedNotice: String {
-        if !requestStore.hasEstablishedRemovalSafety {
-            return Self.removeEmailNotYetAvailableNotice
-        }
-        if requestStore.activeClaim != nil {
-            return Self.removeEmailBlockedByReservationNotice
-        }
-        return Self.removeEmailBlockedByPendingCreateNotice
-    }
-
-    /// The shared semantic-state (W4-F1) treatment for whichever reason
-    /// `removeEmailBlockedNotice` currently reports. Presentation only — it
-    /// decides no blocking behavior itself, only how an already-decided
-    /// reason looks.
-    private var removeEmailBlockedStatusKind: CommonPlateStatusKind {
-        Self.removeEmailBlockedStatusKind(
-            hasEstablishedRemovalSafety: requestStore.hasEstablishedRemovalSafety,
-            hasActiveClaim: requestStore.activeClaim != nil
-        )
-    }
-
-    /// The pure mapping behind `removeEmailBlockedStatusKind`, extracted as a
-    /// `static func` (matching the existing `ParticipantVerificationView`
-    /// pure-predicate pattern) so it is directly testable without
-    /// instantiating `ContentView`'s full store dependency graph. Mirrors
-    /// `removeEmailBlockedNotice`'s exact precedence: the cold/relaunch
-    /// readiness check reads as in-progress work (`.loading`); an active
-    /// reservation/request reads as this action being temporarily
-    /// unavailable, not gone (`.unavailable`); otherwise (the remaining
-    /// blocked case is always an unresolved W3-D1 create, since this is only
-    /// consulted while `isRemoveEmailBlocked` is true) an unresolved create
-    /// is exactly a mutation-outcome-uncertain state (`.uncertain`).
+    /// The pure predicate behind Settings' Remove Email blocked-status
+    /// presentation (`SettingsView`, W4-H2), kept here as a `static func` so
+    /// it is directly testable without instantiating a full store dependency
+    /// graph — matching the existing `ParticipantVerificationView`
+    /// pure-predicate pattern. Precedence: the cold/relaunch readiness check
+    /// reads as in-progress work (`.loading`); an active reservation/request
+    /// reads as this action being temporarily unavailable, not gone
+    /// (`.unavailable`); otherwise (an unresolved W3-D1 create) is exactly a
+    /// mutation-outcome-uncertain state (`.uncertain`).
     static func removeEmailBlockedStatusKind(
         hasEstablishedRemovalSafety: Bool,
         hasActiveClaim: Bool
@@ -824,15 +576,18 @@ struct ContentView: View {
         return .uncertain
     }
 
-    /// Open while a flow is running and Home is the surface presenting it. The
-    /// request and reservation screens present their own gates, so this is
-    /// scoped to the replacement flow Home actually started — otherwise a gate
-    /// opened deeper in the stack would also raise a sheet here.
+    /// Open while a flow is running and Home or Settings — W4-H2's own
+    /// entry point for Change Email — is the surface presenting it. The
+    /// request and reservation screens present their own gates, so this
+    /// stays scoped to exactly the two surfaces that actually start this
+    /// flow: nothing pushed (Home) or Settings alone with nothing pushed
+    /// past it, so a gate opened deeper in the stack still does not also
+    /// raise a sheet here.
     private var isPresentingIdentityFlow: Binding<Bool> {
         Binding(
             get: {
                 participantIdentityStore.flow?.purpose == .emailReplacement
-                    && path.isEmpty
+                    && (path.isEmpty || path == [.settings])
             },
             set: { isPresented in
                 if !isPresented { participantIdentityStore.cancelVerification() }
@@ -911,6 +666,8 @@ struct ContentView: View {
                 unsubscribeStore: participantEmailUnsubscribeStore,
                 identityStore: participantIdentityStore
             )
+            .navigationTitle(AlertSignupView.title)
+            .navigationBarTitleDisplayMode(.inline)
         case .onboardingChooser:
             OnboardingExperienceView(
                 onStartFlow: startWalkthroughFlow,
@@ -923,6 +680,17 @@ struct ContentView: View {
                 }
         case .privacySafety:
             PrivacySafetyView()
+        case .settings:
+            SettingsView(
+                requestStore: requestStore,
+                participantIdentityStore: participantIdentityStore,
+                alertSubscriptionStore: alertSubscriptionStore,
+                pushSubscriptionStore: pushSubscriptionStore,
+                unsubscribeStore: participantEmailUnsubscribeStore,
+                emailAlertStateStore: emailAlertStateStore
+            )
+        case .support:
+            SupportView()
         case .requestDetail(let request):
             RequestDetailView(
                 request: request,
