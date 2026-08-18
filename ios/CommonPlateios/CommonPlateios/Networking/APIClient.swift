@@ -86,14 +86,23 @@ struct APIClient {
     /// deliberately a header rather than a body field: two accepted request
     /// shapes are strict about their keys, and a person-identity credential has
     /// no business in a payload that can be echoed back in a validation error.
+    /// `timeoutInterval` overrides `URLSession`'s default (60s) for one
+    /// request. `nil` (every existing call site) leaves the session default
+    /// unchanged; a caller that needs a tighter finite bound — e.g. W4-S1's
+    /// screenshot analysis, which must resolve or fail well before that —
+    /// passes an explicit value instead.
     func send<Body: Encodable, Response: Decodable>(
         path: String,
         method: HTTPMethod,
         body: Body,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        timeoutInterval: TimeInterval? = nil
     ) async throws -> Response {
         var request = try makeRequest(path: path, method: method, headers: headers)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let timeoutInterval {
+            request.timeoutInterval = timeoutInterval
+        }
         do {
             request.httpBody = try encoder.encode(body)
         } catch is CancellationError {

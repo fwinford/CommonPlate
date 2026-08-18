@@ -162,6 +162,7 @@ import { assertApnsConfigurationForActivation } from "./src/apnsConfig.js";
 import { assertParticipantSigningSecretForActivation } from "./src/participantCredentials.js";
 import { registerParticipantVerificationRoutes } from "./src/participantVerificationRoutes.js";
 import { registerParticipantEmailUnsubscribeRoute } from "./src/participantEmailUnsubscribeRoute.js";
+import { registerScreenshotProposalRoute } from "./src/screenshotProposalRoute.js";
 import { buildEffectiveAvailabilityFilter } from "./src/requestAvailability.js";
 import {
   CREATE_UNAVAILABLE_MESSAGE,
@@ -358,6 +359,13 @@ registerParticipantVerificationRoutes(app);
 // and the participant-authority gate must still run before any global
 // middleware could otherwise see the request.
 registerParticipantEmailUnsubscribeRoute(app);
+
+// api: W4-S1 non-authoritative AI screenshot proposal. Registered ahead of
+// the global parsers for the same reason as the two routes above, plus one
+// more: this route needs a larger body limit than the global 100 KB parser
+// for a normalized screenshot, so it owns its own bounded JSON parser rather
+// than widening the shared one every other route uses.
+registerScreenshotProposalRoute(app);
 
 // middleware to parse JSON and serve static files
 app.use(express.json({ limit: '100kb' }));

@@ -4,7 +4,19 @@
 //
 //  Created by faith on 7/9/26.
 //
+import PhotosUI
 import SwiftUI
+import UIKit
+
+/// One locally-prepared screenshot ready for analysis: the normalized image
+/// bytes plus the independent on-device Vision OCR text
+/// (`ScreenshotLocalTextRecognizer`) that gates and corroborates whatever
+/// the OpenAI provider later returns for it.
+struct ScreenshotAnalysisInput {
+    let data: Data
+    let mimeType: String
+    let localEvidenceText: String
+}
 
 enum RequestFoodFormError: Error, Equatable {
     case missingDiningSpot
@@ -208,6 +220,11 @@ struct RequestFoodView: View {
     static let localRejectionPointerNotice = "Check the highlighted fields above."
 
     @ObservedObject var store: RequestStore
+    /// The one W4-S1 state owner for AI screenshot proposals. Entirely
+    /// separate from `store`: it never calls `store.createRequest(...)` and
+    /// only ever mutates `draft` through the manual-precedence-aware
+    /// application this screen calls below.
+    @ObservedObject var screenshotProposalStore: ScreenshotProposalStore
     /// Observed, not owned: the verified identity outlives this screen, and the
     /// gate below has to see the same one every other participant action does.
     @ObservedObject var identityStore: ParticipantIdentityStore
@@ -231,6 +248,28 @@ struct RequestFoodView: View {
     @State private var showsLocalRejectionPointer = false
     @State private var didCreateRequest = false
     @FocusState private var focusedField: RequestFoodFormField?
+
+    // MARK: - W4-S1 AI screenshot assistance
+
+    @State private var selectedScreenshotItem: PhotosPickerItem?
+    /// A normalized image, plus its independently-derived local OCR evidence
+    /// text, already picked and awaiting the first-use disclosure decision.
+    /// Discarded (never sent) on Cancel, on a newer selection superseding it,
+    /// or on leaving this screen.
+    @State private var pendingScreenshotForConsent: ScreenshotAnalysisInput?
+    /// The selection `pendingScreenshotForConsent` belongs to. Checked
+    /// against `screenshotProposalStore.isCurrent(_:)` before the disclosure
+    /// decision is ever acted on, so a stale sheet left open behind a newer
+    /// selection cannot start analysis for a screenshot the requester has
+    /// already replaced.
+    @State private var pendingConsentToken: ScreenshotSelectionToken?
+    @State private var isPresentingScreenshotDisclosure = false
+    /// Explicit requester-interaction provenance for the three allowlisted
+    /// proposal fields (see `ScreenshotFieldManualEditState`'s declaration).
+    /// Set only by this screen's three custom bindings below — never by a
+    /// store-applied proposal write — and never reset for the lifetime of
+    /// this view.
+    @State private var screenshotManualEdits = ScreenshotFieldManualEditState()
 
     /// Campus time, not device time. Every day boundary, every clamp, and the
     /// picker itself are computed here, so the same selection means the same
@@ -327,7 +366,227 @@ struct RequestFoodView: View {
         }
         .onDisappear {
             verificationCoordinator.requesterDisappeared()
+            // Review finding: old work must be invalidated on disappearance,
+            // not just superseded by a later selection — otherwise a
+            // still-running analysis for a screen the requester has already
+            // left could still be applied if this exact view instance were
+            // ever reused.
+            screenshotProposalStore.invalidateCurrentSelection()
         }
+        .onChange(of: selectedScreenshotItem) { _, newItem in
+            guard let newItem else { return }
+            // A newer selection immediately supersedes anything the previous
+            // one was doing, including a still-open disclosure sheet for it.
+            isPresentingScreenshotDisclosure = false
+            pendingScreenshotForConsent = nil
+            pendingConsentToken = nil
+            // Minted synchronously, here, before any async work for this
+            // selection starts — "last selection wins from the moment the
+            // requester chooses it," not from whenever its preprocessing
+            // happens to finish.
+            let token = screenshotProposalStore.beginSelection(
+                clearing: &draft,
+                manualEdits: screenshotManualEdits
+            )
+            Task { await processSelectedScreenshot(newItem, token: token) }
+        }
+        .sheet(isPresented: $isPresentingScreenshotDisclosure) {
+            ScreenshotProposalDisclosureView(
+                onContinue: acceptScreenshotDisclosure,
+                onCancel: cancelScreenshotDisclosure
+            )
+        }
+    }
+
+    // MARK: - W4-S1 AI screenshot assistance
+
+    @ViewBuilder
+    private var screenshotAssistanceRow: some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
+            // `.images`, not `.screenshots`: a genuine Grubhub screenshot
+            // saved via AirDrop/Files/a share sheet loses the OS's own
+            // screenshot tag, and the deterministic eligibility gate
+            // (`screenshotEligibility.ts`) — not this filter — is what
+            // actually decides whether the selected image is a supported
+            // category.
+            PhotosPicker(
+                selection: $selectedScreenshotItem,
+                matching: .images,
+                photoLibrary: .shared()
+            ) {
+                if screenshotProposalStore.isApplying {
+                    HStack {
+                        ProgressView()
+                        Text("Analyzing screenshot…")
+                    }
+                } else {
+                    Text("Add from Grubhub screenshot")
+                }
+            }
+            .disabled(!screenshotProposalStore.isAIAssistanceEnabled || screenshotProposalStore.isApplying)
+            .accessibilityIdentifier("request-screenshot-picker")
+
+            if !screenshotProposalStore.isAIAssistanceEnabled {
+                Text("AI screenshot assistance is off. Turn it on in Settings, or fill out the form manually.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("request-screenshot-disabled-notice")
+            } else if let notice = screenshotProposalStore.notice {
+                Text(notice.message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("request-screenshot-notice")
+            } else {
+                Text("Optional. Manual entry always works, whether or not you use this.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Local normalization (resize/compress) plus independent on-device
+    /// Vision OCR — no network call yet, and both run before any disclosure
+    /// or transmission decision. OCR runs against the original selected
+    /// image (before compression) for the best recognition fidelity; the
+    /// evidence text is what actually gates and corroborates analysis, not
+    /// the image bytes.
+    ///
+    /// Every stage below re-checks `screenshotProposalStore.isCurrent(token)`
+    /// and `.isAIAssistanceEnabled` before proceeding: a newer selection or
+    /// AI Assistance being turned Off at any point must stop this exact
+    /// attempt from reaching the next stage, and in particular must make
+    /// network transfer for it impossible.
+    @MainActor
+    private func processSelectedScreenshot(
+        _ item: PhotosPickerItem,
+        token: ScreenshotSelectionToken
+    ) async {
+        selectedScreenshotItem = nil
+
+        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
+        guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
+            return
+        }
+
+        guard let uiImage = UIImage(data: data),
+              let normalized = ScreenshotImageNormalizer.normalize(uiImage) else {
+            return
+        }
+        guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
+            return
+        }
+
+        let evidenceText = await ScreenshotLocalTextRecognizer.recognizeText(in: uiImage)
+        guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
+            return
+        }
+
+        let input = ScreenshotAnalysisInput(
+            data: normalized.data,
+            mimeType: normalized.mimeType,
+            localEvidenceText: evidenceText
+        )
+
+        if screenshotProposalStore.hasRecordedThirdPartyConsent {
+            await beginScreenshotAnalysis(input, token: token)
+        } else {
+            pendingScreenshotForConsent = input
+            pendingConsentToken = token
+            isPresentingScreenshotDisclosure = true
+        }
+    }
+
+    private func acceptScreenshotDisclosure() {
+        isPresentingScreenshotDisclosure = false
+        guard let pending = pendingScreenshotForConsent, let token = pendingConsentToken else {
+            return
+        }
+        pendingScreenshotForConsent = nil
+        pendingConsentToken = nil
+        // The disclosure sheet can only be showing for the current
+        // selection (a newer one clears it on appearance, above), but this
+        // still checks explicitly rather than assuming that invariant holds
+        // forever.
+        guard screenshotProposalStore.isCurrent(token) else { return }
+        screenshotProposalStore.recordThirdPartyConsent()
+        Task { await beginScreenshotAnalysis(pending, token: token) }
+    }
+
+    private func cancelScreenshotDisclosure() {
+        isPresentingScreenshotDisclosure = false
+        pendingScreenshotForConsent = nil
+        pendingConsentToken = nil
+    }
+
+    @MainActor
+    private func beginScreenshotAnalysis(
+        _ input: ScreenshotAnalysisInput,
+        token: ScreenshotSelectionToken
+    ) async {
+        let outcome = await screenshotProposalStore.analyzeScreenshot(
+            imageData: input.data,
+            mimeType: input.mimeType,
+            localEvidenceText: input.localEvidenceText,
+            participantAuthority: identityStore.currentAuthority(),
+            token: token
+        )
+        // Applied synchronously, after the suspension point above: a
+        // `@State` draft cannot be passed `inout` across an `await`, so the
+        // outcome returns here and is applied in one non-suspending step.
+        // Re-checked again here (not just inside `analyzeScreenshot`): the
+        // gap between that call returning and this line running is itself a
+        // point where a newer selection could have started.
+        guard let outcome, screenshotProposalStore.isCurrent(token) else { return }
+        screenshotProposalStore.apply(
+            outcome,
+            manualEdits: screenshotManualEdits,
+            to: &draft
+        )
+    }
+
+    /// The only path that may set `screenshotManualEdits.hasManuallyEditedMealSwipes`
+    /// — latches on genuine user interaction with the picker, including
+    /// reselecting the same value, and never on a store-applied proposal
+    /// write (which mutates `draft.mealSwipes` directly).
+    private var mealSwipesBinding: Binding<Int> {
+        Binding(
+            get: { draft.mealSwipes },
+            set: { newValue in
+                draft.mealSwipes = newValue
+                screenshotManualEdits.hasManuallyEditedMealSwipes = true
+            }
+        )
+    }
+
+    /// The only path that may set
+    /// `screenshotManualEdits.hasManuallyEditedLocation` — latches on any
+    /// real picker interaction, including selecting `nil` ("Select a spot")
+    /// to manually clear an AI-proposed location. A store-applied proposal
+    /// write never goes through this binding.
+    private var selectedDiningSpotBinding: Binding<DiningSpot?> {
+        Binding(
+            get: { draft.selectedDiningSpot },
+            set: { newValue in
+                draft.selectedDiningSpot = newValue
+                screenshotManualEdits.hasManuallyEditedLocation = true
+            }
+        )
+    }
+
+    /// The only path that may set
+    /// `screenshotManualEdits.hasManuallyEditedFoodRequest` — latches on the
+    /// first keystroke and stays latched even if the requester later clears
+    /// the field back to empty, so a subsequent AI proposal can never
+    /// silently regain ownership just because the text happens to be empty
+    /// again.
+    private var foodRequestBinding: Binding<String> {
+        Binding(
+            get: { draft.foodRequest },
+            set: { newValue in
+                draft.foodRequest = newValue
+                screenshotManualEdits.hasManuallyEditedFoodRequest = true
+            }
+        )
     }
 
     /// The sheet is open exactly while the identity store has a flow running.
@@ -469,7 +728,11 @@ struct RequestFoodView: View {
 
         return Form {
             Section("Food request") {
-                Picker("NYU dining spot", selection: $draft.selectedDiningSpot) {
+                screenshotAssistanceRow
+
+                // A custom binding, not `$draft.selectedDiningSpot` directly
+                // — see `selectedDiningSpotBinding`'s declaration.
+                Picker("NYU dining spot", selection: selectedDiningSpotBinding) {
                     Text("Select a spot").tag(nil as DiningSpot?)
 
                     ForEach(diningSpots) { spot in
@@ -489,7 +752,9 @@ struct RequestFoodView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                TextField("What do you want?", text: $draft.foodRequest, axis: .vertical)
+                // A custom binding, not `$draft.foodRequest` directly — see
+                // `foodRequestBinding`'s declaration.
+                TextField("What do you want?", text: foodRequestBinding, axis: .vertical)
                     .lineLimit(3, reservesSpace: true)
                     .focused($focusedField, equals: .foodDescription)
                     .accessibilityHint(Text(fieldError(.foodDescription, errors: errors) ?? ""))
@@ -503,7 +768,12 @@ struct RequestFoodView: View {
                 // V1 meal-swipe requirement (W3-C1): meal swipes only, no
                 // Dining Dollars. A bounded picker, not free-form entry, so
                 // this app can never submit a value the backend would refuse.
-                Picker("Meal swipes needed", selection: $draft.mealSwipes) {
+                // A custom binding, not `$draft.mealSwipes` directly, so
+                // `screenshotManualEdits.hasManuallyEditedMealSwipes` latches
+                // on genuine user interaction only — never on an AI-applied
+                // write, which mutates `draft` directly rather than through
+                // this binding.
+                Picker("Meal swipes needed", selection: mealSwipesBinding) {
                     ForEach(RequestFoodFormDraft.mealSwipeOptions, id: \.self) { count in
                         Text("\(count)").tag(count)
                     }

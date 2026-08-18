@@ -19,6 +19,15 @@ struct SettingsView: View {
     /// `alertSubscriptionStore.phase`, Check Email presentation history, or a
     /// remembered signup submission.
     @ObservedObject var emailAlertStateStore: EmailAlertStateStore
+    /// W4-S1's app-level AI Assistance Settings control. Off prevents any
+    /// screenshot selection from starting a new transfer, and cancels/fences
+    /// a pending one that has not yet actually begun transfer; it cannot
+    /// recall bytes a transfer had already genuinely started sending, but
+    /// generation/cancellation fencing guarantees that transfer's response
+    /// is never applied. On only restores availability for a later
+    /// selection — the separate first-use disclosure gate is unaffected by
+    /// this toggle and still governs every actual transfer.
+    @ObservedObject var screenshotProposalStore: ScreenshotProposalStore
 
     /// W3-I4: open only between tapping Remove Email and the mutation
     /// actually running. Cancel (or dismissing any other way) leaves
@@ -42,6 +51,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xl) {
                     identitySection
                     requestAlertsSection
+                    aiAssistanceSection
                     aboutAndHelpSection
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -440,6 +450,54 @@ struct SettingsView: View {
                 } else {
                     Task { await pushSubscriptionStore.disable() }
                 }
+            }
+        )
+    }
+
+    // MARK: - AI Assistance
+
+    /// W4-S1: a single app-level kill switch, independent of Request Alerts'
+    /// Email/Push toggles above — it shares no state with them. Off disables
+    /// `RequestFoodView`'s picker, retires the current screenshot selection
+    /// in `ScreenshotProposalStore`, and cancels whatever transfer task that
+    /// selection had (`ScreenshotProposalStore.setAIAssistanceEnabled`): work
+    /// that has not yet started transfer is prevented from ever starting it.
+    /// A transfer that had already genuinely begun before Off cannot be
+    /// recalled — bytes already sent stay sent — but generation/cancellation
+    /// fencing guarantees its response, whenever it arrives, can never be
+    /// applied to the draft. It does not by itself grant or revoke the
+    /// separate first-use third-party disclosure recorded the first time a
+    /// screenshot is actually sent.
+    private var aiAssistanceSection: some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
+            sectionHeading("AI ASSISTANCE")
+
+            VStack(alignment: .leading, spacing: 0) {
+                requestAlertsToggleRow(
+                    title: "Screenshot Assistance",
+                    isOn: aiAssistanceToggleBinding,
+                    isEnabled: true,
+                    accessibilityIdentifier: "settings-ai-assistance-toggle"
+                )
+
+                Text(Self.aiAssistanceExplanation)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, CommonPlateStyle.Metrics.settingsRowInset)
+                    .padding(.bottom, CommonPlateStyle.Spacing.xs)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    static let aiAssistanceExplanation =
+        "When on, you can optionally fill in a food request from a Grubhub screenshot. CommonPlate sends the screenshot to OpenAI to read it — you always review and edit the result before posting, and manual entry always works either way."
+
+    private var aiAssistanceToggleBinding: Binding<Bool> {
+        Binding(
+            get: { screenshotProposalStore.isAIAssistanceEnabled },
+            set: { newValue in
+                screenshotProposalStore.setAIAssistanceEnabled(newValue)
             }
         )
     }

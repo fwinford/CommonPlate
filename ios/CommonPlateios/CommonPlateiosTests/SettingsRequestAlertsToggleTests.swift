@@ -160,9 +160,10 @@ final class SettingsRequestAlertsToggleTests: XCTestCase {
         XCTAssertTrue(source.contains("CommonPlateStyle.Metrics.settingsPageInset"))
         XCTAssertEqual(
             source.components(separatedBy: "CommonPlateStyle.Metrics.settingsRowInset").count - 1,
-            6,
+            7,
             "expected the measured row inset on: identity content, the inline status, the toggle row, "
-                + "the verification prompt row, the shared divider, and the About & Help row"
+                + "the verification prompt row, the shared divider, the About & Help row, and the "
+                + "W4-S1 AI Assistance explanatory row"
         )
     }
 

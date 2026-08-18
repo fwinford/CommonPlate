@@ -19,6 +19,7 @@ enum RequestFoodEntryPresentation: Equatable {
 
 struct RequestFoodEntryView: View {
     @ObservedObject var store: RequestStore
+    @ObservedObject var screenshotProposalStore: ScreenshotProposalStore
     /// Observed, not owned: the same identity every other participant action
     /// reads, so a verification completed here is immediately visible to the
     /// form this screen reveals.
@@ -66,6 +67,7 @@ struct RequestFoodEntryView: View {
                 NavigationStack {
                     RequestFoodView(
                         store: store,
+                        screenshotProposalStore: screenshotProposalStore,
                         identityStore: identityStore,
                         verificationCoordinator: verificationCoordinator,
                         path: $path,

@@ -38,6 +38,11 @@ struct ContentView: View {
     /// and `participantEmailUnsubscribeStore` (the Off mutation): this is the
     /// only source Settings' Email toggle may read On/Off from.
     @StateObject private var emailAlertStateStore: EmailAlertStateStore
+    /// The one W4-S1 state owner for AI screenshot proposals. Entirely
+    /// separate from `requestStore`: it never mutates a `Request`, mints an
+    /// operation identity, or otherwise touches D1/create lifecycle — only
+    /// the in-progress `RequestFoodFormDraft` it is handed.
+    @StateObject private var screenshotProposalStore: ScreenshotProposalStore
     /// Local presentation preference only. It deliberately has no connection
     /// to participant identity, credentials, or backend authority.
     @StateObject private var onboardingStore: OnboardingPresentationStore
@@ -165,6 +170,15 @@ struct ContentView: View {
                 participantAuthorityRejected: { identityStore.discardRejectedIdentity() }
             )
         )
+        _screenshotProposalStore = StateObject(
+            wrappedValue: ScreenshotProposalStore(
+                service: ScreenshotProposalService(client: client),
+                // The app's real preferences. Tests inject an isolated suite
+                // or an in-memory double instead, matching every other
+                // real-storage argument here.
+                preferences: UserDefaultsScreenshotProposalPreferencesStorage(defaults: .standard)
+            )
+        )
         let onboardingStore = OnboardingPresentationStore(
             storage: UserDefaultsOnboardingPresentationStorage(defaults: .standard)
         )
@@ -226,6 +240,7 @@ struct ContentView: View {
         .sheet(isPresented: $isRequestFoodPresented, onDismiss: finishRequestFoodPresentation) {
             RequestFoodEntryView(
                 store: requestStore,
+                screenshotProposalStore: screenshotProposalStore,
                 identityStore: participantIdentityStore,
                 verificationCoordinator: participantActionVerificationCoordinator,
                 path: $requestFoodPresentationPath,
@@ -687,7 +702,8 @@ struct ContentView: View {
                 alertSubscriptionStore: alertSubscriptionStore,
                 pushSubscriptionStore: pushSubscriptionStore,
                 unsubscribeStore: participantEmailUnsubscribeStore,
-                emailAlertStateStore: emailAlertStateStore
+                emailAlertStateStore: emailAlertStateStore,
+                screenshotProposalStore: screenshotProposalStore
             )
         case .support:
             SupportView()
