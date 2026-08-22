@@ -246,6 +246,20 @@ CommonPlate attempts to limit each email to three requests per NYU/New York cale
 
 Ordinary Request Food presentation does not continuously advertise this limit. Only an actual `REQUEST_LIMIT_REACHED` refusal tells the requester to try again after midnight Eastern/New York time.
 
+### 7.1 Participant-authorized request-creation eligibility read (W4-Q1)
+
+`GET /api/participant/request-eligibility` lets the currently verified participant authoritatively read whether they are presently eligible to attempt another request under the daily abuse-control quota above. The principal is derived only from `resolveParticipantAuthority`, never from a caller-supplied email, participant ID, installation ID, Subscriber identity, or request-list identity; authority resolution happens before any count, exactly as it does for `POST /api/request`.
+
+The read shares its substantive quota authority with `POST /api/request` (`src/requestDailyQuota.ts`): the same exact-principal `Request.countDocuments` basis, the same `startOfCampusDay`/`America/New_York` campus-day boundary, and the same three-request threshold. Neither the read nor its extraction changes create's existing principal, count filter, threshold, serial best-effort behavior, count-failure handling, D1 replay ordering, or write path; the quota remains the best-effort, non-atomic abuse control described above, and concurrent creates can still exceed it.
+
+The successful response exposes only the accepted binary product state — `{ "eligibility": "eligible" }` or `{ "eligibility": "exhausted" }` — with no count used, count remaining, reset timestamp, quota-dashboard data, email, participant ID, credential, or request content. A count/database failure answers unavailable/error and never fabricates either successful result.
+
+The result is advisory and current only as of that read. It is not a reservation of quota and does not guarantee that a later `POST /api/request` will pass validation, pause/configuration, rate-limiting, D1, database, or then-current quota checks; another request or race may change state after an `eligible` answer. `POST /api/request` remains the sole authoritative create-time quota enforcement.
+
+The read is side-effect free — it performs no Request, RequestOperation, participant, notification, subscription, or installation mutation — and uses its own read-sized rate-limit bucket rather than consuming `POST /api/request`'s create allowance. The response carries `Cache-Control: private, no-store` and `Vary: x-commonplate-participant` on every outcome, including a mounted rate-limited refusal, so one participant's answer can never be cached or reused for another or for an unverified caller.
+
+On iOS, `RequestService` owns the participant-authorized read and strict DTO decoding; `RequestStore.resolveRequestCreationEligibility()` owns the current authority-scoped load and its stale-response fence, mirroring `resolveStaleParticipationEligibility`. Missing authority, transport/server/decoding failure, cancellation, a stale/superseded-identity result, or an unmapped server refusal all resolve to unknown and are never coerced to eligible; a current `PARTICIPANT_AUTHORITY_INVALID` refusal feeds the same participant-authority-retirement lifecycle every other participant-gated store method already uses. No Q1 result is persisted or reused as durable quota truth.
+
 ## 8. Email and notification truth
 
 Provider acceptance means only that CommonPlate submitted an email to the provider. It does not prove delivery, reading, or pickup; no email result is described as verified delivery.

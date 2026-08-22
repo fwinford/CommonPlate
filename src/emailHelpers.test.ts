@@ -533,8 +533,11 @@ describe("requester email separation", () => {
     const confirmationStart = routeSource.indexOf(
       'subject: "Request Confirmed - CommonPlate"'
     );
+    // The actual close of the `resend.emails.send({...})` call this
+    // confirmation email is built from — not an incidental later "});" match
+    // elsewhere in the route, which is fragile to unrelated refactors.
     const confirmationEnd = routeSource.indexOf(
-      "      });",
+      "    });",
       confirmationStart
     );
     const requesterConfirmation = routeSource.slice(

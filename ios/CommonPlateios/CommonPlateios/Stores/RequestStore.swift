@@ -1484,6 +1484,74 @@ final class RequestStore: ObservableObject {
         }
     }
 
+    /// W4-Q1 bounded participant-authorized read of whether the currently
+    /// verified participant may presently attempt another request under the
+    /// existing best-effort three-per-NYU-campus-day quota. This is a
+    /// prerequisite authority only — no R2 requester-entry consumer exists
+    /// yet.
+    enum RequestCreationEligibility: Equatable {
+        /// Not yet read, unreadable, missing authority, or resolved under a
+        /// participant authority the read's own stale-response guard could
+        /// not confirm still current. Never treated as permission to
+        /// proceed; a future R2 consumer must fail closed on this case.
+        case unknown
+        case eligible
+        case exhausted
+    }
+
+    /// Resolves `RequestCreationEligibility` against current backend truth —
+    /// never fabricated from local state, Home request counts, or a cached
+    /// prior result, and never persisted: each call performs a fresh read.
+    ///
+    /// No participant identity presented at all resolves immediately to
+    /// `.unknown` rather than issuing a call — this read exists to gate a
+    /// requester-authorized action, so there is nothing to ask about yet.
+    ///
+    /// Stale-response guard: the participant authority in effect *before*
+    /// this read is captured and compared against the authority in effect
+    /// *after* it completes, matching `resolveStaleParticipationEligibility`
+    /// above. If they differ — a Change Email completed while this read was
+    /// in flight — the result belongs to a principal that is no longer
+    /// authoritative and is discarded as `.unknown`. The result is advisory
+    /// and current only as of this read: `POST /api/request` remains the
+    /// sole authoritative create-time quota enforcement regardless of what
+    /// this call returns.
+    func resolveRequestCreationEligibility() async -> RequestCreationEligibility {
+        guard let participantAuthority = participantAuthorityProvider() else {
+            return .unknown
+        }
+        do {
+            let wire = try await service.fetchRequestCreationEligibility(
+                participantAuthority: participantAuthority
+            )
+            guard participantAuthorityProvider() == participantAuthority else {
+                return .unknown
+            }
+            switch wire {
+            case .eligible: return .eligible
+            case .exhausted: return .exhausted
+            }
+        } catch {
+            // W4-Q1 review fix: a current `PARTICIPANT_AUTHORITY_INVALID`
+            // refusal must feed the same authority-retirement lifecycle every
+            // other participant-gated read/mutation already uses, rather than
+            // silently discarding it as an unmapped `.unknown`.
+            // `applyParticipantVerdict` carries its own stale-response fence
+            // (it only retires the credential this exact call presented, and
+            // only while that credential is still current), so a rejection
+            // for an authority a newer Change Email has already replaced
+            // cannot retire the replacement — and every non-authority-invalid
+            // failure (transport, decoding, cancellation, an unrelated server
+            // error) is a no-op here, exactly as it is at every other call
+            // site of this method.
+            applyParticipantVerdict(
+                Self.asServiceError(error),
+                presentedAuthority: participantAuthority
+            )
+            return .unknown
+        }
+    }
+
     /// One presentation/action truth for explicit release. The destructive
     /// action is available only while this store would actually start the
     /// release operation: a matching, still-active claimed reservation exists

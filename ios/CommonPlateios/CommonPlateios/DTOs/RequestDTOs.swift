@@ -253,6 +253,21 @@ struct ActiveReservationResponseDTO: Decodable {
     let placement: PlacedReservationDetailsDTO?
 }
 
+// MARK: - Request creation eligibility (W4-Q1)
+
+/// The exact two successful values `GET /api/participant/request-eligibility`
+/// answers with. An unrecognized value fails decoding rather than being
+/// mapped to a guessed state, matching `RequestStatusWire` above — never
+/// silently coerced to `eligible`.
+enum RequestEligibilityWire: String, Decodable {
+    case eligible
+    case exhausted
+}
+
+struct RequestEligibilityResponseDTO: Decodable {
+    let eligibility: RequestEligibilityWire
+}
+
 // MARK: - Fulfillment
 
 /// Strict nested fields accepted by `POST /api/request/:id/fulfill`.

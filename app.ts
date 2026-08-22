@@ -156,6 +156,12 @@ import {
   emailAlertStateRateLimiter,
   getEmailAlertState,
 } from "./src/emailAlertStateRoute.js";
+import {
+  REQUEST_ELIGIBILITY_ROUTE_PATH,
+  buildRequestEligibilityMiddlewareChain,
+  requestEligibilityRateLimiter,
+  getRequestEligibility,
+} from "./src/requestEligibilityRoute.js";
 import { readClaimTokenHmacSecret } from "./src/claimToken.js";
 import { assertUnsubscribeSigningSecretForActivation } from "./src/unsubscribeCredential.js";
 import { assertApnsConfigurationForActivation } from "./src/apnsConfig.js";
@@ -533,6 +539,22 @@ app.get(
   EMAIL_ALERT_STATE_ROUTE_PATH,
   emailAlertStateRateLimiter,
   getEmailAlertState
+);
+
+// W4-Q1: a read of the caller's own current request-creation eligibility
+// under the shared daily quota authority, not a new mutation, so it is not
+// paused by `PUBLIC_ACTIONS_PAUSED` — matching
+// `GET /api/participant/email-alerts/state` immediately above.
+// The middleware ordering itself (cache isolation ahead of the rate limiter
+// and handler) is single-sourced in `buildRequestEligibilityMiddlewareChain`
+// so this registration cannot silently drift from the mounted rate-limit
+// proof in `requestEligibilityRoute.test.ts`.
+app.get(
+  REQUEST_ELIGIBILITY_ROUTE_PATH,
+  ...buildRequestEligibilityMiddlewareChain(
+    requestEligibilityRateLimiter,
+    getRequestEligibility
+  )
 );
 
 // A valid active claim is the only authorization for placement. This route is

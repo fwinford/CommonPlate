@@ -560,6 +560,35 @@ struct RequestService {
         return .none
     }
 
+    /// `GET /api/participant/request-eligibility` (W4-Q1).
+    ///
+    /// Bounded participant-authorized prerequisite for a future
+    /// requester-entry eligibility check (R2 UI is not implemented here).
+    /// Reports whether the verified participant behind `participantAuthority`
+    /// is presently `eligible` or `exhausted` under the existing best-effort
+    /// three-per-NYU-campus-day quota — the same shared authority
+    /// `POST /api/request` uses as its own final create-time check
+    /// (`src/requestDailyQuota.ts`). Advisory and current-as-of-read only: an
+    /// `eligible` result never reserves quota and never guarantees a later
+    /// `POST /api/request` will succeed.
+    func fetchRequestCreationEligibility(
+        participantAuthority: String
+    ) async throws -> RequestEligibilityWire {
+        try Task.checkCancellation()
+        do {
+            let response: RequestEligibilityResponseDTO = try await client.send(
+                path: "/api/participant/request-eligibility",
+                method: .get,
+                headers: Self.participantHeaders(participantAuthority)
+            )
+            return response.eligibility
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
     /// `POST /api/request/:id/fulfill`
     /// The helper is whoever the claim is bound to, so this deliberately takes
     /// no address: the backend derives it from the reservation and refuses a

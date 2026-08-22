@@ -21,7 +21,8 @@ import {
   buildPublicRequestDetailResponse,
   type PublicRequestDocument,
 } from "./requestListResponse.js";
-import { formatMealRequestWindow, startOfCampusDay } from "./utils/date.js";
+import { formatMealRequestWindow } from "./utils/date.js";
+import { countTodaysRequests, isUnderDailyLimit } from "./requestDailyQuota.js";
 import {
   isAcceptableScheduledStart,
   resolveAsapTiming,
@@ -792,19 +793,17 @@ export async function createRequest(
     // not a transactional quota guarantee under concurrent requests. The day
     // boundary is the NYU campus calendar day, not the Node process's local
     // timezone, so quota reset time does not depend on where this process runs.
-    const startOfDay = startOfCampusDay(now);
-
+    // Shared with the W4-Q1 participant-authorized eligibility read
+    // (`src/requestDailyQuota.ts`), so the two paths cannot drift into
+    // different eligibility semantics.
     try {
       // Counted against the verified principal, so the daily allowance now
       // belongs to a proved mailbox rather than to whatever address a caller
       // typed. The exact-principal rule matters here too: `+tag` variants are
       // separate participants and therefore separate allowances, which is the
       // accepted consequence of not canonicalizing aliases into one human.
-      const todaysCount = await MealRequest.countDocuments({
-        email: principal,
-        createdAt: { $gte: startOfDay },
-      });
-      if (todaysCount >= 3) {
+      const todaysCount = await countTodaysRequests(principal, now);
+      if (!isUnderDailyLimit(todaysCount)) {
         return res.status(429).json(
           errorEnvelope(
             "REQUEST_LIMIT_REACHED",
