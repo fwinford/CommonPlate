@@ -99,6 +99,36 @@ Native SwiftUI `.refreshable` is the sole refresh trigger/activation authority; 
 
 Home reaches app-level utilities through one shared Settings route rather than permanent competing tabs. From Settings, `Change Email` actually presents the existing replacement verification flow (section 3.1); identity replacement (a successful Change Email) invalidates participant-relative state, including caller-relative ownership and cached Email Request Alert truth (section 9.10). An unverified participant's Request Alerts entry is an explicit `Verify NYU email` action rather than passive explanatory text or a bare disclosure chevron. The Request Alerts overlay's `Done` closes only its own overlay rather than performing ambient navigation. N0 Email Request Alert state (section 9.10) remains the sole authoritative Email On/Off source; a result or rejection resolved under authority a later Change Email has replaced cannot be silently applied to, or retire, the replacement identity. Email and Push remain independent channels (sections 8.6, 9.10); neither H2 nor Settings presentation infers or fabricates one channel's state from the other.
 
+### 1.4 Accepted Home continuous scroll composition (W4-H4)
+
+Home is one coherent vertical scroll. The established header and priority area, `Continue Helping` when applicable, the caller-owned request preview when applicable, and `Needs help right now` all live inside that same scroll, in that order. `Continue Helping` retains its accepted priority (section 1.3) and the ownership preview follows it; `Needs help right now` follows ownership. There is no nested `Needs help` vertical scroll and no horizontal `Needs help` carousel. Exactly one native `.refreshable` is attached to that unified scroll.
+
+#### Home ownership preview
+
+Home presents the current participant's currently-open owned requests as a bounded, count-sensitive preview: zero owned requests render no ownership section; one renders `Your request` with one card and no `See all`; two render `Your requests` with both cards and no `See all`; three or more render the first two under the authoritative owned-request ordering plus `See all N`, where `N` is the full authoritative count of currently-open owned requests.
+
+The two-card Home cap is presentation-only. Ownership authority and board ordering are unchanged from section 1.3: ownership remains the server-derived caller-relative signal, never an installation-local heuristic. An owned open request never appears under `Needs help right now`, including an owned request that the two-card preview does not itself display.
+
+#### See all
+
+For three or more owned open requests, `See all N` opens an ordinary subordinate destination containing the full currently-open owned-request set in the same authoritative ordering. It is not request history, not completed requests, not Edit/Remove, not requester management, and not a new root or tab.
+
+#### Persistent Request a Meal
+
+`Request a Meal` remains persistently available at the bottom of Home, outside the scrolling content, through a `ScrollView`-level `.safeAreaInset(edge: .bottom)`. That inset is the authoritative structural bottom accommodation: the final Home scroll content can be scrolled fully clear of the action rather than resting beneath it. The action carries a soft transparent-to-canvas transition above it instead of a hard opaque cutoff; that gradient is presentation only and supplies no scroll clearance of its own. There is no authored footer animation.
+
+The action shares the same Home content column as request cards. One shared horizontal content-column inset of 24 points governs ownership cards, `Needs help right now` cards, and the persistent action together; they are not sized independently of each other. Authored bottom padding on the action is zero, so the remaining clearance is the device-provided home-indicator safe area, which remains native and is never overlapped or negatively adjusted.
+
+#### Home freshness
+
+Home resolves authoritative request data through the one existing reload path (`fetchRequests()`; section 1.3) when Home appears, and native pull-to-refresh provides manual freshness on demand. A student never has to force-quit and relaunch CommonPlate to see currently available requests.
+
+A pull-to-refresh must actually apply the authoritative result it resolves. The lifetime of the authoritative fetch is independent of SwiftUI's own cancellation of the pull interaction: SwiftUI cancels a `.refreshable` action task as soon as the view owning the modifier is invalidated, and a refresh necessarily invalidates Home the moment it publishes its own in-flight state, so an authoritative fetch owned by that action task's lifetime would be cancelled on every pull and silently apply nothing. Transient cancellation of the refresh *caller* therefore never cancels the authoritative fetch operation.
+
+This changes none of section 1.3's refresh authority. Native `.refreshable` remains the sole refresh trigger; there is no second refresh path, no reload authority beyond `fetchRequests()`, and no visible retry action. The initial-load and manual-refresh 5-second ceilings, the cancellation of whichever side loses the manual-refresh deadline, the recovery-only success checkmark, and the stale-response generation/collection-revision fencing that decides which result may be applied all remain exactly as recorded there. Timeout or cancellation still never fabricates success.
+
+The authored refresh visual and motion treatment remains **not** accepted as final and remains deferred to W4-H3 (section 1.3); H4 accepts refresh correctness only, not refresh presentation.
+
 ## 2. Request lifecycle and availability
 
 | Persisted state | Meaning | Effective availability |

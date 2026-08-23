@@ -227,4 +227,61 @@ final class HomeExchangeBoardStateTests: XCTestCase {
             return XCTFail("expected .populated, not a regression to loading/unavailable")
         }
     }
+
+    // MARK: - W4-R2 Home ownership partition heading
+
+    func testOwnRequestsHeadingSingularForExactlyOne() {
+        XCTAssertEqual(HomeExchangeView.ownRequestsHeading(count: 1), "Your request")
+    }
+
+    func testOwnRequestsHeadingPluralForTwoOrMore() {
+        XCTAssertEqual(HomeExchangeView.ownRequestsHeading(count: 2), "Your requests")
+        XCTAssertEqual(HomeExchangeView.ownRequestsHeading(count: 5), "Your requests")
+    }
+
+    // MARK: - W4-H4 revised ownership preview (0/1/2/3+ Home presentation cap)
+
+    func testOwnRequestsPreviewOmitsEverythingForZeroOwned() {
+        let preview = HomeExchangeView.ownRequestsPreview([])
+        XCTAssertEqual(preview.cards, [])
+        XCTAssertNil(preview.seeAllCount)
+    }
+
+    func testOwnRequestsPreviewRendersTheSingleRequestForOneOwned() {
+        let owned = [request(id: "a")]
+        let preview = HomeExchangeView.ownRequestsPreview(owned)
+        XCTAssertEqual(preview.cards.map(\.id), ["a"])
+        XCTAssertNil(preview.seeAllCount)
+    }
+
+    func testOwnRequestsPreviewRendersBothRequestsForTwoOwned() {
+        let owned = [request(id: "a"), request(id: "b")]
+        let preview = HomeExchangeView.ownRequestsPreview(owned)
+        XCTAssertEqual(preview.cards.map(\.id), ["a", "b"])
+        XCTAssertNil(preview.seeAllCount)
+    }
+
+    /// 3+ owned: exactly the first two authoritative-ordered requests, plus
+    /// the full authoritative count for `See all N`.
+    func testOwnRequestsPreviewCapsAtTwoAndReportsFullCountForThreeOwned() {
+        let owned = [request(id: "a"), request(id: "b"), request(id: "c")]
+        let preview = HomeExchangeView.ownRequestsPreview(owned)
+        XCTAssertEqual(preview.cards.map(\.id), ["a", "b"])
+        XCTAssertEqual(preview.seeAllCount, 3)
+    }
+
+    /// A larger state (e.g. 10 owned) still caps the inline preview at
+    /// exactly two, using the same first-two authoritative ordering, with
+    /// `See all N` reporting the complete authoritative count.
+    func testOwnRequestsPreviewCapsAtTwoAndReportsFullCountForTenOwned() {
+        let owned = (1...10).map { request(id: "r\($0)") }
+        let preview = HomeExchangeView.ownRequestsPreview(owned)
+        XCTAssertEqual(preview.cards.map(\.id), ["r1", "r2"])
+        XCTAssertEqual(preview.seeAllCount, 10)
+    }
+
+    func testSeeAllOwnRequestsTitleUsesTheFullAuthoritativeCount() {
+        XCTAssertEqual(HomeExchangeView.seeAllOwnRequestsTitle(count: 3), "See all 3")
+        XCTAssertEqual(HomeExchangeView.seeAllOwnRequestsTitle(count: 10), "See all 10")
+    }
 }

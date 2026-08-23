@@ -717,6 +717,8 @@ struct ContentView: View {
             )
         case .fulfillment(let request):
             FulfillRequestView(request: request, store: requestStore, path: $path)
+        case .ownRequests(let requests):
+            OwnRequestsListView(requests: requests)
         }
     }
 

@@ -44,7 +44,11 @@ final class HomeExchangeRefreshDeadlineTests: XCTestCase {
     func testAwaitWithDeadlineCancelsTheLoserAndInvokesNoSecondReloadAuthority() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
-        XCTAssertTrue(source.contains("private static func awaitWithDeadline("))
+        // W4-H4 physical-device FIX: now `internal` rather than `private`, so
+        // `HomeRefreshCallerCancellationTests` can exercise the real race
+        // instead of only pinning its source. The loser-cancellation
+        // guarantee this test exists for is unchanged.
+        XCTAssertTrue(source.contains("static func awaitWithDeadline("))
         XCTAssertTrue(source.contains("withTaskGroup(of: Bool.self)"))
         XCTAssertTrue(source.contains("group.cancelAll()"))
 

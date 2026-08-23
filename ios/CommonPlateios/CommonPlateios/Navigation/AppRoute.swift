@@ -37,6 +37,13 @@ enum AppRoute: Hashable {
     /// the detail screen and from the pinned active-reservation item; the route
     /// itself carries no claimant-private value, only the public request.
     case fulfillment(FoodRequest)
+    /// W4-H4's `See all N` destination: the complete authoritative
+    /// currently-open owned-request set, carried by value for the same reason
+    /// `requestDetail` is — a request can leave the board between the tap and
+    /// the destination rendering. Not history, not V2 My Requests, not
+    /// request management: an ordinary subordinate expansion of the same Home
+    /// ownership preview.
+    case ownRequests([FoodRequest])
 }
 
 extension AppRoute {
@@ -77,7 +84,7 @@ extension AppRoute {
             case .requestDetail(let request), .fulfillment(let request):
                 return request.id == requestID
             case .requestFood, .activeRequests, .alerts, .onboardingChooser,
-                 .privacySafety, .settings, .support:
+                 .privacySafety, .settings, .support, .ownRequests:
                 return false
             }
         }

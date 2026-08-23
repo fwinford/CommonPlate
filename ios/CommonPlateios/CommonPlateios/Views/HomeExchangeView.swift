@@ -190,23 +190,62 @@ struct HomeExchangeView: View {
     /// Returns whether `operation` itself finished first. This is the only
     /// place H2 imposes the manual-refresh deadline; it invokes no reload
     /// path of its own.
-    private static func awaitWithDeadline(
+    ///
+    /// W4-H4 physical-device FIX — why the race runs inside its own
+    /// unstructured `Task` rather than directly in the caller's:
+    ///
+    /// SwiftUI cancels `.refreshable`'s own action task as soon as the view
+    /// that owns the modifier is invalidated, and this refresh necessarily
+    /// invalidates Home the moment it starts — `RequestStore.fetchRequests()`
+    /// publishes `isRefreshingRequests`, which `HomeExchangeView` observes.
+    /// Device and simulator instrumentation measured that cancellation
+    /// arriving ~15-40 ms into every pull-to-refresh, before the `GET
+    /// /api/requests` response could land.
+    ///
+    /// A structured child of that task inherits the cancellation, so the real
+    /// fetch was being cancelled mid-flight on *every* pull:
+    /// `fetchRequests()` correctly treats `CancellationError` as "no answer"
+    /// and returns without touching `requests`, so newly available
+    /// authoritative requests could never reach the rendered board until a
+    /// cold relaunch re-ran the initial `.task` load. Making the race
+    /// unstructured decouples the authoritative refresh's lifetime from
+    /// SwiftUI's presentation-driven cancellation of the pull gesture, which
+    /// is the same reasoning `RequestStore.refreshRequestsAfterClaimConflict`
+    /// already documents for its own store-owned reload task.
+    ///
+    /// Nothing else about the deadline changes. The group still cancels
+    /// whichever side loses — so HQ decision 8 still holds exactly: a fetch
+    /// that loses to `deadline` is still cancelled and still cannot keep
+    /// running to mutate state later. `fetchGeneration` and
+    /// `collectionRevision` remain the authority on which result may be
+    /// applied, and a caller whose own task is cancelled still simply waits
+    /// here rather than being handed a fabricated outcome.
+    /// Deliberately `internal` rather than `private` (W4-H4 physical-device
+    /// FIX): the caller-cancellation behavior above is exactly the defect
+    /// that shipped, and the only non-brittle seam that can prove it without
+    /// UI-test infrastructure is calling this directly — matching this file's
+    /// existing testable-`static`-member pattern (`boardState`,
+    /// `partitionByOwnership`, `ownRequestsPreview`).
+    static func awaitWithDeadline(
         _ deadline: Duration,
-        operation: @escaping () async -> Void
+        operation: @escaping @Sendable () async -> Void
     ) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                await operation()
-                return true
+        let race = Task {
+            await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    await operation()
+                    return true
+                }
+                group.addTask {
+                    try? await Task.sleep(for: deadline)
+                    return false
+                }
+                let didOperationFinishFirst = await group.next() ?? false
+                group.cancelAll()
+                return didOperationFinishFirst
             }
-            group.addTask {
-                try? await Task.sleep(for: deadline)
-                return false
-            }
-            let didOperationFinishFirst = await group.next() ?? false
-            group.cancelAll()
-            return didOperationFinishFirst
         }
+        return await race.value
     }
 
     /// HQ decision 8.
@@ -255,26 +294,48 @@ struct HomeExchangeView: View {
 
     // MARK: - Exchange content
 
-    /// HQ decision 3: CommonPlate/at NYU branding, the Settings gear, the
-    /// board heading ("Needs help" / "Needs help right now"), and Continue
-    /// Helping's attention-priority state stay outside the inner refreshable
-    /// `ScrollView` so they remain visually anchored during a pull gesture.
-    /// Only the exchange/board content below participates in the authored
-    /// pull/refreshing/success presentation — the whole Home composition no
-    /// longer rubber-bands as one sheet.
+    /// W4-H4: one coherent vertical scrolling board. The established header/
+    /// priorities, `Continue Helping`, the caller-owned ownership partition,
+    /// the shared board heading, and `Needs help right now` all live inside
+    /// the *same* refreshable `ScrollView` — superseding H2's prior
+    /// composition, which kept that header/priorities/ownership stack
+    /// outside a separately refreshable inner `ScrollView` and broke as one
+    /// coherent page once ownership content grew past the viewport. The
+    /// persistent `Request Food` action is intentionally the one thing kept
+    /// outside this scroll, anchored via `.safeAreaInset(edge: .bottom)`
+    /// directly on the `ScrollView` itself (not on the enclosing
+    /// `GeometryReader`): physical-device verification found that attaching
+    /// the inset one level higher, on the `GeometryReader`, does not
+    /// reliably reach the `ScrollView`'s underlying `UIScrollView`
+    /// `contentInset` — a long `Needs help` board could render its last
+    /// visible card partially beneath the button's opaque background instead
+    /// of gaining bottom scroll accommodation for it. Attaching the inset to
+    /// the `ScrollView` directly makes that accommodation authoritative for
+    /// the one view that needs it, still without shrinking `geometry.size`
+    /// (safe-area insets never shrink frames) and without creating a
+    /// second/nested scroll region.
     private var exchangeContent: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.l) {
-                header
-                continueHelpingSection
-                boardHeadingRow
-            }
-            .padding(.horizontal, CommonPlateStyle.Spacing.l)
-            .padding(.top, CommonPlateStyle.Spacing.l)
-            .padding(.bottom, CommonPlateStyle.Spacing.m)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.l) {
+                        header
+                        continueHelpingSection
+                        ownRequestsSection
+                        boardHeadingRow
+                    }
+                    // W4-H4 final reconciliation: the shared Home
+                    // content-column authority (see
+                    // `CommonPlateStyle.Metrics.homeContentColumnInset`),
+                    // not the general-purpose `Spacing.l` step — this margin
+                    // must stay identical to `boardSection`'s below and to
+                    // the persistent bottom CTA's so ownership cards, `Needs
+                    // help` cards, and the persistent action remain one
+                    // column.
+                    .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
+                    .padding(.top, CommonPlateStyle.Spacing.l)
+                    .padding(.bottom, CommonPlateStyle.Spacing.m)
 
-            GeometryReader { geometry in
-                ScrollView {
                     VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
                         // This is load-bearing (Section 6): Exchange
                         // Unavailable's own persistent cue inside
@@ -287,47 +348,47 @@ struct HomeExchangeView: View {
                         }
                         boardSection
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, CommonPlateStyle.Spacing.l)
+                    .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
                     .padding(.bottom, CommonPlateStyle.Spacing.l)
-                    .frame(minHeight: geometry.size.height, alignment: .top)
-                    .background(
-                        GeometryReader { contentGeometry in
-                            Color.clear.preference(
-                                key: HomeExchangeScrollOffsetKey.self,
-                                value: contentGeometry.frame(in: .named(Self.scrollCoordinateSpace)).minY
-                            )
-                        }
-                    )
                 }
-                .coordinateSpace(name: Self.scrollCoordinateSpace)
-                .onPreferenceChange(HomeExchangeScrollOffsetKey.self) { minY in
-                    pullOffset = max(0, minY)
-                }
-                // Functional fix, not a motion-polish change: `.frame(
-                // minHeight: geometry.size.height)` above makes the exchange
-                // ScrollView's content exactly fill the viewport on every
-                // short-content state (Unavailable, Empty, and in practice
-                // most Populated/Low Activity boards too, since a handful of
-                // request cards rarely exceeds one screen). Without this
-                // modifier, UIKit only allows vertical rubber-banding — the
-                // drag `.refreshable` itself depends on — when a scroll
-                // view's content is taller than its bounds, so a physical
-                // pull could not initiate a refresh at all whenever content
-                // did not overflow the viewport. `.always` keeps bounce (and
-                // therefore the ability to pull) available regardless of
-                // content length; it changes no refresh authority or reload
-                // path.
-                .scrollBounceBehavior(.always, axes: .vertical)
-                .refreshable {
-                    await performAuthoredRefresh()
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: geometry.size.height, alignment: .top)
+                .background(
+                    GeometryReader { contentGeometry in
+                        Color.clear.preference(
+                            key: HomeExchangeScrollOffsetKey.self,
+                            value: contentGeometry.frame(in: .named(Self.scrollCoordinateSpace)).minY
+                        )
+                    }
+                )
+            }
+            .coordinateSpace(name: Self.scrollCoordinateSpace)
+            .onPreferenceChange(HomeExchangeScrollOffsetKey.self) { minY in
+                pullOffset = max(0, minY)
+            }
+            // Functional fix, not a motion-polish change: `.frame(
+            // minHeight: geometry.size.height)` above makes the exchange
+            // ScrollView's content exactly fill the viewport on every
+            // short-content state (Unavailable, Empty, and in practice
+            // most Populated/Low Activity boards too, since a handful of
+            // request cards rarely exceeds one screen). Without this
+            // modifier, UIKit only allows vertical rubber-banding — the
+            // drag `.refreshable` itself depends on — when a scroll
+            // view's content is taller than its bounds, so a physical
+            // pull could not initiate a refresh at all whenever content
+            // did not overflow the viewport. `.always` keeps bounce (and
+            // therefore the ability to pull) available regardless of
+            // content length; it changes no refresh authority or reload
+            // path.
+            .scrollBounceBehavior(.always, axes: .vertical)
+            .refreshable {
+                await performAuthoredRefresh()
+            }
+            .safeAreaInset(edge: .bottom) {
+                requestMealButton
             }
         }
         .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
-        .safeAreaInset(edge: .bottom) {
-            requestMealButton
-        }
     }
 
     // MARK: - Authored refresh feedback (HQ decision 3)
@@ -411,10 +472,126 @@ struct HomeExchangeView: View {
         }
     }
 
+    // MARK: - Your request(s) (W4-R2 Home ownership partition)
+
+    /// The single authoritative ownership partition of a populated board:
+    /// every owned open request (`FoodRequest.isOwnRequest`, resolved
+    /// server-side — never a local ownership heuristic) versus every
+    /// remaining `Needs help` request, both in the board's existing
+    /// authoritative order. `ownRequests` and `populatedBoard(_:)` below both
+    /// derive from this one function rather than each re-filtering the same
+    /// `requests` array independently, so the two zones cannot silently
+    /// diverge (e.g. an owned request leaking into `Needs help right now`).
+    /// Pure and `static`, matching this file's existing testable-`static-func`
+    /// pattern (`ownRequestsPreview`, `boardState`).
+    struct BoardOwnershipPartition: Equatable {
+        let owned: [FoodRequest]
+        let needsHelp: [FoodRequest]
+    }
+
+    static func partitionByOwnership(_ requests: [FoodRequest]) -> BoardOwnershipPartition {
+        BoardOwnershipPartition(
+            owned: requests.filter(\.isOwnRequest),
+            needsHelp: requests.filter { !$0.isOwnRequest }
+        )
+    }
+
+    /// The authoritative caller-relative open requests owned by this
+    /// participant, in the same order H2's board already carries them. Only
+    /// defined while the board itself is authoritatively populated;
+    /// Loading/Unavailable have no authoritative list to partition, and an
+    /// owned request being open necessarily makes `.populated` (never
+    /// `.empty`) reachable when one exists.
+    private var ownRequests: [FoodRequest] {
+        guard case .populated(let requests) = displayedBoardState else { return [] }
+        return Self.partitionByOwnership(requests).owned
+    }
+
+    /// W4-H4 revised ownership-preview contract: the Home-inline preview is
+    /// a bounded, count-sensitive slice of the full authoritative
+    /// `ownRequests` set above — never a second ownership source. 0 owned
+    /// omits the section; 1-2 owned render every owned request inline; 3+
+    /// owned render exactly the first two authoritative-ordered requests
+    /// plus a `See all N` count, where `N` is the full authoritative count.
+    /// Pure and `static` so it is directly testable without instantiating a
+    /// view, matching this file's existing `boardState`/`ownRequestsHeading`
+    /// pattern.
+    struct OwnRequestsPreview: Equatable {
+        let cards: [FoodRequest]
+        let seeAllCount: Int?
+    }
+
+    static func ownRequestsPreview(_ owned: [FoodRequest]) -> OwnRequestsPreview {
+        guard owned.count > 2 else {
+            return OwnRequestsPreview(cards: owned, seeAllCount: nil)
+        }
+        return OwnRequestsPreview(cards: Array(owned.prefix(2)), seeAllCount: owned.count)
+    }
+
+    private var ownRequestsPreview: OwnRequestsPreview {
+        Self.ownRequestsPreview(ownRequests)
+    }
+
+    /// W4-R2/H4: zero owned open requests omits this zone entirely; one
+    /// shows `Your request`; two or more show `Your requests`. Rendered
+    /// alongside `continueHelpingSection`, ahead of `boardHeadingRow` and
+    /// `boardSection`, inside the single unified Home `ScrollView` (see
+    /// `exchangeContent`) — it retains attention-state priority above the
+    /// ordinary `Needs help` board purely through that ordering, matching
+    /// `Continue Helping`'s existing higher priority. Renders no Edit/Remove
+    /// action; tapping a card preserves the existing `RequestDetailView`
+    /// own-request navigation/behavior unchanged. The two-card cap (W4-H4) is
+    /// presentation-only on Home — every owned open request, including ones
+    /// not shown here, remains excluded from `Needs help` via `populatedBoard`.
+    @ViewBuilder
+    private var ownRequestsSection: some View {
+        if !ownRequests.isEmpty {
+            let preview = ownRequestsPreview
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+                Text(Self.ownRequestsHeading(count: ownRequests.count))
+                    .font(.title3.weight(.bold))
+                    .accessibilityIdentifier("home-own-requests-heading")
+
+                VStack(spacing: CommonPlateStyle.Spacing.m) {
+                    ForEach(preview.cards) { request in
+                        NavigationLink(value: AppRoute.requestDetail(request)) {
+                            // W4-R2: this section's own heading already
+                            // establishes ownership, so the per-card `YOUR
+                            // REQUEST` eyebrow is redundant here only.
+                            RequestCardView(request: request, kind: .own, showsOwnershipEyebrow: false)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("home-own-request-card-\(request.id)")
+                    }
+                }
+
+                if let seeAllCount = preview.seeAllCount {
+                    NavigationLink(value: AppRoute.ownRequests(ownRequests)) {
+                        Text(Self.seeAllOwnRequestsTitle(count: seeAllCount))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("home-own-requests-see-all")
+                    .accessibilityLabel(Self.seeAllOwnRequestsTitle(count: seeAllCount))
+                }
+            }
+        }
+    }
+
+    static func ownRequestsHeading(count: Int) -> String {
+        count == 1 ? "Your request" : "Your requests"
+    }
+
+    static func seeAllOwnRequestsTitle(count: Int) -> String {
+        "See all \(count)"
+    }
+
     // MARK: - Board
 
-    /// The one shared board-heading row, rendered once outside the inner
-    /// refreshable `ScrollView` (see `exchangeContent`) rather than repeated
+    /// The one shared board-heading row, rendered once inside the single
+    /// unified Home `ScrollView` (see `exchangeContent`) rather than repeated
     /// inside each state branch — so `Needs help` is structurally guaranteed
     /// present across every board state, including the very first load,
     /// instead of relying on each branch to repeat it.
@@ -471,19 +648,22 @@ struct HomeExchangeView: View {
         }
     }
 
+    /// W4-R2: owned requests are rendered exactly once, in `ownRequestsSection`
+    /// above — never duplicated here. `needsHelpRequests` uses the same
+    /// `partitionByOwnership` split `ownRequests` derives from, so the two
+    /// zones cannot diverge, while preserving H2's existing order for the
+    /// remainder.
     private func populatedBoard(_ requests: [FoodRequest]) -> some View {
-        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+        let needsHelpRequests = Self.partitionByOwnership(requests).needsHelp
+        return VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
             if store.refreshError != nil {
                 refreshFailureNotice
             }
 
             VStack(spacing: CommonPlateStyle.Spacing.m) {
-                ForEach(requests) { request in
+                ForEach(needsHelpRequests) { request in
                     NavigationLink(value: AppRoute.requestDetail(request)) {
-                        RequestCardView(
-                            request: request,
-                            kind: request.isOwnRequest ? .own : .open
-                        )
+                        RequestCardView(request: request, kind: .open)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("home-request-card-\(request.id)")
@@ -589,21 +769,67 @@ struct HomeExchangeView: View {
 
     // MARK: - Request a Meal
 
+    /// W4-H4 persistent-CTA visual completion (soft floating, column-
+    /// aligned). Two changes from the prior structural-only H4 button:
+    ///
+    /// 1. *Soft floating transition.* A restrained, static transparent-to-
+    ///    canvas `LinearGradient` sits above the button, inside the same
+    ///    `.safeAreaInset(edge: .bottom)` region `exchangeContent` already
+    ///    anchors this view in. It is presentation only — it adds no scroll
+    ///    clearance of its own and drives no scroll-position/animation state;
+    ///    the structural guarantee that `Needs help` content can fully clear
+    ///    the CTA remains the ScrollView-level safe-area inset itself (see
+    ///    `exchangeContent`), which this gradient never substitutes for. It
+    ///    replaces the previous flat, hard-edged `baseCanvas` background that
+    ///    made the boundary against scrolling content read as an abrupt
+    ///    opaque cutoff.
+    /// 2. *Content-column alignment.* `commonPlateMajorActionFrame()`'s
+    ///    narrower, centered R1 major-action width (capped at
+    ///    `Control.majorActionMaximumWidth`) does not line up with the
+    ///    request-card column, so this CTA now instead reuses the exact same
+    ///    `CommonPlateStyle.Metrics.homeContentColumnInset` horizontal margin
+    ///    the header/ownership/board content already applies in
+    ///    `exchangeContent` — the one shared W4-H4 column authority, not a
+    ///    separate CTA-only width — with `commonPlateMajorPrimaryAction()`'s
+    ///    own `maxWidth: .infinity` label layout filling that column
+    ///    edge-to-edge like a request card does.
     private var requestMealButton: some View {
-        Button(action: onRequestMeal) {
-            Text("＋  Request a Meal")
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [
+                    CommonPlateStyle.Color.baseCanvas.opacity(0),
+                    CommonPlateStyle.Color.baseCanvas
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: CommonPlateStyle.Spacing.xl)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+
+            Button(action: onRequestMeal) {
+                Text("＋  Request a Meal")
+            }
+            // `.commonPlateMajorPrimaryAction()` already sets the approved
+            // `.title3.weight(.semibold)` (~20pt) major-action label font on
+            // `configuration.label`; a `.font()` set directly on this Text, as
+            // an inner modifier, would win over that outer style and silently
+            // shrink the CTA to `.body` (~17pt) instead.
+            .commonPlateMajorPrimaryAction()
+            .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
+            // W4-H4 physical-device FIX: an explicit `.padding(.bottom,
+            // Spacing.s)` here previously stacked on top of the native
+            // home-indicator clearance `.safeAreaInset(edge: .bottom)`
+            // already reserves (measured ~34pt), producing a combined ~42pt
+            // gap that read on device as the CTA floating too far above the
+            // bottom edge. `.safeAreaInset` itself remains the only source
+            // of bottom clearance now — still fully safe-area aware and
+            // still never clipped by the home indicator — so the CTA sits
+            // exactly at that native boundary instead of an authored amount
+            // beyond it.
+            .background(CommonPlateStyle.Color.baseCanvas)
+            .accessibilityIdentifier("home-request-a-meal")
         }
-        // `.commonPlateMajorPrimaryAction()` already sets the approved
-        // `.title3.weight(.semibold)` (~20pt) major-action label font on
-        // `configuration.label`; a `.font()` set directly on this Text, as
-        // an inner modifier, would win over that outer style and silently
-        // shrink the CTA to `.body` (~17pt) instead.
-        .commonPlateMajorPrimaryAction()
-        .commonPlateMajorActionFrame()
-        .padding(.horizontal, CommonPlateStyle.Spacing.l)
-        .padding(.bottom, CommonPlateStyle.Spacing.s)
-        .background(CommonPlateStyle.Color.baseCanvas)
-        .accessibilityIdentifier("home-request-a-meal")
     }
 
     // MARK: - Copy

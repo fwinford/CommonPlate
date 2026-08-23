@@ -25,10 +25,16 @@ enum RequestCardKind: Equatable {
 struct RequestCardView: View {
     let request: FoodRequest
     let kind: RequestCardKind
+    /// W4-R2: suppressed only inside Home's dedicated `Your request(s)`
+    /// zone, which already establishes ownership contextually via its own
+    /// section heading — every other `.own` placement (e.g. the shared
+    /// board, before this zone existed) keeps the eyebrow. Has no effect for
+    /// `.open`/`.helping`, which never show it regardless.
+    var showsOwnershipEyebrow: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if kind == .own {
+            if kind == .own && showsOwnershipEyebrow {
                 Text(Self.ownRequestEyebrow)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color.accentColor)

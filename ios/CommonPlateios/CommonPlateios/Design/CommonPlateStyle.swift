@@ -119,6 +119,18 @@ enum CommonPlateStyle {
         /// Request Alerts row labels/toggles, and About & Help row titles
         /// all measure to this same combined inset in the approved Design.
         static let settingsRowInset: CGFloat = 16
+        /// W4-H4 final shared-content-column reconciliation: the one
+        /// horizontal inset authority for the live Home board — ownership
+        /// request cards, `Needs help right now` request cards, and the
+        /// persistent `Request a Meal` CTA all apply this same value rather
+        /// than each being sized independently. Deliberately its own named
+        /// token rather than reusing `Spacing.l` (20pt) directly: `Spacing.l`
+        /// remains the general-purpose scale step used across many unrelated
+        /// screens, and widening it globally would restyle those screens
+        /// too. A modest step up from `Spacing.l` moves Home's runtime
+        /// proportions closer to the approved H2 Figma without the dramatic
+        /// narrowing a jump to `Spacing.xl` (32pt) would produce.
+        static let homeContentColumnInset: CGFloat = 24
     }
 }
 

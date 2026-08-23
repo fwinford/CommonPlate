@@ -492,6 +492,108 @@ SUCCEEDED**. Independent review was CLEAN. These source-level presentation
 tests are not rendered UI proof; the correction is limited to presentation and
 does not alter the verification lifecycle.
 
+### W4-H4 Home continuous scroll composition acceptance
+
+W4-H4 is accepted. It is an iOS-only slice: per section 11, its minimum
+verification is focused suites plus the complete `CommonPlateiosTests` target.
+No backend, Mongo, or browser-bundle check was required or rerun for H4, and
+none is claimed here.
+
+Automated coverage proves the count-sensitive ownership preview (0/1/2/3+ and
+`See all N`), the ownership partition — including that an owned request hidden
+from the two-card Home preview is still excluded from `Needs help right now` —
+the `See all N` destination wiring, one unified Home `ScrollView` with exactly
+one `.refreshable`, the persistent-CTA `.safeAreaInset` bottom accommodation,
+the shared 24-point content-column authority, and the manual-refresh deadline
+contract.
+
+`HomeRefreshCallerCancellationTests` covers the physical-device refresh defect
+behaviorally rather than by source text: it drives the production
+`HomeExchangeView.awaitWithDeadline`, the production
+`RequestStore.fetchRequests()`, and a real `URLSession` behind the existing
+`RequestFetchingURLProtocol` stub, and proves that a refresh whose calling task
+is cancelled mid-flight still applies the new authoritative requests, that
+repeated cancelled refreshes leave the latest authoritative result through the
+existing generation/collection-revision fence rather than anything added by the
+fix, that an operation losing the manual-refresh deadline is still cancelled and
+still reports failure without a spurious `refreshError`, and that an uncancelled
+refresh is unchanged. These tests do not, and cannot, prove the physical pull
+gesture itself; they prove the refresh path applies authoritative data when the
+caller is cancelled the way SwiftUI cancels it.
+
+At acceptance: focused Home/H4/refresh suites passed **115 passed, 0 failed, 0
+skipped**; the complete `CommonPlateiosTests` target passed **1,009 passed, 0
+failed, TEST SUCCEEDED** for the H4 commit set in isolation and **1,032 passed,
+0 failed, 0 skipped, TEST SUCCEEDED** on the full working tree (see the
+attribution table below); `git diff --check` passed. Independent
+engineering review was CLEAN. The ownership-partition review fix and the
+refresh cancellation/lifetime fix were each independently rereviewed CLEAN /
+RESOLVED.
+
+**Complete-target total attribution (measured, not inferred).** The 1,032
+figure was measured on the full working tree, which also carries unrelated
+in-progress W4-R2/W4-S1 and dev-seed work, so it is not an H4 total. Three
+complete-target runs were taken during H4 closeout to separate the slices, each
+in an isolated `git worktree`:
+
+| Tree | Result |
+| --- | --- |
+| Clean `W4-Q1` commit (`fb3adcd`), no local changes | 976 passed, 0 failed |
+| That commit plus exactly the staged W4-H4 commit set | 1,009 passed, 0 failed |
+| Full H4 working tree, including unrelated R2/S1/seed work | 1,032 passed, 0 failed |
+
+**1,009 is the H4-attributable total** and is what the target will report once
+the H4 commit lands. H4 contributes exactly 33 cases over the committed Q1 tree:
+9 in `HomeContinuousScrollCompositionTests`, 6 in
+`HomeOwnershipPartitionRegressionTests`, 6 in
+`OwnRequestsSeeAllDestinationTests`, 4 in
+`HomeRefreshCallerCancellationTests`, and 8 added to
+`HomeExchangeBoardStateTests`. The remaining 23 cases between 1,009 and 1,032
+belong to unrelated in-progress work and must not be credited to H4.
+
+**Discrepancy flagged, not silently rewritten.** The W4-Q1 row below records
+1,001 for `CommonPlateiosTests` at Q1 acceptance, but a clean checkout of the Q1
+commit measures 976. That earlier figure therefore appears to have been taken on
+a working tree that also carried then-in-progress work, the same way 1,032 does
+here. Q1's own acceptance record is left as written — correcting it belongs to
+Q1, not to this slice — but no H4 statement relies on 1,001, and the H4 baseline
+below uses the measured 976/1,009 pair instead.
+
+Physical-device verification completed by Faith on a physical iPhone: final
+Home proportions and the shared content column, the persistent CTA and its
+soft-floating treatment, pull-to-refresh correctness, automatic fresh data on
+Home return, larger Dynamic Type, and VoiceOver traversal and focus all passed,
+and the native safe-area relationship is accepted. The remaining apparent
+CTA-bottom-position difference against Figma is recorded as **NO ACTION /
+CONTRACT-LIMITED DEVICE SAFE-AREA DIFFERENCE**: authored CTA bottom padding is
+zero and the residual clearance is the device-provided home-indicator safe area,
+so moving the CTA lower would require a negative adjustment or safe-area overlap
+the accepted contract prohibits.
+
+**Known, accepted limitations.** The repository still has no iOS UI-test
+target, so no automated check drives the real pull gesture, the rendered Home
+composition, Dynamic Type layout, or VoiceOver traversal; the physical-device
+evidence above is the authority for every device-specific safe-area, gesture,
+and accessibility observation, and the source and unit tests do not by
+themselves establish any of them. Simulator reproduction of the refresh defect
+and of the fix was performed with synthetic pointer drags against the local
+backend; that is stronger than source inspection but is not physical-device
+proof and does not replace it. The authored refresh presentation and polish
+remain W4-H3's, and nothing in H4's evidence accepts them. H4 acceptance does
+not establish Release/Archive/TestFlight signing or environment behavior, which
+remains open (`docs/system-contract.md` section 11).
+
+**Freshness-scope correction (verified).** `docs/system-contract.md` section 1.4
+deliberately states Home freshness as "when Home appears" plus manual
+pull-to-refresh. Returning CommonPlate to the foreground from the background is
+**not** an automatic refetch: with ten open requests present on the backend, an
+app foregrounded from the background continued to render Empty Exchange until a
+pull-to-refresh was performed, and no `scenePhase` transition invokes
+`fetchRequests()`. This was verified on the simulator during documentation sync.
+The accepted "fresh data on Home return" physical result is recorded above as
+Faith observed it; it is not documented as a background-to-foreground refresh
+guarantee. See the open question raised at H4 closeout.
+
 ## 10. Test-file organization
 
 Add new Week 3 iOS tests in new focused files where practical. Do not keep extending `ClaimFlowTests.swift` merely because it already contains related tests. Preserve existing test files rather than splitting them during unrelated feature work, and keep one endpoint and one user-flow slice per test change. This does not prescribe a new test framework or UI-test target.
@@ -531,7 +633,7 @@ These results are reference evidence, not a substitute for rerunning affected ch
 | `npm test` | Passed at W4-Q1 acceptance: 1,537 passed, 335 Mongo-gated skipped |
 | `npm run test:mongo` | Passed at W4-Q1 acceptance: 335 passed across 24 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build), at the W4-H2 final ownership rereview — not independently rerun for Q1; see the Q1 coverage subsection above for the checks that were |
-| `CommonPlateiosTests` | Latest complete run, after W4-Q1 acceptance: 1,001 passed; 0 failed; TEST SUCCEEDED |
+| `CommonPlateiosTests` | At W4-H4 acceptance, measured in isolated worktrees: **1,009 passed, 0 failed, TEST SUCCEEDED** for the clean W4-Q1 commit plus exactly the W4-H4 commit set — the figure the target will report once H4 lands. The same clean Q1 commit alone measures 976, and the full H4 working tree including unrelated in-progress R2/S1 work measures 1,032. See the W4-H4 subsection in section 9 for the attribution table and for the flagged 1,001-versus-976 discrepancy in the Q1 record |
 | `npm run build:client` | Passed; no tracked bundle diff (no browser-client source changed in N2, D1, H2, N0, or Q1) |
 | `git diff --check` | Passed |
 
@@ -556,6 +658,8 @@ W4-H2 acceptance evidence (participant-scoped request-list ownership projection,
 W4-N0 acceptance evidence (authorization/privacy/cache-isolation for the participant-authorized Email Request Alert state read, current-participant stale-authority fencing, and Subscriber-lifecycle-to-state mapping) is recorded above (Email Request Alert State Authority (W4-N0) coverage) and in `docs/system-contract.md` section 9.10. No physical-device or environmental proof was required; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
 W4-Q1 acceptance evidence (the participant-authorized request-creation eligibility read sharing its substantive quota authority with `POST /api/request`, authorization/privacy/cache-isolation including a mounted rate-limited response, the current-as-of-read-to-POST-refusal boundary, and iOS fail-closed/stale-response/authority-retirement behavior) is recorded above (Request Creation Eligibility Authority (W4-Q1) coverage) and in `docs/system-contract.md` section 7.1. No physical-device or environmental proof was required; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
+
+W4-H4 acceptance evidence (the count-sensitive Home ownership preview and `See all N`, the ownership partition, one unified Home scroll with a single native `.refreshable`, the persistent `Request a Meal` structural bottom accommodation and shared 24-point content column, and pull-to-refresh actually applying authoritative data) is recorded above (W4-H4 Home continuous scroll composition acceptance) and in `docs/system-contract.md` section 1.4. Faith's physical-device pass is the authority for the rendered composition, gesture, Dynamic Type, and VoiceOver observations; no automated check drives them. H4 accepts refresh correctness only — the authored refresh presentation remains deferred to W4-H3 and is not accepted as final. It does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
 W3-H2 durable one-successful-participation enforcement, marketplace/detail privacy isolation, and fulfillment re-entry evidence is recorded above and in `docs/system-contract.md` section 5.1. **W3-H2 was accepted without an iOS UI-test target**, so the literal SwiftUI stale-detail render/tap scheduling sequence was not driven end-to-end through UI automation or physical-device interaction; production predicate/action logic and wiring are covered by unit/source-level tests and the full iOS target instead. That remaining limitation is accepted, not a failed or pending check, and must not be described as UI-test or physical-device proof; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
