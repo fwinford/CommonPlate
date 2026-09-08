@@ -529,6 +529,36 @@ final class RequestStore: ObservableObject {
         hasResolvedReservationStateForRemoval && hasResolvedPendingCreateStateForRemoval
     }
 
+    /// W4-R2 2026-09-06 sync (overlap-safety correction, same-day rereview):
+    /// presentation-only in-flight count distinguishing "at least one
+    /// `continueActiveReservationIfNeeded()` read is actively in flight" from
+    /// "every such read has ended, at least one inconclusively, and this
+    /// process will not resolve removal safety further on its own."
+    /// `hasResolvedReservationStateForRemoval` alone cannot express that
+    /// distinction — an inconclusive outcome leaves it `false` forever,
+    /// identically to before any read ever started. A plain Boolean set
+    /// before the read and cleared in `defer` is unsafe under overlapping
+    /// calls (`ContentView`'s launch `.task` and
+    /// `ReservationWarningRouteDriver` can each call this): call A finishing
+    /// would clear the flag while call B is still in flight, which the
+    /// Settings presentation would misread as "settled" while a check is
+    /// genuinely still running. A count balanced on every exit (success,
+    /// inconclusive error, cancellation) stays accurate under any number of
+    /// overlapping callers. This grants no removal-eligibility authority of
+    /// its own: it only brackets the one network read inside
+    /// `continueActiveReservationIfNeeded()` that can leave removal safety
+    /// unresolved, so a view can stop showing a spinner only once no such
+    /// read remains in flight.
+    @Published private(set) var reservationStateResolutionCount = 0
+
+    /// The externally observed presentation signal: `true` while at least
+    /// one relevant read is in flight, `false` only once the last one has
+    /// exited. Never itself removal-eligibility authority — see
+    /// `reservationStateResolutionCount`'s own documentation.
+    var isResolvingReservationStateForRemoval: Bool {
+        reservationStateResolutionCount > 0
+    }
+
     private let service: RequestService
     /// The app's existing installation credential (Week 3 Day 6 Slice 6E),
     /// read from the same storage `PushSubscriptionStore` uses. Reading it
@@ -941,7 +971,11 @@ final class RequestStore: ObservableObject {
             )
             operationStorage.clear()
             advanceCollectionRevision()
-            applyConfirmed(created, createdUnderAuthority: participantAuthority)
+            // W4-R2 2026-09-05 sync item 5: this request has never been
+            // fetched, so H4's own authoritative fetch — not this create
+            // confirmation — is what surfaces it on Home, in H4's own order
+            // and partition.
+            applyConfirmed(created, createdUnderAuthority: participantAuthority, insertIfMissing: false)
         } catch is CancellationError {
             // `RequestService.createRequest` only ever lets a raw
             // `CancellationError` reach here from its own leading
@@ -1075,7 +1109,10 @@ final class RequestStore: ObservableObject {
             // The equality check inside `applyConfirmed` still withholds it
             // if the authority changed while reconciliation was in flight;
             // ownership is never inferred from the request id alone.
-            applyConfirmed(created, createdUnderAuthority: participantAuthority)
+            // W4-R2 2026-09-05 sync item 5: same as the fresh-create path —
+            // this reconciled request has never been fetched, so H4's own
+            // authoritative fetch surfaces it, not this reconciliation.
+            applyConfirmed(created, createdUnderAuthority: participantAuthority, insertIfMissing: false)
             return true
         } catch is CancellationError {
             return false
@@ -1320,6 +1357,8 @@ final class RequestStore: ObservableObject {
             hasResolvedReservationStateForRemoval = true
             return .unknown
         }
+        reservationStateResolutionCount += 1
+        defer { reservationStateResolutionCount -= 1 }
         do {
             let state = try await service.fetchParticipantReservationState(
                 participantAuthority: participantAuthority
@@ -1486,9 +1525,10 @@ final class RequestStore: ObservableObject {
 
     /// W4-Q1 bounded participant-authorized read of whether the currently
     /// verified participant may presently attempt another request under the
-    /// existing best-effort three-per-NYU-campus-day quota. This is a
-    /// prerequisite authority only — no R2 requester-entry consumer exists
-    /// yet.
+    /// existing best-effort three-per-NYU-campus-day quota.
+    /// `RequestFoodEntryView`'s early-boundary consumption (W4-R2 item 20) is
+    /// this authority's one requester-entry consumer; it never reimplements
+    /// or overrides this result.
     enum RequestCreationEligibility: Equatable {
         /// Not yet read, unreadable, missing authority, or resolved under a
         /// participant authority the read's own stale-response guard could
@@ -2929,9 +2969,23 @@ final class RequestStore: ObservableObject {
     /// If the authority changed while the create was in flight, the
     /// A-relative conclusion is not applied for B — ownership stays
     /// `.unresolved` and fails closed until B's own read resolves it.
+    /// W4-R2 2026-09-05 sync item 5: `insertIfMissing` defaults to `true`,
+    /// preserving this function's original behavior for every call site not
+    /// concerned with H4's Home-authority conflict — in particular claim
+    /// confirmation (`applyConfirmed(outcome.request)`), which always hits the
+    /// update-in-place branch anyway, since a claimable request must already
+    /// exist in Home's fetched collection. Only R2's two create-confirmation
+    /// call sites (a fresh `createRequest` and D1's unresolved-create
+    /// reconciliation) pass `insertIfMissing: false`: a request neither has
+    /// ever been fetched, so both always exercised the append branch,
+    /// inserting the new request into Home's shared collection immediately on
+    /// creation — ahead of, and independent from, H4's own authoritative
+    /// fetch. H4's own committed contract already owns surfacing it, in the
+    /// correct order and partition, on the requester's next Home appearance.
     private func applyConfirmed(
         _ request: FoodRequest,
-        createdUnderAuthority: String? = nil
+        createdUnderAuthority: String? = nil,
+        insertIfMissing: Bool = true
     ) {
         var confirmed = request
         if let createdUnderAuthority,
@@ -2940,7 +2994,7 @@ final class RequestStore: ObservableObject {
         }
         if let index = requests.firstIndex(where: { $0.id == confirmed.id }) {
             requests[index] = confirmed
-        } else {
+        } else if insertIfMissing {
             requests.append(confirmed)
         }
     }

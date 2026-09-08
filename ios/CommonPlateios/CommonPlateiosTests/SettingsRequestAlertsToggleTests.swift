@@ -158,12 +158,15 @@ final class SettingsRequestAlertsToggleTests: XCTestCase {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift")
 
         XCTAssertTrue(source.contains("CommonPlateStyle.Metrics.settingsPageInset"))
+        // W4-R2 removed the permanent W4-S1 AI Assistance explanatory
+        // paragraph (Settings now presents Screenshot Assistance as one
+        // named toggle with no permanent explanatory row) — six measured
+        // rows remain.
         XCTAssertEqual(
             source.components(separatedBy: "CommonPlateStyle.Metrics.settingsRowInset").count - 1,
-            7,
+            6,
             "expected the measured row inset on: identity content, the inline status, the toggle row, "
-                + "the verification prompt row, the shared divider, the About & Help row, and the "
-                + "W4-S1 AI Assistance explanatory row"
+                + "the verification prompt row, the shared divider, and the About & Help row"
         )
     }
 

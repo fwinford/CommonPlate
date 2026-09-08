@@ -5,9 +5,9 @@
 
 import Foundation
 
-/// The requester form's editable values. This stays specific to
-/// `RequestFoodView`; it is not shared with fulfillment or persisted outside
-/// the screen.
+/// The requester form's editable values. This remains private to the Request
+/// Food flow: its session owner may outlive a transient pushed view, but it is
+/// never persisted to disk/server or shared with fulfillment.
 struct RequestFoodFormDraft: Equatable {
     var selectedDiningSpot: DiningSpot?
     var foodRequest: String
@@ -186,4 +186,16 @@ struct RequestFoodSubmissionResult: Equatable {
     let presentation: RequestFoodValidationPresentation
     let firstInvalidTextField: RequestFoodFormField?
     let didSubmit: Bool
+}
+
+/// W4-R2 2026-09-05 sync item 6: `RequestFoodView.submissionFailureOutcome(for:hasUnresolvedCreateAmbiguity:)`'s
+/// return value — the one production-owned decision its real `submit()`
+/// catch path calls verbatim, so a test can drive a real thrown error through
+/// that exact function rather than only reconstructing the same decision
+/// independently.
+struct RequestFoodSubmissionFailureOutcome: Equatable {
+    let mapped: RequestCreatePresentationError
+    /// True exactly when the definitive-failure haptic and failure summary
+    /// must both fire; false for every unresolved/write-uncertain ambiguity.
+    let isDefinitiveFailure: Bool
 }

@@ -5,13 +5,14 @@
 // Focused coverage for the W4-Q1 bounded participant-authorized read of
 // whether the currently verified participant is presently eligible to
 // attempt another request under the existing best-effort
-// three-per-NYU-campus-day quota. There is no R2 requester-entry consumer
-// yet — this proves only the `APIClient -> RequestService -> RequestStore`
-// authority itself: `RequestService.fetchRequestCreationEligibility` and
+// three-per-NYU-campus-day quota. This proves only the
+// `APIClient -> RequestService -> RequestStore` authority itself:
+// `RequestService.fetchRequestCreationEligibility` and
 // `RequestStore.resolveRequestCreationEligibility`, including its
 // stale-response/identity-staleness guard, matching the pattern established
 // by `RequestDetailStaleParticipationTests.swift` for
-// `resolveStaleParticipationEligibility`.
+// `resolveStaleParticipationEligibility`. `RequestFoodEntryTests.swift`
+// proves the W4-R2 requester-entry consumer built on top of this authority.
 import Foundation
 import XCTest
 @testable import CommonPlateios

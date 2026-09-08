@@ -56,7 +56,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         XCTAssertTrue(Self.looksLikeAValidOperationId(sentOperationId))
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        XCTAssertEqual(store.requests.map(\.foodDescription), ["Fresh create food"])
+        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
+        // `store.requests` ahead of H4's own authoritative fetch.
+        XCTAssertTrue(store.requests.isEmpty)
     }
 
     // MARK: - Ambiguous transport persists the exact operation and blocks a
@@ -173,7 +175,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
 
         XCTAssertFalse(storeAfterRelaunch.hasUnresolvedCreateAmbiguity)
         XCTAssertNil(sharedStorage.load())
-        XCTAssertEqual(storeAfterRelaunch.requests.map(\.id), ["reconciled-request"])
+        // W4-R2 2026-09-05 sync item 5: a reconciled D1 create must not
+        // insert into `store.requests` ahead of H4's own authoritative fetch.
+        XCTAssertTrue(storeAfterRelaunch.requests.isEmpty)
     }
 
     func testReconciliationWithNothingDurableIsANoOp() async {
@@ -287,7 +291,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             RequestFetchingURLProtocol.lastCapturedHeaders?[RequestService.operationIdentityHeader]
         )
         XCTAssertNotEqual(newOperationId, originalOperationId)
-        XCTAssertEqual(store.requests.map(\.id), ["fresh-after-expiry"])
+        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
+        // `store.requests` ahead of H4's own authoritative fetch.
+        XCTAssertTrue(store.requests.isEmpty)
     }
 
     // MARK: - Invalid operation identity (proof 13)
@@ -394,7 +400,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             ))
         ))
         try await storeForB.createRequest(asapPayload(food: "Belongs to participant B"))
-        XCTAssertEqual(storeForB.requests.map(\.id), ["participant-b-request"])
+        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
+        // `store.requests` ahead of H4's own authoritative fetch.
+        XCTAssertTrue(storeForB.requests.isEmpty)
     }
 
     // MARK: - Ordinary pre-write rejections are also definitive non-create
@@ -434,7 +442,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             ))
         ))
         try await store.createRequest(asapPayload(food: "A different request"))
-        XCTAssertEqual(store.requests.map(\.id), ["after-quota-refusal"])
+        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
+        // `store.requests` ahead of H4's own authoritative fetch.
+        XCTAssertTrue(store.requests.isEmpty)
     }
 
     /// The same property for the remaining pre-write ordinary rejections
@@ -618,7 +628,10 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         XCTAssertTrue(didRecoverX)
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        XCTAssertEqual(store.requests.map(\.id), ["recovered-x"])
+        // W4-R2 2026-09-05 sync item 5: a reconciled D1 create must not
+        // insert into `store.requests` ahead of H4's own authoritative fetch
+        // either.
+        XCTAssertTrue(store.requests.isEmpty)
     }
 
     /// The identical property during relaunch reconciliation: an ordinary
@@ -688,7 +701,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             ))
         ))
         try await store.createRequest(asapPayload(food: "The real submission"))
-        XCTAssertEqual(store.requests.map(\.id), ["after-cancelled-attempt"])
+        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
+        // `store.requests` ahead of H4's own authoritative fetch.
+        XCTAssertTrue(store.requests.isEmpty)
     }
 
     /// Reconciliation's own cancellation handling is unchanged: a record that

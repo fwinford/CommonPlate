@@ -122,6 +122,7 @@ final class ScreenshotProposalURLProtocol: URLProtocol {
 final class InMemoryScreenshotProposalPreferencesStorage: ScreenshotProposalPreferencesStoring {
     var isAIAssistanceEnabled: Bool = true
     var hasRecordedThirdPartyConsent: Bool = false
+    var hasCompletedScreenshotHelp: Bool = false
 }
 
 @MainActor
@@ -254,12 +255,46 @@ final class ScreenshotProposalStoreTests: XCTestCase {
                 mealSwipes: 2
             )
         )
-        store.apply(outcome, manualEdits: noManualEdits, to: &draft)
+        let applied = store.apply(outcome, manualEdits: noManualEdits, to: &draft)
 
         XCTAssertEqual(draft.selectedDiningSpot, palladium)
         XCTAssertEqual(draft.foodRequest, "1 Create Your Own Bowl")
         XCTAssertEqual(draft.mealSwipes, 2)
         XCTAssertNil(store.notice)
+
+        // W4-R2 provenance/afterglow plumbing: `apply(...)` reports exactly
+        // which allowlisted fields it actually wrote.
+        XCTAssertTrue(applied.location)
+        XCTAssertTrue(applied.foodRequest)
+        XCTAssertTrue(applied.mealSwipes)
+        XCTAssertFalse(applied.isEmpty)
+    }
+
+    /// A field the requester already manually owns must not be reported as
+    /// applied, even though the proposal carried a value for it — mirroring
+    /// the manual-precedence guarantee `apply(...)` already enforces on
+    /// `draft` itself.
+    func testAppliedFieldsOmitManuallyOwnedFields() {
+        let store = makeStore()
+        var draft = RequestFoodFormDraft(foodRequest: "Already typed")
+
+        let outcome = ScreenshotProposalOutcome(
+            eligible: true,
+            proposal: ScreenshotProposal(
+                selectedDiningSpot: palladium,
+                foodRequest: "1 Create Your Own Bowl",
+                mealSwipes: 2
+            )
+        )
+        var manualEdits = ScreenshotFieldManualEditState()
+        manualEdits.hasManuallyEditedFoodRequest = true
+
+        let applied = store.apply(outcome, manualEdits: manualEdits, to: &draft)
+
+        XCTAssertTrue(applied.location)
+        XCTAssertFalse(applied.foodRequest)
+        XCTAssertTrue(applied.mealSwipes)
+        XCTAssertEqual(draft.foodRequest, "Already typed")
     }
 
     func testApplyMarksUnsupportedScreenshotNoticeForAnIneligibleResult() {
@@ -789,5 +824,46 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         XCTAssertTrue(store.hasRecordedThirdPartyConsent)
         XCTAssertTrue(preferences.hasRecordedThirdPartyConsent)
+    }
+
+    // MARK: - W4-R2 2026-09-01 sync: independent Screenshot Help
+    // education-completion state
+
+    /// Defaults to `false` (unlike `isAIAssistanceEnabled`, which defaults
+    /// `true`): education is shown until actually completed once.
+    func testScreenshotHelpCompletionDefaultsToFalse() {
+        let store = makeStore()
+        XCTAssertFalse(store.hasCompletedScreenshotHelp)
+    }
+
+    func testRecordScreenshotHelpCompletedPersistsThroughStorage() {
+        let preferences = InMemoryScreenshotProposalPreferencesStorage()
+        let store = makeStore(preferences: preferences)
+        XCTAssertFalse(store.hasCompletedScreenshotHelp)
+
+        store.recordScreenshotHelpCompleted()
+
+        XCTAssertTrue(store.hasCompletedScreenshotHelp)
+        XCTAssertTrue(preferences.hasCompletedScreenshotHelp)
+    }
+
+    /// Item 4 of the sync: education state and consent/AI-enabled state are
+    /// independent — recording one must never mutate the other, in either
+    /// direction.
+    func testScreenshotHelpCompletionIsIndependentOfConsentAndAIEnabledState() {
+        let preferences = InMemoryScreenshotProposalPreferencesStorage()
+        let store = makeStore(preferences: preferences)
+
+        store.recordScreenshotHelpCompleted()
+        XCTAssertFalse(store.hasRecordedThirdPartyConsent)
+        XCTAssertTrue(store.isAIAssistanceEnabled)
+
+        let otherPreferences = InMemoryScreenshotProposalPreferencesStorage()
+        let otherStore = makeStore(preferences: otherPreferences)
+        otherStore.recordThirdPartyConsent()
+        XCTAssertFalse(otherStore.hasCompletedScreenshotHelp)
+
+        otherStore.setAIAssistanceEnabled(false)
+        XCTAssertFalse(otherStore.hasCompletedScreenshotHelp)
     }
 }

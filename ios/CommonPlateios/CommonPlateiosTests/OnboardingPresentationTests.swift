@@ -242,17 +242,39 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertTrue(source.contains("case walkthrough(OnboardingIntent)"))
         XCTAssertTrue(source.contains("case route(AppRoute)"))
         XCTAssertTrue(source.contains("duration: 0.28"))
-        XCTAssertTrue(source.contains("offset(y: hasEntered || reduceMotion ? 0 : 6)"))
+        // W4-R2 2026-09-05 sync item 8: `SoftFlowEnterDestination` gained a
+        // `playsOwnSettle` parameter (defaulting to `true`, so every route
+        // besides `.requestFood` keeps this exact offset/gating behavior
+        // unchanged) so Request Food's own local Bottom Continuity settle can
+        // become the entrance's sole owner without duplicating this shared
+        // wrapper's own settle/hit-testing gate.
+        XCTAssertTrue(source.contains("offset(y: playsOwnSettle && !hasEntered && !reduceMotion ? 6 : 0)"))
+        XCTAssertTrue(source.contains("var playsOwnSettle: Bool = true"))
+        XCTAssertTrue(source.contains("playsOwnSettle: route != .requestFood"))
+        XCTAssertTrue(source.contains(".allowsHitTesting(playsOwnSettle ? hasEntered : true)"))
         XCTAssertTrue(source.contains("flowPresentation = .walkthrough(intent)\n            onboardingFlowCoordinator.selectedIntent = intent"))
         XCTAssertTrue(source.contains("flowPresentation = .route(route)\n            path = AppRoute.appending(route, to: path)"))
         XCTAssertTrue(source.contains("if case .route(let route)? = flowPresentation, newPath.last != route"))
         XCTAssertTrue(source.contains("if case .walkthrough? = flowPresentation, intent == nil"))
-        XCTAssertTrue(source.contains("@State private var isRequestFoodPresented = false"))
-        XCTAssertTrue(source.contains(".sheet(isPresented: $isRequestFoodPresented, onDismiss: finishRequestFoodPresentation)"))
-        XCTAssertTrue(source.contains("requestFoodPresentationPath = [.requestFood]"))
-        XCTAssertTrue(source.contains("requestFoodPresentationPath = []"))
+        // W4-R2: Request Food is now pushed through the same typed
+        // `AppRoute.requestFood` destination every other route uses —
+        // superseding the former Home-owned sheet special-case — and exits
+        // through the same `finishPrimaryRoute` truncation every other
+        // primary route uses.
+        XCTAssertFalse(source.contains("isRequestFoodPresented"))
+        XCTAssertFalse(source.contains("requestFoodPresentationPath"))
+        XCTAssertTrue(source.contains("case .requestFood:"))
+        XCTAssertTrue(source.contains("onExit: { finishPrimaryRoute(.requestFood) }"))
         XCTAssertFalse(requestEntry.contains("Color.clear"))
-        XCTAssertFalse(requestEntry.contains(".sheet(isPresented: isPresentingEntryVerification"))
+        // The pushed destination must keep ParticipantVerificationView's own
+        // NavigationStack behind the accepted modal boundary. Mounting it
+        // directly inside ContentView's typed root stack makes an interactive
+        // request-food push fail with AnyNavigationPath comparison mismatch.
+        XCTAssertTrue(requestEntry.contains(".sheet(isPresented: isPresentingEntryVerification)"))
+        XCTAssertTrue(requestEntry.contains("case .verification:\n                CommonPlateStyle.Color.baseCanvas"))
+        // The form destination no longer wraps itself in a second, nested
+        // `NavigationStack` now that it is pushed directly on the root one.
+        XCTAssertFalse(requestEntry.contains("NavigationStack {"))
         XCTAssertFalse(source.contains("flowDestination(for:"))
         XCTAssertFalse(source.contains("if let flowPresentation {"))
         XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.onboardingChooser)"))
@@ -268,13 +290,27 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertTrue(onboarding.contains("frame(width: 44, height: 44)"))
     }
 
+    /// W4-R2 restyled these two fields into the approved `Requester / Form
+    /// Field` bordered-card control (a `Menu` for meal swipes, matching the
+    /// approved component's plain value display with no native
+    /// `Picker`/list chrome) — the exact SwiftUI declaration this test
+    /// pinned to before that restyle no longer exists. The substantive
+    /// guarantee this test guards remains true and is asserted directly: the
+    /// bounded meal-swipe range is unchanged, driven by the same
+    /// `RequestFoodFormDraft.mealSwipeOptions`, and the accepted field labels
+    /// are unchanged. The revised READY contract also removes the permanent
+    /// meal-swipes helper sentence with no replacement, and the final R2
+    /// contract renames the field label to `Name on order` with no separate
+    /// timing-mixed sentence.
     func testRequesterGuidanceUsesTheAcceptedLabelsWithoutChangingThePickerRange() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift")
 
-        XCTAssertTrue(source.contains("Picker(\"Meal swipes needed\""))
-        XCTAssertTrue(source.contains("Choose how many meal swipes your Grubhub order requires."))
-        XCTAssertTrue(source.contains("TextField(\"Pickup name\""))
-        XCTAssertTrue(source.contains("Enter the name you want the Grubhub order placed under."))
+        XCTAssertTrue(source.contains("mealSwipesControl"))
+        XCTAssertTrue(source.contains("static let mealSwipesLabel = \"Meal swipes\""))
+        XCTAssertFalse(source.contains("Choose how many meal swipes your Grubhub order requires."))
+        XCTAssertTrue(source.contains("static let pickupNameLabel = \"Name on order\""))
+        XCTAssertFalse(source.contains("Enter the name you want the Grubhub order placed under."))
+        XCTAssertFalse(source.contains("The student placing the order will use this name and approximate time."))
         XCTAssertTrue(source.contains("RequestFoodFormDraft.mealSwipeOptions"))
     }
 

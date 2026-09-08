@@ -43,6 +43,11 @@ struct ContentView: View {
     /// operation identity, or otherwise touches D1/create lifecycle — only
     /// the in-progress `RequestFoodFormDraft` it is handed.
     @StateObject private var screenshotProposalStore: ScreenshotProposalStore
+    /// The bounded in-memory owner for one unfinished Request Food draft.
+    /// Unlike D1's operation storage, this has no durable representation and
+    /// exists only for this ContentView/app-process lifetime. Holding it above
+    /// `.requestFood` lets an ordinary route pop/re-push restore the same task.
+    @StateObject private var requestFoodDraftSession: RequestFoodDraftSession
     /// Local presentation preference only. It deliberately has no connection
     /// to participant identity, credentials, or backend authority.
     @StateObject private var onboardingStore: OnboardingPresentationStore
@@ -75,12 +80,6 @@ struct ContentView: View {
     /// A presentation-only handoff for major actions that start a task. Unlike
     /// `path` and onboarding completion, this never establishes app truth.
     @State private var flowPresentation: FlowPresentation?
-    /// Request Food is one native presentation owned by Home, rather than a
-    /// navigation destination that presents a second sheet on top of itself.
-    /// Its local route remains available to the existing requester
-    /// continuation machinery without creating a visible root-stack screen.
-    @State private var isRequestFoodPresented = false
-    @State private var requestFoodPresentationPath: [AppRoute] = []
 
     /// The one-time Home notice a requester-fulfillment push tap presents
     /// (Week 3 Day 6 Slice 6E). Distinct from every helper-flow notice: it
@@ -179,6 +178,7 @@ struct ContentView: View {
                 preferences: UserDefaultsScreenshotProposalPreferencesStorage(defaults: .standard)
             )
         )
+        _requestFoodDraftSession = StateObject(wrappedValue: RequestFoodDraftSession())
         let onboardingStore = OnboardingPresentationStore(
             storage: UserDefaultsOnboardingPresentationStorage(defaults: .standard)
         )
@@ -215,7 +215,17 @@ struct ContentView: View {
                 .navigationDestination(for: AppRoute.self) { route in
                     SoftFlowEnterDestination(
                         reduceMotion: reduceMotion,
-                        shouldAnimate: flowPresentation == .route(route)
+                        shouldAnimate: flowPresentation == .route(route),
+                        // W4-R2 2026-09-05 sync item 8: Request Food owns its
+                        // own local Bottom Continuity settle
+                        // (`RequestFoodEntryView`'s `hasSettled`), which never
+                        // gates hit testing. This shared wrapper's own
+                        // opacity/offset settle and hit-testing gate would
+                        // otherwise duplicate that cue and reintroduce a
+                        // decorative delay to interactivity for this route
+                        // specifically. Every other route keeps this
+                        // wrapper's existing entrance exactly as it is today.
+                        playsOwnSettle: route != .requestFood
                     ) {
                         destination(for: route)
                     } onFinished: {
@@ -236,16 +246,6 @@ struct ContentView: View {
                 .zIndex(1)
             }
 
-        }
-        .sheet(isPresented: $isRequestFoodPresented, onDismiss: finishRequestFoodPresentation) {
-            RequestFoodEntryView(
-                store: requestStore,
-                screenshotProposalStore: screenshotProposalStore,
-                identityStore: participantIdentityStore,
-                verificationCoordinator: participantActionVerificationCoordinator,
-                path: $requestFoodPresentationPath,
-                onExit: dismissRequestFoodPresentation
-            )
         }
         // Cold-launch and relaunch-after-termination continuation (W3-H1):
         // reconstructs "do I have an active reservation" from backend truth,
@@ -477,40 +477,12 @@ struct ContentView: View {
     }
 
     private func startRouteFlow(_ route: AppRoute) {
-        guard route != .requestFood else {
-            startRequestFoodPresentation()
-            return
-        }
         guard flowPresentation == nil else { return }
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             flowPresentation = .route(route)
             path = AppRoute.appending(route, to: path)
-        }
-    }
-
-    private func startRequestFoodPresentation() {
-        guard !isRequestFoodPresented else { return }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            requestFoodPresentationPath = [.requestFood]
-        }
-        // This state change is intentionally outside that transaction: the
-        // sheet is Request Food's single native visible entrance.
-        isRequestFoodPresented = true
-    }
-
-    private func dismissRequestFoodPresentation() {
-        isRequestFoodPresented = false
-    }
-
-    private func finishRequestFoodPresentation() {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            requestFoodPresentationPath = []
         }
     }
 
@@ -525,6 +497,11 @@ struct ContentView: View {
     private struct SoftFlowEnterDestination<Destination: View>: View {
         let reduceMotion: Bool
         let shouldAnimate: Bool
+        /// W4-R2 2026-09-05 sync item 8: defaults to `true`, preserving this
+        /// shared wrapper's existing opacity/offset settle and hit-testing
+        /// gate for every route unrelated to that sync's Request Food fix —
+        /// only `.requestFood`'s own call site passes `false`.
+        var playsOwnSettle: Bool = true
         @ViewBuilder let destination: () -> Destination
         let onFinished: () -> Void
 
@@ -533,11 +510,13 @@ struct ContentView: View {
         init(
             reduceMotion: Bool,
             shouldAnimate: Bool,
+            playsOwnSettle: Bool = true,
             @ViewBuilder destination: @escaping () -> Destination,
             onFinished: @escaping () -> Void
         ) {
             self.reduceMotion = reduceMotion
             self.shouldAnimate = shouldAnimate
+            self.playsOwnSettle = playsOwnSettle
             self.destination = destination
             self.onFinished = onFinished
             _hasEntered = State(initialValue: !shouldAnimate)
@@ -547,12 +526,22 @@ struct ContentView: View {
             ZStack {
                 CommonPlateStyle.Color.baseCanvas.ignoresSafeArea()
                 destination()
-                    .opacity(hasEntered ? 1 : 0)
-                    .offset(y: hasEntered || reduceMotion ? 0 : 6)
-                    .animation(animation, value: hasEntered)
-                    .allowsHitTesting(hasEntered)
+                    .opacity(playsOwnSettle ? (hasEntered ? 1 : 0) : 1)
+                    .offset(y: playsOwnSettle && !hasEntered && !reduceMotion ? 6 : 0)
+                    .animation(playsOwnSettle ? animation : nil, value: hasEntered)
+                    .allowsHitTesting(playsOwnSettle ? hasEntered : true)
                     .onAppear {
                         guard shouldAnimate, !hasEntered else { return }
+                        guard playsOwnSettle else {
+                            // This route owns its own local settle cue
+                            // instead (never gated on hit testing); this
+                            // wrapper only still needs to retire
+                            // `flowPresentation` via `onFinished()` exactly
+                            // once, with no animation or gating of its own.
+                            hasEntered = true
+                            onFinished()
+                            return
+                        }
                         withAnimation(animation, completionCriteria: .logicallyComplete) {
                             hasEntered = true
                         } completion: {
@@ -573,17 +562,21 @@ struct ContentView: View {
     /// presentation (`SettingsView`, W4-H2), kept here as a `static func` so
     /// it is directly testable without instantiating a full store dependency
     /// graph — matching the existing `ParticipantVerificationView`
-    /// pure-predicate pattern. Precedence: the cold/relaunch readiness check
-    /// reads as in-progress work (`.loading`); an active reservation/request
-    /// reads as this action being temporarily unavailable, not gone
-    /// (`.unavailable`); otherwise (an unresolved W3-D1 create) is exactly a
-    /// mutation-outcome-uncertain state (`.uncertain`).
+    /// pure-predicate pattern. Precedence: while the cold/relaunch readiness
+    /// check is actively in flight, it reads as in-progress work (`.loading`);
+    /// once that check has ended without establishing removal safety (W4-R2
+    /// 2026-09-06 sync), it reads as this action being temporarily
+    /// unavailable, not still loading (`.unavailable`) — the same kind an
+    /// active reservation/request already uses; otherwise (an unresolved
+    /// W3-D1 create) is exactly a mutation-outcome-uncertain state
+    /// (`.uncertain`).
     static func removeEmailBlockedStatusKind(
         hasEstablishedRemovalSafety: Bool,
+        isResolvingReservationStateForRemoval: Bool,
         hasActiveClaim: Bool
     ) -> CommonPlateStatusKind {
         if !hasEstablishedRemovalSafety {
-            return .loading
+            return isResolvingReservationStateForRemoval ? .loading : .unavailable
         }
         if hasActiveClaim {
             return .unavailable
@@ -671,7 +664,20 @@ struct ContentView: View {
     private func destination(for route: AppRoute) -> some View {
         switch route {
         case .requestFood:
-            EmptyView()
+            // W4-R2: pushed on this same root stack (superseding the former
+            // Home-owned sheet), analogous to `.settings`. `onExit` truncates
+            // exactly this route via `finishPrimaryRoute`, so ordinary Back,
+            // D1 "Go to Home", and the Success dwell's native dismissal all
+            // return to Home the same way.
+            RequestFoodEntryView(
+                store: requestStore,
+                screenshotProposalStore: screenshotProposalStore,
+                draftSession: requestFoodDraftSession,
+                identityStore: participantIdentityStore,
+                verificationCoordinator: participantActionVerificationCoordinator,
+                path: $path,
+                onExit: { finishPrimaryRoute(.requestFood) }
+            )
         case .activeRequests:
             ActiveRequestsView(store: requestStore)
         case .alerts:

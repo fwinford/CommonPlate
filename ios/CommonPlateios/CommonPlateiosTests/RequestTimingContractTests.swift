@@ -153,6 +153,58 @@ final class RequestTimingContractTests: XCTestCase {
 
     // MARK: - Near-now Later is never silently converted
 
+    func testQuickTimesAreDerivedFromNowOnNearbyHalfHourBoundaries() throws {
+        // 4:07 PM New York. The quick row begins at the next half-hour and
+        // continues in 30-minute steps; no example clock values are constants.
+        let now = try iso("2026-07-28T20:07:00.000Z")
+        let choices = RequestFoodView.quickScheduledTimes(
+            now: now,
+            calendar: NYUCampusTime.calendar
+        )
+
+        XCTAssertEqual(
+            choices,
+            [
+                try iso("2026-07-28T20:30:00.000Z"),
+                try iso("2026-07-28T21:00:00.000Z"),
+                try iso("2026-07-28T21:30:00.000Z")
+            ]
+        )
+        XCTAssertTrue(choices.allSatisfy {
+            RequestFoodView.isValidScheduledWindow(
+                startingAt: $0,
+                now: now,
+                calendar: NYUCampusTime.calendar
+            )
+        })
+    }
+
+    func testQuickTimesStopAtTheAcceptedSameDaySchedulingCutoff() throws {
+        // 10:47 PM New York: only 11:00 and 11:30 remain before the existing
+        // 30-minutes-before-midnight latest-start boundary.
+        let now = try iso("2026-07-29T02:47:00.000Z")
+        XCTAssertEqual(
+            RequestFoodView.quickScheduledTimes(
+                now: now,
+                calendar: NYUCampusTime.calendar
+            ),
+            [
+                try iso("2026-07-29T03:00:00.000Z"),
+                try iso("2026-07-29T03:30:00.000Z")
+            ]
+        )
+    }
+
+    func testQuickTimesAreEmptyWhenLaterIsUnavailable() throws {
+        let now = try iso("2026-07-29T03:45:00.000Z")
+        XCTAssertTrue(
+            RequestFoodView.quickScheduledTimes(
+                now: now,
+                calendar: NYUCampusTime.calendar
+            ).isEmpty
+        )
+    }
+
     /// The accepted recovery path. A `Later` selection that has slipped into
     /// the past is refused with an instruction, and is never quietly rewritten
     /// into an ASAP request the student did not ask for.

@@ -194,15 +194,17 @@ final class MealSwipeQuantityTests: XCTestCase {
 
     // MARK: - End-to-end: create round-trips the quantity through RequestStore
 
+    /// W4-R2 2026-09-05 sync item 5: `RequestStore.createRequest` no longer
+    /// inserts into `store.requests` (H4's own authoritative fetch owns
+    /// that), so this round-trips the quantity through the same production
+    /// `RequestService.createRequest` the store itself calls, which already
+    /// returns the decoded domain `FoodRequest` directly.
     func testCreateRequestRoundTripsTheQuantityIntoTheStoredDomainRequest() async throws {
         MealSwipeQuantityURLProtocol.reset(data: detailResponse(mealSwipes: 2))
-        let store = makeStore()
 
-        try await store.createRequest(makePayload(mealSwipes: 2))
+        let created = try await makeService().createRequest(makePayload(mealSwipes: 2))
 
-        let created = try XCTUnwrap(
-            store.requests.first { $0.id == "meal-swipe-quantity-request" }
-        )
+        XCTAssertEqual(created.id, "meal-swipe-quantity-request")
         XCTAssertEqual(created.mealSwipes, 2)
 
         let sentBody = try XCTUnwrap(MealSwipeQuantityURLProtocol.lastCapturedBody)

@@ -358,6 +358,178 @@ final class RemoveEmailTests: XCTestCase {
             store.hasEstablishedRemovalSafety,
             "an inconclusive relaunch read must not incorrectly enable Remove Email"
         )
+        // W4-R2 2026-09-06 sync: once the read has settled — even
+        // inconclusively — presentation must stop reading as in-progress
+        // work, distinct from `hasEstablishedRemovalSafety` remaining `false`
+        // forever for this outcome.
+        XCTAssertFalse(
+            store.isResolvingReservationStateForRemoval,
+            "a settled inconclusive read must not be mistaken for one still in flight"
+        )
+    }
+
+    /// W4-R2 2026-09-06 sync: `isResolvingReservationStateForRemoval` is the
+    /// presentation-only signal that lets Settings distinguish an actively
+    /// running readiness check from a settled-inconclusive one, since
+    /// `hasResolvedReservationStateForRemoval` alone cannot — both read
+    /// `false` identically before any read starts and after an inconclusive
+    /// one ends. Before this call, it must already read `false` (nothing is
+    /// in flight yet); after an inconclusive read completes, it must read
+    /// `false` again (no longer in flight), never staying stuck `true`.
+    func testIsResolvingReservationStateForRemovalReflectsOnlyTheActiveNetworkRead() async throws {
+        let store = RequestStore(
+            service: makeClaimService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            participantAuthorityProvider: { canonicalParticipantAuthorityFixture },
+            participantAuthorityRejected: {}
+        )
+        XCTAssertFalse(store.isResolvingReservationStateForRemoval)
+
+        ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
+        _ = try await store.continueActiveReservationIfNeeded()
+
+        XCTAssertFalse(
+            store.isResolvingReservationStateForRemoval,
+            "the read has ended (inconclusively) by the time this call returns, so no spinner should remain justified"
+        )
+    }
+
+    /// W4-R2 2026-09-06 same-day rereview (SHOULD FIX): a single gated read
+    /// proves the count-backed signal reads `true` only while the network
+    /// call is genuinely suspended, and `false` again once it completes —
+    /// the baseline a plain Boolean also got right, now reproduced against
+    /// `reservationStateResolutionCount` directly rather than inferred from
+    /// timing alone.
+    func testSingleActiveReadDrivesIsResolvingReservationStateForRemoval() async throws {
+        let store = RequestStore(
+            service: makeClaimService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            participantAuthorityProvider: { canonicalParticipantAuthorityFixture },
+            participantAuthorityRejected: {}
+        )
+        XCTAssertFalse(store.isResolvingReservationStateForRemoval)
+        XCTAssertEqual(store.reservationStateResolutionCount, 0)
+
+        let gate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: Data(#"{"reservation":null}"#.utf8), gate: gate))
+
+        let task = Task { try await store.continueActiveReservationIfNeeded() }
+        await waitUntil { gate.isWaiting }
+
+        XCTAssertTrue(store.isResolvingReservationStateForRemoval)
+        XCTAssertEqual(store.reservationStateResolutionCount, 1)
+
+        gate.open()
+        _ = try await task.value
+
+        XCTAssertFalse(store.isResolvingReservationStateForRemoval)
+        XCTAssertEqual(store.reservationStateResolutionCount, 0)
+    }
+
+    /// W4-R2 2026-09-06 same-day rereview (SHOULD FIX, key regression): the
+    /// exact overlap a plain Boolean got wrong. Two reads overlap — matching
+    /// `ContentView`'s launch `.task` and `ReservationWarningRouteDriver`
+    /// each independently calling `continueActiveReservationIfNeeded()` —
+    /// and the first finishing must not flip presentation to
+    /// settled-unavailable while the second is still genuinely in flight.
+    /// Only once *both* have exited does the signal read `false` again.
+    func testOverlappingReservationReadsKeepIsResolvingTrueUntilTheLastOneExits() async throws {
+        let store = RequestStore(
+            service: makeClaimService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            participantAuthorityProvider: { canonicalParticipantAuthorityFixture },
+            participantAuthorityRejected: {}
+        )
+        XCTAssertFalse(store.isResolvingReservationStateForRemoval)
+
+        let gateA = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: Data(#"{"reservation":null}"#.utf8), gate: gateA))
+        let taskA = Task { try await store.continueActiveReservationIfNeeded() }
+        await waitUntil { gateA.isWaiting }
+        XCTAssertEqual(store.reservationStateResolutionCount, 1)
+
+        let gateB = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: Data(#"{"reservation":null}"#.utf8), gate: gateB))
+        let taskB = Task { try await store.continueActiveReservationIfNeeded() }
+        await waitUntil { gateB.isWaiting }
+        XCTAssertEqual(
+            store.reservationStateResolutionCount, 2,
+            "both reads are genuinely in flight at once"
+        )
+        XCTAssertTrue(store.isResolvingReservationStateForRemoval)
+
+        // The first read exits — the signal must stay `true`: a second real
+        // read is still running. This is the exact case a plain Boolean
+        // cleared incorrectly.
+        gateA.open()
+        _ = try await taskA.value
+        XCTAssertEqual(store.reservationStateResolutionCount, 1)
+        XCTAssertTrue(
+            store.isResolvingReservationStateForRemoval,
+            "one relevant read is still active; presentation must not settle to unavailable yet"
+        )
+
+        // Only once the last one exits does the signal settle.
+        gateB.open()
+        _ = try await taskB.value
+        XCTAssertEqual(store.reservationStateResolutionCount, 0)
+        XCTAssertFalse(store.isResolvingReservationStateForRemoval)
+    }
+
+    /// W4-R2 2026-09-06 same-day rereview: a gated read that ultimately
+    /// succeeds (an active reservation discovered) still balances the count,
+    /// and the in-flight signal carries no removal-eligibility authority of
+    /// its own — `hasResolvedReservationStateForRemoval`/`activeClaim` are
+    /// what actually change, exactly as before this correction.
+    func testGatedSuccessfulReadBalancesTheCountAndEstablishesReadinessNormally() async throws {
+        let store = RequestStore(
+            service: makeClaimService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            participantAuthorityProvider: { canonicalParticipantAuthorityFixture },
+            participantAuthorityRejected: {}
+        )
+        let gate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: activeReservationResponse(), gate: gate))
+
+        let task = Task { try await store.continueActiveReservationIfNeeded() }
+        await waitUntil { gate.isWaiting }
+        XCTAssertTrue(store.isResolvingReservationStateForRemoval)
+
+        gate.open()
+        _ = try await task.value
+
+        XCTAssertFalse(store.isResolvingReservationStateForRemoval)
+        XCTAssertEqual(store.reservationStateResolutionCount, 0)
+        XCTAssertNotNil(store.activeClaim, "the discovered reservation itself is unaffected by this correction")
+        XCTAssertTrue(store.hasResolvedReservationStateForRemoval)
+    }
+
+    /// W4-R2 2026-09-06 same-day rereview: cancellation is one of the exit
+    /// paths the count must balance on, matching the existing `defer` in
+    /// `continueActiveReservationIfNeeded()`.
+    func testCancellationOfAGatedReadBalancesTheCount() async throws {
+        let store = RequestStore(
+            service: makeClaimService(),
+            installationCredentialProvider: { "test-installation-credential" },
+            participantAuthorityProvider: { canonicalParticipantAuthorityFixture },
+            participantAuthorityRejected: {}
+        )
+        let gate = RequestFetchingGate()
+        ClaimFlowURLProtocol.enqueue(.response(data: Data(#"{"reservation":null}"#.utf8), gate: gate))
+
+        let task = Task { try await store.continueActiveReservationIfNeeded() }
+        await waitUntil { gate.isWaiting }
+        XCTAssertTrue(store.isResolvingReservationStateForRemoval)
+
+        task.cancel()
+        gate.open()
+        _ = try? await task.value
+
+        XCTAssertFalse(
+            store.isResolvingReservationStateForRemoval,
+            "a cancelled read has still exited, so it must not leave the count stuck"
+        )
+        XCTAssertEqual(store.reservationStateResolutionCount, 0)
     }
 
     /// Directly demonstrates the race the fix closes: at the instant Home
@@ -591,5 +763,18 @@ final class RemoveEmailTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: date)
+    }
+
+    private func waitUntil(
+        timeoutIterations: Int = 200,
+        condition: @MainActor () -> Bool
+    ) async {
+        for _ in 0..<timeoutIterations {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("Timed out waiting for condition")
     }
 }

@@ -194,6 +194,8 @@ struct SettingsView: View {
         "You’ll need to verify an NYU email again before posting or helping with a request. Your request and help history is not affected."
     static let removeEmailNotYetAvailableNotice =
         "Checking whether your email can be removed. Try again in a moment."
+    static let removeEmailUnavailableNotice =
+        "Remove Email is temporarily unavailable."
     static let removeEmailBlockedByReservationNotice =
         "You can’t remove your email while you have an active reservation or an in-progress request. Finish or release that first."
     static let removeEmailBlockedByPendingCreateNotice =
@@ -210,7 +212,9 @@ struct SettingsView: View {
 
     private var removeEmailBlockedNotice: String {
         if !requestStore.hasEstablishedRemovalSafety {
-            return Self.removeEmailNotYetAvailableNotice
+            return requestStore.isResolvingReservationStateForRemoval
+                ? Self.removeEmailNotYetAvailableNotice
+                : Self.removeEmailUnavailableNotice
         }
         if requestStore.activeClaim != nil {
             return Self.removeEmailBlockedByReservationNotice
@@ -221,6 +225,7 @@ struct SettingsView: View {
     private var removeEmailBlockedStatusKind: CommonPlateStatusKind {
         ContentView.removeEmailBlockedStatusKind(
             hasEstablishedRemovalSafety: requestStore.hasEstablishedRemovalSafety,
+            isResolvingReservationStateForRemoval: requestStore.isResolvingReservationStateForRemoval,
             hasActiveClaim: requestStore.activeClaim != nil
         )
     }
@@ -470,28 +475,20 @@ struct SettingsView: View {
     /// screenshot is actually sent.
     private var aiAssistanceSection: some View {
         VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
-            sectionHeading("AI ASSISTANCE")
+            sectionHeading("AI FEATURES")
 
-            VStack(alignment: .leading, spacing: 0) {
-                requestAlertsToggleRow(
-                    title: "Screenshot Assistance",
-                    isOn: aiAssistanceToggleBinding,
-                    isEnabled: true,
-                    accessibilityIdentifier: "settings-ai-assistance-toggle"
-                )
-
-                Text(Self.aiAssistanceExplanation)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, CommonPlateStyle.Metrics.settingsRowInset)
-                    .padding(.bottom, CommonPlateStyle.Spacing.xs)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // W4-R2: one named toggle, no permanent explanatory paragraph
+            // (superseded `aiAssistanceExplanation`). The required first-use
+            // third-party disclosure (`ScreenshotProposalDisclosureView`) is
+            // unchanged and still shown at the actual invocation flow.
+            requestAlertsToggleRow(
+                title: "Screenshot Assistance",
+                isOn: aiAssistanceToggleBinding,
+                isEnabled: true,
+                accessibilityIdentifier: "settings-ai-assistance-toggle"
+            )
         }
     }
-
-    static let aiAssistanceExplanation =
-        "When on, you can optionally fill in a food request from a Grubhub screenshot. CommonPlate sends the screenshot to OpenAI to read it — you always review and edit the result before posting, and manual entry always works either way."
 
     private var aiAssistanceToggleBinding: Binding<Bool> {
         Binding(

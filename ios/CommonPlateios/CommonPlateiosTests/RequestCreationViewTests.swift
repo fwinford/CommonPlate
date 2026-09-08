@@ -947,9 +947,11 @@ final class RequestCreationViewTests: XCTestCase {
     func testSuccessViewDoesNotReintroduceTheExpirationPolicy() throws {
         let successViewSource = try successViewDeclarationSource()
 
-        // The confirmation state itself is unchanged.
-        XCTAssertTrue(successViewSource.contains(#"Text("Request posted")"#))
-        XCTAssertTrue(successViewSource.contains(#"Button("Back to Home")"#))
+        // W4-R2: the confirmation state directly replaces Posting in the
+        // same centered locus with this exact copy, and carries no CTA — the
+        // dwell/native-dismissal sequence is the only continuation.
+        XCTAssertTrue(successViewSource.contains("Text(Self.successMessage)"))
+        XCTAssertFalse(successViewSource.contains("Button("))
 
         // No duration or expiration wording of any kind belongs on this
         // screen; that explanation lives solely at the timing choice.
@@ -960,6 +962,173 @@ final class RequestCreationViewTests: XCTestCase {
                 "success view must not restate timing/expiration policy: found \"\(forbidden)\""
             )
         }
+    }
+
+    /// W4-R2 2026-09-05 sync: `successSubtitle` ("It'll appear on Home as
+    /// Your Request.") is stale against H4's own committed behavior — a
+    /// requester with two or more other open owned requests sees the new
+    /// request only behind `See all N`, not inline, so the promise was no
+    /// longer always true. This is a pure removal with no invented
+    /// replacement copy: the checkmark icon and `successMessage` title remain
+    /// the entire accepted Success hierarchy.
+    @MainActor
+    func testSuccessSubtitlePromisingHomeAppearanceIsRemovedWithNoReplacementCopy() throws {
+        let source = try String(
+            contentsOf: repositoryFile("ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(source.contains("successSubtitle"))
+        XCTAssertFalse(source.contains("It\u{2019}ll appear on Home"))
+        XCTAssertFalse(source.contains("Your Request."))
+
+        let successViewSource = try successViewDeclarationSource()
+        XCTAssertEqual(
+            successViewSource.components(separatedBy: "Text(").count - 1,
+            1,
+            "the success view must render exactly one Text — the title — with no subtitle"
+        )
+    }
+
+    @MainActor
+    func testFinalSuccessDwellHapticFenceAndOpticalPlacement() throws {
+        // W4-R2 final READY contract: supersedes every earlier ~1.7-second
+        // requirement with ~1.6 seconds.
+        XCTAssertEqual(RequestFoodView.successDwellDuration, .milliseconds(1600))
+
+        let successViewSource = try successViewDeclarationSource()
+        XCTAssertTrue(successViewSource.contains("guard !hasAcknowledgedSuccess else { return }"))
+        XCTAssertEqual(
+            successViewSource.components(separatedBy: "CommonPlateHaptics.success()").count - 1,
+            1
+        )
+        XCTAssertTrue(successViewSource.contains(".padding(.bottom, 60)"))
+        XCTAssertTrue(successViewSource.contains("UIAccessibility.post("))
+        XCTAssertTrue(successViewSource.contains("try await Task.sleep(for: Self.successDwellDuration)"))
+        XCTAssertTrue(successViewSource.contains("onExit()"))
+    }
+
+    func testPickupNamePrecedesTimingWithoutHelperAndTimingKeepsExplanation() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(source.range(of: "private var requestForm: some View {"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "// MARK: - W4-R2 approved `Requester / Form Field` controls",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let requestFormSource = String(source[start.lowerBound..<end.lowerBound])
+        let pickup = try XCTUnwrap(requestFormSource.range(of: "label: Self.pickupNameLabel"))
+        let timing = try XCTUnwrap(requestFormSource.range(of: "Text(Self.timingLabel)"))
+
+        XCTAssertLessThan(pickup.lowerBound, timing.lowerBound)
+        XCTAssertFalse(requestFormSource.contains("Enter the name you want"))
+        XCTAssertFalse(requestFormSource.contains("placed under"))
+    }
+
+    /// W4-R2 2026-09-02 sync item 2: the persistent ASAP/Later educational
+    /// subtitles are superseded by the on-demand `ⓘ` explanation; the
+    /// distinct lapsed-Later-window/unavailability messaging is unaffected.
+    func testTimingHasNoPersistentEducationalSubtitles() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(source.range(of: "private var requestForm: some View {"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "// MARK: - W4-R2 approved `Requester / Form Field` controls",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let requestFormSource = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertFalse(requestFormSource.contains("Text(Self.asapTimingNotice)"))
+        XCTAssertFalse(requestFormSource.contains("request-form-expiration"))
+        XCTAssertFalse(requestFormSource.contains("Text(Self.scheduledWindowNotice)"))
+        XCTAssertFalse(requestFormSource.contains("scheduled-window-notice"))
+        XCTAssertFalse(requestFormSource.contains("Text(\"Selected:"))
+        XCTAssertFalse(requestFormSource.contains("request-selected-later-time"))
+
+        // The distinct lapsed-Later-window error/unavailability notice is not
+        // an educational subtitle and remains available where required.
+        XCTAssertTrue(requestFormSource.contains("Text(Self.scheduledUnavailableNotice)"))
+        XCTAssertTrue(requestFormSource.contains("scheduled-unavailable-notice"))
+    }
+
+    /// W4-R2 2026-09-02 sync item 4: the quiet on-demand Timing information
+    /// affordance — accessible, dismissible, and independent of the current
+    /// selection.
+    func testTimingInfoAffordancePresentsExactTitleAndBody() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(source.range(of: "private var requestForm: some View {"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "// MARK: - W4-R2 approved `Requester / Form Field` controls",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let requestFormSource = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(requestFormSource.contains("isPresentingTimingInfo = true"))
+        XCTAssertTrue(requestFormSource.contains("request-timing-info"))
+        XCTAssertTrue(requestFormSource.contains(".alert("))
+        XCTAssertTrue(requestFormSource.contains("Self.timingInfoTitle"))
+        XCTAssertTrue(requestFormSource.contains("Self.timingInfoBody"))
+
+        XCTAssertEqual(RequestFoodView.timingInfoTitle, "How timing works")
+        XCTAssertEqual(
+            RequestFoodView.timingInfoBody,
+            "ASAP starts now. Later starts at the time you choose. Requests stay open for 3 hours."
+        )
+    }
+
+    /// W4-R2 2026-09-02 sync item 3: the custom `Choose time` selection
+    /// becomes the sole on-screen representation of the effective custom
+    /// Later time — no separate `Selected:` sentence.
+    func testChooseTimeButtonBecomesTheSelectedCustomTimeLabel() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(source.range(of: "private func laterTimeChoices(quickTimes: [Date]) -> some View {"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func chooseTimeButton(isCustomTimeSelected: Bool) -> some View {",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let choicesSource = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(choicesSource.contains("isCustomTimeSelected"))
+        XCTAssertTrue(choicesSource.contains("chooseTimeButton(isCustomTimeSelected: isCustomTimeSelected)"))
+        XCTAssertFalse(choicesSource.contains("Text(\"Selected:"))
+        XCTAssertFalse(choicesSource.contains("request-selected-later-time"))
+    }
+
+    func testPostActionUsesOnlySmallPaddingBeyondScrollViewSafeArea() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains(".padding(.bottom, CommonPlateStyle.Spacing.xs)"))
+        XCTAssertFalse(source.contains(".padding(.bottom, CommonPlateStyle.Spacing.l)"))
     }
 
     /// Extracts the `successView` computed property's own source text — from
@@ -987,6 +1156,612 @@ final class RequestCreationViewTests: XCTestCase {
         }
 
         return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    /// Extracts `cancelScreenshotDisclosure()`'s own source text, matching
+    /// `successViewDeclarationSource()`'s bounded-extraction pattern.
+    private func cancelScreenshotDisclosureSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "private func cancelScreenshotDisclosure() {"
+        let endMarker = "@MainActor\n    private func beginScreenshotAnalysis("
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after cancelScreenshotDisclosure")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    /// W4-R2 item 19 final first-use consent/toggle coupling: Decline must
+    /// turn Screenshot Assistance Off (superseding the earlier statement that
+    /// Decline leaves the setting unchanged), record no consent, and start no
+    /// analysis — never mutate `draft`, which would leave manual Request Food
+    /// unusable.
+    func testDecliningTheFirstUseDisclosureTurnsScreenshotAssistanceOff() throws {
+        let source = try cancelScreenshotDisclosureSource()
+
+        XCTAssertTrue(source.contains("screenshotProposalStore.setAIAssistanceEnabled(false)"))
+        XCTAssertFalse(source.contains("recordThirdPartyConsent"))
+        XCTAssertFalse(source.contains("beginScreenshotAnalysis"))
+        XCTAssertFalse(source.contains("draft ="))
+        // W4-R2 2026-09-01 sync item 3: Decline must not open Screenshot
+        // Help or the photo picker either — disclosure now gates before both.
+        XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
+    }
+
+    /// Extracts `beginScreenshotAssistanceFlow()`'s own source text.
+    private func beginScreenshotAssistanceFlowSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "private func beginScreenshotAssistanceFlow() {"
+        let endMarker = "private func proceedAfterConsent() {"
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after beginScreenshotAssistanceFlow")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    /// W4-R2 2026-09-01 sync item 3, "First-use remote route ordering":
+    /// `Choose Grubhub screenshot` / `Change` must run the required
+    /// disclosure gate before anything else — the photo picker/Screenshot
+    /// Help never open directly from this function when consent is absent.
+    func testScreenshotAssistanceFlowGatesOnConsentBeforeAnythingElse() throws {
+        let source = try beginScreenshotAssistanceFlowSource()
+
+        XCTAssertTrue(source.contains("guard screenshotProposalStore.hasRecordedThirdPartyConsent else {"))
+        XCTAssertTrue(source.contains("isPresentingScreenshotDisclosure = true"))
+        XCTAssertTrue(source.contains("proceedAfterConsent()"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
+    }
+
+    /// Extracts `proceedAfterConsent()`'s own source text.
+    private func proceedAfterConsentSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "private func proceedAfterConsent() {"
+        let endMarker = "/// Local normalization"
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after proceedAfterConsent")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    /// W4-R2 2026-09-01 sync items 4-5: once consent exists, Screenshot Help
+    /// gates the picker only while Help-completion is independently false —
+    /// never coupled to or inferred from consent.
+    func testProceedAfterConsentGatesOnIndependentHelpCompletionState() throws {
+        let source = try proceedAfterConsentSource()
+
+        XCTAssertTrue(source.contains("if screenshotProposalStore.hasCompletedScreenshotHelp {"))
+        XCTAssertTrue(source.contains("isPresentingScreenshotPicker = true"))
+        XCTAssertTrue(source.contains("isPresentingScreenshotHelp = true"))
+    }
+
+    /// Extracts `acceptScreenshotDisclosure()`'s own source text.
+    private func acceptScreenshotDisclosureSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "private func acceptScreenshotDisclosure() {"
+        let endMarker = "/// W4-R2 item 19, final first-use consent/toggle coupling"
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after acceptScreenshotDisclosure")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    /// Accept records consent, then defers to the same shared
+    /// Help/picker continuation `beginScreenshotAssistanceFlow()` uses when
+    /// consent already existed — so "prior consent + unseen Help" and
+    /// "disclosure just accepted + unseen Help" behave identically.
+    func testAcceptingDisclosureRecordsConsentThenDefersToSharedContinuation() throws {
+        let source = try acceptScreenshotDisclosureSource()
+
+        XCTAssertTrue(source.contains("screenshotProposalStore.recordThirdPartyConsent()"))
+        XCTAssertTrue(source.contains("proceedAfterConsent()"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
+    }
+
+    /// W4-R2 2026-09-01 round-2 sync item 2: `Continue` must turn Screenshot
+    /// Assistance on, not merely record consent — this is what lets the
+    /// Off-state `Turn on Screenshot Assistance` entry point actually leave
+    /// Screenshot Assistance On once the requester accepts.
+    func testAcceptingDisclosureTurnsScreenshotAssistanceOn() throws {
+        let source = try acceptScreenshotDisclosureSource()
+
+        XCTAssertTrue(source.contains("screenshotProposalStore.setAIAssistanceEnabled(true)"))
+    }
+
+    /// Extracts `beginTurnOnScreenshotAssistanceFlow()`'s own source text.
+    private func beginTurnOnScreenshotAssistanceFlowSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "private func beginTurnOnScreenshotAssistanceFlow() {"
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: "\n    }", range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find the end of beginTurnOnScreenshotAssistanceFlow")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.upperBound])
+    }
+
+    /// W4-R2 2026-09-01 round-2 sync item 2: `Turn on Screenshot Assistance`
+    /// is a second entry point into the same disclosure/consent gate
+    /// `beginScreenshotAssistanceFlow()` already uses — consent absent shows
+    /// the disclosure; consent already recorded turns Screenshot Assistance
+    /// on directly and defers to the same shared continuation, without
+    /// requiring `isAIAssistanceEnabled` to already be true first (unlike
+    /// `beginScreenshotAssistanceFlow()`, this is the Off-originating entry
+    /// point).
+    func testTurnOnFlowGatesOnConsentAndTurnsAssistanceOnWhenAlreadyConsented() throws {
+        let source = try beginTurnOnScreenshotAssistanceFlowSource()
+
+        XCTAssertTrue(source.contains("guard screenshotProposalStore.hasRecordedThirdPartyConsent else {"))
+        XCTAssertTrue(source.contains("isPresentingScreenshotDisclosure = true"))
+        XCTAssertTrue(source.contains("screenshotProposalStore.setAIAssistanceEnabled(true)"))
+        XCTAssertTrue(source.contains("proceedAfterConsent()"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
+    }
+
+    /// W4-R2 2026-09-01 round-2 sync item 1: Off must show `Screenshot
+    /// Assistance` / `Off` / `Turn on Screenshot Assistance` — never the
+    /// disabled `Choose Grubhub screenshot` control or the withdrawn
+    /// `Screenshot Assistance is off` notice.
+    func testOffStateShowsTurnOnAffordanceNotADisabledControl() throws {
+        let source = try screenshotAssistanceRowSource()
+
+        XCTAssertTrue(source.contains("if !screenshotProposalStore.isAIAssistanceEnabled {"))
+        XCTAssertTrue(source.contains("beginTurnOnScreenshotAssistanceFlow()"))
+        XCTAssertTrue(source.contains(RequestFoodView.turnOnScreenshotAssistanceLabel))
+        XCTAssertTrue(source.contains(RequestFoodView.screenshotAssistanceOffLabel))
+        XCTAssertTrue(source.contains("request-screenshot-turn-on"))
+        XCTAssertFalse(source.contains("screenshotOffNotice"))
+        XCTAssertFalse(source.contains("Screenshot Assistance is off"))
+        XCTAssertFalse(source.contains("request-screenshot-disabled-notice"))
+    }
+
+    /// W4-R2 2026-09-02 sync item 1: `Off` is status text only — no
+    /// gesture/tap target may be attached to it, and the row/header must not
+    /// become tappable. `Turn on Screenshot Assistance` remains the sole
+    /// interactive opt-in affordance.
+    func testOffLabelIsStaticTextWithNoAttachedInteraction() throws {
+        let source = try screenshotAssistanceRowSource()
+
+        let headerStart = try XCTUnwrap(source.range(of: "HStack {"))
+        let headerEnd = try XCTUnwrap(
+            source.range(
+                of: "if !screenshotProposalStore.isAIAssistanceEnabled {",
+                range: headerStart.upperBound..<source.endIndex
+            )
+        )
+        let headerSource = String(source[headerStart.lowerBound..<headerEnd.lowerBound])
+
+        // The header HStack renders `Text(Self.screenshotAssistanceTitle)`
+        // and the `Optional`/`Off` label as plain `Text`, never a `Button`,
+        // `.onTapGesture`, or an added button accessibility trait.
+        XCTAssertTrue(headerSource.contains("Self.screenshotAssistanceOffLabel"))
+        XCTAssertFalse(headerSource.contains("Button"))
+        XCTAssertFalse(headerSource.contains(".onTapGesture"))
+        XCTAssertFalse(headerSource.contains(".accessibilityAddTraits(.isButton)"))
+
+        // No tap gesture exists anywhere in the row — the only interactive
+        // control across every state is a native `Button`.
+        XCTAssertFalse(source.contains(".onTapGesture"))
+    }
+
+    /// The Off branch must not also render the ordinary Choose/Change
+    /// button or checked-result row underneath it — those remain On-only.
+    func testOffStateBranchIsMutuallyExclusiveWithTheOnStateControls() throws {
+        let source = try screenshotAssistanceRowSource()
+
+        guard let offRange = source.range(of: "if !screenshotProposalStore.isAIAssistanceEnabled {") else {
+            XCTFail("expected to find the Off branch")
+            return
+        }
+        guard let elseRange = source.range(
+            of: "} else if screenshotChecked && !screenshotProposalStore.isApplying {",
+            range: offRange.upperBound..<source.endIndex
+        ) else {
+            XCTFail("expected to find the On-state branch immediately following Off")
+            return
+        }
+        let offBranch = String(source[offRange.upperBound..<elseRange.lowerBound])
+
+        XCTAssertFalse(offBranch.contains(RequestFoodView.screenshotChooseLabel))
+        XCTAssertFalse(offBranch.contains("request-screenshot-picker"))
+        XCTAssertFalse(offBranch.contains("request-screenshot-checked-row"))
+    }
+
+    /// W4-R2 2026-09-01 sync item 5: `Got it` — and only `Got it` — records
+    /// Screenshot Help completion, immediately followed by opening the photo
+    /// picker (the flow this education was blocking).
+    func testGotItRecordsHelpCompletionAndOpensThePicker() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        guard let startRange = source.range(of: "ScreenshotHelpView {") else {
+            XCTFail("expected to find the ScreenshotHelpView onDismiss closure")
+            return
+        }
+        guard let endRange = source.range(of: "\n                    }", range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find the end of the onDismiss closure")
+            return
+        }
+        let closureBody = String(source[startRange.upperBound..<endRange.lowerBound])
+
+        XCTAssertTrue(closureBody.contains("screenshotProposalStore.recordScreenshotHelpCompleted()"))
+        XCTAssertTrue(closureBody.contains("isPresentingScreenshotHelp = false"))
+        XCTAssertTrue(closureBody.contains("isPresentingScreenshotPicker = true"))
+    }
+
+    /// W4-R2 2026-09-01 sync item 3: both the initial `Choose Grubhub
+    /// screenshot` action and the post-analysis `Change` action must run the
+    /// same gated flow — neither may open the photo picker directly.
+    func testChooseAndChangeBothRunTheGatedFlowNotADirectPicker() throws {
+        let source = try screenshotAssistanceRowSource()
+
+        XCTAssertFalse(source.contains("PhotosPicker("))
+        let callSites = source.components(separatedBy: "Button {\n").count - 1
+        XCTAssertGreaterThanOrEqual(callSites, 2, "expected both Choose and Change to be Button-driven")
+        let calls = source.components(separatedBy: "beginScreenshotAssistanceFlow()\n").count - 1
+        XCTAssertEqual(calls, 2, "expected exactly the Choose and Change actions to call beginScreenshotAssistanceFlow()")
+    }
+
+    /// W4-R2 2026-08-31 sync: item 21's three explanatory second-line
+    /// outcomes are withdrawn — no dynamic explanatory copy remains in the
+    /// completed-result presentation, only the compact `✓ Screenshot
+    /// checked` label and a `Change` action.
+    func testScreenshotAssistanceAcknowledgementSecondLineCopyIsWithdrawn() throws {
+        let source = try screenshotAssistanceRowSource()
+
+        XCTAssertFalse(source.contains("I found suggestions for a few blank fields."))
+        XCTAssertFalse(source.contains("Everything I found was already filled in, so nothing changed."))
+        XCTAssertFalse(source.contains("I checked the screenshot, but didn’t find anything new to suggest."))
+        XCTAssertTrue(source.contains(RequestFoodView.screenshotCheckedLabel))
+        XCTAssertTrue(source.contains(RequestFoodView.screenshotChangeLabel))
+    }
+
+    /// Extracts `beginScreenshotAnalysis(...)`'s own source text, matching
+    /// `cancelScreenshotDisclosureSource()`'s bounded-extraction pattern.
+    private func beginScreenshotAnalysisSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "@MainActor\n    private func beginScreenshotAnalysis("
+        let endMarker = "static let afterglowDuration"
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after beginScreenshotAnalysis")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    /// W4-R2 2026-08-31 sync: derives the compact result row purely from
+    /// S1's own already-committed `outcome.eligible` — an ineligible
+    /// (unsupported) outcome keeps its existing dedicated notice instead of
+    /// showing the checked row, and no new S1 authority/call is introduced
+    /// to make the distinction.
+    func testScreenshotAcknowledgementIsDerivedOnlyFromExistingS1OutcomeWithoutNewAuthority() throws {
+        let source = try beginScreenshotAnalysisSource()
+
+        XCTAssertTrue(source.contains("if outcome.eligible {"))
+        XCTAssertTrue(source.contains("screenshotChecked = true"))
+        // No second `analyzeScreenshot`/`apply` call and no store-notice
+        // mutation: the result row reads S1's existing result, it never
+        // asks S1 a new question or writes new S1 state.
+        XCTAssertEqual(source.components(separatedBy: "screenshotProposalStore.analyzeScreenshot").count, 2)
+        XCTAssertEqual(source.components(separatedBy: "screenshotProposalStore.apply(").count, 2)
+        XCTAssertFalse(source.contains("screenshotProposalStore.notice ="))
+    }
+
+    /// Extracts `screenshotAssistanceRow`'s own source text, matching the
+    /// same bounded-extraction pattern used above.
+    private func screenshotAssistanceRowSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "private var screenshotAssistanceRow: some View {"
+        let endMarker = "static let screenshotAssistanceTitle"
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after screenshotAssistanceRow")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
+    }
+
+    /// The store's existing `.noUsefulExtraction` notice box would otherwise
+    /// duplicate what the compact `✓ Screenshot checked` result row already
+    /// communicates; the row must show only the result row for that case,
+    /// not both stacked.
+    func testNoUsefulExtractionNoticeBoxIsSuppressedInFavorOfTheAcknowledgement() throws {
+        let source = try screenshotAssistanceRowSource()
+
+        XCTAssertTrue(source.contains("notice != .noUsefulExtraction"))
+        XCTAssertTrue(source.contains("screenshotChecked"))
+        XCTAssertTrue(source.contains("Screenshot checked"))
+    }
+
+    /// W4-R2 2026-08-31 sync: `Change` is the row's own actionable affordance
+    /// for selecting/analyzing another screenshot once one has been checked.
+    func testScreenshotCheckedRowOffersAChangeAction() throws {
+        let source = try screenshotAssistanceRowSource()
+
+        XCTAssertTrue(source.contains("request-screenshot-checked-row"))
+        XCTAssertTrue(source.contains("request-screenshot-change"))
+    }
+
+    /// W4-R2 2026-08-31 sync "manual clear": manually clearing a food-request
+    /// or location field back to empty must unlatch its manual-edit flag —
+    /// not leave it permanently requester-owned-empty — so a later screenshot
+    /// suggestion is eligible to fill it again.
+    func testManuallyClearingAFieldUnlatchesItForFutureScreenshotSuggestions() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        guard let foodRange = source.range(of: "private var foodRequestBinding: Binding<String> {") else {
+            XCTFail("expected to find foodRequestBinding")
+            return
+        }
+        let foodTail = String(source[foodRange.upperBound...].prefix(300))
+        XCTAssertTrue(
+            foodTail.contains("hasManuallyEditedFoodRequest = !newValue.isEmpty"),
+            "clearing food request back to \"\" must unlatch, not permanently latch, manual ownership"
+        )
+
+        guard let locationRange = source.range(of: "private var selectedDiningSpotBinding: Binding<DiningSpot?> {") else {
+            XCTFail("expected to find selectedDiningSpotBinding")
+            return
+        }
+        let locationTail = String(source[locationRange.upperBound...].prefix(300))
+        XCTAssertTrue(
+            locationTail.contains("hasManuallyEditedLocation = newValue != nil"),
+            "selecting nil (\"Select a spot\") must unlatch, not permanently latch, manual ownership"
+        )
+    }
+
+    /// W4-R2 2026-08-31 sync "Bottom Continuity": the pushed Request Food
+    /// entry plays a brief, bounded settle-in on first appearance, never
+    /// gates interactivity on it, and Reduce Motion skips it entirely.
+    func testRequestFoodEntrySettleInIsBoundedAndSkipsUnderReduceMotion() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodEntryView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("hasSettled"))
+        XCTAssertTrue(source.contains("reduceMotion"))
+        XCTAssertTrue(source.contains(".opacity(hasSettled || reduceMotion ? 1 : 0)"))
+        // Still the same pushed destination — `.form` continues to return
+        // `RequestFoodView(...)` directly, not a new sheet/modal wrapper.
+        XCTAssertTrue(source.contains("case .form:"))
+    }
+
+    /// W4-R2 2026-09-05 sync item 8: Request Food's own local Bottom
+    /// Continuity settle above (never gated on hit testing, per its own
+    /// long-standing comment) is now this route's sole entrance cue —
+    /// `ContentView`'s shared `SoftFlowEnterDestination` no longer plays its
+    /// own duplicate opacity/offset settle or hit-testing gate for
+    /// `.requestFood` specifically, while every other route (Settings,
+    /// onboarding) keeps that shared wrapper's existing entrance untouched.
+    func testRequestFoodIsTheOnlyRouteThatSuppressesTheSharedEntranceWrappersOwnSettle() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/ContentView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("var playsOwnSettle: Bool = true"))
+        XCTAssertTrue(source.contains("playsOwnSettle: route != .requestFood"))
+        XCTAssertTrue(source.contains(".opacity(playsOwnSettle ? (hasEntered ? 1 : 0) : 1)"))
+        XCTAssertTrue(source.contains(".allowsHitTesting(playsOwnSettle ? hasEntered : true)"))
+        // The onboarding walkthrough destination passes no `playsOwnSettle`
+        // argument at all, so it keeps the wrapper's own default (`true`) —
+        // its existing settle/hit-testing gate is unchanged by this fix.
+        let walkthroughCallSite = String(repeating: " ", count: 20) + "SoftFlowEnterDestination(\n"
+            + String(repeating: " ", count: 24) + "reduceMotion: reduceMotion,\n"
+            + String(repeating: " ", count: 24) + "shouldAnimate: flowPresentation == .walkthrough(intent)\n"
+            + String(repeating: " ", count: 20) + ") {"
+        XCTAssertTrue(source.contains(walkthroughCallSite))
+    }
+
+    /// W4-R2 2026-08-31 sync "Quiet Settle": the Later-controls reveal/hide
+    /// animation lives in its own subtree, never sharing an `.animation`
+    /// modifier with `timingControl`'s segment selection — so the segment
+    /// pill itself remains unanimated, matching the existing "no authored
+    /// segment-selection animation" contract.
+    func testQuietSettleAnimationNeverScopesOverTheTimingSegmentControl() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        guard let controlRange = source.range(of: "private func timingControl(timingOptions: [RequestTiming]) -> some View {") else {
+            XCTFail("expected to find timingControl")
+            return
+        }
+        let controlBody = String(source[controlRange.upperBound...].prefix(900))
+        XCTAssertFalse(
+            controlBody.contains(".animation("),
+            "the segment pill itself must remain governed by no animation modifier"
+        )
+
+        XCTAssertTrue(source.contains("quietSettleAnimation"))
+        XCTAssertTrue(source.contains("reduceMotion ? nil : Self.quietSettleAnimation, value: draft.timing"))
+    }
+
+    /// W4-R2 2026-09-02 physical-walkthrough sync (stable Timing footprint):
+    /// the Later-controls reveal is now always mounted — never conditionally
+    /// inserted/removed via `if draft.timing == .later` — so its layout
+    /// height is reserved identically in ASAP and Later and `Post request`
+    /// no longer travels between them. Quiet Settle's visual motion is
+    /// reproduced with the same values `QuietSettleModifier` used, driven as
+    /// an ordinary `.opacity`/`.offset` state change instead of a
+    /// `.transition`, since transitions only fire on insertion/removal.
+    func testTimingFootprintIsStableAcrossASAPAndLater() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("let isLaterActive = draft.timing == .later && isScheduledTimingAvailable"))
+        XCTAssertTrue(source.contains(".opacity(isLaterActive ? 1 : 0)"))
+        XCTAssertTrue(source.contains(".offset(y: isLaterActive ? 0 : 8)"))
+        XCTAssertTrue(source.contains(".allowsHitTesting(isLaterActive)"))
+        XCTAssertTrue(source.contains(".accessibilityHidden(!isLaterActive)"))
+
+        // The reveal is no longer gated behind an `if` that would remove it
+        // (and its reserved height) from the tree in ASAP mode.
+        XCTAssertFalse(source.contains("if draft.timing == .later && isScheduledTimingAvailable {"))
+        XCTAssertFalse(source.contains("quietSettleTransition"))
+    }
+
+    /// W4-R2 final walkthrough sync: Screenshot Help must actually read as
+    /// centered against the full device screen, not merely the safe content
+    /// area beneath the pushed `Request Food` navigation bar — the dimming
+    /// layer and the modal must share one `ignoresSafeArea()` container
+    /// rather than the dimming alone ignoring safe areas.
+    func testScreenshotHelpOverlayCentersAgainstTheFullScreenNotJustTheSafeContentArea() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        guard let startRange = source.range(of: "if isPresentingScreenshotHelp {") else {
+            XCTFail("expected to find the Screenshot Help overlay")
+            return
+        }
+        let overlaySource = String(source[startRange.lowerBound...])
+        guard let closingRange = overlaySource.range(of: "\n            }") else {
+            XCTFail("expected to find the overlay's closing brace")
+            return
+        }
+        let block = String(overlaySource[overlaySource.startIndex..<closingRange.upperBound])
+
+        XCTAssertTrue(block.contains("ZStack {"))
+        XCTAssertTrue(block.contains(".ignoresSafeArea()"))
+        // Exactly one `ignoresSafeArea()` covering both the dimming Color and
+        // the modal — not a second one scoped only to the dimming layer,
+        // which is what previously centered the modal against the narrower
+        // safe content area instead of the whole screen.
+        XCTAssertEqual(block.components(separatedBy: ".ignoresSafeArea()").count, 2)
+    }
+
+    /// W4-R2 final walkthrough sync: Post request must be the shared
+    /// restrained rounded-rectangle primary action, not the system
+    /// `.borderedProminent` capsule/pill treatment.
+    func testPostRequestUsesTheSharedPrimaryActionTreatmentNotTheSystemCapsuleStyle() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        guard let range = source.range(of: "Text(Self.postRequestLabel)") else {
+            XCTFail("expected to find the Post request label")
+            return
+        }
+        let tail = String(source[range.upperBound...].prefix(400))
+
+        XCTAssertTrue(tail.contains(".commonPlatePrimaryAction()"))
+        XCTAssertFalse(tail.contains(".buttonStyle(.borderedProminent)"))
+        XCTAssertFalse(tail.contains(".controlSize(.large)"))
     }
 
     /// A `201` proves the request was persisted, not that anyone will take it.
@@ -1217,6 +1992,30 @@ final class RequestCreationViewTests: XCTestCase {
         }
     }
 
+    // MARK: - W4-R2 2026-08-31 round-2 sync: Posting/Success Back suppression
+
+    @MainActor
+    func testBackNavigationIsSuppressedOnlyForPostingAndSuccess() {
+        XCTAssertTrue(RequestFoodView.shouldSuppressBackNavigation(presentation: .posting))
+        XCTAssertTrue(RequestFoodView.shouldSuppressBackNavigation(presentation: .success))
+
+        XCTAssertFalse(RequestFoodView.shouldSuppressBackNavigation(presentation: .form))
+        XCTAssertFalse(
+            RequestFoodView.shouldSuppressBackNavigation(presentation: .blockedByUnresolvedCreateAmbiguity)
+        )
+        XCTAssertFalse(
+            RequestFoodView.shouldSuppressBackNavigation(presentation: .checkingCreateAmbiguity)
+        )
+        XCTAssertFalse(
+            RequestFoodView.shouldSuppressBackNavigation(presentation: .checkingAvailability)
+        )
+        XCTAssertFalse(
+            RequestFoodView.shouldSuppressBackNavigation(
+                presentation: .unavailable(message: "x", retryable: true)
+            )
+        )
+    }
+
     // MARK: - Availability gating
 
     @MainActor
@@ -1365,6 +2164,128 @@ final class RequestCreationViewTests: XCTestCase {
                 )
             }
         }
+    }
+
+    // MARK: - W4-R2 Posting / D1 checking states
+
+    /// An ordinary in-flight submission replaces the form with the centered
+    /// Posting state, regardless of what the availability probe last
+    /// reported — the same "outranks availability presentation" shape
+    /// `didCreateRequest` already has above.
+    @MainActor
+    func testInFlightCreateShowsPostingRegardlessOfAvailability() {
+        for availability in [
+            RequestCreationAvailability.unknown,
+            .available,
+            .paused,
+            .unavailable
+        ] {
+            XCTAssertEqual(
+                RequestFoodView.presentation(
+                    hasUnresolvedCreateAmbiguity: false,
+                    availability: availability,
+                    isCheckingAvailability: false,
+                    hasAttemptedAvailabilityCheck: true,
+                    didCreateRequest: false,
+                    isCreating: true
+                ),
+                .posting
+            )
+        }
+    }
+
+    /// A confirmed creation always outranks a merely in-flight one: once
+    /// `didCreateRequest` is true, `.success` wins even if `isCreating` is
+    /// still momentarily true in the same state snapshot.
+    @MainActor
+    func testConfirmedCreateOutranksInFlightPosting() {
+        XCTAssertEqual(
+            RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: false,
+                availability: .available,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: true,
+                didCreateRequest: true,
+                isCreating: true
+            ),
+            .success
+        )
+    }
+
+    /// D1 reconciliation actively running reads as "Checking your request",
+    /// distinct from the already-resolved-unresolved blocked state.
+    @MainActor
+    func testUnresolvedAmbiguityWhileCreatingShowsCheckingNotBlocked() {
+        XCTAssertEqual(
+            RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: true,
+                availability: .available,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: true,
+                didCreateRequest: false,
+                isCreating: true
+            ),
+            .checkingCreateAmbiguity
+        )
+    }
+
+    /// Once reconciliation stops without resolving, the same unresolved
+    /// ambiguity reads as the static blocked state instead.
+    @MainActor
+    func testUnresolvedAmbiguityNotCreatingShowsBlocked() {
+        XCTAssertEqual(
+            RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: true,
+                availability: .available,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: true,
+                didCreateRequest: false,
+                isCreating: false
+            ),
+            .blockedByUnresolvedCreateAmbiguity
+        )
+    }
+
+    /// Every existing call site that never passes `isCreating` must keep
+    /// reproducing exactly the presentation it always has — the default
+    /// parameter must not silently change any pre-existing caller's result.
+    @MainActor
+    func testOmittingIsCreatingDefaultsToPreR2Behavior() {
+        XCTAssertEqual(
+            RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: false,
+                availability: .available,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: true,
+                didCreateRequest: false
+            ),
+            .form
+        )
+    }
+
+    // MARK: - W4-R2 definitive-failure summary
+
+    @MainActor
+    func testDraftSummaryRestatesOnlyAlreadyEnteredValues() throws {
+        let draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
+            foodRequest: "Chicken bowl",
+            pickupName: "Taylor",
+            timing: .asap,
+            mealSwipes: 2
+        )
+        let summary = RequestFoodView.draftSummaryText(for: draft)
+
+        XCTAssertTrue(summary.contains("Palladium"))
+        XCTAssertTrue(summary.contains("2 meal swipes"))
+        XCTAssertTrue(summary.contains("ASAP"))
+    }
+
+    // MARK: - W4-R2 D1/ambiguous exit copy
+
+    @MainActor
+    func testGoToHomeIsTheExactAmbiguousExitLabel() {
+        XCTAssertEqual(RequestFoodView.goToHomeLabel, "Go to Home")
     }
 
     // MARK: - Availability probe state machine
@@ -1900,6 +2821,180 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(RequestFoodView.showsReturnHomeAction(for: presented))
     }
 
+    // MARK: - Independent-review fix: write-uncertain REQUEST_CREATION_FAILED
+    // must not fire the definitive-failure haptic
+
+    /// The exact integrated path the review flagged: `createRequestRoute.ts`
+    /// can return `REQUEST_CREATION_FAILED` from a path that follows a write
+    /// attempt, so `RequestStore.createRequest` (unlike the rate-limit case
+    /// above) authoritatively arms `hasUnresolvedCreateAmbiguity` for it —
+    /// while the view's own local `RequestCreatePresentationError.map`
+    /// resolves the identical code to `.creationFailed`, a case that reads as
+    /// definitive on its own. Proven end to end through the real store
+    /// against a stubbed backend response, then through the real mapping and
+    /// the real haptic-gating predicate, so nothing here hand-waves the
+    /// store's actual D1 state.
+    @MainActor
+    func testWriteUncertainCreationFailedArmsAmbiguityAndSuppressesTheFailureHaptic() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: Data(#"""
+            {"error":{"code":"REQUEST_CREATION_FAILED","message":"Unable to create request","fields":null}}
+            """#.utf8)
+        ))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("A write-uncertain create must still be thrown to the caller")
+        } catch RequestServiceError.serverError(let code, _) {
+            XCTAssertEqual(code, "REQUEST_CREATION_FAILED")
+        } catch {
+            XCTFail("Unexpected create error: \(error)")
+        }
+
+        // The store's own authority: unresolved, exactly like an ambiguous
+        // transport outcome — never retired as a definitive non-create.
+        XCTAssertTrue(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertNotNil(store.unresolvedCreateError)
+
+        let mapped = RequestCreatePresentationError.map(
+            RequestServiceError.serverError(code: "REQUEST_CREATION_FAILED", message: "Unable to create request")
+        )
+        XCTAssertEqual(mapped, .creationFailed, "the local mapping alone still reads as definitive")
+
+        // The bug: deciding the haptic from `mapped` alone would fire it here.
+        // The fix: the store's real, current `hasUnresolvedCreateAmbiguity`
+        // overrides that local reading.
+        XCTAssertFalse(
+            RequestFoodView.isDefinitiveNonCreate(
+                mapped: mapped,
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+            ),
+            "an unresolved write must never be treated as a definitive non-create"
+        )
+    }
+
+    /// A genuinely definitive non-create (no store ambiguity armed) must
+    /// still receive the accepted failure haptic/presentation — the fix must
+    /// not silence real failures along with the write-uncertain one above.
+    @MainActor
+    func testGenuinelyDefinitiveFailureStillQualifiesForTheFailureHaptic() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 400,
+            data: Data(#"""
+            {"error":{"code":"INVALID_REQUEST","message":"backend detail","fields":null}}
+            """#.utf8)
+        ))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("An invalid request must be refused")
+        } catch RequestServiceError.serverError(let code, _) {
+            XCTAssertEqual(code, "INVALID_REQUEST")
+        } catch {
+            XCTFail("Unexpected create error: \(error)")
+        }
+
+        XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
+
+        let mapped = RequestCreatePresentationError.map(
+            RequestServiceError.serverError(code: "INVALID_REQUEST", message: "backend detail")
+        )
+        XCTAssertEqual(mapped, .invalidRequest)
+        XCTAssertTrue(
+            RequestFoodView.isDefinitiveNonCreate(
+                mapped: mapped,
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+            ),
+            "a genuine definitive non-create must still receive the failure haptic/presentation"
+        )
+    }
+
+    /// W4-R2 2026-09-05 sync item 6: drives the real caught error through the
+    /// exact production-owned function `RequestFoodView.submit()`'s real
+    /// catch path calls — `submissionFailureOutcome(for:hasUnresolvedCreateAmbiguity:)`
+    /// — rather than independently reconstructing the same map/gate decision
+    /// by hand, so this is provably exercising what `submit()` itself does,
+    /// not a second parallel decision that could silently drift from it.
+    @MainActor
+    func testRealAmbiguousCreationFailedOutcomeThroughTheProductionFunctionSuppressesTheHaptic() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 500,
+            data: Data(#"""
+            {"error":{"code":"REQUEST_CREATION_FAILED","message":"Unable to create request","fields":null}}
+            """#.utf8)
+        ))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("A write-uncertain create must still be thrown to the caller")
+        } catch {
+            let outcome = RequestFoodView.submissionFailureOutcome(
+                for: error,
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+            )
+            XCTAssertEqual(outcome.mapped, .creationFailed, "the local mapping alone still reads as definitive")
+            XCTAssertFalse(
+                outcome.isDefinitiveFailure,
+                "an unresolved write must never be treated as a definitive non-create"
+            )
+        }
+        XCTAssertTrue(store.hasUnresolvedCreateAmbiguity)
+    }
+
+    /// The definitive-failure counterpart, through the same production
+    /// function: a genuine `INVALID_REQUEST` refusal must still fire the
+    /// accepted failure haptic/presentation.
+    @MainActor
+    func testRealDefinitiveInvalidRequestOutcomeThroughTheProductionFunctionFiresTheFailureHaptic() async {
+        let store = makeStore()
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 400,
+            data: Data(#"""
+            {"error":{"code":"INVALID_REQUEST","message":"backend detail","fields":null}}
+            """#.utf8)
+        ))
+
+        do {
+            try await store.createRequest(makeCreatePayload())
+            XCTFail("An invalid request must be refused")
+        } catch {
+            let outcome = RequestFoodView.submissionFailureOutcome(
+                for: error,
+                hasUnresolvedCreateAmbiguity: store.hasUnresolvedCreateAmbiguity
+            )
+            XCTAssertEqual(outcome.mapped, .invalidRequest)
+            XCTAssertTrue(
+                outcome.isDefinitiveFailure,
+                "a genuine definitive non-create must still receive the failure haptic/presentation"
+            )
+        }
+        XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
+    }
+
+    /// A real ambiguous transport outcome (the pre-existing `.ambiguous`
+    /// case) must also remain excluded from the failure haptic, regardless of
+    /// the new store-authority check — the fix adds a second, wider gate; it
+    /// does not narrow the original one.
+    @MainActor
+    func testAmbiguousTransportOutcomeStillSuppressesTheFailureHaptic() {
+        let mapped = RequestCreatePresentationError.map(
+            RequestServiceError.ambiguousCreateOutcome(underlying: URLError(.timedOut))
+        )
+        XCTAssertEqual(mapped, .ambiguous)
+        XCTAssertFalse(
+            RequestFoodView.isDefinitiveNonCreate(mapped: mapped, hasUnresolvedCreateAmbiguity: true)
+        )
+        // Even if the store's ambiguity flag were somehow already clear by
+        // the time this renders, `.ambiguous` itself must still suppress it.
+        XCTAssertFalse(
+            RequestFoodView.isDefinitiveNonCreate(mapped: mapped, hasUnresolvedCreateAmbiguity: false)
+        )
+    }
+
     /// A bare 404 means this route does not exist at this base URL — a
     /// misconfigured host or an unmounted route. Nothing was created, so it must
     /// not claim the request may already exist.
@@ -1939,7 +3034,9 @@ final class RequestCreationViewTests: XCTestCase {
             RequestFetchingURLProtocol.capturedRequestedPaths,
             ["/api/request", "/api/request"]
         )
-        XCTAssertEqual(store.requests.map(\.id), ["after-404"])
+        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
+        // `store.requests` ahead of H4's own authoritative fetch.
+        XCTAssertTrue(store.requests.isEmpty)
     }
 
     // MARK: - Genuine indeterminacy stays ambiguous
@@ -2086,12 +3183,25 @@ final class RequestCreationViewTests: XCTestCase {
         """
     }
 
+    /// W4-R2 2026-09-05 sync item 5: `RequestStore.createRequest` no longer
+    /// inserts into `store.requests` (H4's own authoritative fetch owns
+    /// that), so decoded-shape assertions call the same production
+    /// `RequestService.createRequest` the store itself calls, directly — it
+    /// already returns the decoded `FoodRequest`, matching
+    /// `RequestFetchingTests.testCreateDecodesWrappedCanonicalResponseAndMapsOpenStatus`'s
+    /// own pattern.
     @MainActor
     private func decodedCreatedRequest(_ data: Data) async throws -> FoodRequest {
-        let store = makeStore()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RequestFetchingURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let client = APIClient(
+            configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
+            session: session
+        )
+        let service = RequestService(client: client)
         RequestFetchingURLProtocol.enqueue(.response(statusCode: 201, data: data))
-        try await store.createRequest(makeCreatePayload())
-        return try XCTUnwrap(store.requests.first)
+        return try await service.createRequest(makeCreatePayload())
     }
 
     /// Mirrors the production call exactly, guard included, so the availability

@@ -32,9 +32,13 @@ enum ScreenshotProposalNotice: Equatable {
         case .invalidImage:
             return "Choose a single Grubhub cart or order-detail screenshot."
         case .unsupportedScreenshot:
-            return "That screenshot type isn’t supported yet. Choose a Grubhub cart or order-detail screenshot, or fill out the form manually."
+            // Approved Figma `Requester / Screenshot Assistance,
+            // State=Unsupported` recovery-note wording.
+            return "This screenshot doesn’t have enough request details. Try another screenshot or continue manually."
         case .noUsefulExtraction:
-            return "We couldn’t find anything usable in that screenshot. You can still fill out the form manually."
+            // Approved Figma `Requester / Screenshot Assistance,
+            // State=No useful extraction` recovery-note wording.
+            return "CommonPlate couldn’t find request details in this screenshot. Your form is unchanged."
         case .unavailable:
             return "We couldn’t analyze that screenshot right now. You can still fill out the form manually."
         }
@@ -58,25 +62,45 @@ enum ScreenshotProposalNotice: Equatable {
 }
 
 /// Explicit requester-interaction provenance for the three allowlisted
-/// proposal fields, owned by `RequestFoodView` and passed into every store
-/// call that reads or clears them.
+/// proposal fields, owned beside the process/session draft and passed into
+/// every store call that reads or clears them.
 ///
 /// Deliberately not inferred from value equality (review finding: value
 /// equality is wrong whenever a requester types then clears a field while a
-/// proposal is pending, changes an AI value and later manually returns to
-/// the same value, or manually clears a location back to `nil` — every one
-/// of those must retire AI ownership, and none of them is distinguishable
-/// from "never touched" by comparing values alone). Each flag is set by
-/// exactly one thing: a real user interaction with that field's control
-/// (`RequestFoodView`'s custom bindings). A store-applied proposal write
-/// never sets it — that is what keeps a programmatic AI write from ever
-/// being mistaken for a manual edit. Once true, a flag is never reset for
-/// the lifetime of one `RequestFoodView` instance: manual ownership, once
-/// established, is permanent.
+/// proposal is pending, or changes an AI value and later manually returns to
+/// the same value — neither is distinguishable from "never touched" by
+/// comparing values alone). Each flag is set by exactly one thing: a real
+/// user interaction with that field's control (`RequestFoodView`'s custom
+/// bindings). A store-applied proposal write never sets it — that is what
+/// keeps a programmatic AI write from ever being mistaken for a manual edit.
+///
+/// A flag set by a nonempty manual value remains set for this logical draft,
+/// including route recreation, until an authoritatively successful creation
+/// clears the completed draft. It is the one exception (W4-R2 2026-08-31
+/// sync, "manual clear"): manually clearing a field back to empty — typing
+/// text back to `""`, or picking `nil` ("Select a spot") for location —
+/// unlatches the flag. The empty field is not permanently requester-owned;
+/// it is eligible for a future screenshot suggestion again, exactly like a
+/// field that was never touched.
 struct ScreenshotFieldManualEditState: Equatable {
     var hasManuallyEditedLocation = false
     var hasManuallyEditedFoodRequest = false
     var hasManuallyEditedMealSwipes = false
+}
+
+/// Which of the three allowlisted proposal fields a single `apply(...)` call
+/// actually wrote into the draft (W4-R2 presentation plumbing only — this
+/// carries no additional S1 authority). `RequestFoodView` uses this purely to
+/// drive its own provenance caption ("Filled from screenshot") and brief
+/// afterglow on exactly the fields that changed; it has no bearing on what
+/// `apply(...)` is allowed to write, which remains governed entirely by the
+/// allowlist and manual-precedence rules below.
+struct ScreenshotProposalAppliedFields: Equatable {
+    var location = false
+    var foodRequest = false
+    var mealSwipes = false
+
+    var isEmpty: Bool { !location && !foodRequest && !mealSwipes }
 }
 
 /// A specific screenshot selection's identity, minted synchronously by
@@ -99,6 +123,11 @@ final class ScreenshotProposalStore: ObservableObject {
     @Published private(set) var notice: ScreenshotProposalNotice?
     @Published private(set) var isAIAssistanceEnabled: Bool
     @Published private(set) var hasRecordedThirdPartyConsent: Bool
+    /// W4-R2 2026-09-01 sync: independent local Screenshot Help
+    /// education-completion state — never inferred from or coupled to
+    /// `hasRecordedThirdPartyConsent`/`isAIAssistanceEnabled`. See
+    /// `recordScreenshotHelpCompleted()`.
+    @Published private(set) var hasCompletedScreenshotHelp: Bool
     /// Generations with analysis work currently in flight. A set, not a
     /// single flag (review finding: one shared boolean can be cleared by
     /// older work while newer work is still running) — mirrors
@@ -153,6 +182,7 @@ final class ScreenshotProposalStore: ObservableObject {
         self.preferences = preferences
         self.isAIAssistanceEnabled = preferences.isAIAssistanceEnabled
         self.hasRecordedThirdPartyConsent = preferences.hasRecordedThirdPartyConsent
+        self.hasCompletedScreenshotHelp = preferences.hasCompletedScreenshotHelp
     }
 
     /// Cancels every currently tracked transfer task. Called whenever
@@ -193,6 +223,18 @@ final class ScreenshotProposalStore: ObservableObject {
         hasRecordedThirdPartyConsent = true
     }
 
+    /// W4-R2 2026-09-01 sync: records Screenshot Help education completion.
+    /// Callers must invoke this only when the requester actually completes
+    /// Screenshot Help through `Got it` — never merely because Screenshot
+    /// Help was presented or a detail state was opened. Independent of
+    /// `recordThirdPartyConsent()`/`setAIAssistanceEnabled(_:)`: neither
+    /// consent nor the AI-enabled toggle infers or is inferred from this
+    /// state.
+    func recordScreenshotHelpCompleted() {
+        preferences.hasCompletedScreenshotHelp = true
+        hasCompletedScreenshotHelp = true
+    }
+
     func clearNotice() {
         notice = nil
     }
@@ -217,8 +259,8 @@ final class ScreenshotProposalStore: ObservableObject {
     ///
     /// A field the requester has manually edited (`manualEdits`) is never
     /// cleared here, regardless of its current value — manual ownership is
-    /// permanent for the lifetime of this screen, never merely "until the
-    /// value happens to match an old AI value again."
+    /// permanent for this logical draft, never merely "until the value
+    /// happens to match an old AI value again."
     func beginSelection(
         clearing draft: inout RequestFoodFormDraft,
         manualEdits: ScreenshotFieldManualEditState
@@ -343,19 +385,24 @@ final class ScreenshotProposalStore: ObservableObject {
     ///
     /// A field the requester has manually edited never receives a proposed
     /// value here, regardless of its current value.
+    @discardableResult
     func apply(
         _ outcome: ScreenshotProposalOutcome,
         manualEdits: ScreenshotFieldManualEditState,
         to draft: inout RequestFoodFormDraft
-    ) {
+    ) -> ScreenshotProposalAppliedFields {
+        var applied = ScreenshotProposalAppliedFields()
         if let spot = outcome.proposal.selectedDiningSpot, !manualEdits.hasManuallyEditedLocation {
             draft.selectedDiningSpot = spot
+            applied.location = true
         }
         if let food = outcome.proposal.foodRequest, !manualEdits.hasManuallyEditedFoodRequest {
             draft.foodRequest = food
+            applied.foodRequest = true
         }
         if let mealSwipes = outcome.proposal.mealSwipes, !manualEdits.hasManuallyEditedMealSwipes {
             draft.mealSwipes = mealSwipes
+            applied.mealSwipes = true
         }
 
         if !outcome.eligible {
@@ -363,5 +410,7 @@ final class ScreenshotProposalStore: ObservableObject {
         } else if outcome.isEmpty {
             notice = .noUsefulExtraction
         }
+
+        return applied
     }
 }
