@@ -24,6 +24,13 @@ export const ScreenshotFoodItemSchema = z
   })
   .strict();
 
+/**
+ * W4-R4: unchanged in shape for multi-image analysis. Up to five screenshots
+ * are evidence for ONE logical order, so the provider still returns exactly
+ * one output object describing that one order — never one object per image,
+ * which would invite the caller to concatenate overlapping screenshots into
+ * duplicate items.
+ */
 export const ScreenshotProviderOutputSchema = z
   .object({
     visibleVenueText: z.string().nullable(),
@@ -51,12 +58,31 @@ export const FORBIDDEN_PROVIDER_FIELDS = [
   "submit",
   "reasoning",
   "explanation",
+  // W4-R4: which menu path a request uses, and how many Dining Dollars it
+  // needs, are requester product decisions. Screenshot Assistance proposes
+  // values; it does not decide them. Listing these here means a provider
+  // attempting to select a path or invent a dollar amount is refused before
+  // schema validation even runs, exactly like an attempted `submit`.
+  "menuPath",
+  "orderDetails",
+  "diningDollars",
+  "estimatedDiningDollars",
+  "estimatedDiningDollarsCents",
 ] as const;
 
-/** The allowlisted proposal shape: location, literal food, meal swipes only. */
+/**
+ * The allowlisted proposal shape: location, literal food, meal swipes only.
+ *
+ * W4-R4 replaces the single `foodRequest` string with `mealItems` — one
+ * entry per distinct observed item — so a proposal can populate the
+ * structured per-swipe meal-detail fields instead of one flat blob. The
+ * allowlist itself is unchanged in kind: still location, literal food, and
+ * meal swipes, and still nothing that decides menu path, Dining Dollars,
+ * timing, or submission.
+ */
 export interface ScreenshotProposal {
   selectedDiningSpot?: { name: string; address: string };
-  foodRequest?: string;
+  mealItems?: string[];
   mealSwipes?: number;
 }
 

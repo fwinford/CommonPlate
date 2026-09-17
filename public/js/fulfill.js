@@ -89,7 +89,7 @@ document.addEventListener("DOMContentLoaded", () => {
   (async () => {
     try {
       const req = await fetchRequest(requestId);
-      if (detailsVendor) detailsVendor.textContent = `${req.vendor} \u2014 Pickup: ${req.pickupName}`;
+      if (detailsVendor) detailsVendor.textContent = req.vendor;
       if (detailsFood) detailsFood.textContent = req.food || "";
       if (detailsWindow) {
         if (req.isAsap) {
@@ -103,12 +103,10 @@ document.addEventListener("DOMContentLoaded", () => {
       const elFood = document.getElementById("summary-food");
       const elVendor = document.getElementById("summary-vendor");
       const elFoodDetails = document.getElementById("summary-food-details");
-      const elPickup = document.getElementById("summary-pickup");
       const elWindow = document.getElementById("summary-window");
       if (elFood) elFood.textContent = req.food || "Unknown item";
       if (elVendor) elVendor.textContent = req.vendor ? `at ${req.vendor}` : "";
       if (elFoodDetails) elFoodDetails.textContent = req.details || req.foodDetails || "";
-      if (elPickup) elPickup.textContent = req.pickupName ? `Pickup Name: ${req.pickupName}` : "";
       if (elWindow) elWindow.textContent = req.isAsap ? req.pickupWindowText || "Time window not specified" : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);
     } catch (err) {
       errorMsg.textContent = "Unable to load request details.";

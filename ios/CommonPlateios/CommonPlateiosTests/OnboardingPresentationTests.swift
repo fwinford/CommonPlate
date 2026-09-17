@@ -308,7 +308,10 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertTrue(source.contains("mealSwipesControl"))
         XCTAssertTrue(source.contains("static let mealSwipesLabel = \"Meal swipes\""))
         XCTAssertFalse(source.contains("Choose how many meal swipes your Grubhub order requires."))
-        XCTAssertTrue(source.contains("static let pickupNameLabel = \"Name on order\""))
+        // W4-R4: pickup name is removed from the requester form entirely,
+        // so the label it used no longer exists anywhere in this source.
+        XCTAssertFalse(source.contains("pickupNameLabel"))
+        XCTAssertFalse(source.contains("Name on order"))
         XCTAssertFalse(source.contains("Enter the name you want the Grubhub order placed under."))
         XCTAssertFalse(source.contains("The student placing the order will use this name and approximate time."))
         XCTAssertTrue(source.contains("RequestFoodFormDraft.mealSwipeOptions"))

@@ -21,7 +21,9 @@ struct APIConfiguration {
 
     /// Simulator local backend. Port matches `app.ts`'s default (`process.env.PORT || 3000`);
     /// the simulator reaches the host Mac's loopback interface directly.
+    /// Uses stable loopback rather than a specific global/temporary IPv6
+    /// address, which can rotate (SLAAC privacy addressing) and go stale.
     static let localSimulator = APIConfiguration(
-        baseURL: URL(string: "http://[2607:fb90:7325:d04b:c5f:620a:d8dc:f269]:3000")!
+        baseURL: URL(string: "http://127.0.0.1:3000")!
     )
 }

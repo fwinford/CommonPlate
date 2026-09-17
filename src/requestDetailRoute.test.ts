@@ -21,10 +21,14 @@ function requestDocument(overrides: Record<string, unknown> = {}) {
     food: "Vegetable rice bowl",
     pickupName: "Requester Private Name",
     pickupWindowText: "1:00 PM – 2:00 PM",
-    // Every request accepted since W3-C1 carries an integer 1-5, on every
-    // accepted shape including the legacy web one, so an ordinary fixture
-    // always supplies it.
+    // Every request accepted since W3-C1 carries an integer quantity, on
+    // every accepted shape including the legacy web one, so an ordinary
+    // fixture always supplies it — now alongside the W4-R4 structured fields
+    // it is part of. `pickupName` above is retained deliberately, as a stray
+    // pre-R4 stored value this projection must still omit.
     mealSwipes: 3,
+    menuPath: "meal-exchange",
+    mealItems: ["Vegetable rice bowl", "Side salad", "Iced tea"],
     email: "requester@example.edu",
     requesterPhone: "555-0100",
     requesterPhoneNumber: "555-0101",
@@ -103,6 +107,10 @@ describe("GET /api/request/:id", () => {
         food: "Vegetable rice bowl",
         pickupWindowText: "1:00 PM – 2:00 PM",
         mealSwipes: 3,
+        menuPath: "meal-exchange",
+        mealItems: ["Vegetable rice bowl", "Side salad", "Iced tea"],
+        orderDetails: null,
+        estimatedDiningDollarsCents: null,
         windowStart: new Date("2026-07-26T20:00:00.000Z"),
         windowEnd: new Date("2026-07-26T21:00:00.000Z"),
         status: "open",
@@ -121,6 +129,10 @@ describe("GET /api/request/:id", () => {
       "food",
       "pickupWindowText",
       "mealSwipes",
+      "menuPath",
+      "mealItems",
+      "orderDetails",
+      "estimatedDiningDollarsCents",
       "windowStart",
       "windowEnd",
       "status",

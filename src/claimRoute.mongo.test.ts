@@ -227,9 +227,11 @@ describeMongo("real MongoDB claim atomicity", () => {
     expect(winners[0].body.claim.claimToken).toMatch(
       /^[A-Za-z0-9_-]{43}$/
     );
-    expect(winners[0].body.claim.pickupName).toBe(
-      "Only Winner Sees This"
-    );
+    // W4-R4: pickup name is gone from the request contract, so even the
+    // winning claimant's private half no longer carries one. The fixture
+    // still sets the field, so this proves removal rather than absent input.
+    expect(winners[0].body.claim).not.toHaveProperty("pickupName");
+    expect(JSON.stringify(winners[0].body)).not.toMatch(/Only Winner/);
     expect(JSON.stringify(losers[0].body)).not.toMatch(
       /pickupName|claimToken|Only Winner/
     );
@@ -287,9 +289,8 @@ describeMongo("real MongoDB claim atomicity", () => {
     );
     await claimRequest(otherAttempt.req, otherAttempt.res);
     expect(otherAttempt.statusCode).toBe(200);
-    expect(otherAttempt.body?.claim?.pickupName).toBe(
-      "Only Winner Sees This"
-    );
+    expect(otherAttempt.body?.claim).not.toHaveProperty("pickupName");
+    expect(otherAttempt.body?.claim?.claimToken).toEqual(expect.any(String));
   });
 
   it("allows exactly one of two concurrent extension attempts", async () => {

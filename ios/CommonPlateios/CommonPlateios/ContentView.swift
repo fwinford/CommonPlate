@@ -87,6 +87,12 @@ struct ContentView: View {
     /// like the router's own exactly-once consumption guarantees.
     @State private var isShowingOrderPlacedNotice = false
 
+    /// W4-H1: owns the helper success presentation's active-scene-aware
+    /// progression and its exactly-once haptic, announcement, and Home
+    /// return. Presentation only — never persisted and never consulted by any
+    /// lifecycle decision.
+    @StateObject private var helperSuccessCoordinator = HelperSuccessPresentationCoordinator()
+
     /// `remoteNotificationRegistrar` must be the same instance
     /// `PushAppDelegate` forwards APNs callbacks into — see
     /// `CommonPlateiosApp.swift` — so, matching every other injected
@@ -246,6 +252,20 @@ struct ContentView: View {
                 .zIndex(1)
             }
 
+            // W4-H1: shown only while an in-process, authoritatively confirmed
+            // placement exists. Relaunch never restores a confirmation, so it
+            // never reconstructs this presentation, its haptic, or its Home
+            // return.
+            if let confirmation = requestStore.fulfillmentConfirmation {
+                HelperSuccessView(
+                    confirmation: confirmation,
+                    phase: helperSuccessPhase(for: confirmation),
+                    reduceMotion: reduceMotion
+                )
+                .id(confirmation.id)
+                .transition(.opacity)
+                .zIndex(2)
+            }
         }
         // Cold-launch and relaunch-after-termination continuation (W3-H1):
         // reconstructs "do I have an active reservation" from backend truth,
@@ -256,6 +276,8 @@ struct ContentView: View {
         // in the same process.
         .task {
             let isActive = scenePhase == .active
+            installHelperSuccessHomeReturn()
+            helperSuccessCoordinator.updateSceneActivity(isActive: isActive)
             notificationRouter.updateApplicationSceneActivity(isActive: isActive)
             requestStore.updateApplicationVisibility(isVisible: isActive)
             _ = try? await requestStore.continueActiveReservationIfNeeded()
@@ -266,8 +288,17 @@ struct ContentView: View {
             // whenever nothing durable remains.
             _ = await requestStore.reconcilePendingCreateOperationIfNeeded()
         }
+        // W4-D2: whose unresolved create operation blocks creation and
+        // Remove Email depends on the participant current now, so the block
+        // is re-derived whenever that identity changes. Local only: an
+        // identity arriving never triggers a reconciliation by itself.
+        .onChange(of: participantIdentityStore.identity) { _, _ in
+            requestStore.refreshPendingCreateState()
+        }
         .onChange(of: scenePhase) { _, phase in
             let isActive = phase == .active
+            // W4-H1: success progression counts only active time.
+            helperSuccessCoordinator.updateSceneActivity(isActive: isActive)
             notificationRouter.updateApplicationSceneActivity(isActive: isActive)
             requestStore.updateApplicationVisibility(isVisible: isActive)
             if phase == .active {
@@ -361,6 +392,14 @@ struct ContentView: View {
         .onChange(of: isShowingOrderPlacedNotice) { _, isVisible in
             guard !isVisible else { return }
             presentNextRequesterFulfillmentNoticeIfPossible()
+        }
+        // W4-H1: an authoritative confirmation — including one recorded while
+        // inactive — begins its presentation; retiring it ends it.
+        .onChange(of: requestStore.fulfillmentConfirmation?.id) { _, _ in
+            helperSuccessCoordinator.update(
+                confirmation: requestStore.fulfillmentConfirmation,
+                reduceMotion: reduceMotion
+            )
         }
         .onChange(of: path) { _, newPath in
             if case .route(let route)? = flowPresentation, newPath.last != route {
@@ -737,6 +776,35 @@ struct ContentView: View {
         withTransaction(transaction) {
             onboardingFlowCoordinator.continueFromWalkthrough()
             path = []
+        }
+    }
+
+    private func helperSuccessPhase(
+        for confirmation: FulfillmentConfirmation
+    ) -> HelperSuccessProgression.Phase {
+        guard let progression = helperSuccessCoordinator.progression,
+              progression.confirmationID == confirmation.id else {
+            return .ticket
+        }
+        return progression.phase
+    }
+
+    /// The one automatic Home return after a complete foreground success
+    /// presentation, whatever the helper's entry point, then retirement of the
+    /// presentation. The path is replaced without a native pop so Home is
+    /// simply revealed as the presentation fades.
+    private func installHelperSuccessHomeReturn() {
+        let pathBinding = $path
+        let store = requestStore
+        helperSuccessCoordinator.returnHome = { confirmation in
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                pathBinding.wrappedValue = AppRoute.afterHelperSuccess(from: pathBinding.wrappedValue)
+            }
+            withAnimation(.easeOut(duration: 0.2)) {
+                store.dismissFulfillmentConfirmation(id: confirmation.id)
+            }
         }
     }
 

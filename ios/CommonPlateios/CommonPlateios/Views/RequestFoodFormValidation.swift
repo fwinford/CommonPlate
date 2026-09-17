@@ -5,39 +5,256 @@
 
 import Foundation
 
+/// W4-R4 exact currency entry.
+///
+/// Dining Dollars are held as the requester's own text while they type and
+/// converted to an exact integer count of cents for validation and
+/// submission. The conversion is done by integer arithmetic on the digits
+/// themselves — never by parsing into a `Double` and scaling — so a value the
+/// requester typed can never acquire floating-point rounding behaviour on its
+/// way to the backend. `12.34` is exactly `1234`, always.
+enum DiningDollarsEntry: Equatable {
+    /// The requester typed nothing. On the Meal Exchange path this is valid
+    /// and means "no Dining Dollars needed"; it is never read as `$0.00`.
+    case empty
+    /// An exact, positive amount in cents.
+    case cents(Int)
+    /// Text that is not an amount at all, or an amount of zero. Zero is
+    /// invalid rather than empty-equivalent: a requester who typed `0` said
+    /// something different from a requester who typed nothing, and neither
+    /// should silently become the other.
+    case invalid
+
+    /// Parses ordinary dollar entry: optional `$`, optional thousands
+    /// separators, and at most two decimal places.
+    static func parse(_ text: String) -> DiningDollarsEntry {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return .empty }
+
+        var normalized = trimmed
+        if normalized.hasPrefix("$") { normalized.removeFirst() }
+        normalized = normalized.trimmingCharacters(in: .whitespaces)
+        if normalized.isEmpty { return .invalid }
+
+        let parts = normalized.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count <= 2 else { return .invalid }
+
+        guard let wholeText = ungroupedWholeDollars(String(parts[0])) else {
+            return .invalid
+        }
+        let fractionText = parts.count == 2 ? String(parts[1]) : ""
+
+        // A bare "." or ".50" is accepted for the fraction, but the whole part
+        // must be digits when present, and the fraction at most two digits.
+        guard wholeText.allSatisfy(isASCIIDigit),
+              fractionText.allSatisfy(isASCIIDigit),
+              fractionText.count <= 2,
+              !(wholeText.isEmpty && fractionText.isEmpty) else {
+            return .invalid
+        }
+
+        let dollars = wholeText.isEmpty ? 0 : Int(wholeText)
+        guard let dollars else { return .invalid }
+
+        // Pad so "5" after the point means 50 cents, not 5.
+        let paddedFraction = fractionText.padding(
+            toLength: 2,
+            withPad: "0",
+            startingAt: 0
+        )
+        let fraction = paddedFraction.isEmpty ? 0 : Int(paddedFraction)
+        guard let fraction else { return .invalid }
+
+        // Integer arithmetic throughout. The per-path ceilings are far under
+        // any overflow threshold, but a pasted 30-digit number must be
+        // refused rather than trapping.
+        let (scaled, scaleOverflowed) = dollars.multipliedReportingOverflow(by: 100)
+        guard !scaleOverflowed else { return .invalid }
+        let (total, addOverflowed) = scaled.addingReportingOverflow(fraction)
+        guard !addOverflowed else { return .invalid }
+        return total > 0 ? .cents(total) : .invalid
+    }
+
+    private static func isASCIIDigit(_ character: Character) -> Bool {
+        character.isASCII && character.isNumber
+    }
+
+    /// The whole-dollar digits with thousands separators removed — but only
+    /// when every separator is in a real thousands position (`1,234`,
+    /// `12,345,678`). Anything else (`1,2`, `12,34`, `1,,234`, `,123`,
+    /// `1234,567`) is `nil`: a misplaced comma is a typo whose intended
+    /// amount is unknown, and stripping it would silently post a different
+    /// number than the one on screen.
+    private static func ungroupedWholeDollars(_ text: String) -> String? {
+        guard text.contains(",") else { return text }
+        let groups = text.split(separator: ",", omittingEmptySubsequences: false)
+        guard let leading = groups.first,
+              (1...3).contains(leading.count),
+              groups.dropFirst().allSatisfy({ $0.count == 3 }) else {
+            return nil
+        }
+        return groups.joined()
+    }
+
+    /// Exact cents to the display string, by the same integer arithmetic the
+    /// backend uses (`formatDiningDollars`, `src/structuredRequest.ts`).
+    static func formatted(cents: Int) -> String {
+        "$\(cents / 100).\(String(format: "%02d", cents % 100))"
+    }
+}
+
 /// The requester form's editable values. This remains private to the Request
 /// Food flow: its session owner may outlive a transient pushed view, but it is
 /// never persisted to disk/server or shared with fulfillment.
 struct RequestFoodFormDraft: Equatable {
     var selectedDiningSpot: DiningSpot?
-    var foodRequest: String
-    var pickupName: String
+    /// W4-R4: which menu the requester is using. Requester-owned; Screenshot
+    /// Assistance never sets it.
+    var menuPath: RequestMenuPath
     var timing: RequestTiming
     var preferredPickupTime: Date
     /// V1 meal-swipe requirement (W3-C1): an exact integer 1 through 5, chosen
-    /// from a bounded picker rather than typed. Defaults to the picker's
-    /// first offered value, so the field is always complete and never needs
-    /// its own completeness check.
+    /// from a bounded picker rather than typed. Meaningful only on the Meal
+    /// Exchange path; the submitted value for a Dining-Dollars-only request is
+    /// exactly 0, derived in `activeMealSwipes` rather than stored here, so
+    /// switching paths and switching back does not destroy the requester's
+    /// swipe choice.
     var mealSwipes: Int
+
+    /// W4-R4 meal-detail entries, always exactly `maxMealSwipes` long.
+    ///
+    /// This fixed length is the whole preservation mechanism. Lowering the
+    /// swipe count changes which entries are *active* — and therefore which
+    /// are shown and which are submitted — without touching the array, so a
+    /// requester who drops from 4 swipes to 2 and back to 4 finds entries 3
+    /// and 4 exactly as they left them. Nothing is destroyed on the way down
+    /// and nothing is reconstructed on the way up, because nothing moved.
+    ///
+    /// Entries above the active count are excluded from the submitted request
+    /// by `activeMealEntries` regardless of what they contain.
+    var mealEntries: [String]
+
+    /// The single structured order-details value a Dining-Dollars-only
+    /// request requires. Preserved across a path switch for the same reason
+    /// hidden meal entries are: the requester's typing is theirs.
+    var orderDetails: String
+
+    /// The requester's Dining Dollar estimate, as they typed it. Optional on
+    /// the Meal Exchange path, required on the Dining-Dollars-only one. Kept
+    /// as text so the field can be empty — which means "none needed" and is
+    /// never rendered or submitted as `$0.00`.
+    var diningDollarsText: String
 
     init(
         selectedDiningSpot: DiningSpot? = nil,
-        foodRequest: String = "",
-        pickupName: String = "",
+        menuPath: RequestMenuPath = .mealExchange,
         timing: RequestTiming = .asap,
         preferredPickupTime: Date = Date(),
-        mealSwipes: Int = RequestFoodFormDraft.mealSwipeOptions.first!
+        mealSwipes: Int = RequestFoodFormDraft.mealSwipeOptions.first!,
+        mealEntries: [String] = RequestFoodFormDraft.emptyMealEntries,
+        orderDetails: String = "",
+        diningDollarsText: String = ""
     ) {
         self.selectedDiningSpot = selectedDiningSpot
-        self.foodRequest = foodRequest
-        self.pickupName = pickupName
+        self.menuPath = menuPath
         self.timing = timing
         self.preferredPickupTime = preferredPickupTime
         self.mealSwipes = mealSwipes
+        // Normalized so the fixed-length invariant holds no matter what a
+        // caller supplies: a shorter array is padded and a longer one is
+        // truncated, rather than silently changing what "active" means.
+        self.mealEntries = RequestFoodFormDraft.normalized(mealEntries)
+        self.orderDetails = orderDetails
+        self.diningDollarsText = diningDollarsText
     }
 
-    /// The exact bounded set the picker may offer and the backend accepts.
+    /// The exact bounded set the picker may offer and the backend accepts on
+    /// the Meal Exchange path.
     static let mealSwipeOptions = Array(1...5)
+
+    static let maxMealSwipes = 5
+
+    static let emptyMealEntries = Array(repeating: "", count: maxMealSwipes)
+
+    static func normalized(_ entries: [String]) -> [String] {
+        if entries.count == maxMealSwipes { return entries }
+        if entries.count > maxMealSwipes { return Array(entries.prefix(maxMealSwipes)) }
+        return entries + Array(repeating: "", count: maxMealSwipes - entries.count)
+    }
+
+    /// The swipe count this draft actually submits: the requester's choice on
+    /// the Meal Exchange path, and exactly 0 on the Dining-Dollars-only one.
+    var activeMealSwipes: Int {
+        menuPath == .mealExchange ? mealSwipes : 0
+    }
+
+    /// The indices whose meal fields are currently visible and required.
+    var activeMealEntryIndices: Range<Int> {
+        0..<activeMealSwipes
+    }
+
+    /// Exactly the entries this draft submits, trimmed. Entries above the
+    /// active count — the ones a lowered swipe count hid — are excluded here,
+    /// which is the single place that exclusion happens.
+    var activeMealEntries: [String] {
+        activeMealEntryIndices.map {
+            mealEntries[$0].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    /// The parsed estimate. `.empty` on the Meal Exchange path is valid and
+    /// means no Dining Dollars are needed.
+    var diningDollars: DiningDollarsEntry {
+        DiningDollarsEntry.parse(diningDollarsText)
+    }
+
+    /// The accepted ceiling for the path this draft is currently on.
+    var diningDollarsCeilingCents: Int {
+        menuPath == .mealExchange
+            ? RequestFoodFormDraft.mealExchangeDiningDollarsCeilingCents
+            : RequestFoodFormDraft.diningDollarsOnlyCeilingCents
+    }
+
+    /// `> $0.00` and `<= $25.00` when supplied alongside meal swipes.
+    static let mealExchangeDiningDollarsCeilingCents = 2_500
+    /// `> $0.00` and `<= $50.00` when it is the whole request.
+    static let diningDollarsOnlyCeilingCents = 5_000
+}
+
+enum RequestFoodFormError: Error, Equatable {
+    case missingDiningSpot
+    /// A required, currently active meal-detail entry is blank (W4-R4).
+    case missingMealDetail(index: Int)
+    /// The Dining-Dollars-only path's required order-details value is blank.
+    case missingOrderDetails
+    /// Dining-Dollars-only requires an estimate; it cannot be left empty.
+    case missingDiningDollars
+    /// The estimate is not an amount, is zero, or exceeds the path's ceiling.
+    case invalidDiningDollars(ceilingCents: Int)
+    case invalidScheduledTime
+    /// A `Later` selection that outlived scheduling itself. Distinct from
+    /// `invalidScheduledTime` because the correction is different: there is no
+    /// pickup time left to choose today, only ASAP.
+    case scheduledTimingUnavailable
+
+    var message: String {
+        switch self {
+        case .missingDiningSpot:
+            return "Choose an NYU dining spot."
+        case .missingMealDetail:
+            return "Tell us what this meal swipe is for."
+        case .missingOrderDetails:
+            return "Tell us what to order."
+        case .missingDiningDollars:
+            return "Enter how many Dining Dollars this order needs."
+        case .invalidDiningDollars(let ceilingCents):
+            return "Enter an amount between $0.01 and \(DiningDollarsEntry.formatted(cents: ceilingCents))."
+        case .invalidScheduledTime:
+            return "Choose a pickup time later today."
+        case .scheduledTimingUnavailable:
+            return RequestFoodView.lapsedScheduledTimingNotice
+        }
+    }
 }
 
 /// Request-form fields in screen order. Only text fields can receive focus;
@@ -47,15 +264,27 @@ struct RequestFoodFormDraft: Equatable {
 /// The requester's email is deliberately absent (W3-I1): it is no longer a
 /// field, because the requester is the verified participant this installation
 /// remembers and the backend binds the request to that principal.
+///
+/// Pickup name is absent too, and since W4-R4 it does not exist anywhere in
+/// the request contract.
 enum RequestFoodFormField: Hashable, CaseIterable {
     case diningSpot
-    case foodDescription
-    case pickupName
+    /// One case per possible meal-detail entry, so each has its own focus
+    /// target and its own inline error, exactly like any other text field.
+    case mealDetail(index: Int)
+    case orderDetails
+    case diningDollars
     case pickupSchedule
+
+    static var allCases: [RequestFoodFormField] {
+        [.diningSpot]
+            + (0..<RequestFoodFormDraft.maxMealSwipes).map { .mealDetail(index: $0) }
+            + [.orderDetails, .diningDollars, .pickupSchedule]
+    }
 
     var isTextField: Bool {
         switch self {
-        case .foodDescription, .pickupName:
+        case .mealDetail, .orderDetails, .diningDollars:
             return true
         case .diningSpot, .pickupSchedule:
             return false
@@ -81,10 +310,34 @@ enum RequestFoodFormValidator {
     /// validation, not completeness, and is intentionally checked on Submit.
     static func hasRequiredInput(_ draft: RequestFoodFormDraft) -> Bool {
         guard let diningSpot = draft.selectedDiningSpot,
-              !diningSpot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !draft.foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !draft.pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              !diningSpot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
+        }
+
+        switch draft.menuPath {
+        case .mealExchange:
+            // Every currently active meal-detail entry is required. A hidden
+            // entry's content is irrelevant either way.
+            guard draft.activeMealEntries.allSatisfy({ !$0.isEmpty }) else {
+                return false
+            }
+            // Optional here: empty is complete, and means none are needed.
+            switch draft.diningDollars {
+            case .empty:
+                break
+            case .cents(let cents):
+                guard cents <= draft.diningDollarsCeilingCents else { return false }
+            case .invalid:
+                return false
+            }
+        case .diningDollars:
+            guard !draft.orderDetails.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return false
+            }
+            guard case .cents(let cents) = draft.diningDollars,
+                  cents <= draft.diningDollarsCeilingCents else {
+                return false
+            }
         }
 
         switch draft.timing {
@@ -100,25 +353,79 @@ enum RequestFoodFormValidator {
     /// underneath them — two failures that need different instructions, because
     /// only one of them still has a control to act on.
     static func validate(
-        selectedDiningSpot: DiningSpot?,
-        foodRequest: String,
-        pickupName: String,
-        timing: RequestTiming,
+        draft: RequestFoodFormDraft,
         isScheduledWindowValid: Bool,
         isScheduledTimingAvailable: Bool
     ) -> [RequestFoodFieldError] {
         var errors: [RequestFoodFieldError] = []
 
-        if selectedDiningSpot?.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+        if draft.selectedDiningSpot?.name
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
             errors.append(RequestFoodFieldError(field: .diningSpot, error: .missingDiningSpot))
         }
-        if foodRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            errors.append(RequestFoodFieldError(field: .foodDescription, error: .missingFood))
+
+        switch draft.menuPath {
+        case .mealExchange:
+            // Only the active entries are validated. A hidden entry is not a
+            // failure no matter what it holds, because it is not part of this
+            // request — which is the same reason it is not submitted.
+            for index in draft.activeMealEntryIndices
+            where draft.mealEntries[index]
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                errors.append(RequestFoodFieldError(
+                    field: .mealDetail(index: index),
+                    error: .missingMealDetail(index: index)
+                ))
+            }
+
+            switch draft.diningDollars {
+            case .empty:
+                break
+            case .cents(let cents) where cents > draft.diningDollarsCeilingCents:
+                errors.append(RequestFoodFieldError(
+                    field: .diningDollars,
+                    error: .invalidDiningDollars(ceilingCents: draft.diningDollarsCeilingCents)
+                ))
+            case .cents:
+                break
+            case .invalid:
+                errors.append(RequestFoodFieldError(
+                    field: .diningDollars,
+                    error: .invalidDiningDollars(ceilingCents: draft.diningDollarsCeilingCents)
+                ))
+            }
+
+        case .diningDollars:
+            if draft.orderDetails
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                errors.append(RequestFoodFieldError(
+                    field: .orderDetails,
+                    error: .missingOrderDetails
+                ))
+            }
+
+            switch draft.diningDollars {
+            case .empty:
+                errors.append(RequestFoodFieldError(
+                    field: .diningDollars,
+                    error: .missingDiningDollars
+                ))
+            case .cents(let cents) where cents > draft.diningDollarsCeilingCents:
+                errors.append(RequestFoodFieldError(
+                    field: .diningDollars,
+                    error: .invalidDiningDollars(ceilingCents: draft.diningDollarsCeilingCents)
+                ))
+            case .cents:
+                break
+            case .invalid:
+                errors.append(RequestFoodFieldError(
+                    field: .diningDollars,
+                    error: .invalidDiningDollars(ceilingCents: draft.diningDollarsCeilingCents)
+                ))
+            }
         }
-        if pickupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            errors.append(RequestFoodFieldError(field: .pickupName, error: .missingPickupName))
-        }
-        if timing == .later && !isScheduledWindowValid {
+
+        if draft.timing == .later && !isScheduledWindowValid {
             // Telling someone to choose a different pickup time is only useful
             // while there is a time left to choose. Once the last full window
             // has passed, the picker is gone and the only move left is ASAP —

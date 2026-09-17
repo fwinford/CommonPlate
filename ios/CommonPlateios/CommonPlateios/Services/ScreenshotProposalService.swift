@@ -31,15 +31,23 @@ enum ScreenshotProposalServiceError: Error {
     case unavailable(underlying: Error)
 }
 
-private struct ScreenshotProposalRequestPayload: Encodable {
+/// One selected screenshot and its own independent on-device evidence.
+private struct ScreenshotImagePayload: Encodable {
     let imageBase64: String
     let mimeType: String
-    /// On-device Apple Vision OCR transcription of the same image
+    /// On-device Apple Vision OCR transcription of this same image
     /// (`ScreenshotLocalTextRecognizer`) — a different engine than the
     /// OpenAI provider the backend calls. The backend's sole eligibility and
     /// meal-swipe-corroboration evidence source; this app never asks the
-    /// provider to produce or confirm its own evidence.
+    /// provider to produce or confirm its own evidence. Sent per image, so
+    /// the backend can decide each screenshot's eligibility independently.
     let localEvidenceText: String
+}
+
+/// W4-R4: 1 to 5 screenshots, which are evidence for ONE logical order
+/// rather than several independent analyses.
+private struct ScreenshotProposalRequestPayload: Encodable {
+    let images: [ScreenshotImagePayload]
 }
 
 private struct ScreenshotProposalLocationDTO: Decodable {
@@ -49,7 +57,9 @@ private struct ScreenshotProposalLocationDTO: Decodable {
 
 private struct ScreenshotProposalFieldsDTO: Decodable {
     let selectedDiningSpot: ScreenshotProposalLocationDTO?
-    let foodRequest: String?
+    /// W4-R4: one entry per distinct observed item, already deduplicated
+    /// across overlapping screenshots by the backend.
+    let mealItems: [String]?
     let mealSwipes: Int?
 }
 
@@ -73,15 +83,13 @@ struct ScreenshotProposalService {
     /// `screenshotProposalRoute.ts`) is shorter still.
     static let requestTimeoutInterval: TimeInterval = 25
 
-    /// Sends exactly one normalized screenshot. `imageData` and `mimeType`
-    /// are whatever local normalization already produced
-    /// (`ScreenshotImageNormalizer`) — this call performs no further
+    /// Sends the normalized screenshots for one logical order (W4-R4: 1 to
+    /// 5 of them). Each image's bytes and evidence are whatever local
+    /// normalization and OCR already produced — this call performs no further
     /// transformation. Nothing here retries: a failed attempt is reported as
     /// such, never silently resent.
     func requestProposal(
-        imageData: Data,
-        mimeType: String,
-        localEvidenceText: String,
+        images: [ScreenshotAnalysisInput],
         authority: String
     ) async throws -> ScreenshotProposalOutcome {
         try Task.checkCancellation()
@@ -91,9 +99,13 @@ struct ScreenshotProposalService {
                 path: Self.routePath,
                 method: .post,
                 body: ScreenshotProposalRequestPayload(
-                    imageBase64: imageData.base64EncodedString(),
-                    mimeType: mimeType,
-                    localEvidenceText: localEvidenceText
+                    images: images.map {
+                        ScreenshotImagePayload(
+                            imageBase64: $0.data.base64EncodedString(),
+                            mimeType: $0.mimeType,
+                            localEvidenceText: $0.localEvidenceText
+                        )
+                    }
                 ),
                 headers: [RequestService.participantAuthorityHeader: authority],
                 timeoutInterval: Self.requestTimeoutInterval
@@ -121,7 +133,7 @@ struct ScreenshotProposalService {
         }
         return ScreenshotProposal(
             selectedDiningSpot: spot,
-            foodRequest: dto.foodRequest,
+            mealItems: dto.mealItems,
             mealSwipes: dto.mealSwipes
         )
     }

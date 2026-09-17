@@ -112,7 +112,11 @@ final class ReservationContinuationTests: XCTestCase {
 
         let claim = try XCTUnwrap(store.activeClaim)
         XCTAssertEqual(claim.requestID, requestID)
-        XCTAssertEqual(claim.pickupName, "Continuation Pickup")
+        // W4-R4: the reservation no longer carries a pickup name, so the
+        // restored claim presentation has none either.
+        XCTAssertFalse(
+            String(describing: claim).contains("Continuation Pickup")
+        )
         // ISO-8601 round-tripping through JSON only preserves millisecond
         // precision, so this compares within a tolerance rather than for
         // bit-exact equality with the original `Date()` value.
@@ -415,6 +419,10 @@ final class ReservationContinuationTests: XCTestCase {
               "food": "Rice bowl",
               "pickupWindowText": "ASAP",
               "mealSwipes": 2,
+              "menuPath": "meal-exchange",
+              "mealItems": ["Meal 1", "Meal 2"],
+              "orderDetails": null,
+              "estimatedDiningDollarsCents": null,
               "windowStart": null,
               "windowEnd": null,
               "status": "\(requestStatus)",

@@ -214,12 +214,7 @@ final class RequestTimingContractTests: XCTestCase {
 
         XCTAssertThrowsError(
             try RequestFoodView.makePayload(
-                selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-                foodRequest: "Chicken bowl",
-                pickupName: "Taylor",
-                timing: .later,
-                preferredPickupTime: alreadyPassed,
-                mealSwipes: 2,
+                draft: laterDraft(preferredPickupTime: alreadyPassed),
                 now: now,
                 calendar: NYUCampusTime.calendar
             )
@@ -264,18 +259,27 @@ final class RequestTimingContractTests: XCTestCase {
         let inOneMinute = try iso("2026-07-28T20:01:00.000Z")
 
         let payload = try RequestFoodView.makePayload(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            timing: .later,
-            preferredPickupTime: inOneMinute,
-            mealSwipes: 2,
+            draft: laterDraft(preferredPickupTime: inOneMinute),
             now: now,
             calendar: NYUCampusTime.calendar
         )
 
         XCTAssertEqual(payload.timing, .scheduled)
         XCTAssertEqual(payload.windowStart, inOneMinute)
+    }
+
+    /// A complete W4-R4 Meal Exchange `Later` draft. R4 preserves R2's
+    /// accepted Timing behaviour unchanged; the structured entries simply
+    /// travel with it.
+    private func laterDraft(preferredPickupTime: Date) -> RequestFoodFormDraft {
+        RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            menuPath: .mealExchange,
+            timing: .later,
+            preferredPickupTime: preferredPickupTime,
+            mealSwipes: 2,
+            mealEntries: ["Chicken bowl", "Side salad", "", "", ""]
+        )
     }
 
     // MARK: - Lifecycle stays backend-owned

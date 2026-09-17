@@ -70,7 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
   (async () => {
     try {
       const req = await fetchRequest(requestId);
-        if (detailsVendor) detailsVendor.textContent = `${req.vendor} — Pickup: ${req.pickupName}`;
+        if (detailsVendor) detailsVendor.textContent = req.vendor;
         if (detailsFood) detailsFood.textContent = req.food || '';
         if (detailsWindow) {
           // The backend derives `pickupWindowText` from the timing it actually
@@ -89,13 +89,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const elFood = document.getElementById('summary-food') as HTMLElement | null;
         const elVendor = document.getElementById('summary-vendor') as HTMLElement | null;
         const elFoodDetails = document.getElementById('summary-food-details') as HTMLElement | null;
-        const elPickup = document.getElementById('summary-pickup') as HTMLElement | null;
         const elWindow = document.getElementById('summary-window') as HTMLElement | null;
 
         if (elFood) elFood.textContent = req.food || 'Unknown item';
         if (elVendor) elVendor.textContent = req.vendor ? `at ${req.vendor}` : '';
         if (elFoodDetails) elFoodDetails.textContent = req.details || req.foodDetails || '';
-        if (elPickup) elPickup.textContent = req.pickupName ? `Pickup Name: ${req.pickupName}` : '';
         if (elWindow) elWindow.textContent = req.isAsap
           ? (req.pickupWindowText || 'Time window not specified')
           : formatMealRequestWindow(req.windowStart, req.windowEnd, req.pickupWindowText);

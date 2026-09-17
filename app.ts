@@ -169,6 +169,8 @@ import { assertParticipantSigningSecretForActivation } from "./src/participantCr
 import { registerParticipantVerificationRoutes } from "./src/participantVerificationRoutes.js";
 import { registerParticipantEmailUnsubscribeRoute } from "./src/participantEmailUnsubscribeRoute.js";
 import { registerScreenshotProposalRoute } from "./src/screenshotProposalRoute.js";
+import { registerRequestOperationTerminalRoute } from "./src/requestOperationTerminalRoute.js";
+import { establishRequestOperationLedger } from "./src/requestOperationAuthority.js";
 import { buildEffectiveAvailabilityFilter } from "./src/requestAvailability.js";
 import {
   CREATE_UNAVAILABLE_MESSAGE,
@@ -372,6 +374,15 @@ registerParticipantEmailUnsubscribeRoute(app);
 // for a normalized screenshot, so it owns its own bounded JSON parser rather
 // than widening the shared one every other route uses.
 registerScreenshotProposalRoute(app);
+
+// api: W4-D2 exact-operation terminal reconciliation for an already-issued
+// request-create operation, and the ledger authority identity a create
+// records. Registered ahead of the global parsers for the same reason as the
+// participant-authorized routes above: the terminal route takes no body, and a
+// malformed or oversized one must not reach the global parser and error
+// handler before its cache isolation, pause, limiter, and participant
+// authority run. Their order is owned by the registration function.
+registerRequestOperationTerminalRoute(app);
 
 // middleware to parse JSON and serve static files
 app.use(express.json({ limit: '100kb' }));
@@ -624,6 +635,12 @@ await ParticipantVerification.createIndexes();
 // guarantee (W3-H2). Without it, `claimRequest`'s pre-check and insert are
 // only a best-effort race guard, not a durable invariant.
 await RequestParticipation.createIndexes();
+// Do not accept request-create or terminal-reconciliation traffic until the
+// database has established the unique operation-identity index that makes a
+// created operation and a terminal NO-CREATE one-winner (W3-D1/W4-D2), and the
+// ledger authority identity clients record with a pending create. Rejects —
+// and so stops startup before listening — if either cannot be established.
+await establishRequestOperationLedger();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   const PUBLIC_BASE = process.env.BASE_URL || `http://localhost:${PORT}`;

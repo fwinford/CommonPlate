@@ -39,6 +39,7 @@ final class RequestCreationCredentialURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if answerOperationLedgerReadIfNeeded() { return }
         // `URLProtocol` hands the body through `httpBodyStream` for POST
         // requests built by `URLSession`, not `httpBody`.
         let body: Data
@@ -127,12 +128,14 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
         // fields; the credential is store-owned installation identity, filled
         // in by `RequestStore.createRequest` immediately before sending.
         let payload = try RequestFoodView.makePayload(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            timing: .asap,
-            preferredPickupTime: Date(timeIntervalSince1970: 0),
-            mealSwipes: 2,
+            draft: RequestFoodFormDraft(
+                selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+                menuPath: .mealExchange,
+                timing: .asap,
+                preferredPickupTime: Date(timeIntervalSince1970: 0),
+                mealSwipes: 2,
+                mealEntries: ["Chicken bowl"] + Array(repeating: "filler", count: 2 - 1) + Array(repeating: "", count: RequestFoodFormDraft.maxMealSwipes - 2)
+            ),
             now: Date(timeIntervalSince1970: 1_000),
             calendar: Calendar(identifier: .gregorian)
         )
@@ -149,11 +152,13 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
     private func makePayload() -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: "Vegetable rice bowl",
-            pickupName: "Requester Private Name",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: 2
+            menuPath: .mealExchange,
+            mealSwipes: 2,
+            mealItems: ["Vegetable rice bowl"],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 
@@ -188,6 +193,10 @@ final class RequestCreationInstallationCredentialTests: XCTestCase {
             "food": "Vegetable rice bowl",
             "pickupWindowText": "ASAP (available for the next 3 hours)",
             "mealSwipes": 2,
+            "menuPath": "meal-exchange",
+            "mealItems": ["Meal 1", "Meal 2"],
+            "orderDetails": null,
+            "estimatedDiningDollarsCents": null,
             "windowStart": null,
             "windowEnd": null,
             "status": "open",

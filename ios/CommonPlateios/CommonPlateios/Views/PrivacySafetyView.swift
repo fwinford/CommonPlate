@@ -32,7 +32,7 @@ struct PrivacySafetyView: View {
                     Text("Privacy")
                         .font(.headline)
 
-                    Text("Pickup names and order details are only used to coordinate food pickup. Contact information should only be used for coordinating the request.")
+                    Text("Order details are only used to coordinate food pickup. Contact information should only be used for coordinating the request.")
                         .foregroundStyle(.secondary)
                 }
 

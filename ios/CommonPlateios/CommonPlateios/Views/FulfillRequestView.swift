@@ -5,6 +5,7 @@
 //  Created by faith on 7/9/26.
 //
 import SwiftUI
+import UIKit
 
 /// Copy for a failed extension attempt. The reservation itself is never
 /// shortened by a failure, and none of these states offer an automatic retry —
@@ -80,7 +81,7 @@ enum ClaimExtensionPresentationError: Equatable {
     }
 }
 
-/// The choices offered for "When will it be ready?".
+/// The choices offered for the Helping page's required `Pickup ETA`.
 ///
 /// This is a presentation control over an unchanged backend contract: `eta` is
 /// still a required free-form string on `POST /api/request/:id/fulfill`, and the
@@ -124,13 +125,6 @@ enum FulfillmentReadyTime: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// `ASAP` unless draft state already holds one of the other valid choices.
-    static func initialSelection(draftETA: String?) -> FulfillmentReadyTime {
-        guard let draftETA, let option = option(forETA: draftETA) else {
-            return .asap
-        }
-        return option
-    }
 }
 
 /// Copy for a failed explicit release (W3-H1). Release is always safe to
@@ -183,15 +177,15 @@ enum FulfillmentPresentationError: Equatable {
             // The envelope has no field attribution. Ask the helper to recheck
             // both locally validated fields and never suggest placing another
             // external order.
-            return "We couldn’t save these details. Check the order number, then tap “I placed this order” again. Don’t place another Grubhub order."
+            return "We couldn’t save these details. Check the order number, then tap “Finish helping” again. Don’t place another Grubhub order."
         case .rateLimited:
-            return "Too many tries. Wait a moment, then tap “I placed this order” again. Don’t place another Grubhub order."
+            return "Too many tries. Wait a moment, then tap “Finish helping” again. Don’t place another Grubhub order."
         case .temporarilyUnavailable:
             return "CommonPlate can’t save the order right now. Stay on this screen and try again in a moment. Don’t place another Grubhub order."
         case .couldNotRecord:
             // `INTERNAL_FAILURE` can follow an unknown commit. Repeating the
             // CommonPlate write is safe; placing a second Grubhub order is not.
-            return "CommonPlate may not have saved your order. Tap “I placed this order” again. Trying again here only updates CommonPlate. It does not place another Grubhub order."
+            return "CommonPlate may not have saved your order. Tap “Finish helping” again. Trying again here only updates CommonPlate. It does not place another Grubhub order."
         }
     }
 
@@ -223,33 +217,55 @@ enum FulfillmentPresentationError: Equatable {
     }
 }
 
-/// The claimant-only flow, reachable only from a confirmed backend claim. It is
-/// the single place the pickup name is readable, and it never holds the raw
-/// claim token — extension goes through `RequestStore`, which owns the token.
+
+/// The Helping page's single extension control state (W4-H1). Derived only
+/// from backend-confirmed reservation truth; the one extension is never
+/// offered twice.
+enum HelpingExtensionControlState: Equatable {
+    /// The one extension is still offered: unused, and a full five minutes
+    /// fits before the request's own expiry.
+    case available
+    /// The backend confirmed the one extension.
+    case added
+    /// No confirmed extension, and none can be offered — either a full five
+    /// minutes no longer fits before the request's expiry, or the one offer
+    /// was already consumed by an attempt that did not confirm.
+    case cantExtend
+}
+
+/// External Grubhub handoff (W4-H1). Opening Grubhub is navigation out of the
+/// app only: this type has no access to `RequestStore`, so it cannot mark
+/// placement, end the reservation, or change fulfillment state.
+enum GrubhubHandoff {
+    /// The installed Grubhub app. No cart prepopulation, partner API, or
+    /// deep link into an order is used.
+    static let appURL = URL(string: "grubhub://")!
+
+    /// Asks the system to open Grubhub and reports only whether it did.
+    /// `open` is the SwiftUI `openURL` action in production.
+    static func open(
+        using open: (URL, @escaping (Bool) -> Void) -> Void,
+        completion: @escaping (_ didOpen: Bool) -> Void
+    ) {
+        open(appURL, completion)
+    }
+}
+
+/// The claimant-only continuous Helping page (W4-H1), reachable only from a
+/// confirmed backend claim. It is the single place the pickup name is
+/// readable, the one place the reservation is extended or released, and it
+/// never holds the raw claim token — every mutation goes through
+/// `RequestStore`, which owns the token.
 struct FulfillRequestView: View {
-    /// The one-time extension prompt asks about the *reservation*, not about
-    /// ordering: order submission does not exist yet, so "Still ordering?" would
-    /// ask a helper to confirm an activity this screen tells them not to start.
-    static let extensionPromptTitle = "Need more time?"
-
-    /// Extending is the only thing this prompt can do. Declining keeps the
-    /// current deadline — it is not a way to give the request back, and the
-    /// wording must not suggest otherwise.
-    static let extensionAcceptTitle = "Give me 5 more minutes"
-    static let extensionDeclineTitle = "Keep my current time"
-
-    /// The W3-H1 five-minute warning and its two actions. Locked copy, per
-    /// the accepted contract — reused verbatim rather than paraphrased.
-    static let reservationWarningTitle = "5 minutes remain"
-    static let reservationWarningExtendTitle = "Add 5 minutes"
-    static let reservationWarningReleaseTitle = "Release reservation"
-
     let request: FoodRequest
     @ObservedObject var store: RequestStore
     @Binding var path: [AppRoute]
 
+    @Environment(\.openURL) private var openURL
+
     /// The encoded backend `eta` string is written only from `readyTime`, so the
-    /// value the helper picked and the value the student reads are the same text.
+    /// value the helper picked and the value the requester reads are the same
+    /// text.
     @State private var draft = FulfillmentFormDraft()
 
     /// A field revalidates live only after its own error has appeared. This is
@@ -257,9 +273,13 @@ struct FulfillRequestView: View {
     @State private var validationPresentation = FulfillmentValidationPresentation()
     @FocusState private var focusedField: FulfillmentFormField?
 
-    /// The claim this screen is showing. Nil once the store ends the flow —
-    /// which pops the screen — so the body never renders claimant-private data
-    /// without a live claim behind it.
+    /// Presentation only: the most recent Open Grubhub attempt was not
+    /// accepted by the system. Changes no lifecycle state.
+    @State private var isShowingGrubhubOpenFailure = false
+
+    /// The claim this screen is showing. Nil once the store ends the flow, so
+    /// the body never renders claimant-private data without a live claim
+    /// behind it.
     private var claim: ActiveClaimPresentation? {
         guard let activeClaim = store.activeClaim,
               activeClaim.requestID == request.id else {
@@ -269,167 +289,32 @@ struct FulfillRequestView: View {
     }
 
     var body: some View {
-        Form {
+        ScrollView {
             if let claim {
-                if store.isShowingClaimExtensionPrompt {
-                    extensionPromptSection
+                VStack(alignment: .leading, spacing: 0) {
+                    reservationStatus(claim: claim)
+                    reservationControls(claim: claim)
+                        .padding(.top, 16)
+                    placeOrderSection(claim: claim)
+                        .padding(.top, 20)
+                    afterYouOrderSection
+                        .padding(.top, 28)
                 }
-
-                reservationActionsSection(claim: claim)
-
-                Section("Reservation") {
-                    Label {
-                        Text(Self.completedOrderNotice)
-                            .font(.headline)
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                    }
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("fulfillment-completed-order-notice")
-
-                    Text(Self.reservationNotice(claimExpiresAt: claim.claimExpiresAt))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("claim-reservation-notice")
-                }
-
-                Section("Order info") {
-                    Text(request.foodDescription)
-
-                    Text("\(request.diningSpot.name) · \(request.timingDescription)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    // V1 meal-swipe requirement (W3-C1). Every request
-                    // carries one, so this is never conditional on its
-                    // presence.
-                    Text("Meal swipes: \(request.mealSwipes)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("fulfillment-meal-swipes")
-
-                    HStack {
-                        Text("Pickup name")
-                        Spacer()
-                        Text(claim.pickupName)
-                            .fontWeight(.semibold)
-                    }
-                    .accessibilityIdentifier("claim-pickup-name")
-
-                    // One instruction, not a tutorial: the helper already knows
-                    // how their own Grubhub order works, they only need to know
-                    // which name to put on it.
-                    Text(Self.pickupNameInstruction(pickupName: claim.pickupName))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("claim-pickup-name-instruction")
-                }
-
-                if let extensionError = ClaimExtensionPresentationError.map(store.claimExtensionError) {
-                    Section {
-                        Text(extensionError.message)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("claim-extension-error")
-                    }
-                }
-
-                if let ambiguity = matchingAmbiguity {
-                    let isShowingRecovery = Self.showsAmbiguityRecoveryCopy(
-                        isRecoveryAvailable: ambiguity.isRecoveryAvailable,
-                        isRecovering: ambiguity.isRecovering
-                    )
-                    Section {
-                        // Before the question, not after it: the helper needs
-                        // the state they are in before they read what the
-                        // action does about it.
-                        if isShowingRecovery {
-                            Text(Self.ambiguityRecoveryContext)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("fulfillment-ambiguity-recovery-context")
-                        }
-                        Text(isShowingRecovery
-                             ? Self.ambiguityRecoveryTitle
-                             : Self.ambiguousTitle(isCheckingStatus: ambiguity.isCheckingStatus))
-                            .font(.headline)
-                        Text(isShowingRecovery
-                             ? Self.ambiguityRecoveryDetail
-                             : Self.ambiguousDetail(isCheckingStatus: ambiguity.isCheckingStatus))
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("fulfillment-ambiguous-detail")
-                        if ambiguity.isCheckingStatus {
-                            HStack {
-                                ProgressView()
-                                Text("Checking…")
-                            }
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        }
-                        if ambiguity.isRecovering {
-                            HStack {
-                                ProgressView()
-                                Text("Saving…")
-                            }
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        }
-                        if Self.showsAmbiguityRecoveryAction(
-                            isCheckingStatus: ambiguity.isCheckingStatus,
-                            isRecoveryAvailable: ambiguity.isRecoveryAvailable
-                        ) {
-                            Button(Self.ambiguityRecoveryActionTitle) {
-                                let ambiguityID = ambiguity.id
-                                Task {
-                                    try? await store.resubmitAmbiguousFulfillment(
-                                        ambiguityID: ambiguityID,
-                                        requestID: request.id
-                                    )
-                                }
-                            }
-                            .disabled(store.isFulfilling || store.isReleasingClaim)
-                            .accessibilityIdentifier("fulfillment-ambiguity-recovery")
-                        }
-                        // Navigation only. It uses the same exit the
-                        // confirmation section uses, minus the store call —
-                        // nothing here resolves the ambiguity or unblocks a
-                        // second submission.
-                        if Self.showsAmbiguityReturnAction(
-                            isCheckingStatus: ambiguity.isCheckingStatus
-                        ) {
-                            Button(Self.returnTitle) {
-                                Self.returnToActiveRequests(from: store) {
-                                    returnToActiveRequests()
-                                }
-                            }
-                            .accessibilityIdentifier("fulfillment-ambiguous-return")
-                        }
-                    }
-                    .accessibilityIdentifier("fulfillment-ambiguous-state")
-                } else {
-                    fulfillmentForm
-
-                    if let fulfillmentError = FulfillmentPresentationError.map(store.fulfillError) {
-                        Section {
-                            Text(fulfillmentError.message)
-                                .font(.footnote)
-                                .foregroundStyle(.red)
-                                .accessibilityIdentifier("fulfillment-error")
-                        }
-                    }
-                }
-
+                .padding(.horizontal, CommonPlateStyle.Metrics.settingsPageInset)
+                .padding(.top, 24)
+                .padding(.bottom, CommonPlateStyle.Spacing.l)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
+        .safeAreaInset(edge: .bottom) {
+            if claim != nil {
+                finishHelpingBar
             }
         }
         .navigationTitle(Self.navigationTitle)
-        // The one place the ETA control's default is decided. `eta` is this
-        // screen's draft state and survives its own re-appearances, so a helper
-        // who already chose "30 minutes" and came back does not silently get
-        // ASAP; only an empty or unrecognised draft falls back to the default.
-        .onAppear {
-            draft.readyTime = FulfillmentReadyTime.initialSelection(draftETA: draft.eta)
-            draft.eta = draft.readyTime.etaValue
-        }
+        .navigationBarTitleDisplayMode(.inline)
         .onChange(of: focusedField) { previousField, currentField in
             validationPresentation.handleFocusTransition(
                 from: previousField,
@@ -437,9 +322,9 @@ struct FulfillRequestView: View {
                 errors: currentFieldErrors
             )
         }
-        // Any terminal end to this claim removes the entire request-scoped flow.
-        // Confirmed placement also publishes a confirmation card, which belongs
-        // on Active Requests rather than keeping this completed screen alive.
+        // A non-success end to this claim removes the entire request-scoped
+        // flow. A confirmed placement is left to the success presentation,
+        // which owns the one automatic Home return.
         .onChange(of: store.activeClaim?.requestID) { _, _ in
             synchronizeClaimedFlowPath()
         }
@@ -448,16 +333,12 @@ struct FulfillRequestView: View {
         .onChange(of: store.fulfillmentConfirmation?.id) { _, _ in
             synchronizeClaimedFlowPath()
         }
-    }
-
-    /// The only exit this screen has. Rewriting the path — rather than
-    /// dismissing — is what removes the completed claimant screen *and* the
-    /// request detail that opened it in one update. A `dismiss()` read on that
-    /// detail could not do it: it is below this screen in the stack, so SwiftUI
-    /// does not act on it while this screen is on top, which is what left the
-    /// emptied reservation screen visible after a confirmed placement.
-    private func returnToActiveRequests() {
-        path = AppRoute.returningToActiveRequests(from: path)
+        // The failure notice belongs to an Open Grubhub that is still offered.
+        .onChange(of: isOpenGrubhubAvailable) { _, isAvailable in
+            if !isAvailable {
+                isShowingGrubhubOpenFailure = false
+            }
+        }
     }
 
     private func synchronizeClaimedFlowPath() {
@@ -469,17 +350,24 @@ struct FulfillRequestView: View {
         )
     }
 
-    /// Keeps request-scoped destinations only while this exact reservation is
-    /// active and no placement confirmation for it exists. A confirmed placement
-    /// truncates immediately so system Back has no stale detail to reveal.
+    /// Keeps request-scoped destinations while this exact reservation is
+    /// active. A non-success end (release, expiry, a lost reservation)
+    /// unwinds to Active Requests, where its safety notice is presented.
+    ///
+    /// W4-H1: a confirmed placement for this request leaves the path alone.
+    /// The success presentation covers it and performs the single automatic
+    /// Home return (`AppRoute.afterHelperSuccess`); truncating here as well
+    /// would be a second, competing destination.
     static func claimedFlowPath(
         _ path: [AppRoute],
         activeRequestID: String?,
         confirmationRequestID: String?,
         requestID: String
     ) -> [AppRoute] {
-        guard confirmationRequestID != requestID,
-              activeRequestID == requestID else {
+        if confirmationRequestID == requestID {
+            return path
+        }
+        guard activeRequestID == requestID else {
             return AppRoute.returningToActiveRequests(from: path)
         }
         return path
@@ -491,77 +379,486 @@ struct FulfillRequestView: View {
         return ambiguity
     }
 
-    /// Headerless on purpose. "After you’ve ordered" duplicated the instruction
-    /// already given at the top of the screen and pushed the fields further down
-    /// a form that was reading as too long.
-    private var fulfillmentForm: some View {
-        Section {
-            // No email field (W3-I1). The helper is the verified participant
-            // this reservation is bound to, so the address the student can
-            // reply to is one CommonPlate already proved — not one retyped here
-            // on every order.
-            Text(Self.helperEmailNotice)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("fulfillment-verified-helper-notice")
+    // MARK: - Reservation
 
-            // A digits-only contract, so the keypad matches it. The binding
-            // stays a `String` and nothing filters or reformats it as the
-            // helper types: a paste that carries letters keeps them on screen
-            // and is explained by the field's own message, rather than being
-            // silently rewritten into something the helper never entered.
-            // Leading zeroes are text here and survive to the wire intact.
-            TextField("Order number", text: $draft.orderNumber)
-                .keyboardType(.numberPad)
-                .autocorrectionDisabled()
-                .focused($focusedField, equals: .orderNumber)
-                .accessibilityIdentifier("fulfillment-order-number")
-                .accessibilityHint(Text(fieldError(.orderNumber) ?? ""))
-
-            fieldErrorText(.orderNumber, identifier: "fulfillment-order-number-error")
-
-            Text(Self.orderNumberNotice)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            // A menu picker, not a text field. The free-text row read as static
-            // text — a helper could not tell "Ready in  15 minutes" was theirs
-            // to change — and left them inventing a phrasing for an order that
-            // might be ready immediately or in an hour.
-            Picker(Self.readyTimeQuestion, selection: $draft.readyTime) {
-                ForEach(FulfillmentReadyTime.allCases) { option in
-                    Text(option.label).tag(option)
-                }
+    private func reservationStatus(claim: ActiveClaimPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 6) {
+                HelpingEyebrow(text: Self.reservedUntilLabel)
+                Text(Self.reservedUntilTime(claim.claimExpiresAt))
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(HelpingPalette.primaryText)
             }
-            .pickerStyle(.menu)
-            .accessibilityIdentifier("fulfillment-eta")
-            .onChange(of: draft.readyTime) { _, selection in
-                draft.eta = selection.etaValue
-            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(ActiveRequestsView.reservedUntilText(claim.claimExpiresAt))
+            .accessibilityIdentifier("claim-reservation-notice")
 
-            TextField(
-                "Message to the student (optional)",
-                text: $draft.contactMessage,
-                axis: .vertical
-            )
-                .lineLimit(2...5)
-                .accessibilityIdentifier("fulfillment-contact-message")
-
-            Button {
-                submitFulfillment()
-            } label: {
-                if store.isFulfilling {
-                    HStack {
-                        ProgressView()
-                        Text("Saving…")
-                    }
-                } else {
-                    Text(Self.submitTitle)
-                }
+            // The accepted in-app half of the W3-H1 warning. It is a status
+            // line only: the controls it concerns are the ones directly below.
+            if store.isShowingReservationWarning {
+                Text(Self.reservationWarningTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HelpingPalette.stopText)
+                    .accessibilityIdentifier("reservation-warning")
             }
-            .disabled(!isSubmissionEnabled)
-            .accessibilityIdentifier("fulfillment-submit")
         }
+    }
+
+    private func reservationControls(claim: ActiveClaimPresentation) -> some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+            HStack(alignment: .top, spacing: CommonPlateStyle.Spacing.m) {
+                extensionControl(claim: claim)
+                    .frame(maxWidth: .infinity)
+                stopHelpingControl
+                    .frame(maxWidth: .infinity)
+            }
+
+            if let extensionError = ClaimExtensionPresentationError.map(store.claimExtensionError) {
+                Text(extensionError.message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("claim-extension-error")
+            }
+
+            if let releaseError = ReleasePresentationError.map(store.releaseClaimError) {
+                Text(releaseError.message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("reservation-warning-release-error")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func extensionControl(claim: ActiveClaimPresentation) -> some View {
+        switch Self.extensionControlState(for: claim, isExtending: store.isExtendingClaim) {
+        case .available:
+            Button {
+                Task {
+                    await store.extendActiveClaim()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    if store.isExtendingClaim {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "plus")
+                            .font(.caption.weight(.bold))
+                            .accessibilityHidden(true)
+                    }
+                    Text(Self.addFiveMinutesTitle)
+                }
+            }
+            .buttonStyle(HelpingReservationControlStyle(role: .extend))
+            .disabled(!store.canExtendActiveClaim)
+            .accessibilityIdentifier("reservation-warning-extend")
+        case .added:
+            HelpingReservationStatusLabel(text: Self.fiveMinutesAddedTitle)
+                .accessibilityIdentifier("reservation-extension-added")
+        case .cantExtend:
+            HelpingReservationStatusLabel(text: Self.cantExtendTitle)
+                .accessibilityIdentifier("reservation-extension-unavailable")
+        }
+    }
+
+    private var stopHelpingControl: some View {
+        Button {
+            Task {
+                await store.releaseActiveClaim()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if store.isReleasingClaim {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .accessibilityHidden(true)
+                }
+                Text(Self.stopHelpingTitle)
+            }
+        }
+        .buttonStyle(HelpingReservationControlStyle(role: .stop))
+        .disabled(!store.canReleaseActiveClaim)
+        .accessibilityIdentifier("reservation-warning-release")
+    }
+
+    /// The one mapping from confirmed reservation truth to the extension
+    /// control. A confirmed extension always reads as added. The store
+    /// consumes the single offer the moment an attempt starts, so an attempt
+    /// still in flight keeps the (disabled, in-progress) extension control
+    /// rather than momentarily reading `Can't extend`; otherwise the store's
+    /// single-offer flag decides between offering it and `Can't extend`.
+    static func extensionControlState(
+        for claim: ActiveClaimPresentation,
+        isExtending: Bool = false
+    ) -> HelpingExtensionControlState {
+        if claim.hasUsedExtension {
+            return .added
+        }
+        if isExtending {
+            return .available
+        }
+        return claim.isExtensionAvailable ? .available : .cantExtend
+    }
+
+    // MARK: - Place the order
+
+    private func placeOrderSection(claim: ActiveClaimPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(Self.placeOrderHeading)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(HelpingPalette.primaryText)
+                .accessibilityAddTraits(.isHeader)
+
+            // 1. Dining location, with the request's authoritative timing as
+            // its secondary context so a Later request is placed on time.
+            HelpingDetailRow(label: Self.diningLocationLabel) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(request.diningSpot.name)
+                        .font(.headline)
+                        .foregroundStyle(HelpingPalette.primaryText)
+                    Text(request.timingDescription)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("fulfillment-request-timing")
+                }
+            }
+            .padding(.top, 20)
+
+            HelpingDivider()
+
+            // 2. Meal swipes (W3-C1). Every request carries one.
+            HelpingDetailRow(label: Self.mealSwipesLabel) {
+                Text(RequestCardView.mealSwipesText(request.mealSwipes))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(HelpingPalette.primaryText)
+                    .accessibilityIdentifier("fulfillment-meal-swipes")
+            }
+
+            HelpingDivider()
+
+            // 3. Meal request.
+            HelpingDetailRow(label: Self.mealRequestLabel) {
+                Text(request.foodDescription)
+                    .font(.callout)
+                    .foregroundStyle(HelpingPalette.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // W4-R4 narrow compatibility adaptation: the `Name on order` row
+            // is removed because the field it rendered no longer exists
+            // anywhere in the request contract — pickup name is gone from the
+            // schema, the create payload, every projection, and the claim
+            // response. This is the row removal H1's own third READY repair
+            // already accepted ("removes `Name on order` / `pickupName`
+            // reliance from the Helping-page hierarchy"), not an R4 redesign
+            // of H1: no other row, label, ordering, interaction, reservation,
+            // fulfillment, or success behaviour on this screen is touched,
+            // and no replacement text is added in its place.
+
+            // 5. Open Grubhub. No divider above it, by design.
+            if isOpenGrubhubAvailable {
+                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+                    Button(action: openGrubhub) {
+                        HStack(spacing: 6) {
+                            Text(Self.openGrubhubTitle)
+                            Image("GrubhubExternalArrow")
+                                .renderingMode(.template)
+                                .resizable()
+                                .frame(width: 9, height: 9)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    .buttonStyle(OpenGrubhubButtonStyle())
+                    .accessibilityHint(Text(Self.openGrubhubAccessibilityHint))
+                    .accessibilityIdentifier("fulfillment-open-grubhub")
+
+                    if isShowingGrubhubOpenFailure {
+                        Text(Self.grubhubOpenFailureNotice)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("fulfillment-open-grubhub-failure")
+                    }
+                }
+                .padding(.top, 20)
+            }
+        }
+    }
+
+    /// The Open Grubhub safety gate for this screen's live state.
+    private var isOpenGrubhubAvailable: Bool {
+        Self.isOpenGrubhubAvailable(
+            requestID: request.id,
+            activeClaimRequestID: store.activeClaim?.requestID,
+            isFulfilling: store.isFulfilling,
+            hasFulfillmentAmbiguity: store.fulfillmentAmbiguity != nil,
+            confirmationRequestID: store.fulfillmentConfirmation?.requestID
+        )
+    }
+
+    /// W4-H1 Open Grubhub availability safety gate: offered only while this
+    /// helper holds the confirmed active reservation for this request, no
+    /// fulfillment submission is in flight, no fulfillment ambiguity/recovery
+    /// exists, and no placement has been confirmed. Anything else could read
+    /// as an invitation to place a second external order.
+    static func isOpenGrubhubAvailable(
+        requestID: String,
+        activeClaimRequestID: String?,
+        isFulfilling: Bool,
+        hasFulfillmentAmbiguity: Bool,
+        confirmationRequestID: String?
+    ) -> Bool {
+        activeClaimRequestID == requestID
+            && !isFulfilling
+            && !hasFulfillmentAmbiguity
+            && confirmationRequestID != requestID
+    }
+
+    /// External handoff only. Re-checks the safety gate at the tap, and on
+    /// failure stays in CommonPlate with the accepted inline notice. Nothing
+    /// here reaches `RequestStore`.
+    private func openGrubhub() {
+        guard isOpenGrubhubAvailable else { return }
+        isShowingGrubhubOpenFailure = false
+        GrubhubHandoff.open(
+            using: { url, completion in openURL(url, completion: completion) },
+            completion: { didOpen in
+                guard !didOpen, isOpenGrubhubAvailable else { return }
+                isShowingGrubhubOpenFailure = true
+                UIAccessibility.post(
+                    notification: .announcement,
+                    argument: Self.grubhubOpenFailureNotice
+                )
+            }
+        )
+    }
+
+    // MARK: - After you order
+
+    @ViewBuilder
+    private var afterYouOrderSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(Self.afterYouOrderHeading)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(HelpingPalette.primaryText)
+                .accessibilityAddTraits(.isHeader)
+
+            // No email field (W3-I1): the helper is the verified participant
+            // this reservation is bound to. The V1 email-sharing / Reply-To
+            // disclosure is presented by W4-T1, not on this page.
+
+            if let ambiguity = matchingAmbiguity {
+                ambiguitySection(ambiguity)
+                    .padding(.top, 16)
+            } else {
+                fulfillmentFields
+                    .padding(.top, 16)
+
+                if let fulfillmentError = FulfillmentPresentationError.map(store.fulfillError) {
+                    Text(fulfillmentError.message)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, CommonPlateStyle.Spacing.m)
+                        .accessibilityIdentifier("fulfillment-error")
+                }
+            }
+        }
+    }
+
+    private var fulfillmentFields: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            VStack(alignment: .leading, spacing: 7) {
+                HelpingFieldLabel(text: Self.orderNumberLabel)
+                // A digits-only contract, so the keypad matches it. The
+                // binding stays a `String` and nothing filters or reformats
+                // it: a paste that carries letters keeps them on screen and is
+                // explained by the field's own message. Leading zeroes survive
+                // to the wire intact.
+                TextField(Self.orderNumberPlaceholder, text: $draft.orderNumber)
+                    .keyboardType(.numberPad)
+                    .autocorrectionDisabled()
+                    .focused($focusedField, equals: .orderNumber)
+                    .font(.subheadline)
+                    .modifier(HelpingFieldChrome(minHeight: 44))
+                    .accessibilityLabel(Text(Self.orderNumberLabel))
+                    .accessibilityHint(Text(fieldError(.orderNumber) ?? ""))
+                    .accessibilityIdentifier("fulfillment-order-number")
+
+                fieldErrorText(.orderNumber, identifier: "fulfillment-order-number-error")
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                HelpingFieldLabel(text: Self.pickupETALabel)
+                Menu {
+                    Picker(Self.pickupETALabel, selection: readyTimeSelection) {
+                        ForEach(FulfillmentReadyTime.allCases) { option in
+                            Text(option.label).tag(Optional(option))
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(draft.readyTime?.label ?? Self.pickupETAPlaceholder)
+                            .font(.subheadline)
+                            .foregroundStyle(
+                                draft.readyTime == nil ? Color.secondary : HelpingPalette.primaryText
+                            )
+                        Spacer(minLength: CommonPlateStyle.Spacing.s)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.accentColor.opacity(0.72))
+                            .accessibilityHidden(true)
+                    }
+                    .modifier(HelpingFieldChrome(minHeight: 44))
+                }
+                .accessibilityLabel(Text(Self.pickupETALabel))
+                .accessibilityValue(Text(draft.readyTime?.label ?? Self.pickupETAPlaceholder))
+                .accessibilityIdentifier("fulfillment-eta")
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline) {
+                    HelpingFieldLabel(text: Self.messageLabel)
+                    Spacer()
+                    Text(Self.messageOptionalLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                TextField(
+                    Self.messagePlaceholder,
+                    text: $draft.contactMessage,
+                    axis: .vertical
+                )
+                .lineLimit(3...6)
+                .font(.subheadline)
+                .modifier(HelpingFieldChrome(minHeight: 80, alignment: .topLeading))
+                .accessibilityLabel(Text(Self.messageLabel))
+                .accessibilityIdentifier("fulfillment-contact-message")
+            }
+        }
+    }
+
+    /// Writes the backend `eta` string only from the chosen option, so the
+    /// helper's choice and the requester's email carry the same text.
+    private var readyTimeSelection: Binding<FulfillmentReadyTime?> {
+        Binding(
+            get: { draft.readyTime },
+            set: { selection in
+                draft.readyTime = selection
+                draft.eta = selection?.etaValue ?? ""
+            }
+        )
+    }
+
+    private func ambiguitySection(_ ambiguity: FulfillmentAmbiguityPresentation) -> some View {
+        let isShowingRecovery = Self.showsAmbiguityRecoveryCopy(
+            isRecoveryAvailable: ambiguity.isRecoveryAvailable,
+            isRecovering: ambiguity.isRecovering
+        )
+        return VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+            // Before the question, not after it: the helper needs the state
+            // they are in before they read what the action does about it.
+            if isShowingRecovery {
+                Text(Self.ambiguityRecoveryContext)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("fulfillment-ambiguity-recovery-context")
+            }
+            Text(isShowingRecovery
+                 ? Self.ambiguityRecoveryTitle
+                 : Self.ambiguousTitle(isCheckingStatus: ambiguity.isCheckingStatus))
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(isShowingRecovery
+                 ? Self.ambiguityRecoveryDetail
+                 : Self.ambiguousDetail(isCheckingStatus: ambiguity.isCheckingStatus))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("fulfillment-ambiguous-detail")
+            if ambiguity.isCheckingStatus {
+                HStack {
+                    ProgressView()
+                    Text("Checking…")
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+            if ambiguity.isRecovering {
+                HStack {
+                    ProgressView()
+                    Text("Saving…")
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+            if Self.showsAmbiguityRecoveryAction(
+                isCheckingStatus: ambiguity.isCheckingStatus,
+                isRecoveryAvailable: ambiguity.isRecoveryAvailable
+            ) {
+                Button(Self.ambiguityRecoveryActionTitle) {
+                    let ambiguityID = ambiguity.id
+                    Task {
+                        try? await store.resubmitAmbiguousFulfillment(
+                            ambiguityID: ambiguityID,
+                            requestID: request.id
+                        )
+                    }
+                }
+                .commonPlateSecondaryAction()
+                .disabled(store.isFulfilling || store.isReleasingClaim)
+                .accessibilityIdentifier("fulfillment-ambiguity-recovery")
+            }
+            // Navigation only — nothing here resolves the ambiguity or
+            // unblocks a second submission.
+            if Self.showsAmbiguityReturnAction(
+                isCheckingStatus: ambiguity.isCheckingStatus
+            ) {
+                Button(Self.returnTitle) {
+                    Self.returnToActiveRequests(from: store) {
+                        path = AppRoute.returningToActiveRequests(from: path)
+                    }
+                }
+                .commonPlateTertiaryAction()
+                .accessibilityIdentifier("fulfillment-ambiguous-return")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("fulfillment-ambiguous-state")
+    }
+
+    // MARK: - Finish helping
+
+    private var finishHelpingBar: some View {
+        let isSubmitting = Self.showsSubmittingState(
+            isFulfilling: store.isFulfilling,
+            hasMatchingAmbiguity: matchingAmbiguity != nil
+        )
+        return Button {
+            submitFulfillment()
+        } label: {
+            Text(isSubmitting ? Self.submittingTitle : Self.submitTitle)
+        }
+        .buttonStyle(HelperPrimaryActionButtonStyle(isInFlight: isSubmitting))
+        .disabled(!isSubmissionEnabled)
+        .accessibilityIdentifier("fulfillment-submit")
+        .padding(.horizontal, CommonPlateStyle.Metrics.settingsPageInset)
+        .padding(.top, CommonPlateStyle.Spacing.m)
+        .padding(.bottom, CommonPlateStyle.Spacing.s)
+        .frame(maxWidth: .infinity)
+        .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea(edges: .bottom))
+    }
+
+    /// `Submitting…` is only the in-flight state of an ordinary submission.
+    /// The single ambiguity resend has its own recovery progress copy.
+    static func showsSubmittingState(isFulfilling: Bool, hasMatchingAmbiguity: Bool) -> Bool {
+        isFulfilling && !hasMatchingAmbiguity
     }
 
     private var currentFieldErrors: [FulfillmentFieldError] {
@@ -575,9 +872,8 @@ struct FulfillRequestView: View {
             .message
     }
 
-    /// The message sits immediately below the field it names, in the same red
-    /// the form already uses for a failed submission, so the invalid field is
-    /// identified where the helper is already looking.
+    /// The message sits immediately below the field it names, so the invalid
+    /// field is identified where the helper is already looking.
     @ViewBuilder
     private func fieldErrorText(
         _ field: FulfillmentFormField,
@@ -598,17 +894,22 @@ struct FulfillRequestView: View {
         )
     }
 
+    /// `Finish helping` is enabled only when every required field is valid
+    /// under the existing fulfillment validation and the store permits a
+    /// submission. There is no tap-to-validate path on a disabled button.
     static func isSubmissionEnabled(
         draft: FulfillmentFormDraft,
         isOperationallyAvailable: Bool
     ) -> Bool {
         guard isOperationallyAvailable else { return false }
 
-        return !draft.orderNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return FulfillmentFormValidator.validate(orderNumber: draft.orderNumber).isEmpty
+            && draft.readyTime != nil
             && !draft.eta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func submitFulfillment() {
+        focusedField = nil
         let submittedDraft = draft
         let currentPresentation = validationPresentation
         Task {
@@ -670,132 +971,47 @@ struct FulfillRequestView: View {
         )
     }
 
-    private var extensionPromptSection: some View {
-        Section {
-            Text(Self.extensionPromptTitle)
-                .font(.headline)
-                .accessibilityIdentifier("claim-extension-prompt")
+    // MARK: - Copy
 
-            Button {
-                Task {
-                    await store.extendActiveClaim()
-                }
-            } label: {
-                if store.isExtendingClaim {
-                    HStack {
-                        ProgressView()
-                        Text("Adding time…")
-                    }
-                } else {
-                    Text(Self.extensionAcceptTitle)
-                }
-            }
-            .disabled(!store.canExtendActiveClaim)
-            .accessibilityIdentifier("claim-extension-accept")
+    static let navigationTitle = "Helping"
 
-            Button(Self.extensionDeclineTitle) {
-                store.dismissClaimExtensionPrompt()
-            }
-            .disabled(store.isExtendingClaim)
-            .accessibilityIdentifier("claim-extension-decline")
-        }
+    static let reservedUntilLabel = "Reserved until"
+
+    /// The authoritative reservation deadline as a static `HH:MM`. Deliberately
+    /// not a live countdown: the backend owns expiration.
+    static func reservedUntilTime(_ claimExpiresAt: Date) -> String {
+        claimExpiresAt.formatted(date: .omitted, time: .shortened)
     }
 
-    /// Always-available reservation actions (W3-H1 MUST FIX 2). `Release
-    /// reservation` is offered whenever the caller holds a still-active,
-    /// releasable reservation, and `Add 5 minutes` whenever the one extension
-    /// is actually still available — neither waits for the five-minute
-    /// warning to fire; both are backend-authoritative regardless. The
-    /// warning still surfaces here as the "5 minutes remain" heading and
-    /// routes into these same actions — it supersedes the T-3 "Still
-    /// ordering?" prompt for this reservation (`RequestStore` already
-    /// resolves that prompt the instant the warning fires, so the two never
-    /// both show) — but it is no longer the condition that first enables
-    /// them.
-    private func reservationActionsSection(claim: ActiveClaimPresentation) -> some View {
-        Section {
-            if store.isShowingReservationWarning {
-                Text(Self.reservationWarningTitle)
-                    .font(.headline)
-                    .accessibilityIdentifier("reservation-warning")
-            }
+    /// The accepted W3-H1 warning copy, reused verbatim.
+    static let reservationWarningTitle = "5 minutes remain"
 
-            if claim.isExtensionAvailable {
-                Button {
-                    Task {
-                        await store.extendActiveClaim()
-                    }
-                } label: {
-                    if store.isExtendingClaim {
-                        HStack {
-                            ProgressView()
-                            Text("Adding time…")
-                        }
-                    } else {
-                        Text(Self.reservationWarningExtendTitle)
-                    }
-                }
-                .disabled(!store.canExtendActiveClaim)
-                .accessibilityIdentifier("reservation-warning-extend")
-            }
+    static let addFiveMinutesTitle = "Add 5 minutes"
+    static let fiveMinutesAddedTitle = "5 minutes added"
+    static let cantExtendTitle = "Can't extend"
+    static let stopHelpingTitle = "Stop helping"
 
-            Button(role: .destructive) {
-                Task {
-                    await store.releaseActiveClaim()
-                }
-            } label: {
-                if store.isReleasingClaim {
-                    HStack {
-                        ProgressView()
-                        Text("Releasing…")
-                    }
-                } else {
-                    Text(Self.reservationWarningReleaseTitle)
-                }
-            }
-            .disabled(!store.canReleaseActiveClaim)
-            .accessibilityIdentifier("reservation-warning-release")
+    static let placeOrderHeading = "Place the order"
+    static let diningLocationLabel = "Dining location"
+    static let mealSwipesLabel = "Meal swipes"
+    static let mealRequestLabel = "Meal request"
 
-            if let releaseError = ReleasePresentationError.map(store.releaseClaimError) {
-                Text(releaseError.message)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("reservation-warning-release-error")
-            }
-        }
-    }
+    static let openGrubhubTitle = "Open Grubhub"
+    static let openGrubhubAccessibilityHint = "Opens the Grubhub app."
+    static let grubhubOpenFailureNotice =
+        "Couldn't open Grubhub. Open the Grubhub app to place the order."
 
-    /// The authoritative reservation deadline, stated once. Deliberately not a
-    /// live countdown: the backend owns expiration, and a ticking client clock
-    /// would imply a precision iOS does not have.
-    static func reservationNotice(claimExpiresAt: Date) -> String {
-        let time = claimExpiresAt.formatted(date: .omitted, time: .shortened)
-        return "This request is reserved for you until \(time)."
-    }
+    static let afterYouOrderHeading = "After you order"
+    static let orderNumberLabel = "Order number"
+    static let orderNumberPlaceholder = "Enter order number"
+    static let pickupETALabel = "Pickup ETA"
+    static let pickupETAPlaceholder = "Choose time"
+    static let messageLabel = "Message"
+    static let messageOptionalLabel = "Optional"
+    static let messagePlaceholder = "Anything they should know?"
 
-    static let navigationTitle = "Your reservation"
-
-    /// The order comes first and this screen only records it. Stated as the two
-    /// steps they are, near the top, because it is the one instruction a helper
-    /// has to act on before touching anything else on the screen.
-    static let completedOrderNotice =
-        "Place the Grubhub order first. Then save the details here."
-    /// The provider submission carries the helper's verified NYU address as
-    /// Reply-To, but provider acceptance cannot prove the message reached the
-    /// student.
-    static let helperEmailNotice =
-        "If the email reaches the student, they can reply to your verified NYU email."
-    static let orderNumberNotice = "From your Grubhub confirmation."
-    /// A question, because the control answers one. "Ready in" read as a label
-    /// on a value rather than as something to choose.
-    static let readyTimeQuestion = "When will it be ready?"
-    static let submitTitle = "I placed this order"
-
-    /// The single pickup-name instruction. The helper does not need to be taught
-    /// Grubhub; they need to be told which name to use, once, next to the name.
-    static func pickupNameInstruction(pickupName: String) -> String {
-        "Use “\(pickupName)” as the pickup name in Grubhub."
-    }
+    static let submitTitle = "Finish helping"
+    static let submittingTitle = "Submitting…"
 
     /// While the single read-only status check is still running.
     static let ambiguousCheckingTitle = "We’re checking your order"
@@ -860,17 +1076,197 @@ struct FulfillRequestView: View {
         navigate()
     }
 
-    static let confirmationTitle = "Order recorded"
     static let returnTitle = "Back to Active Requests"
+}
 
-    static func confirmationDetail(for kind: FulfillmentConfirmationKind) -> String {
-        switch kind {
-        case .notificationSent:
-            return "CommonPlate submitted the order details for email delivery. We can’t confirm that the student received or read the email, or that they will pick up the food. If they reply, it goes to your verified NYU email."
-        case .notificationFailed:
-            return "Your order is recorded, but we couldn’t email the student. They may not know their food is waiting. Don’t place another Grubhub order."
-        case .emailStatusUnknown:
-            return "Your order is recorded. We couldn’t tell whether the student’s email went out, so they may not know their food is waiting. Don’t place another Grubhub order."
+// MARK: - Helping page presentation
+
+/// Approved W4-H1 Figma colors for the Helping page, with dark-appearance
+/// counterparts so the narrow Grubhub-orange exception and the destructive
+/// control stay legible on the dark canvas.
+private enum HelpingPalette {
+    static let primaryText = Color.primary
+    static let eyebrowText = Color.secondary
+    static let divider = CommonPlateStyle.Color.requestCardBorder
+
+    static let extendTint = Color.accentColor
+    static let stopText = dynamic(
+        light: UIColor(red: 180 / 255, green: 67 / 255, blue: 73 / 255, alpha: 1),
+        dark: UIColor(red: 240 / 255, green: 130 / 255, blue: 135 / 255, alpha: 1)
+    )
+
+    /// Grubhub orange (`rgba(255, 128, 0, …)`) — a restrained third-party
+    /// brand treatment used only by Open Grubhub.
+    static let grubhubOrange = Color(red: 1, green: 128 / 255, blue: 0)
+    static let grubhubText = dynamic(
+        light: UIColor(red: 156 / 255, green: 71 / 255, blue: 0, alpha: 1),
+        dark: UIColor(red: 1, green: 170 / 255, blue: 90 / 255, alpha: 1)
+    )
+
+    private static func dynamic(light: UIColor, dark: UIColor) -> Color {
+        Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark ? dark : light
+        })
+    }
+}
+
+private struct HelpingEyebrow: View {
+    let text: String
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.caption.weight(.semibold))
+            .tracking(0.6)
+            .foregroundStyle(HelpingPalette.eyebrowText)
+    }
+}
+
+/// One labelled fact in `Place the order`. Flat by design: no card per fact.
+private struct HelpingDetailRow<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HelpingEyebrow(text: label)
+            content
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct HelpingDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(HelpingPalette.divider)
+            .frame(height: 1)
+            .padding(.vertical, 18)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct HelpingFieldLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(HelpingPalette.primaryText)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct HelpingFieldChrome: ViewModifier {
+    let minHeight: CGFloat
+    var alignment: Alignment = .leading
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 13)
+            .padding(.vertical, 11)
+            .frame(maxWidth: .infinity, minHeight: minHeight, alignment: alignment)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(CommonPlateStyle.Color.baseCanvas)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(CommonPlateStyle.Color.requestCardBorder)
+            )
+            .contentShape(Rectangle())
+    }
+}
+
+/// Noninteractive `5 minutes added` / `Can't extend`, occupying the extension
+/// control's slot so the pair stays side by side.
+private struct HelpingReservationStatusLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, CommonPlateStyle.Spacing.s)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(CommonPlateStyle.Color.requestCardBorder)
+            )
+    }
+}
+
+private struct HelpingReservationControlStyle: ButtonStyle {
+    enum Role {
+        case extend
+        case stop
+    }
+
+    let role: Role
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let tint = role == .extend ? HelpingPalette.extendTint : HelpingPalette.stopText
+        configuration.label
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(isEnabled ? tint : Color.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, CommonPlateStyle.Spacing.s)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isEnabled ? tint.opacity(role == .extend ? 0.08 : 0.07) : Color.gray.opacity(0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(isEnabled ? tint.opacity(role == .extend ? 0.16 : 0.14) : Color.gray.opacity(0.2))
+            )
+            .opacity(configuration.isPressed && isEnabled ? 0.82 : 1)
+    }
+}
+
+/// Centered label with a trailing external arrow on a restrained
+/// Grubhub-orange surface — the one narrow third-party-brand exception.
+private struct OpenGrubhubButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .foregroundStyle(HelpingPalette.grubhubText)
+            .padding(.horizontal, CommonPlateStyle.Spacing.m)
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(HelpingPalette.grubhubOrange.opacity(0.13))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(HelpingPalette.grubhubOrange.opacity(0.38), lineWidth: 1.25)
+            )
+            .opacity(configuration.isPressed ? 0.82 : 1)
+    }
+}
+
+/// The Helping page's pinned `Finish helping` action: filled purple when
+/// enabled, neutral when disabled, and a dimmed purple while in flight.
+private struct HelperPrimaryActionButtonStyle: ButtonStyle {
+    let isInFlight: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let isActive = isEnabled || isInFlight
+        configuration.label
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(isActive ? Color.white : Color.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, CommonPlateStyle.Spacing.m)
+            .frame(maxWidth: .infinity, minHeight: CommonPlateStyle.Control.majorActionMinimumHeight)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isActive ? Color.accentColor : Color.gray.opacity(0.28))
+            )
+            .opacity(isInFlight ? 0.72 : (configuration.isPressed && isEnabled ? 0.88 : 1))
     }
 }

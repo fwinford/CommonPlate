@@ -64,9 +64,10 @@ function makeRequest(overrides: Record<string, unknown> = {}) {
   return {
     vendor: "Test Vendor",
     food: "Test food",
-    pickupName: "Test pickup",
     email: "eligibility-mongo@nyu.edu",
+    menuPath: "meal-exchange",
     mealSwipes: 1,
+    mealItems: ["Test food"],
     pickupWindowText: "ASAP",
     status: "open",
     visibleFrom: new Date(),
@@ -94,10 +95,10 @@ const raceParticipantAuthority = signParticipantAuthority(
 function canonicalAsapPayload() {
   return {
     vendor: "Palladium",
-    food: "Vegetable rice bowl",
-    pickupName: "Requester Private Name",
     timing: "asap",
+    menuPath: "meal-exchange",
     mealSwipes: 2,
+    mealItems: ["Vegetable rice bowl", "Side salad"],
   };
 }
 

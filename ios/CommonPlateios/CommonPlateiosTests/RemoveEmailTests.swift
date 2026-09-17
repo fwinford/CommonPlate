@@ -4,10 +4,13 @@
 //
 // Focused W3-I4 coverage: `ParticipantIdentityStore.removeIdentity()` — what
 // it clears, what it leaves alone, and that a caller cannot use it while a
-// verification flow is running. The removal-safety *gating* Home applies
-// (`ContentView.isRemoveEmailBlocked`) is `!requestStore.hasEstablishedRemovalSafety
-// || requestStore.activeClaim != nil || requestStore.hasUnresolvedCreateAmbiguity`
-// by source inspection; this file proves those published `RequestStore`
+// verification flow is running. The removal-safety *gating* Settings applies
+// (`SettingsView.isRemoveEmailBlocked`) is `!requestStore.hasEstablishedRemovalSafety
+// || requestStore.activeClaim != nil || requestStore.hasUnresolvedCreateAmbiguity
+// || requestStore.isCreating` (the last disjunct added by the W4-D2 FIX
+// 2026-09-18 independent-review MUST FIX; see
+// `RemoveEmailInFlightCreateGatingTests.swift` for its focused coverage) by
+// source inspection; this file proves those published `RequestStore`
 // signals hold exactly when the accepted removal-safety matrix says Remove
 // Email must be unavailable, reusing the same store construction other
 // focused H1/D1 suites already use. `hasEstablishedRemovalSafety` is the
@@ -298,12 +301,11 @@ final class RemoveEmailTests: XCTestCase {
             PendingRequestOperationRecord(
                 operationId: "cold-launch-recovered-op",
                 participantIdentifier: "64c0000000000000000000a1",
-                vendor: "Palladium",
-                food: "Ambiguous rice bowl",
-                pickupName: "Taylor",
-                timing: .asap,
-                windowStart: nil,
-                mealSwipes: 2
+                operationAuthority: RequestOperationAuthorityIdentity(
+                    origin: RequestService.operationAuthorityOrigin(for: URL(string: "https://commonplate.test")!),
+                    ledger: RequestFetchingURLProtocol.defaultOperationLedger
+                ),
+                payload: asapPayload()
             )
         )
         let store = makeStoreWithOperationStorage(storage)
@@ -550,7 +552,27 @@ final class RemoveEmailTests: XCTestCase {
         let isRemoveEmailBlocked = !store.hasEstablishedRemovalSafety
             || store.activeClaim != nil
             || store.hasUnresolvedCreateAmbiguity
+            || store.isCreating
         XCTAssertTrue(isRemoveEmailBlocked)
+    }
+
+    // MARK: - Blocked-by-unresolved-create notice copy (W4-D2 fix,
+    // 2026-09-16 Faith decision)
+
+    /// The prior wording ("CommonPlate is still confirming a request you
+    /// submitted. You can remove your email once that finishes.") promised
+    /// automatic resolution that D2's fail-closed states (unavailable
+    /// stable recovery identity; operation-authority/backend-identity
+    /// mismatch) may never actually reach. Pins the accepted replacement and
+    /// guards against the old sentence silently returning.
+    func testRemoveEmailBlockedByPendingCreateNoticeUsesAcceptedD2Copy() {
+        XCTAssertEqual(
+            SettingsView.removeEmailBlockedByPendingCreateNotice,
+            "CommonPlate can’t remove your email while a request tied to it is unresolved. This helps prevent a duplicate request."
+        )
+        XCTAssertFalse(
+            SettingsView.removeEmailBlockedByPendingCreateNotice.contains("You can remove your email once that finishes")
+        )
     }
 
     // MARK: - Ambiguous-fulfillment-recovery keeps the removal signal blocked
@@ -682,6 +704,10 @@ final class RemoveEmailTests: XCTestCase {
           "food": "Rice bowl",
           "pickupWindowText": "ASAP",
           "mealSwipes": 2,
+          "menuPath": "meal-exchange",
+          "mealItems": ["Meal 1", "Meal 2"],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": null,
           "windowEnd": null,
           "status": "\(status)",
@@ -734,11 +760,13 @@ final class RemoveEmailTests: XCTestCase {
     private func asapPayload(food: String = "Ambiguous rice bowl") -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: food,
-            pickupName: "Taylor",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: 2
+            menuPath: .mealExchange,
+            mealSwipes: 2,
+            mealItems: [food, "Side salad"],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 

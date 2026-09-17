@@ -92,11 +92,9 @@ struct ActiveRequestsView: View {
     /// Everything that stays above the list regardless of its state.
     @ViewBuilder
     private var pinnedHeader: some View {
-        // A confirmed placement whose claimant screen is already gone has
-        // nowhere else to land: the claim is cleared and the request is removed
-        // from the list, so without this the helper never learns the order was
-        // recorded and the confirmation can never be acknowledged.
-        placementConfirmationItem
+        // W4-H1: no placement confirmation card lives here. Confirmed
+        // placement is presented once by the automatic helper success
+        // presentation, which returns to Home; there is nothing to acknowledge.
 
         // Pinned above every list state, including loading and empty: a
         // reservation the helper is holding must stay reachable even when the
@@ -161,63 +159,6 @@ struct ActiveRequestsView: View {
             .accessibilityIdentifier("active-reservation-item")
         }
     }
-
-    /// The confirmed placement the helper has not acknowledged yet, carrying the
-    /// same message the claimant screen would have shown.
-    ///
-    /// Rendered as inline content rather than an alert or a sheet. This screen
-    /// already owns one modal — the claim-unavailable alert — and the claimant
-    /// screen shows this same confirmation in its own success section, so the
-    /// two surfaces can never contend for one presentation: whichever screen the
-    /// helper is actually on renders it, and the covered one is just layout.
-    @ViewBuilder
-    private var placementConfirmationItem: some View {
-        if let confirmation = store.fulfillmentConfirmation {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(FulfillRequestView.confirmationTitle)
-                    .font(.headline)
-
-                // Which meal this result belongs to. The request is out of the
-                // list and the claim is cleared by now, so the confirmation
-                // carries its own public identity — matching the reservation
-                // card above it, which a helper may have just been reading.
-                Text(confirmation.vendor)
-                    .font(.subheadline)
-                    .accessibilityIdentifier("placement-confirmation-vendor")
-
-                Text(confirmation.foodDescription)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .accessibilityIdentifier("placement-confirmation-food")
-
-                Text(FulfillRequestView.confirmationDetail(for: confirmation.kind))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button(Self.confirmationAcknowledgeTitle) {
-                    store.acknowledgeFulfillmentConfirmation(id: confirmation.id)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("placement-confirmation-acknowledge")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.secondary.opacity(0.12))
-            )
-            .padding(.horizontal)
-            .padding(.top, 8)
-            .accessibilityIdentifier("placement-confirmation-item")
-        }
-    }
-
-    /// Acknowledgement from the list itself. The claimant screen's button says
-    /// "Back to Active Requests" because it navigates; this one is already
-    /// there, so it only dismisses the message.
-    static let confirmationAcknowledgeTitle = "Got it"
 
     static let activeReservationTitle = "You’re helping with a request"
 

@@ -197,8 +197,10 @@ function isDuplicateKeyError(error: unknown): boolean {
   );
 }
 
+/** W4-R4: `pickupName` is gone from the V1 request contract, so the
+ * claimant-private half of a successful claim carries only the claim
+ * authorization itself. */
 interface ClaimedRequestDocument extends PublicRequestDocument {
-  pickupName: string;
   claimExpiresAt: Date;
 }
 
@@ -429,7 +431,6 @@ export async function claimRequest(
     return res.json({
       request: publicResponse.request,
       claim: {
-        pickupName: document.pickupName,
         claimToken: rawToken,
         claimExpiresAt: document.claimExpiresAt,
       },

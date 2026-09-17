@@ -2,13 +2,18 @@
 //  PlacementReentryContinuationTests.swift
 //  CommonPlateiosTests
 //
-// Focused coverage for W3-H2 fulfillment re-entry: a helper who placed an
-// external order but lost the confirming response before acknowledging it
-// (Got It) must recover truthful already-placed presentation on relaunch,
-// from `RequestStore.continueActiveReservationIfNeeded()` reading the same
-// `GET /api/participant/active-reservation` W3-H1 continuation already uses.
-// This must never recreate reservation authority and must never reopen a
-// path to Place Order for the same request.
+// Focused coverage for relaunch reconciliation of a *settled placement*, over
+// the same `GET /api/participant/active-reservation` read W3-H1 continuation
+// already uses.
+//
+// W4-H1 supersedes W3-H2's placed re-entry restore. A settled placement is
+// authoritatively confirmed success, which completes the helper relationship,
+// so relaunch must reconcile to ordinary helper-available state: no restored
+// success presentation, no acknowledgement gate rebuilt from it, and — as
+// before — no reservation authority and no path back to Place Order for that
+// request. These cases pin exactly that, including that the read still
+// resolves W3-I4 removal-safety readiness and still yields to a genuinely
+// active reservation.
 import Foundation
 import XCTest
 @testable import CommonPlateios
@@ -89,7 +94,9 @@ final class PlacementReentryContinuationTests: XCTestCase {
         super.tearDown()
     }
 
-    func testRestoresGotItPresentationWithASettledSentNotificationOutcome() async throws {
+    /// A settled `sent` placement: reconciled as ordinary absence of an
+    /// active reservation, with no success presentation reconstructed.
+    func testASettledSentPlacementReconcilesWithoutRestoringSuccessPresentation() async throws {
         let store = makeStore()
         PlacementReentryURLProtocol.enqueue(.response(
             data: placementResponse(notificationStatus: "sent")
@@ -98,43 +105,36 @@ final class PlacementReentryContinuationTests: XCTestCase {
         let outcome = try await store.continueActiveReservationIfNeeded()
 
         guard case .none = outcome else {
-            return XCTFail("placement re-entry never restores reservation authority")
+            return XCTFail("a settled placement is not reservation authority")
         }
-        XCTAssertNil(store.activeClaim, "must never recreate reservation authority for the request")
-        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
-        XCTAssertEqual(confirmation.requestID, "placed-reentry-target")
-        XCTAssertEqual(confirmation.vendor, "Crave NYU")
-        XCTAssertEqual(confirmation.foodDescription, "Rice bowl")
-        XCTAssertEqual(confirmation.kind, .notificationSent)
-        XCTAssertEqual(store.confirmedFulfillmentOutcome?.notificationStatus, .sent)
-    }
-
-    func testRestoresGotItPresentationWithASettledFailedNotificationOutcome() async throws {
-        let store = makeStore()
-        PlacementReentryURLProtocol.enqueue(.response(
-            data: placementResponse(notificationStatus: "failed")
-        ))
-
-        _ = try await store.continueActiveReservationIfNeeded()
-
-        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
-        XCTAssertEqual(confirmation.kind, .notificationFailed)
-        XCTAssertEqual(store.confirmedFulfillmentOutcome?.notificationStatus, .failed)
-    }
-
-    /// The outcome never settled server-side (e.g. the process ended before
-    /// recording it). This must read as unknown, never guessed as sent.
-    func testRestoresGotItPresentationWithAnUnknownNotificationOutcomeRatherThanGuessing() async throws {
-        let store = makeStore()
-        PlacementReentryURLProtocol.enqueue(.response(
-            data: placementResponse(notificationStatus: nil)
-        ))
-
-        _ = try await store.continueActiveReservationIfNeeded()
-
-        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
-        XCTAssertEqual(confirmation.kind, .emailStatusUnknown)
+        XCTAssertNil(store.activeClaim, "must never recreate reservation authority")
+        XCTAssertNil(
+            store.fulfillmentConfirmation,
+            "W4-H1: relaunch must not rebuild a stale success/acknowledgement screen"
+        )
         XCTAssertNil(store.confirmedFulfillmentOutcome)
+        // W3-I4 removal-safety readiness is still authoritatively resolved by
+        // this read — H1 removes a presentation gate, not this resolution.
+        XCTAssertTrue(store.hasResolvedReservationStateForRemoval)
+    }
+
+    /// The `failed` and never-settled notification outcomes reconcile
+    /// identically: the distinction only ever drove success copy, and there is
+    /// no success presentation to restore.
+    func testFailedAndUnknownNotificationOutcomesReconcileTheSameWay() async throws {
+        for notificationStatus in ["failed", nil] {
+            let store = makeStore()
+            PlacementReentryURLProtocol.enqueue(.response(
+                data: placementResponse(notificationStatus: notificationStatus)
+            ))
+
+            _ = try await store.continueActiveReservationIfNeeded()
+
+            XCTAssertNil(store.fulfillmentConfirmation, "\(notificationStatus ?? "nil")")
+            XCTAssertNil(store.confirmedFulfillmentOutcome, "\(notificationStatus ?? "nil")")
+            XCTAssertNil(store.activeClaim, "\(notificationStatus ?? "nil")")
+            PlacementReentryURLProtocol.reset()
+        }
     }
 
     /// Neither an active reservation nor a still-existing placement: ordinary
@@ -154,44 +154,49 @@ final class PlacementReentryContinuationTests: XCTestCase {
         XCTAssertNil(store.fulfillmentConfirmation)
     }
 
-    /// A restored Got It confirmation blocks a new claim exactly like an
-    /// in-process one already does (`RequestStore.claim`'s existing
-    /// unacknowledged-placement guard) — proving the restoration actually
-    /// feeds the same gate rather than being purely cosmetic.
-    func testARestoredConfirmationBlocksStartingANewClaimUntilAcknowledged() async throws {
+    /// The central W4-H1 relaunch guarantee: after confirmed success, a cold
+    /// launch leaves the helper free to help another eligible request. Nothing
+    /// local refuses the claim, so it reaches the backend, which remains the
+    /// only authority over whether it wins.
+    func testRelaunchAfterConfirmedSuccessLetsTheHelperHelpAnotherRequest() async throws {
         let store = makeStore()
         PlacementReentryURLProtocol.enqueue(.response(
             data: placementResponse(notificationStatus: "sent")
         ))
         _ = try await store.continueActiveReservationIfNeeded()
-        XCTAssertNotNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.fulfillmentConfirmation)
+        let pathsAfterRelaunch = PlacementReentryURLProtocol.requestedPaths
 
-        do {
-            try await store.claim(requestID: "some-other-request")
-            XCTFail("an unacknowledged restored placement must block a new claim")
-        } catch RequestServiceError.unacknowledgedPlacement {
-            // Expected.
-        }
+        PlacementReentryURLProtocol.enqueue(.response(
+            data: claimResponse(requestID: "some-other-request")
+        ))
+        try await store.claim(requestID: "some-other-request")
+
+        XCTAssertEqual(
+            PlacementReentryURLProtocol.requestedPaths,
+            pathsAfterRelaunch + ["/api/request/some-other-request/claim"],
+            "the claim must actually be attempted, not refused locally"
+        )
+        XCTAssertEqual(store.activeClaim?.requestID, "some-other-request")
+        XCTAssertNil(store.claimError(for: "some-other-request"))
     }
 
-    /// A second continuation call (e.g. a second launch-time call site) must
-    /// never clobber a confirmation this process already restored or
-    /// produced — only acknowledgement may clear it.
-    func testASecondContinuationCallNeverOverwritesAnAlreadyRestoredConfirmation() async throws {
+    /// Repeated continuation calls stay a no-op in both directions: they
+    /// neither restore presentation nor invent reservation authority.
+    func testASecondContinuationCallStillRestoresNothing() async throws {
         let store = makeStore()
         PlacementReentryURLProtocol.enqueue(.response(
             data: placementResponse(requestID: "first-placement", notificationStatus: "sent")
         ))
         _ = try await store.continueActiveReservationIfNeeded()
-        let firstConfirmation = try XCTUnwrap(store.fulfillmentConfirmation)
 
         PlacementReentryURLProtocol.enqueue(.response(
             data: placementResponse(requestID: "second-placement", notificationStatus: "failed")
         ))
         _ = try await store.continueActiveReservationIfNeeded()
 
-        XCTAssertEqual(store.fulfillmentConfirmation?.id, firstConfirmation.id)
-        XCTAssertEqual(store.fulfillmentConfirmation?.requestID, "first-placement")
+        XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertNil(store.activeClaim)
     }
 
     /// An active reservation always takes priority; placement re-entry must
@@ -210,6 +215,7 @@ final class PlacementReentryContinuationTests: XCTestCase {
         }
         XCTAssertEqual(claim.requestID, "active-reservation-target")
         XCTAssertNil(store.fulfillmentConfirmation)
+        XCTAssertEqual(store.activeClaim?.requestID, "active-reservation-target")
     }
 
     // MARK: - Helpers
@@ -245,6 +251,10 @@ final class PlacementReentryContinuationTests: XCTestCase {
               "food": "Rice bowl",
               "pickupWindowText": "ASAP",
               "mealSwipes": 2,
+              "menuPath": "meal-exchange",
+              "mealItems": ["Meal 1", "Meal 2"],
+              "orderDetails": null,
+              "estimatedDiningDollarsCents": null,
               "windowStart": null,
               "windowEnd": null,
               "status": "placed",
@@ -252,6 +262,37 @@ final class PlacementReentryContinuationTests: XCTestCase {
               "expiresAt": "2026-08-10T20:00:00.000Z"
             },
             "notification": \(notificationField)
+          }
+        }
+        """.utf8)
+    }
+
+    private func claimResponse(requestID: String) -> Data {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let claimExpiresAt = formatter.string(from: Date().addingTimeInterval(15 * 60))
+        return Data("""
+        {
+          "request": {
+            "id": "\(requestID)",
+            "vendor": "Crave NYU",
+            "food": "Rice bowl",
+            "pickupWindowText": "ASAP",
+            "mealSwipes": 2,
+            "menuPath": "meal-exchange",
+            "mealItems": ["Meal 1", "Meal 2"],
+            "orderDetails": null,
+            "estimatedDiningDollarsCents": null,
+            "windowStart": null,
+            "windowEnd": null,
+            "status": "claimed",
+            "createdAt": "2026-08-10T15:00:00.000Z",
+            "expiresAt": "2026-08-10T20:00:00.000Z"
+          },
+          "claim": {
+            "pickupName": "Next Pickup",
+            "claimToken": "next-claim-token",
+            "claimExpiresAt": "\(claimExpiresAt)"
           }
         }
         """.utf8)
@@ -269,6 +310,10 @@ final class PlacementReentryContinuationTests: XCTestCase {
               "food": "Rice bowl",
               "pickupWindowText": "ASAP",
               "mealSwipes": 2,
+              "menuPath": "meal-exchange",
+              "mealItems": ["Meal 1", "Meal 2"],
+              "orderDetails": null,
+              "estimatedDiningDollarsCents": null,
               "windowStart": null,
               "windowEnd": null,
               "status": "claimed",

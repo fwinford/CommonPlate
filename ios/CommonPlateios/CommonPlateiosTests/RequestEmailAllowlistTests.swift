@@ -169,12 +169,14 @@ final class RequestEmailAllowlistTests: XCTestCase {
 
     func testTheCreatePayloadCarriesNoAddress() throws {
         let payload = try RequestFoodView.makePayload(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            timing: .asap,
-            preferredPickupTime: try date("2026-07-28T17:00:00.000Z"),
-            mealSwipes: 2,
+            draft: RequestFoodFormDraft(
+                selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+                menuPath: .mealExchange,
+                timing: .asap,
+                preferredPickupTime: try date("2026-07-28T17:00:00.000Z"),
+                mealSwipes: 2,
+                mealEntries: ["Chicken bowl"] + Array(repeating: "filler", count: 2 - 1) + Array(repeating: "", count: RequestFoodFormDraft.maxMealSwipes - 2)
+            ),
             now: try date("2026-07-28T16:00:00.000Z"),
             calendar: utcCalendar
         )
@@ -320,21 +322,24 @@ final class RequestEmailAllowlistTests: XCTestCase {
     private func draft(timing: RequestTiming = .asap) -> RequestFoodFormDraft {
         RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
+            menuPath: .mealExchange,
             timing: timing,
-            preferredPickupTime: try! date("2026-07-28T17:00:00.000Z")
+            preferredPickupTime: try! date("2026-07-28T17:00:00.000Z"),
+            mealSwipes: 1,
+            mealEntries: ["Chicken bowl", "", "", "", ""]
         )
     }
 
     private func payload() -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: "Chicken bowl",
-            pickupName: "Taylor",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: 2
+            menuPath: .mealExchange,
+            mealSwipes: 2,
+            mealItems: ["Chicken bowl"],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 
@@ -355,6 +360,10 @@ final class RequestEmailAllowlistTests: XCTestCase {
           "food": "Chicken bowl",
           "pickupWindowText": "ASAP",
           "mealSwipes": 2,
+          "menuPath": "meal-exchange",
+          "mealItems": ["Meal 1", "Meal 2"],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": null,
           "windowEnd": null,
           "status": "open",

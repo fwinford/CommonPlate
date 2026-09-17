@@ -21,7 +21,8 @@
 import Foundation
 
 /// What the driver needs from `RequestStore` — current backend truth for one
-/// request id, and the three recovery notices the accepted contract attaches
+/// request id, whether a not-open request is this helper's held reservation
+/// (W4-H1), and the three recovery notices the accepted contract attaches
 /// to the non-open outcomes. Narrow on purpose: it keeps the driver free of
 /// the rest of the request lifecycle, and lets tests drive it with a real
 /// `RequestStore` over a stubbed transport rather than a hand-written double
@@ -29,6 +30,8 @@ import Foundation
 @MainActor
 protocol HelperNotificationResolving: AnyObject {
     func resolveHelperNotificationRequest(id: String) async throws -> HelperNotificationResolution
+    /// W4-H1: consulted only after the request resolved `.unavailable`.
+    func resolveHeldRequestForNotification(requestID: String) async throws -> HeldRequestNotificationTruth
     func reportRequestUnavailableFromNotification(requestID: String)
     func reportRequestNotYetAvailableFromNotification(requestID: String)
     func reportRequestTemporarilyUnavailableFromNotification(requestID: String)
@@ -74,8 +77,29 @@ enum HelperNotificationRouteDriver {
         // is already classified into `.unavailable` or `.temporarilyUnavailable`
         // by the store. So `nil` here means "this attempt never learned
         // anything", which must leave the tap intact rather than drop it.
-        guard let resolution = try? await resolver.resolveHelperNotificationRequest(id: intent.requestID) else {
+        guard var resolution = try? await resolver.resolveHelperNotificationRequest(id: intent.requestID) else {
             return nil
+        }
+
+        // W4-H1 held-request tap (narrow change to `docs/system-contract.md`
+        // section 8.3). A not-open request may be the reservation this helper
+        // holds; only confirmed continuation truth may route it to Helping.
+        // Confirmed absence, or a different reservation, keeps `.unavailable`;
+        // truth that cannot be established uses the temporarily-unavailable
+        // recovery rather than claiming the request is gone. Still before the
+        // exclusive claim below, and cancellation leaves the tap pending.
+        if resolution == .unavailable {
+            guard let held = try? await resolver.resolveHeldRequestForNotification(requestID: intent.requestID) else {
+                return nil
+            }
+            switch held {
+            case .held(let request):
+                resolution = .heldByCurrentHelper(request)
+            case .notHeld:
+                break
+            case .unknown:
+                resolution = .temporarilyUnavailable
+            }
         }
 
         // Cancelled after the answer came back: this attempt is not going to
@@ -118,7 +142,7 @@ enum HelperNotificationRouteDriver {
         router.markHelperIntentHandled(tapSequence: intent.tapSequence)
 
         switch resolution {
-        case .available:
+        case .available, .heldByCurrentHelper:
             break
         case .unavailable:
             resolver.reportRequestUnavailableFromNotification(requestID: intent.requestID)

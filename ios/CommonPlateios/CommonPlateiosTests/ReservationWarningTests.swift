@@ -5,8 +5,8 @@
 // Focused coverage for the W3-H1 five-minute reservation warning:
 // `RequestStore` scheduling/rescheduling/canceling the local notification
 // through `ReservationWarningScheduling`, the in-app foreground warning
-// firing exactly once, and the pre-existing T-3 "Still ordering?" prompt
-// being folded into it rather than becoming a second interruption.
+// firing exactly once, and — since W4-H1 removed the legacy T−3 prompt — the
+// warning creating no second extension decision of its own.
 import Foundation
 import XCTest
 @testable import CommonPlateios
@@ -760,28 +760,28 @@ final class ReservationWarningTests: XCTestCase {
         XCTAssertNil(store.releaseClaimError)
     }
 
-    /// T-5 always precedes T-3 (five minutes remaining comes before three),
-    /// so by the time the T-3 moment would arrive, T-5 has already resolved
-    /// it — the fold this slice exists to make. Using an already-past
-    /// deadline for both moments (mirroring the existing "already past"
-    /// pattern for the T-3 prompt alone) proves the ordering without a real
-    /// multi-minute wait.
-    func testTheWarningResolvesTheT3PromptSoItNeverAlsoInterrupts() async throws {
+    /// W4-H1 removes the legacy T−3 extension prompt. The five-minute warning
+    /// is now the only timed reservation presentation, and it creates no
+    /// controls or decision of its own: the Helping page's single extension
+    /// offer is left exactly as it was, still offered once.
+    func testTheWarningCreatesNoSecondDecisionAndLeavesTheSingleExtensionOfferIntact() async throws {
         let scheduler = RecordingReservationWarningScheduler()
         let store = makeStore(scheduler: scheduler)
         store.updateApplicationVisibility(isVisible: true)
+        // Inside the five-minute window already, with plenty of request time
+        // left, so the one extension still fits.
         ClaimFlowURLProtocol.enqueue(.response(
-            data: claimResponse(claimExpiresAt: Date().addingTimeInterval(0.3))
+            data: claimResponse(claimExpiresAt: Date().addingTimeInterval(4 * 60))
         ))
 
         try await store.claim(requestID: requestID)
 
         await waitUntil { store.isShowingReservationWarning }
-        XCTAssertFalse(
-            store.isShowingClaimExtensionPrompt,
-            "the T-3 prompt must not also interrupt once the T-5 warning already has"
-        )
-        XCTAssertTrue(store.hasResolvedClaimExtensionPrompt)
+        let claim = try XCTUnwrap(store.activeClaim)
+        XCTAssertTrue(claim.isExtensionAvailable)
+        XCTAssertTrue(store.canExtendActiveClaim)
+        XCTAssertEqual(FulfillRequestView.extensionControlState(for: claim), .available)
+        XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, ["/api/request/\(requestID)/claim"])
     }
 
     // MARK: - Helpers
@@ -821,6 +821,10 @@ final class ReservationWarningTests: XCTestCase {
           "food": "Rice bowl",
           "pickupWindowText": "ASAP",
           "mealSwipes": 2,
+          "menuPath": "meal-exchange",
+          "mealItems": ["Meal 1", "Meal 2"],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": null,
           "windowEnd": null,
           "status": "\(status)",

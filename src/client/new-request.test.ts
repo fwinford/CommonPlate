@@ -214,8 +214,7 @@ describe("web request form privacy disclosure", () => {
 
   it("states the scoped data sharing and retention facts without an absolute", () => {
     for (const expected of [
-      "Pickup name is shared only with the successful helper",
-      "the helper’s email may be sent to the requester for coordination",
+      "The helper’s email may be sent to the requester for coordination",
       "Placed Request data is retained for seven days",
       "Fulfillment records may be retained longer",
     ]) {
@@ -224,5 +223,7 @@ describe("web request form privacy disclosure", () => {
     expect(pageSource).not.toContain(
       "We never share your personal information"
     );
+    // W4-R4 removed pickup name from the request contract.
+    expect(pageSource).not.toMatch(/pickup name/i);
   });
 });

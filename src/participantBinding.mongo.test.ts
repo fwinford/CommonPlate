@@ -147,10 +147,10 @@ describeMongo("durable participant bindings", () => {
     const creation = routeContext(authorityFor(requesterId), {
       body: {
         vendor: "Palladium",
-        food: "Rice bowl",
-        pickupName: "Private Pickup Name",
         timing: "asap",
+        menuPath: "meal-exchange",
         mealSwipes: 2,
+        mealItems: ["Rice bowl", "Side salad"],
       },
     });
     await createRequest(creation.req, creation.res);

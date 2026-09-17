@@ -247,7 +247,7 @@ At acceptance: `npm run typecheck` passed; `npm test` passed 1,317 tests with 27
 
 **Physical acceptance evidence.** Faith verified the meal-swipe quantity is visibly acceptable in Active Requests on a physical device. An earlier walkthrough verified the same distinctive quantity (`4`) in Request Detail, active-reservation presentation, and fulfillment/order context, and the helper new-request notification and email presentation were also physically reviewed and accepted. These observations establish on-device presentation on the observed device only; they do not establish Release/Archive/TestFlight signing or environment behavior, which remains a separate gate (`docs/system-contract.md` section 11).
 
-**Week 4 deferral.** `Meal swipes: N` is technically correct but its user-facing meaning and visual hierarchy are deferred to Week 4; that resolution must not reopen C1 data semantics, backend behavior, validation rules, or notification content.
+**Week 4 deferral.** `Meal swipes: N` is technically correct but its user-facing meaning and visual hierarchy are deferred to Week 4; that resolution must not reopen C1 data semantics, backend behavior, validation rules, or notification content, except that Faith has explicitly authorized W4-N1 (not W4-R2, and only once N1 reaches its own READY contract) to change the new-request push notification's title/body composition specifically; this narrow carve-out does not reopen any other notification content, channel, delivery, tap-routing, or dedup behavior recorded in this document or in `docs/system-contract.md`.
 
 ### Notification Management / Activation Truth (W3-N2) coverage
 

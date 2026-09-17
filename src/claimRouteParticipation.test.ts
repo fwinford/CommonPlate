@@ -318,7 +318,8 @@ describe("W3-H2 one-successful-participation invariant", () => {
     await claimRequest(context.req, context.res);
 
     expect(context.status).not.toHaveBeenCalled();
-    expect(responseBody(context).claim.pickupName).toBe("Private Pickup Name");
+    expect(responseBody(context).claim).not.toHaveProperty("pickupName");
+    expect(responseBody(context).claim.claimToken).toEqual(expect.any(String));
   });
 });
 
@@ -374,7 +375,8 @@ describe("W4-H2 self-claim guard", () => {
     await claimRequest(context.req, context.res);
 
     expect(context.status).not.toHaveBeenCalled();
-    expect(responseBody(context).claim.pickupName).toBe("Private Pickup Name");
+    expect(responseBody(context).claim).not.toHaveProperty("pickupName");
+    expect(responseBody(context).claim.claimToken).toEqual(expect.any(String));
   });
 
   it("allows claiming a request with no recorded requester (legacy/pre-I1 row)", async () => {
@@ -386,6 +388,7 @@ describe("W4-H2 self-claim guard", () => {
     await claimRequest(context.req, context.res);
 
     expect(context.status).not.toHaveBeenCalled();
-    expect(responseBody(context).claim.pickupName).toBe("Private Pickup Name");
+    expect(responseBody(context).claim).not.toHaveProperty("pickupName");
+    expect(responseBody(context).claim.claimToken).toEqual(expect.any(String));
   });
 });

@@ -13,11 +13,12 @@ final class RequestFoodDraftSessionTests: XCTestCase {
         let chosenTime = Date(timeIntervalSince1970: 1_776_000_000)
         owner.draft = RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
-            foodRequest: "Chicken bowl with salsa",
-            pickupName: "Taylor",
+            menuPath: .mealExchange,
             timing: .later,
             preferredPickupTime: chosenTime,
-            mealSwipes: 3
+            mealSwipes: 3,
+            mealEntries: ["Chicken bowl with salsa", "Side salad", "Iced tea", "", ""],
+            diningDollarsText: "4.75"
         )
 
         // Route exit/re-entry and scene backgrounding recreate views, not this
@@ -25,28 +26,34 @@ final class RequestFoodDraftSessionTests: XCTestCase {
         let reenteredOwner = owner
 
         XCTAssertEqual(reenteredOwner.draft.selectedDiningSpot?.name, "Palladium")
-        XCTAssertEqual(reenteredOwner.draft.foodRequest, "Chicken bowl with salsa")
-        XCTAssertEqual(reenteredOwner.draft.pickupName, "Taylor")
         XCTAssertEqual(reenteredOwner.draft.timing, .later)
         XCTAssertEqual(reenteredOwner.draft.preferredPickupTime, chosenTime)
         XCTAssertEqual(reenteredOwner.draft.mealSwipes, 3)
+        // W4-R4: every structured value survives route recreation with the
+        // rest of the draft, including the typed Dining Dollar estimate.
+        XCTAssertEqual(reenteredOwner.draft.menuPath, .mealExchange)
+        XCTAssertEqual(
+            reenteredOwner.draft.activeMealEntries,
+            ["Chicken bowl with salsa", "Side salad", "Iced tea"]
+        )
+        XCTAssertEqual(reenteredOwner.draft.diningDollarsText, "4.75")
     }
 
     func testProposalAndManualPrecedenceMetadataSurviveWithDraft() {
         let owner = RequestFoodDraftSession()
         owner.draft.selectedDiningSpot = DiningSpot(name: "Palladium", address: nil)
-        owner.draft.foodRequest = "Manual edit after proposal"
+        owner.draft.mealEntries[0] = "Manual edit after proposal"
         owner.draft.mealSwipes = 2
-        owner.screenshotManualEdits.hasManuallyEditedFoodRequest = true
+        owner.screenshotManualEdits.manuallyEditedMealEntries = [0]
         owner.screenshotProvenance.location = true
         owner.screenshotProvenance.mealSwipes = true
 
         let reenteredOwner = owner
 
-        XCTAssertEqual(reenteredOwner.draft.foodRequest, "Manual edit after proposal")
-        XCTAssertTrue(reenteredOwner.screenshotManualEdits.hasManuallyEditedFoodRequest)
+        XCTAssertEqual(reenteredOwner.draft.mealEntries[0], "Manual edit after proposal")
+        XCTAssertTrue(reenteredOwner.screenshotManualEdits.hasManuallyEditedMealEntry(0))
         XCTAssertTrue(reenteredOwner.screenshotProvenance.location)
-        XCTAssertFalse(reenteredOwner.screenshotProvenance.foodRequest)
+        XCTAssertFalse(reenteredOwner.screenshotProvenance.mealEntries.contains(0))
         XCTAssertTrue(reenteredOwner.screenshotProvenance.mealSwipes)
     }
 
@@ -54,22 +61,28 @@ final class RequestFoodDraftSessionTests: XCTestCase {
         let owner = RequestFoodDraftSession()
         owner.draft = RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Completed request",
-            pickupName: "Taylor",
+            menuPath: .diningDollars,
             timing: .later,
             preferredPickupTime: Date(timeIntervalSince1970: 1_776_000_000),
-            mealSwipes: 4
+            mealSwipes: 4,
+            mealEntries: ["Completed request", "", "", "", ""],
+            orderDetails: "Completed order",
+            diningDollarsText: "12.34"
         )
         owner.screenshotManualEdits.hasManuallyEditedLocation = true
-        owner.screenshotManualEdits.hasManuallyEditedFoodRequest = true
+        owner.screenshotManualEdits.manuallyEditedMealEntries = [0]
         owner.screenshotManualEdits.hasManuallyEditedMealSwipes = true
         owner.screenshotProvenance.location = true
 
         owner.clearAfterAuthoritativeCreation()
 
         XCTAssertNil(owner.draft.selectedDiningSpot)
-        XCTAssertEqual(owner.draft.foodRequest, "")
-        XCTAssertEqual(owner.draft.pickupName, "")
+        // A completed creation clears every structured value too, so a
+        // genuinely new Request Food entry inherits nothing.
+        XCTAssertEqual(owner.draft.mealEntries, RequestFoodFormDraft.emptyMealEntries)
+        XCTAssertEqual(owner.draft.orderDetails, "")
+        XCTAssertEqual(owner.draft.diningDollarsText, "")
+        XCTAssertEqual(owner.draft.menuPath, .mealExchange)
         XCTAssertEqual(owner.draft.timing, .asap)
         XCTAssertEqual(owner.draft.mealSwipes, RequestFoodFormDraft.mealSwipeOptions.first)
         XCTAssertEqual(owner.screenshotManualEdits, ScreenshotFieldManualEditState())

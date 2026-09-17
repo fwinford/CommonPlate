@@ -336,12 +336,20 @@ final class RequestOwnershipLifecycleTests: XCTestCase {
         PendingRequestOperationRecord(
             operationId: operationId,
             participantIdentifier: "64c0000000000000000000a1",
-            vendor: "Crave NYU",
-            food: "Rice bowl",
-            pickupName: "Alex",
-            timing: .asap,
-            windowStart: nil,
-            mealSwipes: 2
+            operationAuthority: RequestOperationAuthorityIdentity(
+                origin: RequestService.operationAuthorityOrigin(for: URL(string: "https://commonplate.test")!),
+                ledger: RequestFetchingURLProtocol.defaultOperationLedger
+            ),
+            payload: CreateRequestPayload(
+                vendor: "Crave NYU",
+                timing: .asap,
+                windowStart: nil,
+                menuPath: .mealExchange,
+                mealSwipes: 2,
+                mealItems: ["Rice bowl", "Side salad"],
+                orderDetails: nil,
+                estimatedDiningDollarsCents: nil
+            )
         )
     }
 
@@ -359,11 +367,13 @@ final class RequestOwnershipLifecycleTests: XCTestCase {
     private func payload() -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Crave NYU",
-            food: "Rice bowl",
-            pickupName: "Alex",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: 2
+            menuPath: .mealExchange,
+            mealSwipes: 2,
+            mealItems: ["Rice bowl"],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 
@@ -406,6 +416,10 @@ final class RequestOwnershipLifecycleTests: XCTestCase {
           "food": "Rice bowl",
           "pickupWindowText": "ASAP",
           "mealSwipes": 2,
+          "menuPath": "meal-exchange",
+          "mealItems": ["Meal 1", "Meal 2"],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": null,
           "windowEnd": null,
           "status": "\(status)",

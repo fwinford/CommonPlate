@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 let fulfill: typeof import("./fulfill.js");
@@ -45,5 +46,16 @@ describe("legacy web fulfillment pause", () => {
     expect(summary.textContent).toBe(
       fulfill.WEB_ORDERING_UNAVAILABLE_MESSAGE
     );
+  });
+});
+
+describe("web fulfillment page copy", () => {
+  it("does not refer to the removed pickup name", () => {
+    const pageSource = readFileSync(
+      new URL("../../public/fulfill.html", import.meta.url),
+      "utf8"
+    );
+    // W4-R4 removed pickup name from the request contract.
+    expect(pageSource).not.toMatch(/pickup name/i);
   });
 });

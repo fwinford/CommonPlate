@@ -93,10 +93,12 @@ const requesterBAuthority = signParticipantAuthority(
 function canonicalAsapPayload(overrides: Record<string, unknown> = {}) {
   return {
     vendor: "Palladium",
-    food: "Vegetable rice bowl",
-    pickupName: "Requester Private Name",
     timing: "asap",
+    // W4-R4 structured representation: `food` is derived by the backend and
+    // `pickupName` no longer exists, so neither is sent.
+    menuPath: "meal-exchange",
     mealSwipes: 2,
+    mealItems: ["Vegetable rice bowl", "Side salad"],
     ...overrides,
   };
 }
@@ -300,9 +302,10 @@ describeMongo("real MongoDB durable create-operation identity (W3-D1)", () => {
       await MealRequest.create({
         vendor: "Palladium",
         food: "Prior request",
-        pickupName: "Prior Pickup",
         pickupWindowText: "ASAP",
+        menuPath: "meal-exchange",
         mealSwipes: 1,
+        mealItems: ["Prior request"],
         email: requesterAPrincipal,
         requesterParticipantId: requesterAId,
         status: "open",
@@ -338,9 +341,10 @@ describeMongo("real MongoDB durable create-operation identity (W3-D1)", () => {
       await MealRequest.create({
         vendor: "Palladium",
         food: "Additional request",
-        pickupName: "Additional Pickup",
         pickupWindowText: "ASAP",
+        menuPath: "meal-exchange",
         mealSwipes: 1,
+        mealItems: ["Additional request"],
         email: requesterAPrincipal,
         requesterParticipantId: requesterAId,
         status: "open",
@@ -504,5 +508,144 @@ describeMongo("real MongoDB durable create-operation identity (W3-D1)", () => {
       error: expect.objectContaining({ code: OPERATION_UNAUTHORIZED_CODE }),
     });
     expect(await MealRequest.countDocuments({})).toBe(0);
+  });
+
+  // MARK: - W4-R4 structured payload identity through D1 recovery
+
+  /** A deliberately distinctive structured payload: five swipes with five
+   * distinct meal entries plus an exact optional estimate, so a field that
+   * silently dropped, reordered, or rounded during replay is visible. */
+  function structuredMealExchangePayload() {
+    return {
+      vendor: "Palladium",
+      timing: "asap",
+      menuPath: "meal-exchange",
+      mealSwipes: 5,
+      mealItems: [
+        "Chicken over rice, no onions",
+        "Falafel wrap with extra tahini",
+        "Large iced coffee",
+        "Side of plantains",
+        "Bottled water",
+      ],
+      estimatedDiningDollarsCents: 1_337,
+    };
+  }
+
+  function diningDollarsOnlyPayload() {
+    return {
+      vendor: "Palladium",
+      timing: "asap",
+      menuPath: "dining-dollars",
+      mealSwipes: 0,
+      orderDetails: "Grain bowl with extra avocado",
+      estimatedDiningDollarsCents: 4_999,
+    };
+  }
+
+  it("replays a structured Meal Exchange operation to the same Request with every field intact", async () => {
+    const operationId = "mongo-op-structured-replay";
+    const first = routeContext(structuredMealExchangePayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: operationId,
+    });
+    await createRequest(first.req, first.res);
+    expect(first.statusCode).toBe(201);
+
+    const replay = routeContext(structuredMealExchangePayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: operationId,
+    });
+    await createRequest(replay.req, replay.res);
+
+    expect(replay.statusCode).toBe(200);
+    expect(replay.body.request.id).toBe(first.body.request.id);
+    expect(await MealRequest.countDocuments({})).toBe(1);
+
+    // The reconciled response describes the same authoritative Request, with
+    // the structured representation byte-for-byte as submitted — not a
+    // regenerated or re-derived one.
+    expect(replay.body.request.menuPath).toBe("meal-exchange");
+    expect(replay.body.request.mealSwipes).toBe(5);
+    expect(replay.body.request.mealItems).toEqual(
+      structuredMealExchangePayload().mealItems
+    );
+    expect(replay.body.request.estimatedDiningDollarsCents).toBe(1_337);
+    expect(replay.body.request).toEqual(first.body.request);
+
+    const stored = await MealRequest.findById(first.body.request.id).lean();
+    expect(stored?.mealItems).toEqual(structuredMealExchangePayload().mealItems);
+    expect(stored?.estimatedDiningDollarsCents).toBe(1_337);
+  });
+
+  it("replays a Dining-Dollars-only operation with its exact cents preserved", async () => {
+    const operationId = "mongo-op-dining-dollars-replay";
+    const first = routeContext(diningDollarsOnlyPayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: operationId,
+    });
+    await createRequest(first.req, first.res);
+    expect(first.statusCode).toBe(201);
+
+    const replay = routeContext(diningDollarsOnlyPayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: operationId,
+    });
+    await createRequest(replay.req, replay.res);
+
+    expect(replay.statusCode).toBe(200);
+    expect(await MealRequest.countDocuments({})).toBe(1);
+    expect(replay.body.request.mealSwipes).toBe(0);
+    expect(replay.body.request.orderDetails).toBe(
+      "Grain bowl with extra avocado"
+    );
+    // Exactly 4999 cents, with no rounding introduced anywhere between
+    // submission, persistence, and reconciliation.
+    expect(replay.body.request.estimatedDiningDollarsCents).toBe(4_999);
+  });
+
+  it("creates at most one Request when a structured payload races its own identity", async () => {
+    const operationId = "mongo-op-structured-race";
+    const first = routeContext(structuredMealExchangePayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: operationId,
+    });
+    const second = routeContext(structuredMealExchangePayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: operationId,
+    });
+
+    await Promise.all([
+      createRequest(first.req, first.res),
+      createRequest(second.req, second.res),
+    ]);
+
+    expect([first.statusCode, second.statusCode].sort()).toEqual([200, 201]);
+    expect(first.body.request.id).toBe(second.body.request.id);
+    expect(await MealRequest.countDocuments({})).toBe(1);
+    expect(first.body.request.mealItems).toEqual(
+      structuredMealExchangePayload().mealItems
+    );
+  });
+
+  it("reconciles by identity alone, never by structured payload similarity", async () => {
+    const first = routeContext(structuredMealExchangePayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: "mongo-op-structured-identity-a",
+    });
+    await createRequest(first.req, first.res);
+    expect(first.statusCode).toBe(201);
+
+    // The exact same structured content under a new identity is a genuinely
+    // new intentional submission, not a replay.
+    const second = routeContext(structuredMealExchangePayload(), {
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      [OPERATION_IDENTITY_HEADER]: "mongo-op-structured-identity-b",
+    });
+    await createRequest(second.req, second.res);
+
+    expect(second.statusCode).toBe(201);
+    expect(second.body.request.id).not.toBe(first.body.request.id);
+    expect(await MealRequest.countDocuments({})).toBe(2);
   });
 });

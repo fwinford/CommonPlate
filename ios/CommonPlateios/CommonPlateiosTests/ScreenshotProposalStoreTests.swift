@@ -156,7 +156,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
     private func responseBody(
         eligible: Bool,
         locationName: String? = nil,
-        foodRequest: String? = nil,
+        mealItems: [String]? = nil,
         mealSwipes: Int? = nil,
         delay: TimeInterval = 0
     ) -> ScreenshotProposalURLProtocol.Stub {
@@ -164,8 +164,8 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         if let locationName {
             proposal["selectedDiningSpot"] = ["name": locationName, "address": "irrelevant"]
         }
-        if let foodRequest {
-            proposal["foodRequest"] = foodRequest
+        if let mealItems {
+            proposal["mealItems"] = mealItems
         }
         if let mealSwipes {
             proposal["mealSwipes"] = mealSwipes
@@ -182,9 +182,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let outcome = await store.analyzeScreenshot(
-            imageData: Data([0x01]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "irrelevant",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x01]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "irrelevant"
+                )
+            ],
             participantAuthority: nil,
             token: token
         )
@@ -214,17 +218,17 @@ final class ScreenshotProposalStoreTests: XCTestCase {
     func testApplyDoesNotOverwriteExistingManualFoodText() {
         let store = makeStore()
         var draft = RequestFoodFormDraft()
-        draft.foodRequest = "my own words"
+        draft.mealEntries[0] = "my own words"
         var manualEdits = ScreenshotFieldManualEditState()
-        manualEdits.hasManuallyEditedFoodRequest = true
+        manualEdits.manuallyEditedMealEntries = [0]
 
         let outcome = ScreenshotProposalOutcome(
             eligible: true,
-            proposal: ScreenshotProposal(foodRequest: "1 Create Your Own Bowl")
+            proposal: ScreenshotProposal(mealItems: ["1 Create Your Own Bowl"])
         )
         store.apply(outcome, manualEdits: manualEdits, to: &draft)
 
-        XCTAssertEqual(draft.foodRequest, "my own words")
+        XCTAssertEqual(draft.mealEntries[0], "my own words")
     }
 
     func testApplyDoesNotOverwriteMealSwipesOnceManuallyEdited() {
@@ -251,21 +255,21 @@ final class ScreenshotProposalStoreTests: XCTestCase {
             eligible: true,
             proposal: ScreenshotProposal(
                 selectedDiningSpot: palladium,
-                foodRequest: "1 Create Your Own Bowl",
+                mealItems: ["1 Create Your Own Bowl"],
                 mealSwipes: 2
             )
         )
         let applied = store.apply(outcome, manualEdits: noManualEdits, to: &draft)
 
         XCTAssertEqual(draft.selectedDiningSpot, palladium)
-        XCTAssertEqual(draft.foodRequest, "1 Create Your Own Bowl")
+        XCTAssertEqual(draft.mealEntries[0], "1 Create Your Own Bowl")
         XCTAssertEqual(draft.mealSwipes, 2)
         XCTAssertNil(store.notice)
 
         // W4-R2 provenance/afterglow plumbing: `apply(...)` reports exactly
         // which allowlisted fields it actually wrote.
         XCTAssertTrue(applied.location)
-        XCTAssertTrue(applied.foodRequest)
+        XCTAssertTrue(applied.mealEntries.contains(0))
         XCTAssertTrue(applied.mealSwipes)
         XCTAssertFalse(applied.isEmpty)
     }
@@ -276,25 +280,25 @@ final class ScreenshotProposalStoreTests: XCTestCase {
     /// `draft` itself.
     func testAppliedFieldsOmitManuallyOwnedFields() {
         let store = makeStore()
-        var draft = RequestFoodFormDraft(foodRequest: "Already typed")
+        var draft = RequestFoodFormDraft(mealEntries: ["Already typed", "", "", "", ""])
 
         let outcome = ScreenshotProposalOutcome(
             eligible: true,
             proposal: ScreenshotProposal(
                 selectedDiningSpot: palladium,
-                foodRequest: "1 Create Your Own Bowl",
+                mealItems: ["1 Create Your Own Bowl"],
                 mealSwipes: 2
             )
         )
         var manualEdits = ScreenshotFieldManualEditState()
-        manualEdits.hasManuallyEditedFoodRequest = true
+        manualEdits.manuallyEditedMealEntries = [0]
 
         let applied = store.apply(outcome, manualEdits: manualEdits, to: &draft)
 
         XCTAssertTrue(applied.location)
-        XCTAssertFalse(applied.foodRequest)
+        XCTAssertFalse(applied.mealEntries.contains(0))
         XCTAssertTrue(applied.mealSwipes)
-        XCTAssertEqual(draft.foodRequest, "Already typed")
+        XCTAssertEqual(draft.mealEntries[0], "Already typed")
     }
 
     func testApplyMarksUnsupportedScreenshotNoticeForAnIneligibleResult() {
@@ -326,19 +330,19 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         // Simulates the food TextField's binding: any keystroke latches the
         // flag, regardless of the resulting value.
-        draft.foodRequest = "partial"
-        manualEdits.hasManuallyEditedFoodRequest = true
-        draft.foodRequest = ""
+        draft.mealEntries[0] = "partial"
+        manualEdits.manuallyEditedMealEntries = [0]
+        draft.mealEntries[0] = ""
         // Flag stays latched even though the value is empty again.
-        XCTAssertTrue(manualEdits.hasManuallyEditedFoodRequest)
+        XCTAssertTrue(manualEdits.hasManuallyEditedMealEntry(0))
 
         let outcome = ScreenshotProposalOutcome(
             eligible: true,
-            proposal: ScreenshotProposal(foodRequest: "1 Create Your Own Bowl")
+            proposal: ScreenshotProposal(mealItems: ["1 Create Your Own Bowl"])
         )
         store.apply(outcome, manualEdits: manualEdits, to: &draft)
 
-        XCTAssertEqual(draft.foodRequest, "", "a manually-touched field must stay exactly as the requester left it")
+        XCTAssertEqual(draft.mealEntries[0], "", "a manually-touched field must stay exactly as the requester left it")
     }
 
     /// AI proposes X (programmatic write) → requester manually picks Y →
@@ -408,7 +412,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
             eligible: true,
             proposal: ScreenshotProposal(
                 selectedDiningSpot: palladium,
-                foodRequest: "1 Create Your Own Bowl",
+                mealItems: ["1 Create Your Own Bowl"],
                 mealSwipes: 2
             )
         )
@@ -417,7 +421,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         _ = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
 
         XCTAssertNil(draft.selectedDiningSpot)
-        XCTAssertEqual(draft.foodRequest, "")
+        XCTAssertEqual(draft.mealEntries[0], "")
         XCTAssertEqual(draft.mealSwipes, RequestFoodFormDraft.mealSwipeOptions.first!)
     }
 
@@ -429,7 +433,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let firstOutcome = ScreenshotProposalOutcome(
             eligible: true,
-            proposal: ScreenshotProposal(selectedDiningSpot: palladium, foodRequest: "1 Bowl")
+            proposal: ScreenshotProposal(selectedDiningSpot: palladium, mealItems: ["1 Bowl"])
         )
         store.apply(firstOutcome, manualEdits: noManualEdits, to: &draft)
 
@@ -440,7 +444,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
 
         XCTAssertNil(draft.selectedDiningSpot)
-        XCTAssertEqual(draft.foodRequest, "")
+        XCTAssertEqual(draft.mealEntries[0], "")
         // The new selection is already current even though no image has
         // been loaded, decoded, or OCR'd for it yet.
         XCTAssertTrue(store.isCurrent(token))
@@ -460,9 +464,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let tokenA = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let taskA = Task {
             await store.analyzeScreenshot(
-                imageData: Data([0x01]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "View order Order information 1 Bowl",
+                images: [
+                    ScreenshotAnalysisInput(
+                        data: Data([0x01]),
+                        mimeType: "image/jpeg",
+                        localEvidenceText: "View order Order information 1 Bowl"
+                    )
+                ],
                 participantAuthority: "authority-1",
                 token: tokenA
             )
@@ -476,9 +484,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         )
         let tokenB = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let outcomeB = await store.analyzeScreenshot(
-            imageData: Data([0x02]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "View order Order information 1 Bowl",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x02]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "View order Order information 1 Bowl"
+                )
+            ],
             participantAuthority: "authority-1",
             token: tokenB
         )
@@ -502,9 +514,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let tokenA = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let taskA = Task {
             await store.analyzeScreenshot(
-                imageData: Data([0x01]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "irrelevant",
+                images: [
+                    ScreenshotAnalysisInput(
+                        data: Data([0x01]),
+                        mimeType: "image/jpeg",
+                        localEvidenceText: "irrelevant"
+                    )
+                ],
                 participantAuthority: "authority-1",
                 token: tokenA
             )
@@ -514,9 +530,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let tokenB = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let taskB = Task {
             await store.analyzeScreenshot(
-                imageData: Data([0x02]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "irrelevant",
+                images: [
+                    ScreenshotAnalysisInput(
+                        data: Data([0x02]),
+                        mimeType: "image/jpeg",
+                        localEvidenceText: "irrelevant"
+                    )
+                ],
                 participantAuthority: "authority-1",
                 token: tokenB
             )
@@ -548,9 +568,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         store.setAIAssistanceEnabled(false)
 
         let outcome = await store.analyzeScreenshot(
-            imageData: Data([0x01]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "irrelevant",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x01]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "irrelevant"
+                )
+            ],
             participantAuthority: "an-authority",
             token: token
         )
@@ -569,9 +593,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let task = Task {
             await store.analyzeScreenshot(
-                imageData: Data([0x01]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "View order Order information 1 Bowl",
+                images: [
+                    ScreenshotAnalysisInput(
+                        data: Data([0x01]),
+                        mimeType: "image/jpeg",
+                        localEvidenceText: "View order Order information 1 Bowl"
+                    )
+                ],
                 participantAuthority: "an-authority",
                 token: token
             )
@@ -598,9 +626,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         XCTAssertFalse(store.isCurrent(token))
         let outcome = await store.analyzeScreenshot(
-            imageData: Data([0x01]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "irrelevant",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x01]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "irrelevant"
+                )
+            ],
             participantAuthority: "an-authority",
             token: token
         )
@@ -625,9 +657,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let task = Task {
             await store.analyzeScreenshot(
-                imageData: Data([0x01]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "View order Order information 1 Bowl",
+                images: [
+                    ScreenshotAnalysisInput(
+                        data: Data([0x01]),
+                        mimeType: "image/jpeg",
+                        localEvidenceText: "View order Order information 1 Bowl"
+                    )
+                ],
                 participantAuthority: "an-authority",
                 token: token
             )
@@ -659,9 +695,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let task = Task {
             await store.analyzeScreenshot(
-                imageData: Data([0x01]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "View order Order information 1 Bowl",
+                images: [
+                    ScreenshotAnalysisInput(
+                        data: Data([0x01]),
+                        mimeType: "image/jpeg",
+                        localEvidenceText: "View order Order information 1 Bowl"
+                    )
+                ],
                 participantAuthority: "an-authority",
                 token: token
             )
@@ -719,9 +759,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         XCTAssertFalse(store.isCurrent(token), "On restores availability for a new selection, not the retired one")
         let outcome = await store.analyzeScreenshot(
-            imageData: Data([0x01]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "View order Order information 1 Bowl",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x01]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "View order Order information 1 Bowl"
+                )
+            ],
             participantAuthority: "an-authority",
             token: token
         )
@@ -739,9 +783,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let outcome = await store.analyzeScreenshot(
-            imageData: Data([0x01]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "View order Order information 1 Bowl",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x01]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "View order Order information 1 Bowl"
+                )
+            ],
             participantAuthority: "an-authority",
             token: token
         )
@@ -758,9 +806,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         _ = await store.analyzeScreenshot(
-            imageData: Data([0x01]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "View order Order information 1 Bowl",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x01]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "View order Order information 1 Bowl"
+                )
+            ],
             participantAuthority: "a-stale-authority",
             token: token
         )
@@ -784,9 +836,13 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         _ = await store.analyzeScreenshot(
-            imageData: Data([0x01, 0x02]),
-            mimeType: "image/jpeg",
-            localEvidenceText: "a very specific literal independent evidence phrase",
+            images: [
+                ScreenshotAnalysisInput(
+                    data: Data([0x01, 0x02]),
+                    mimeType: "image/jpeg",
+                    localEvidenceText: "a very specific literal independent evidence phrase"
+                )
+            ],
             participantAuthority: "an-authority",
             token: token
         )
@@ -796,10 +852,15 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         let json = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: body) as? [String: Any]
         )
+        // W4-R4: evidence is carried per image, inside `images`, so each
+        // screenshot's eligibility can be decided independently server-side.
+        let images = try XCTUnwrap(json["images"] as? [[String: Any]])
+        XCTAssertEqual(images.count, 1)
         XCTAssertEqual(
-            json["localEvidenceText"] as? String,
+            images.first?["localEvidenceText"] as? String,
             "a very specific literal independent evidence phrase"
         )
+        XCTAssertNil(json["localEvidenceText"])
     }
 
     // MARK: - AI Assistance enable/consent persistence
@@ -865,5 +926,285 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         otherStore.setAIAssistanceEnabled(false)
         XCTAssertFalse(otherStore.hasCompletedScreenshotHelp)
+    }
+}
+
+// MARK: - W4-R4 multi-screenshot evidence
+
+extension ScreenshotProposalStoreTests {
+    private func makeMultiStore() -> ScreenshotProposalStore {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ScreenshotProposalURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let client = APIClient(
+            configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
+            session: session
+        )
+        return ScreenshotProposalStore(
+            service: ScreenshotProposalService(client: client),
+            preferences: InMemoryScreenshotProposalPreferencesStorage()
+        )
+    }
+
+    private func analysisInputs(_ count: Int) -> [ScreenshotAnalysisInput] {
+        (0..<count).map { index in
+            ScreenshotAnalysisInput(
+                data: Data([UInt8(index + 1)]),
+                mimeType: "image/jpeg",
+                localEvidenceText: "evidence for screenshot \(index + 1)"
+            )
+        }
+    }
+
+    private func eligibleStub(mealItems: [String]) -> ScreenshotProposalURLProtocol.Stub {
+        let body: [String: Any] = [
+            "eligible": true,
+            "proposal": ["mealItems": mealItems],
+        ]
+        return .response(data: try! JSONSerialization.data(withJSONObject: body))
+    }
+
+    func testUpToFiveScreenshotsAreSentAsOneAnalysisForOneOrder() async throws {
+        for count in 1...ScreenshotProposalStore.maxScreenshotSelection {
+            ScreenshotProposalURLProtocol.reset()
+            ScreenshotProposalURLProtocol.enqueue(eligibleStub(mealItems: ["1 Bowl"]))
+            let store = makeMultiStore()
+            var draft = RequestFoodFormDraft()
+            let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
+
+            let outcome = await store.analyzeScreenshot(
+                images: analysisInputs(count),
+                participantAuthority: "an-authority",
+                token: token
+            )
+
+            XCTAssertNotNil(outcome, "\(count) screenshots must be analyzable")
+            // One request for the whole set — never one per screenshot.
+            XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 1)
+            let body = try XCTUnwrap(
+                ScreenshotProposalURLProtocol.capturedRequests.last?.body
+            )
+            let json = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: body) as? [String: Any]
+            )
+            let images = try XCTUnwrap(json["images"] as? [[String: Any]])
+            XCTAssertEqual(images.count, count)
+            // Each screenshot carries its own independent evidence.
+            XCTAssertEqual(
+                images.compactMap { $0["localEvidenceText"] as? String },
+                (0..<count).map { "evidence for screenshot \($0 + 1)" }
+            )
+        }
+    }
+
+    func testMoreThanFiveScreenshotsAreRefusedWithoutAnyTransfer() async {
+        ScreenshotProposalURLProtocol.reset()
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft()
+        let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
+
+        let outcome = await store.analyzeScreenshot(
+            images: analysisInputs(6),
+            participantAuthority: "an-authority",
+            token: token
+        )
+
+        XCTAssertNil(outcome)
+        // Refused locally, so no bytes leave the device at all.
+        XCTAssertTrue(ScreenshotProposalURLProtocol.capturedRequests.isEmpty)
+    }
+
+    func testAnEmptySelectionIsRefusedWithoutAnyTransfer() async {
+        ScreenshotProposalURLProtocol.reset()
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft()
+        let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
+
+        let outcome = await store.analyzeScreenshot(
+            images: [],
+            participantAuthority: "an-authority",
+            token: token
+        )
+
+        XCTAssertNil(outcome)
+        XCTAssertTrue(ScreenshotProposalURLProtocol.capturedRequests.isEmpty)
+    }
+
+    func testProposedItemsFillOneActiveMealFieldEachInOrder() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(menuPath: .mealExchange, mealSwipes: 3)
+
+        let applied = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(
+                    mealItems: ["1 Bowl", "2 Soda", "1 Cookie"]
+                )
+            ),
+            manualEdits: noManualEdits,
+            to: &draft
+        )
+
+        XCTAssertEqual(draft.activeMealEntries, ["1 Bowl", "2 Soda", "1 Cookie"])
+        XCTAssertEqual(applied.mealEntries, [0, 1, 2])
+    }
+
+    func testProposedItemsNeverFillAFieldHiddenByALoweredSwipeCount() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(menuPath: .mealExchange, mealSwipes: 2)
+
+        store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(
+                    mealItems: ["1 Bowl", "2 Soda", "1 Cookie", "1 Tea"]
+                )
+            ),
+            manualEdits: noManualEdits,
+            to: &draft
+        )
+
+        // Only the two visible fields receive values; writing into a hidden
+        // field would put AI content where the requester cannot review it.
+        XCTAssertEqual(draft.activeMealEntries, ["1 Bowl", "2 Soda"])
+        XCTAssertEqual(draft.mealEntries[2], "")
+        XCTAssertEqual(draft.mealEntries[3], "")
+    }
+
+    func testManualPrecedenceHoldsPerMealEntry() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(
+            menuPath: .mealExchange,
+            mealSwipes: 3,
+            mealEntries: ["", "Requester typed this", "", "", ""]
+        )
+        var manualEdits = ScreenshotFieldManualEditState()
+        manualEdits.manuallyEditedMealEntries = [1]
+
+        let applied = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(
+                    mealItems: ["1 Bowl", "2 Soda", "1 Cookie"]
+                )
+            ),
+            manualEdits: manualEdits,
+            to: &draft
+        )
+
+        // Entry 1 is requester-owned and untouched; its neighbours are filled.
+        XCTAssertEqual(
+            draft.activeMealEntries,
+            ["1 Bowl", "Requester typed this", "1 Cookie"]
+        )
+        XCTAssertEqual(applied.mealEntries, [0, 2])
+    }
+
+    func testProposedItemsFillOrderDetailsOnTheDiningDollarsPath() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(menuPath: .diningDollars)
+
+        let applied = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: ["1 Bowl", "2 Soda"])
+            ),
+            manualEdits: noManualEdits,
+            to: &draft
+        )
+
+        XCTAssertEqual(draft.orderDetails, "1 Bowl; 2 Soda")
+        XCTAssertTrue(applied.orderDetails)
+        // The per-swipe fields belong to the other path and stay empty.
+        XCTAssertEqual(draft.mealEntries, RequestFoodFormDraft.emptyMealEntries)
+    }
+
+    func testManuallyOwnedOrderDetailsAreNeverOverwritten() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(
+            menuPath: .diningDollars,
+            orderDetails: "Requester typed this"
+        )
+        var manualEdits = ScreenshotFieldManualEditState()
+        manualEdits.hasManuallyEditedOrderDetails = true
+
+        let applied = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: ["1 Bowl"])
+            ),
+            manualEdits: manualEdits,
+            to: &draft
+        )
+
+        XCTAssertEqual(draft.orderDetails, "Requester typed this")
+        XCTAssertFalse(applied.orderDetails)
+    }
+
+    func testAProposalNeverChangesTheMenuPathOrTheDiningDollarAmount() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(
+            menuPath: .diningDollars,
+            diningDollarsText: "7.25"
+        )
+
+        store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(
+                    selectedDiningSpot: palladium,
+                    mealItems: ["1 Bowl"],
+                    mealSwipes: 3
+                )
+            ),
+            manualEdits: noManualEdits,
+            to: &draft
+        )
+
+        // Screenshot Assistance proposes values; it does not decide which
+        // menu the requester is using or how much money they need.
+        XCTAssertEqual(draft.menuPath, .diningDollars)
+        XCTAssertEqual(draft.diningDollarsText, "7.25")
+    }
+
+    func testANewSelectionClearsOnlyAIOwnedEntries() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(
+            menuPath: .mealExchange,
+            mealSwipes: 3,
+            mealEntries: ["AI filled", "Requester typed", "AI filled", "", ""],
+            orderDetails: "AI filled order"
+        )
+        var manualEdits = ScreenshotFieldManualEditState()
+        manualEdits.manuallyEditedMealEntries = [1]
+
+        _ = store.beginSelection(clearing: &draft, manualEdits: manualEdits)
+
+        XCTAssertEqual(draft.mealEntries[0], "")
+        XCTAssertEqual(draft.mealEntries[1], "Requester typed")
+        XCTAssertEqual(draft.mealEntries[2], "")
+        XCTAssertEqual(draft.orderDetails, "")
+    }
+
+    func testAnEmptyItemListIsReportedAsNoUsefulExtraction() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft()
+
+        store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: [])
+            ),
+            manualEdits: noManualEdits,
+            to: &draft
+        )
+
+        XCTAssertEqual(store.notice, .noUsefulExtraction)
+    }
+
+    func testTheClientBoundMatchesTheBackendsOwnBound() {
+        // Both sides enforce the same number independently; this pins them
+        // together so one cannot drift without the other.
+        XCTAssertEqual(ScreenshotProposalStore.maxScreenshotSelection, 5)
     }
 }

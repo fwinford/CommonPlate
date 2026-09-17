@@ -23,7 +23,6 @@ export const ACTIVE_RESERVATION_ROUTE_PATH = "/api/participant/active-reservatio
 export const activeReservationRateLimiter = createDay4MutationRateLimiter(30);
 
 interface ActiveReservationDocument extends PublicRequestDocument {
-  pickupName: string;
   claimExpiresAt?: Date | null;
   claimExtendedAt?: Date | null;
 }
@@ -95,7 +94,6 @@ export async function getActiveReservation(
       return res.json({
         reservation: {
           request: publicResponse.request,
-          pickupName: reservation.pickupName,
           claimExpiresAt: reservation.claimExpiresAt,
           claimExtendedAt: reservation.claimExtendedAt ?? null,
         },

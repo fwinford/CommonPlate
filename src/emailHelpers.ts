@@ -208,7 +208,6 @@ export async function sendFulfillmentEmail(
 
 		<h3>Request details</h3>
 		<p><strong>Vendor:</strong> ${escapeHtml(request.vendor)}</p>
-		<p><strong>Pickup name:</strong> ${escapeHtml(request.pickupName)}</p>
 		<p><strong>Pickup window:</strong> ${escapeHtml(request.pickupWindowText)}</p>
 
 		<h3>Order details</h3>
@@ -228,7 +227,6 @@ export async function sendFulfillmentEmail(
 		``,
 		`Request details:`,
 		`Vendor: ${request.vendor}`,
-		`Pickup name: ${request.pickupName}`,
 		`Pickup window: ${request.pickupWindowText}`,
 		``,
 		`Order details:`,

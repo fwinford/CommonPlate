@@ -19,6 +19,13 @@ final class RequestCreateDurableOperationTests: XCTestCase {
     private let authorityA = "64c0000000000000000000a1.1." + String(repeating: "A", count: 42) + "A"
     private let authorityB = "64c0000000000000000000b2.1." + String(repeating: "B", count: 42) + "A"
     private let participantIdentifierA = "64c0000000000000000000a1"
+    /// W4-D2: the authority `makeService()` sends to, as a pending record
+    /// written by this build records it — its origin and the ledger
+    /// `RequestFetchingURLProtocol` reports by default.
+    private let operationAuthority = RequestOperationAuthorityIdentity(
+        origin: RequestService.operationAuthorityOrigin(for: URL(string: "https://commonplate.test")!),
+        ledger: RequestFetchingURLProtocol.defaultOperationLedger
+    )
 
     /// A fresh `UserDefaults` suite per test, removed in `tearDown` — matching
     /// `PushInstallationStorageTests`/`AlertSignupPresentationTests`: nothing
@@ -84,12 +91,20 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         XCTAssertEqual(record, PendingRequestOperationRecord(
             operationId: sentOperationId,
             participantIdentifier: participantIdentifierA,
-            vendor: "Palladium",
-            food: "Ambiguous distinct food",
-            pickupName: "Taylor",
-            timing: .asap,
-            windowStart: nil,
-            mealSwipes: 4
+            operationAuthority: operationAuthority,
+            payload: CreateRequestPayload(
+                vendor: "Palladium",
+                timing: .asap,
+                windowStart: nil,
+                menuPath: .mealExchange,
+                mealSwipes: 4,
+                mealItems: [
+                    "Ambiguous distinct food", "Additional meal 1",
+                    "Additional meal 2", "Additional meal 3",
+                ],
+                orderDetails: nil,
+                estimatedDiningDollarsCents: nil
+            )
         ))
         XCTAssertTrue(store.hasUnresolvedCreateAmbiguity)
 
@@ -166,12 +181,21 @@ final class RequestCreateDurableOperationTests: XCTestCase {
 
         let secondBody = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: secondBody) as? [String: Any])
-        XCTAssertEqual(json["food"] as? String, "Later distinct food")
         XCTAssertEqual(json["vendor"] as? String, "Palladium")
-        XCTAssertEqual(json["pickupName"] as? String, "Taylor")
         XCTAssertEqual(json["mealSwipes"] as? Int, 5)
         XCTAssertEqual(json["timing"] as? String, "scheduled")
         XCTAssertNotNil(json["windowStart"])
+        // W4-R4: the replayed body carries the exact structured request the
+        // original attempt submitted — every meal entry, in order — and
+        // neither the removed `pickupName` nor a client-composed `food`.
+        XCTAssertEqual(json["menuPath"] as? String, "meal-exchange")
+        XCTAssertEqual(
+            json["mealItems"] as? [String],
+            ["Later distinct food", "Additional meal 1", "Additional meal 2",
+             "Additional meal 3", "Additional meal 4"]
+        )
+        XCTAssertNil(json["pickupName"])
+        XCTAssertNil(json["food"])
 
         XCTAssertFalse(storeAfterRelaunch.hasUnresolvedCreateAmbiguity)
         XCTAssertNil(sharedStorage.load())
@@ -510,7 +534,12 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         )
     }
 
-    func testRouteLevelDefinitiveRefusalsDuringReconciliationRetireDurableState() async {
+    /// W4-D2: during recovery of an already-issued operation, a route-level
+    /// refusal proves only that *this* replay created nothing; an earlier
+    /// transmission may still have reached an authority that had the route.
+    /// The operation stays pending and checkable, and no terminal
+    /// reconciliation is attempted on its strength.
+    func testRouteLevelRefusalsDuringReconciliationKeepTheOperationPending() async {
         let cases: [(String, RequestFetchingURLProtocol.Stub)] = [
             (
                 "RATE_LIMITED",
@@ -523,6 +552,13 @@ final class RequestCreateDurableOperationTests: XCTestCase {
                 "bare 404",
                 .response(statusCode: 404, data: Data("Cannot POST /api/request".utf8))
             ),
+            (
+                "PUBLIC_ACTIONS_PAUSED",
+                .response(
+                    statusCode: 503,
+                    data: errorResponse(code: "PUBLIC_ACTIONS_PAUSED")
+                )
+            ),
         ]
 
         for (label, response) in cases {
@@ -531,20 +567,31 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             storage.save(PendingRequestOperationRecord(
                 operationId: "reconcile-\(label.replacingOccurrences(of: " ", with: "-"))",
                 participantIdentifier: participantIdentifierA,
-                vendor: "Palladium",
-                food: "Previously unresolved \(label)",
-                pickupName: "Taylor",
-                timing: .asap,
-                windowStart: nil,
-                mealSwipes: 2
+                operationAuthority: operationAuthority,
+                payload: CreateRequestPayload(
+                    vendor: "Palladium",
+                    timing: .asap,
+                    windowStart: nil,
+                    menuPath: .mealExchange,
+                    // One entry per swipe, so the payload is replayable and
+                    // this exercises the replay classification itself.
+                    mealSwipes: 1,
+                    mealItems: ["Previously unresolved \(label)"],
+                    orderDetails: nil,
+                    estimatedDiningDollarsCents: nil
+                )
             ))
             let store = makeStore(authority: authorityA, operationStorage: storage)
             RequestFetchingURLProtocol.enqueue(response)
 
+            let before = storage.load()
             let didCreate = await store.reconcilePendingCreateOperationIfNeeded()
             XCTAssertFalse(didCreate)
-            XCTAssertNil(storage.load(), "\(label) must retire the restored operation")
-            XCTAssertFalse(store.hasUnresolvedCreateAmbiguity, "\(label) must not leave a create block")
+            XCTAssertNotNil(before)
+            XCTAssertEqual(storage.load(), before, "\(label) must keep the restored operation")
+            XCTAssertTrue(store.hasUnresolvedCreateAmbiguity, "\(label) must keep the create block")
+            XCTAssertEqual(store.createRecoveryPresentation, .unresolved(canCheckAgain: true), label)
+            XCTAssertEqual(RequestFetchingURLProtocol.capturedRequestedPaths, ["/api/request"], label)
         }
     }
 
@@ -583,7 +630,12 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         // can still reconcile it if the write this response could not rule
         // out actually happened.
         let recordForX = try XCTUnwrap(storage.load())
-        XCTAssertEqual(recordForX.food, "Uncertain outcome X")
+        // W4-R4: the record holds the frozen payload, so the preserved
+        // content is the exact structured request X submitted.
+        XCTAssertEqual(
+            recordForX.payload.mealItems,
+            ["Uncertain outcome X", "Additional meal 1"]
+        )
 
         // The write result is unproven, so this must block exactly like an
         // in-process ambiguous transport outcome does.
@@ -634,10 +686,11 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         XCTAssertTrue(store.requests.isEmpty)
     }
 
-    /// The identical property during relaunch reconciliation: an ordinary
-    /// pre-write rejection encountered on replay must retire the durable
-    /// record and the block, not leave the requester stuck.
-    func testQuotaRejectionDuringReconciliationRetiresDurableState() async throws {
+    /// W4-D2: during relaunch reconciliation a quota refusal follows a
+    /// not-found lookup, which is not terminal on its own — the original
+    /// transmission may still commit. The operation converges through exact
+    /// terminal reconciliation instead of leaving the requester stuck.
+    func testQuotaRejectionDuringReconciliationConvergesThroughTerminalReconciliation() async throws {
         let storage = InMemoryPendingRequestOperationStorage()
         let store = makeStore(authority: authorityA, operationStorage: storage)
         RequestFetchingURLProtocol.enqueue(.failure(.networkConnectionLost))
@@ -648,15 +701,30 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             // Expected.
         }
 
+        let operationId = try XCTUnwrap(storage.load()?.operationId)
+
         RequestFetchingURLProtocol.enqueue(.response(
             statusCode: 429,
             data: errorResponse(code: RequestOperationErrorCode.requestLimitReached)
         ))
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 200,
+            data: Data(#"{"outcome":"not-created"}"#.utf8)
+        ))
         let didCreate = await store.reconcilePendingCreateOperationIfNeeded()
 
         XCTAssertFalse(didCreate)
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request", "/api/request", "/api/request-operation/terminal"]
+        )
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.lastCapturedHeaders?[RequestService.operationIdentityHeader],
+            operationId
+        )
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
     }
 
     // MARK: - Pre-transmission cancellation (independent-review MUST FIX 2)
@@ -715,12 +783,17 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         storage.save(PendingRequestOperationRecord(
             operationId: "predates-this-reconciliation-attempt",
             participantIdentifier: participantIdentifierA,
-            vendor: "Palladium",
-            food: "Still recoverable",
-            pickupName: "Taylor",
-            timing: .asap,
-            windowStart: nil,
-            mealSwipes: 2
+            operationAuthority: operationAuthority,
+            payload: CreateRequestPayload(
+                vendor: "Palladium",
+                timing: .asap,
+                windowStart: nil,
+                menuPath: .mealExchange,
+                mealSwipes: 2,
+                mealItems: ["Still recoverable", "Additional meal 1"],
+                orderDetails: nil,
+                estimatedDiningDollarsCents: nil
+            )
         ))
         let store = makeStore(authority: authorityA, operationStorage: storage)
 
@@ -745,12 +818,17 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         storage.save(PendingRequestOperationRecord(
             operationId: "needs-installation-association",
             participantIdentifier: participantIdentifierA,
-            vendor: "Palladium",
-            food: "Never actually transmitted originally",
-            pickupName: "Taylor",
-            timing: .asap,
-            windowStart: nil,
-            mealSwipes: 2
+            operationAuthority: operationAuthority,
+            payload: CreateRequestPayload(
+                vendor: "Palladium",
+                timing: .asap,
+                windowStart: nil,
+                menuPath: .mealExchange,
+                mealSwipes: 2,
+                mealItems: ["Never actually transmitted originally", "Additional meal 1"],
+                orderDetails: nil,
+                estimatedDiningDollarsCents: nil
+            )
         ))
         let store = makeStore(authority: authorityA, operationStorage: storage)
         RequestFetchingURLProtocol.enqueue(.response(
@@ -775,7 +853,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
 
     // MARK: - Malformed restored state fails safely
 
-    func testMalformedDurableRecordIsRetiredRatherThanReconciled() async {
+    /// W4-D2: a readable identity with an unusable payload is never retired
+    /// locally and never resent; backend authority resolves it by identity.
+    func testMalformedDurableRecordIsResolvedByIdentityRatherThanRetiredLocally() async {
         let storage = InMemoryPendingRequestOperationStorage()
         // A scheduled record with no window start can never have been
         // produced by `createRequest` itself — simulates corrupted or
@@ -783,24 +863,267 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         storage.save(PendingRequestOperationRecord(
             operationId: "not-a-real-operation-id",
             participantIdentifier: participantIdentifierA,
-            vendor: "Palladium",
-            food: "Corrupted",
-            pickupName: "Taylor",
-            timing: .scheduled,
-            windowStart: nil,
-            mealSwipes: 2
+            operationAuthority: operationAuthority,
+            payload: CreateRequestPayload(
+                vendor: "Palladium",
+                timing: .scheduled,
+                windowStart: nil,
+                menuPath: .mealExchange,
+                mealSwipes: 2,
+                mealItems: ["Corrupted"],
+                orderDetails: nil,
+                estimatedDiningDollarsCents: nil
+            )
         ))
         let store = makeStore(authority: authorityA, operationStorage: storage)
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 200,
+            data: Data(#"{"outcome":"not-created"}"#.utf8)
+        ))
 
         let didCreate = await store.reconcilePendingCreateOperationIfNeeded()
 
         XCTAssertFalse(didCreate)
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request-operation/terminal"]
+        )
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.lastCapturedHeaders?[RequestService.operationIdentityHeader],
+            "not-a-real-operation-id"
+        )
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        XCTAssertTrue(RequestFetchingURLProtocol.capturedRequestedPaths.isEmpty)
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
     }
 
     // MARK: - Helpers
+
+    // MARK: - W4-R4 exact structured payload survives recovery
+
+    /// A deliberately distinctive Dining-Dollars-only payload: zero swipes, a
+    /// specific order-details string, and an exact odd cent amount, so a
+    /// field that silently dropped, defaulted, or rounded during freeze and
+    /// replay would be visible rather than plausible.
+    private func diningDollarsPayload() -> CreateRequestPayload {
+        CreateRequestPayload(
+            vendor: "Palladium",
+            timing: .asap,
+            windowStart: nil,
+            menuPath: .diningDollars,
+            mealSwipes: 0,
+            mealItems: [],
+            orderDetails: "Grain bowl with extra avocado, no onions",
+            estimatedDiningDollarsCents: 4_999
+        )
+    }
+
+    private func fiveMealPayload() -> CreateRequestPayload {
+        CreateRequestPayload(
+            vendor: "Palladium",
+            timing: .asap,
+            windowStart: nil,
+            menuPath: .mealExchange,
+            mealSwipes: 5,
+            mealItems: [
+                "Chicken over rice, no onions",
+                "Falafel wrap with extra tahini",
+                "Large iced coffee",
+                "Side of plantains",
+                "Bottled water",
+            ],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: 1_337
+        )
+    }
+
+    func testAnAmbiguousStructuredCreateFreezesTheExactPayload() async throws {
+        let storage = RecordingPendingRequestOperationStorage()
+        let store = makeStore(authority: authorityA, operationStorage: storage)
+        RequestFetchingURLProtocol.enqueue(.failure(.networkConnectionLost))
+
+        do {
+            try await store.createRequest(fiveMealPayload())
+            XCTFail("Transport loss after submission should be ambiguous")
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // Expected.
+        }
+
+        let record = try XCTUnwrap(storage.load())
+        // Frozen verbatim: every structured field, unchanged and in order.
+        XCTAssertEqual(record.payload, fiveMealPayload())
+        XCTAssertEqual(record.payload.mealItems, fiveMealPayload().mealItems)
+        XCTAssertEqual(record.payload.estimatedDiningDollarsCents, 1_337)
+        // The installation credential is store-owned identity, not request
+        // content, and is deliberately never written to durable storage.
+        XCTAssertNil(record.payload.installationCredential)
+    }
+
+    func testDiningDollarsOnlyRecoveryPreservesZeroSwipesAndExactCents() async throws {
+        let storage = RecordingPendingRequestOperationStorage()
+        let store = makeStore(authority: authorityA, operationStorage: storage)
+        RequestFetchingURLProtocol.enqueue(.failure(.networkConnectionLost))
+
+        do {
+            try await store.createRequest(diningDollarsPayload())
+            XCTFail("Transport loss after submission should be ambiguous")
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // Expected.
+        }
+
+        let record = try XCTUnwrap(storage.load())
+        XCTAssertEqual(record.payload.menuPath, .diningDollars)
+        XCTAssertEqual(record.payload.mealSwipes, 0)
+        XCTAssertEqual(record.payload.mealItems, [])
+        XCTAssertEqual(
+            record.payload.orderDetails,
+            "Grain bowl with extra avocado, no onions"
+        )
+        XCTAssertEqual(record.payload.estimatedDiningDollarsCents, 4_999)
+    }
+
+    func testReplayResendsTheExactStructuredPayloadAfterARealRelaunchRoundTrip() async throws {
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: "w4-r4-structured-replay-\(UUID().uuidString)")
+        )
+        defer {
+            defaults.removeObject(forKey: UserDefaultsPendingRequestOperationStorage.collectionKey)
+            defaults.removeObject(forKey: UserDefaultsPendingRequestOperationStorage.singleRecordKey)
+        }
+        let storage = UserDefaultsPendingRequestOperationStorage(defaults: defaults)
+        let storeBeforeTermination = makeStore(
+            authority: authorityA,
+            operationStorage: storage
+        )
+        RequestFetchingURLProtocol.enqueue(.failure(.networkConnectionLost))
+
+        do {
+            try await storeBeforeTermination.createRequest(fiveMealPayload())
+            XCTFail("Expected an ambiguous outcome")
+        } catch RequestServiceError.ambiguousCreateOutcome {
+            // Expected.
+        }
+        let firstHeaders = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedHeaders)
+        let originalOperationId = try XCTUnwrap(
+            firstHeaders[RequestService.operationIdentityHeader]
+        )
+
+        // "Relaunch": a new store reading the same durable storage, so the
+        // payload makes a real JSON encode/decode round trip on the way.
+        let storeAfterRelaunch = makeStore(
+            authority: authorityA,
+            operationStorage: UserDefaultsPendingRequestOperationStorage(defaults: defaults)
+        )
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 200,
+            data: createResponse(requestObject: requestObject(id: "structured-replayed"))
+        ))
+
+        let didCreate = await storeAfterRelaunch.reconcilePendingCreateOperationIfNeeded()
+
+        XCTAssertTrue(didCreate)
+        let replayHeaders = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedHeaders)
+        XCTAssertEqual(
+            replayHeaders[RequestService.operationIdentityHeader],
+            originalOperationId,
+            "Replay must reuse the exact original operation identity"
+        )
+
+        let body = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedBody)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(json["menuPath"] as? String, "meal-exchange")
+        XCTAssertEqual(json["mealSwipes"] as? Int, 5)
+        XCTAssertEqual(json["mealItems"] as? [String], fiveMealPayload().mealItems)
+        XCTAssertEqual(json["estimatedDiningDollarsCents"] as? Int, 1_337)
+        // The credential is re-attached from the live provider, not restored
+        // from disk.
+        XCTAssertEqual(
+            json["installationCredential"] as? String,
+            "test-installation-credential"
+        )
+        // And the removed fields never reappear.
+        XCTAssertNil(json["pickupName"])
+        XCTAssertNil(json["food"])
+    }
+
+    func testDiningDollarCentsSurviveARealDurableRoundTripExactly() throws {
+        // Every accepted amount, through the same encoder/decoder the durable
+        // record actually uses: an amount that changed by even one cent
+        // between submission and replay would be a different request.
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: "w4-r4-cents-round-trip-\(UUID().uuidString)")
+        )
+        defer {
+            defaults.removeObject(forKey: UserDefaultsPendingRequestOperationStorage.collectionKey)
+            defaults.removeObject(forKey: UserDefaultsPendingRequestOperationStorage.singleRecordKey)
+        }
+        let storage = UserDefaultsPendingRequestOperationStorage(defaults: defaults)
+
+        for cents in [1, 5, 99, 100, 1_337, 2_500, 4_999, 5_000] {
+            let payload = CreateRequestPayload(
+                vendor: "Palladium",
+                timing: .asap,
+                windowStart: nil,
+                menuPath: .diningDollars,
+                mealSwipes: 0,
+                mealItems: [],
+                orderDetails: "Grain bowl",
+                estimatedDiningDollarsCents: cents
+            )
+            storage.save(PendingRequestOperationRecord(
+                operationId: "cents-round-trip",
+                participantIdentifier: participantIdentifierA,
+                operationAuthority: operationAuthority,
+                payload: payload
+            ))
+
+            let restored = try XCTUnwrap(storage.load())
+            XCTAssertEqual(restored.payload.estimatedDiningDollarsCents, cents)
+            XCTAssertEqual(restored.payload, payload)
+        }
+    }
+
+    func testAStructurallyInvalidRestoredRecordIsNeitherRepairedNorResent() async {
+        // A record whose frozen payload does not describe exactly one
+        // coherent menu path is never "fixed" into a request the requester
+        // never composed, and never resent. W4-D2: it is not discarded
+        // locally either — only backend authority can retire it.
+        let storage = InMemoryPendingRequestOperationStorage()
+        storage.save(PendingRequestOperationRecord(
+            operationId: "structurally-invalid",
+            participantIdentifier: participantIdentifierA,
+            operationAuthority: operationAuthority,
+            payload: CreateRequestPayload(
+                vendor: "Palladium",
+                timing: .asap,
+                windowStart: nil,
+                menuPath: .mealExchange,
+                // Three swipes but only one entry: never a submittable shape.
+                mealSwipes: 3,
+                mealItems: ["Only one entry"],
+                orderDetails: nil,
+                estimatedDiningDollarsCents: nil
+            )
+        ))
+        let store = makeStore(authority: authorityA, operationStorage: storage)
+        let before = storage.load()
+        RequestFetchingURLProtocol.enqueue(.failure(.networkConnectionLost))
+
+        let didCreate = await store.reconcilePendingCreateOperationIfNeeded()
+
+        XCTAssertFalse(didCreate)
+        XCTAssertFalse(RequestFetchingURLProtocol.capturedRequestedPaths.contains("/api/request"))
+        XCTAssertEqual(
+            RequestFetchingURLProtocol.capturedRequestedPaths,
+            ["/api/request-operation/terminal"]
+        )
+        // Inconclusive: kept exactly, still blocking, still checkable.
+        XCTAssertEqual(storage.load(), before)
+        XCTAssertTrue(store.hasUnresolvedCreateAmbiguity)
+        XCTAssertEqual(store.createRecoveryPresentation, .unresolved(canCheckAgain: true))
+    }
 
     private func makeStore(
         authority: String?,
@@ -878,11 +1201,16 @@ final class RequestCreateDurableOperationTests: XCTestCase {
     private func asapPayload(food: String, mealSwipes: Int = 2) -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: food,
-            pickupName: "Taylor",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: mealSwipes
+            menuPath: .mealExchange,
+            mealSwipes: mealSwipes,
+            // W4-R4 requires exactly one structured entry per selected swipe;
+            // the first carries the distinguishing text each case asserts on.
+            mealItems: [food]
+                + (1..<mealSwipes).map { "Additional meal \($0)" },
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 
@@ -893,11 +1221,16 @@ final class RequestCreateDurableOperationTests: XCTestCase {
     ) -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: food,
-            pickupName: "Taylor",
             timing: .scheduled,
             windowStart: windowStart,
-            mealSwipes: mealSwipes
+            menuPath: .mealExchange,
+            mealSwipes: mealSwipes,
+            // W4-R4 requires exactly one structured entry per selected swipe;
+            // the first carries the distinguishing text each case asserts on.
+            mealItems: [food]
+                + (1..<mealSwipes).map { "Additional meal \($0)" },
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 
@@ -922,6 +1255,10 @@ final class RequestCreateDurableOperationTests: XCTestCase {
           "food": "\(food)",
           "pickupWindowText": "\(pickupWindowText)",
           "mealSwipes": \(mealSwipes),
+          "menuPath": "meal-exchange",
+          "mealItems": [],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": \(windowStartJSON),
           "windowEnd": \(windowEndJSON),
           "status": "\(status)",
@@ -965,20 +1302,19 @@ final class RequestCreateDurableOperationTests: XCTestCase {
 }
 
 private final class RecordingPendingRequestOperationStorage: PendingRequestOperationStorage {
-    private var record: PendingRequestOperationRecord?
+    private let storage = InMemoryPendingRequestOperationStorage()
     private(set) var savedRecords: [PendingRequestOperationRecord] = []
 
-    func load() -> PendingRequestOperationRecord? {
-        record
+    func restoreAll() -> [PendingRequestOperationEntry] {
+        storage.restoreAll()
     }
 
     func save(_ record: PendingRequestOperationRecord) -> Bool {
-        self.record = record
         savedRecords.append(record)
-        return true
+        return storage.save(record)
     }
 
-    func clear() {
-        record = nil
+    func clear(operationId: String) {
+        storage.clear(operationId: operationId)
     }
 }

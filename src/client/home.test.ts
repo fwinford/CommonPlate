@@ -271,8 +271,7 @@ describe("homepage truthfulness copy", () => {
 
   it("states the scoped data sharing and retention facts", () => {
     for (const expected of [
-      "Pickup name is shared only with the successful helper",
-      "the helper’s email may be sent to the requester for coordination",
+      "The helper’s email may be sent to the requester for coordination",
       "Placed Request data is retained for seven days",
       "Fulfillment records may be retained longer",
     ]) {
@@ -281,5 +280,7 @@ describe("homepage truthfulness copy", () => {
     expect(pageSource).not.toContain(
       "No personal data stored after requests are completed"
     );
+    // W4-R4 removed pickup name from the request contract.
+    expect(pageSource).not.toMatch(/pickup name/i);
   });
 });

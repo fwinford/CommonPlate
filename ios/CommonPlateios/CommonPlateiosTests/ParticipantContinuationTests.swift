@@ -57,7 +57,10 @@ final class ParticipantContinuationTests: XCTestCase {
         XCTAssertEqual(capturedRequestCount(path: "/api/request"), 1)
         let body = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(json["food"] as? String, "The exact saved bowl")
+        // W4-R4: the resumed draft submits its exact structured entries;
+        // `food` is derived by the backend and never sent.
+        XCTAssertEqual(json["mealItems"] as? [String], ["The exact saved bowl"])
+        XCTAssertNil(json["food"])
         // The duplicate publication callback used by the view has nothing to
         // consume and cannot enqueue a second create.
         XCTAssertNil(coordinator.requesterIdentityDidChange(
@@ -533,10 +536,11 @@ final class ParticipantContinuationTests: XCTestCase {
     private func completedDraft(food: String) -> RequestFoodFormDraft {
         RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: food,
-            pickupName: "Taylor",
+            menuPath: .mealExchange,
             timing: .asap,
-            preferredPickupTime: try! date("2026-08-09T17:00:00.000Z")
+            preferredPickupTime: try! date("2026-08-09T17:00:00.000Z"),
+            mealSwipes: 1,
+            mealEntries: [food, "", "", "", ""]
         )
     }
 
@@ -568,11 +572,11 @@ final class ParticipantContinuationTests: XCTestCase {
     }
 
     private func createdResponse(food: String) -> Data {
-        Data(#"{"request":{"id":"64b0000000000000000000a1","vendor":"Palladium","food":"\#(food)","pickupWindowText":"ASAP","mealSwipes":2,"windowStart":null,"windowEnd":null,"status":"open","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2026-08-09T20:00:00.000Z"}}"#.utf8)
+        Data(#"{"request":{"id":"64b0000000000000000000a1","vendor":"Palladium","food":"\#(food)","pickupWindowText":"ASAP","mealSwipes":2,"menuPath":"meal-exchange","mealItems":["Meal 1","Meal 2"],"orderDetails":null,"estimatedDiningDollarsCents":null,"windowStart":null,"windowEnd":null,"status":"open","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2026-08-09T20:00:00.000Z"}}"#.utf8)
     }
 
     private func claimedResponse(requestID: String, mealSwipes: Int = 2) -> Data {
-        Data(#"{"request":{"id":"\#(requestID)","vendor":"Palladium","food":"Rice bowl","pickupWindowText":"ASAP","mealSwipes":\#(mealSwipes),"windowStart":null,"windowEnd":null,"status":"claimed","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2036-08-09T20:00:00.000Z"},"claim":{"pickupName":"Taylor","claimToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","claimExpiresAt":"2036-08-09T17:15:00.000Z"}}"#.utf8)
+        Data(#"{"request":{"id":"\#(requestID)","vendor":"Palladium","food":"Rice bowl","pickupWindowText":"ASAP","mealSwipes":\#(mealSwipes),"menuPath":"meal-exchange","mealItems":[],"orderDetails":null,"estimatedDiningDollarsCents":null,"windowStart":null,"windowEnd":null,"status":"claimed","createdAt":"2026-08-09T17:00:00.000Z","expiresAt":"2036-08-09T20:00:00.000Z"},"claim":{"pickupName":"Taylor","claimToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","claimExpiresAt":"2036-08-09T17:15:00.000Z"}}"#.utf8)
     }
 
     private var utcCalendar: Calendar {

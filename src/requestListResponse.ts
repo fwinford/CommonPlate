@@ -5,18 +5,33 @@ export type RequestResponseDate = Date | string;
 export interface PublicRequestDocument {
   _id: unknown;
   vendor: string;
+  /** The derived single-line summary of the structured fields below
+   * (W4-R4, `deriveFoodSummary`). Retained on the wire because every
+   * already-accepted helper surface renders it. */
   food: string;
   pickupWindowText: string;
   /**
-   * V1 meal-swipe requirement (W3-C1). Every shape `POST /api/request`
-   * accepts, including the legacy web one, has required an integer 1-5 since
-   * this slice — that is the production boundary this projection trusts,
-   * not something it re-validates. A document reaching this projection
-   * without one is a malformed/pre-C1 stored row, not a supported outcome of
-   * any accepted submission, and is out of scope for this projection to
-   * paper over.
+   * V1 meal-swipe requirement (W3-C1), widened to 0-5 by W4-R4 so a
+   * Dining-Dollars-only request can state that it needs none. Every shape
+   * `POST /api/request` accepts, including the legacy web one, has required
+   * an integer since C1 — that is the production boundary this projection
+   * trusts, not something it re-validates. A document reaching this
+   * projection without one is a malformed/pre-C1 stored row, not a supported
+   * outcome of any accepted submission, and is out of scope for this
+   * projection to paper over.
    */
   mealSwipes: number;
+  /**
+   * W4-R4 structured representation. Same privacy class as `food`, which is
+   * derived from it: requester-entered request content that helpers have
+   * always been shown, never a newly exposed private field. Projected
+   * alongside `food` so a later, separately routed H1 consumption sync can
+   * present the structure directly instead of parsing the summary string.
+   */
+  menuPath: string;
+  mealItems?: string[] | null;
+  orderDetails?: string | null;
+  estimatedDiningDollarsCents?: number | null;
   windowStart?: RequestResponseDate | null;
   windowEnd?: RequestResponseDate | null;
   status: string;
@@ -53,6 +68,11 @@ export interface PublicRequestResponse<Status extends string = string> {
   food: string;
   pickupWindowText: string;
   mealSwipes: number;
+  /** W4-R4 structured representation; see `PublicRequestDocument`. */
+  menuPath: string;
+  mealItems: string[];
+  orderDetails: string | null;
+  estimatedDiningDollarsCents: number | null;
   windowStart: RequestResponseDate | null;
   windowEnd: RequestResponseDate | null;
   status: Status;
@@ -150,6 +170,14 @@ export function mapPublicRequestFields<Status extends string>(
     food: document.food,
     pickupWindowText: document.pickupWindowText,
     mealSwipes: document.mealSwipes,
+    menuPath: document.menuPath,
+    // Normalized to a definite shape on the wire — an array and two explicit
+    // nulls — so no client has to distinguish "absent" from "none". The
+    // allowlist itself is unchanged in kind: every value here is
+    // requester-entered request content, and no private field is added.
+    mealItems: document.mealItems ?? [],
+    orderDetails: document.orderDetails ?? null,
+    estimatedDiningDollarsCents: document.estimatedDiningDollarsCents ?? null,
     windowStart: document.windowStart ?? null,
     windowEnd: document.windowEnd ?? null,
     status: document.status,

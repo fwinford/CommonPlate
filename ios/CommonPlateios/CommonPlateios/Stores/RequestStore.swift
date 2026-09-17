@@ -17,8 +17,8 @@ import Foundation
 /// Every timestamp here is backend-owned. `claimExpiresAt` advances only when
 /// the extension endpoint confirms a new deadline; `requestExpiresAt` is the
 /// request's own availability deadline, kept so the client can tell in advance
-/// that a full five-minute extension cannot fit and skip a prompt that could
-/// only fail.
+/// that a full five-minute extension cannot fit and never offer an extension
+/// that could only fail.
 struct ActiveClaimPresentation {
     /// The confirmed public request this claim reserves, exactly as the claim
     /// response returned it. Held so the claimant flow can be re-entered from
@@ -26,7 +26,6 @@ struct ActiveClaimPresentation {
     /// including a claim that confirmed late — without re-fetching, re-claiming,
     /// or depending on the request still appearing in the public collection.
     let request: FoodRequest
-    let pickupName: String
     fileprivate(set) var claimExpiresAt: Date
     fileprivate(set) var claimExtendedAt: Date?
     fileprivate(set) var isExtensionAvailable: Bool
@@ -39,8 +38,8 @@ struct ActiveClaimPresentation {
         request.expiresAt
     }
 
-    /// The one permitted extension has been granted, so no further prompt or
-    /// extension request may be made.
+    /// The one permitted extension has been granted, so no further extension
+    /// request may be made.
     var hasUsedExtension: Bool {
         claimExtendedAt != nil
     }
@@ -77,6 +76,14 @@ private struct ActiveClaimAuthorization {
 /// attempt uses, which is what lets `RequestFoodView` present both with the
 /// identical truthful copy.
 private struct PendingRequestOperationRestored: Error {}
+
+/// W4-R4: marks an `unresolvedCreateError` armed because durable storage
+/// holds a pending-operation record whose recovery identity this build cannot
+/// read (W4-D2 identity-unavailable). Something was
+/// persisted, so an operation may exist server-side; the block fails closed
+/// rather than treating the record as absent and letting a second logical
+/// create begin.
+private struct PendingRequestOperationUnreadable: Error {}
 
 private struct ClaimAttempt: Equatable {
     let id: UUID
@@ -245,6 +252,26 @@ enum HelperNotificationResolution: Equatable {
     /// deliberately distinct from `.unavailable`: it must never be presented
     /// as "this request is gone", only as "try again".
     case temporarilyUnavailable
+    /// W4-H1: the request is not open and continuation truth confirms it is
+    /// this helper's own active reservation. Never produced by
+    /// `resolveHelperNotificationRequest(id:)` alone — the request's status
+    /// cannot establish who holds it — only by combining that `.unavailable`
+    /// answer with `resolveHeldRequestForNotification(requestID:)`. Carries
+    /// the active claim's own request.
+    case heldByCurrentHelper(FoodRequest)
+}
+
+/// W4-H1: whether a not-open notification request is this helper's own
+/// active reservation, from the same continuation authority the
+/// reservation-warning tap uses (`docs/system-contract.md` section 8.4).
+enum HeldRequestNotificationTruth: Equatable {
+    /// Confirmed: this helper's active reservation is for exactly this
+    /// request. Carries the active claim's own request.
+    case held(FoodRequest)
+    /// Confirmed: no active reservation, or one for a different request.
+    case notHeld
+    /// Continuation truth could not be established. Never absence.
+    case unknown
 }
 
 /// Truth established by the active-reservation continuation read (W3-H1).
@@ -264,6 +291,9 @@ enum RequestOperationErrorCode {
     static let invalidOperationId = "INVALID_OPERATION_ID"
     static let operationUnauthorized = "OPERATION_UNAUTHORIZED"
     static let operationExpired = "OPERATION_EXPIRED"
+    /// W4-D2 terminal NO-CREATE on `POST /api/request`: this exact identity
+    /// was terminalized and can never create.
+    static let operationNotCreated = "OPERATION_NOT_CREATED"
 
     /// Ordinary `POST /api/request` rejections that `createRequestRoute.ts`
     /// returns from `validateCreateRequest` — after the operation-identity
@@ -309,15 +339,44 @@ enum RequestOperationErrorCode {
     /// presentation this fix does not change — but because it is absent
     /// here, the durable record survives it rather than being retired as if
     /// creation had been definitively ruled out.
+    ///
+    /// W4-D2: this classification is only for the single transmission of a
+    /// freshly minted identity, where a received pre-write rejection proves
+    /// that attempt created nothing. Recovery of an already-issued operation
+    /// uses `isTerminalOperationRetirement`/`isPostLookupRefusal` instead,
+    /// because there an earlier transmission may still be in flight.
     static func isDefinitiveNonCreate(_ code: String) -> Bool {
         code == invalidOperationId
             || code == operationUnauthorized
             || code == operationExpired
+            || code == operationNotCreated
             || code == invalidVendor
             || code == participantPrincipalMismatch
             || code == invalidRequest
             || code == requestLimitReached
             || code == rateLimited
+    }
+
+    /// W4-D2 recovery: operation-identity answers that retire an issued
+    /// operation because it can never create again — it already created and
+    /// has expired, the identity belongs to someone else, or the identity is
+    /// one no create could ever accept. Terminal NO-CREATE is handled
+    /// separately because the requester is told about it.
+    static func isTerminalOperationRetirement(_ code: String) -> Bool {
+        code == invalidOperationId
+            || code == operationUnauthorized
+            || code == operationExpired
+    }
+
+    /// W4-D2 recovery: refusals `createRequestRoute.ts` returns only after the
+    /// identity lookup found nothing. "Nothing yet" is not terminal — an
+    /// earlier transmission can still commit — so these are never retirement
+    /// on their own; they send recovery to exact terminal reconciliation.
+    static func isPostLookupRefusal(_ code: String) -> Bool {
+        code == invalidVendor
+            || code == participantPrincipalMismatch
+            || code == invalidRequest
+            || code == requestLimitReached
     }
 
     /// The write-uncertain counterpart to `isDefinitiveNonCreate`: a decoded
@@ -333,6 +392,48 @@ enum RequestOperationErrorCode {
     static func isWriteUncertain(_ code: String) -> Bool {
         code == requestCreationFailed
     }
+
+    /// W4-D2 ledger-authority refusals (`requestOperationAuthority.ts`),
+    /// returned before the ledger is read or written. A mismatch means the
+    /// backend answering is not the ledger the operation was recorded
+    /// against; unavailable means it could not tell.
+    static let operationAuthorityMismatch = "OPERATION_AUTHORITY_MISMATCH"
+    static let operationAuthorityUnavailable = "OPERATION_AUTHORITY_UNAVAILABLE"
+    static let publicActionsPaused = "PUBLIC_ACTIONS_PAUSED"
+
+    /// W4-D2: refusals produced before the create handler reaches the
+    /// operation ledger at all — the pause guard, the participant gate, and
+    /// the ledger-authority check. For the single transmission of a freshly
+    /// minted identity they prove, exactly like `isDefinitiveNonCreate`, that
+    /// the attempt created nothing, so that attempt's durable record is
+    /// retired rather than left to be replayed later beside a newer
+    /// submission. During recovery they prove nothing about an earlier
+    /// transmission and keep the operation pending.
+    static func isPreLedgerRefusal(_ code: String) -> Bool {
+        code == publicActionsPaused
+            || code == ParticipantErrorCode.verificationRequired
+            || code == ParticipantErrorCode.authorityInvalid
+            || code == ParticipantErrorCode.verificationUnavailable
+            || code == operationAuthorityMismatch
+            || code == operationAuthorityUnavailable
+    }
+}
+
+/// W4-D2: what the requester is told about W3-D1 create recovery. Store-owned;
+/// the recovery identity and payload themselves never leave the store.
+enum RequestCreateRecoveryPresentation: Equatable {
+    case none
+    /// An issued operation's exact recovery identity is known but its outcome
+    /// is not. `canCheckAgain` is true only when another exact reconciliation
+    /// from this installation can change the answer — never for a record
+    /// whose recorded authority does not match (or predates recording one).
+    case unresolved(canCheckAgain: Bool)
+    /// Something is persisted but its recovery identity cannot be read.
+    /// Nothing can be checked or cleared.
+    case identityUnavailable
+    /// Backend authority established terminal NO-CREATE for the operation.
+    /// Informational until acknowledged; it blocks nothing.
+    case notCreated
 }
 
 /// Stable backend claim and extension error codes, centralized so handling
@@ -438,13 +539,14 @@ final class RequestStore: ObservableObject {
     /// W3-D1: after an ambiguous `POST /api/request` result — including one
     /// restored from durable storage at relaunch — this guard blocks every
     /// later *fresh* create, so a lost response can never produce a second
-    /// logical operation. It is armed by `createRequest` and by
-    /// `reconcilePendingCreateOperationIfNeeded`, and retired only by an
-    /// authoritative backend outcome for the exact operation it names:
-    /// created (`201`/reconciled `200`), `OPERATION_EXPIRED`,
+    /// logical operation. W4-D2: derived by `refreshPendingCreateState()`
+    /// from the durable entries and the participant current now, so it
+    /// follows participant changes; an operation leaves it only through an
+    /// authoritative backend outcome for that exact operation: created
+    /// (`201`/reconciled `200`), terminal NO-CREATE, `OPERATION_EXPIRED`,
     /// `INVALID_OPERATION_ID`, or `OPERATION_UNAUTHORIZED`. It is never
-    /// cleared just because the operation could not be reconciled this
-    /// attempt — that leaves it exactly as armed as it already was.
+    /// cleared just because an operation could not be reconciled this
+    /// attempt.
     @Published private(set) var unresolvedCreateError: RequestServiceError?
 
     /// Read-only projection of the process-lifetime create block, for views
@@ -452,6 +554,32 @@ final class RequestStore: ObservableObject {
     var hasUnresolvedCreateAmbiguity: Bool {
         unresolvedCreateError != nil
     }
+
+    /// W4-D2: which recovery state Request Food presents. Derived with
+    /// `unresolvedCreateError`: `.unresolved`/`.identityUnavailable` exactly
+    /// while the block is armed, `.notCreated` only after authoritative
+    /// terminal NO-CREATE retired an operation and nothing else blocks.
+    @Published private(set) var createRecoveryPresentation: RequestCreateRecoveryPresentation = .none
+
+    /// W4-D2 in-process recovery bookkeeping. The durable entries themselves
+    /// are the recovery state; these only refine how it is presented.
+    ///
+    /// - `unrecordedCreateAmbiguity`: an ambiguous create that has no durable
+    ///   entry (no participant identity, or storage refused it). Nothing can
+    ///   reconcile it, so it blocks for the rest of the process.
+    /// - `pendingCreateErrors`: the latest in-process error per recorded
+    ///   operation, presented while that operation blocks.
+    /// - `authorityMismatchedOperations`: operations a different ledger
+    ///   answered for this process; no check from here can resolve them.
+    /// - `inFlightCreateOperationId`: the fresh create being posted right
+    ///   now, whose own entry is not yet a block.
+    /// - `hasNotCreatedNotice`: terminal NO-CREATE retired an operation and
+    ///   the requester has not yet chosen to start a new request.
+    private var unrecordedCreateAmbiguity: RequestServiceError?
+    private var pendingCreateErrors: [String: RequestServiceError] = [:]
+    private var authorityMismatchedOperations: Set<String> = []
+    private var inFlightCreateOperationId: String?
+    private var hasNotCreatedNotice = false
 
     @Published private(set) var isClaiming = false
     @Published private(set) var claimErrorEvent: ClaimErrorEvent?
@@ -472,12 +600,11 @@ final class RequestStore: ObservableObject {
     @Published private(set) var isExtendingClaim = false
     @Published private(set) var claimExtensionError: RequestServiceError?
 
-    /// Whether the one-time "Still ordering?" prompt is currently offered.
-    @Published private(set) var isShowingClaimExtensionPrompt = false
-
-    /// True once the prompt has been answered, extended, or ruled out. The
-    /// prompt is never offered a second time for the same claim.
-    @Published private(set) var hasResolvedClaimExtensionPrompt = false
+    // W4-H1 removes the pre-H1 T−3 extension prompt (`Need more time?`) and
+    // its published state entirely. The Helping page's always-visible
+    // `+ Add 5 minutes` control is the one place the single extension is
+    // offered; `ActiveClaimPresentation.isExtensionAvailable` alone carries
+    // whether that offer still stands.
 
     /// Whether the W3-H1 five-minute reservation warning is currently offered
     /// in-app. Foreground-only presentation: while CommonPlate is not visible
@@ -629,11 +756,8 @@ final class RequestStore: ObservableObject {
 
     /// One local timer per active claim, scheduled from the backend's
     /// `claimExpiresAt`. It replaces polling entirely: nothing is re-fetched to
-    /// discover the prompt moment or the expiration moment.
+    /// discover the warning moment or the expiration moment.
     private var claimLifecycleTask: Task<Void, Never>?
-
-    /// How far ahead of the reservation deadline the one-time prompt appears.
-    static let claimExtensionPromptLead: TimeInterval = 3 * 60
 
     /// The extension the backend grants, used only to decide in advance whether
     /// a full extension could fit before the request's own `expiresAt`. The
@@ -684,6 +808,9 @@ final class RequestStore: ObservableObject {
             return
         }
         participantAuthorityRejected()
+        // W4-D2: a discarded identity can no longer reconcile anything, and
+        // whose pending operation remains is no longer established.
+        refreshPendingCreateState()
     }
 
     var isFetching: Bool {
@@ -872,6 +999,33 @@ final class RequestStore: ObservableObject {
         }
     }
 
+    /// W4-H1: resolves whether a helper new-request tap for a not-open request
+    /// names this helper's own active reservation. An in-process claim
+    /// answers directly. With no participant authority no reservation can
+    /// exist for this app to hold — claiming and continuation both require
+    /// one — so that is confirmed absence, preserving the accepted
+    /// `no longer available` outcome for an unverified helper. Otherwise the
+    /// accepted continuation read decides; its `.unknown` stays unknown.
+    /// Rethrows only cancellation.
+    func resolveHeldRequestForNotification(
+        requestID: String
+    ) async throws -> HeldRequestNotificationTruth {
+        if let activeClaim {
+            return activeClaim.requestID == requestID ? .held(activeClaim.request) : .notHeld
+        }
+        guard participantAuthorityProvider() != nil else {
+            return .notHeld
+        }
+        switch try await continueActiveReservationIfNeeded() {
+        case .active(let activeClaim):
+            return activeClaim.requestID == requestID ? .held(activeClaim.request) : .notHeld
+        case .none:
+            return .notHeld
+        case .unknown:
+            return .unknown
+        }
+    }
+
     /// Runs one fail-closed availability probe. Cancellation returns to
     /// `.unknown`; other failures become `.unavailable`. Concurrent calls are
     /// dropped, and recovery is always requester-initiated.
@@ -902,23 +1056,19 @@ final class RequestStore: ObservableObject {
     /// submission and persists the durable recovery record for it
     /// immediately before sending — after this point the operation may reach
     /// the backend, so the record must already be safe to survive
-    /// termination. A decoded definitive non-create (`INVALID_OPERATION_ID`,
-    /// `OPERATION_EXPIRED`, `OPERATION_UNAUTHORIZED`, and the ordinary
-    /// pre-write rejection codes `RequestOperationErrorCode.isDefinitiveNonCreate`
-    /// recognizes) retires the durable record, exactly like ordinary success
-    /// does, so a later intentional submission mints its own new identity
-    /// rather than being blocked by one that can never resolve.
-    /// `ambiguousCreateOutcome` and any write-uncertain decoded server
-    /// response (`RequestOperationErrorCode.isWriteUncertain` — currently
-    /// only a readable `REQUEST_CREATION_FAILED`) instead arm the
-    /// unresolved-create block, mirroring
-    /// `reconcilePendingCreateOperationIfNeeded`'s own default: the backend
-    /// may have written this exact operation, so nothing may mint a
-    /// replacement identity or overwrite its durable record until
-    /// authoritative reconciliation resolves it. A bare 404 and the
-    /// `RATE_LIMITED` middleware refusal are also definitive non-creates:
-    /// both retire the record without arming the block. Every other outcome
-    /// preserves its existing behavior.
+    /// termination. W4-D2: the record names the ledger authority that will
+    /// receive the create, read from the backend first and sent with the
+    /// create, so no other ledger can accept it.
+    ///
+    /// Every outcome either retires this attempt's record or keeps it as a
+    /// blocking unresolved operation; a record is never left behind silently.
+    /// Retired: success, and every received refusal that proves this single
+    /// transmission created nothing — the operation-identity, validation,
+    /// quota, and rate-limit codes (`isDefinitiveNonCreate`), a bare 404, and
+    /// the pause, participant-gate, and ledger-authority refusals
+    /// (`isPreLedgerRefusal`). Kept and blocking: `ambiguousCreateOutcome`,
+    /// `REQUEST_CREATION_FAILED`, and any other decoded answer, since none of
+    /// them proves no write occurred.
     func createRequest(_ payload: CreateRequestPayload) async throws {
         // A fresh, in-process create attempt is starting: whatever this call
         // ultimately does (succeed, fail definitively, or arm
@@ -926,6 +1076,11 @@ final class RequestStore: ObservableObject {
         // from here on, so W3-I4 removal-safety readiness no longer depends
         // on relaunch reconciliation for it.
         hasResolvedPendingCreateStateForRemoval = true
+        // W4-D2: the block is re-derived from durable storage and the
+        // participant current *now*, immediately before a fresh logical
+        // create — so a participant verified or restored since launch can
+        // never create past its own unresolved operation.
+        refreshPendingCreateState()
         if let unresolvedCreateError {
             createError = unresolvedCreateError
             throw unresolvedCreateError
@@ -935,6 +1090,12 @@ final class RequestStore: ObservableObject {
         }
         isCreating = true
         createError = nil
+        // A new intentional submission supersedes a NO-CREATE notice about an
+        // older, already-retired operation.
+        if hasNotCreatedNotice {
+            hasNotCreatedNotice = false
+            refreshPendingCreateState()
+        }
         defer { isCreating = false }
         // Filled in here, immediately before sending, rather than by
         // `RequestFoodView.makePayload`: the credential is store-owned
@@ -948,28 +1109,72 @@ final class RequestStore: ObservableObject {
         // the request to the principal that is current now.
         let participantAuthority = participantAuthorityProvider()
         let operationId = UUID().uuidString
+        var recordedOperationId: String?
+        var operationLedger: String?
+        // Its own record is not a block while it is being posted.
+        inFlightCreateOperationId = operationId
+        defer { inFlightCreateOperationId = nil }
         if let participantAuthority,
-           let participantIdentifier = Self.participantIdentifier(fromAuthority: participantAuthority) {
-            operationStorage.save(
+           let participantIdentifier = ParticipantAuthorityShape.participantIdentifier(ofAuthority: participantAuthority) {
+            // W4-D2: nothing is recorded or transmitted until the ledger that
+            // will receive this create is known. A failure here sent nothing.
+            let ledger: String
+            do {
+                ledger = try await service.fetchOperationLedger()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                let serviceError = Self.asServiceError(error)
+                createError = serviceError
+                throw serviceError
+            }
+            // The exact request content about to be transmitted, frozen
+            // whole (W4-R4). `installationCredential` is cleared rather than
+            // persisted: it is store-owned installation identity, not request
+            // content, and replay re-supplies it from the live provider. What
+            // is written to disk is therefore precisely the structured
+            // request the requester composed — every meal entry and the exact
+            // Dining Dollar cents — and nothing credential-shaped.
+            var frozenPayload = payload
+            frozenPayload.installationCredential = nil
+            let didRecord = operationStorage.save(
                 PendingRequestOperationRecord(
                     operationId: operationId,
                     participantIdentifier: participantIdentifier,
-                    vendor: submittedPayload.vendor,
-                    food: submittedPayload.food,
-                    pickupName: submittedPayload.pickupName,
-                    timing: submittedPayload.timing,
-                    windowStart: submittedPayload.windowStart,
-                    mealSwipes: submittedPayload.mealSwipes
+                    operationAuthority: RequestOperationAuthorityIdentity(
+                        origin: service.operationAuthorityOrigin,
+                        ledger: ledger
+                    ),
+                    payload: frozenPayload
                 )
             )
+            guard didRecord else {
+                // W4-D2 FIX (2026-09-18, independent-review MUST FIX): the
+                // exact-operation recovery record must be durable *before*
+                // transmission, not merely attempted. If persistence itself
+                // failed, nothing has been sent — and nothing may be: sending
+                // now would risk a backend commit with no durable recovery
+                // identity to reconcile it against on relaunch. This is a
+                // pre-transmission local failure, not an ambiguous write, so
+                // it retires nothing (there is no record to retire), arms no
+                // unresolved-create block, and never reaches
+                // `service.createRequest`.
+                let serviceError = RequestServiceError.durablePersistenceFailed
+                createError = serviceError
+                throw serviceError
+            }
+            recordedOperationId = operationId
+            operationLedger = ledger
         }
         do {
             let created = try await service.createRequest(
                 submittedPayload,
                 operationId: operationId,
-                participantAuthority: participantAuthority
+                participantAuthority: participantAuthority,
+                operationLedger: operationLedger
             )
-            operationStorage.clear()
+            inFlightCreateOperationId = nil
+            retirePendingCreate(operationId: operationId)
             advanceCollectionRevision()
             // W4-R2 2026-09-05 sync item 5: this request has never been
             // fetched, so H4's own authoritative fetch — not this create
@@ -988,213 +1193,490 @@ final class RequestStore: ObservableObject {
             // server mutation exists, so the record this attempt wrote must
             // be retired rather than left to be replayed as an unintended
             // submission on a later relaunch.
-            operationStorage.clear()
+            inFlightCreateOperationId = nil
+            retirePendingCreate(operationId: operationId)
             throw CancellationError()
         } catch {
+            inFlightCreateOperationId = nil
             let serviceError = Self.asServiceError(error)
             createError = serviceError
-            applyParticipantVerdict(
-                serviceError,
-                presentedAuthority: participantAuthority
-            )
             switch serviceError {
-            case .ambiguousCreateOutcome:
-                unresolvedCreateError = serviceError
             case .notFound:
                 // This service case is reserved for a route-level HTTP 404:
                 // no create handler ran, so this exact operation did not
                 // create anything and must not survive for relaunch replay.
-                operationStorage.clear()
-            case .serverError(let code, _) where RequestOperationErrorCode.isDefinitiveNonCreate(code):
-                operationStorage.clear()
-            case .serverError(let code, _) where RequestOperationErrorCode.isWriteUncertain(code):
-                // The write result is not proven — e.g. a readable
-                // `REQUEST_CREATION_FAILED`, which `createRequestRoute.ts`
-                // can return from a path that follows a write attempt. Arm
-                // the block exactly like an ambiguous transport outcome, so
-                // a same-session retry cannot mint a replacement operation
-                // that silently overwrites this operation's durable record.
-                unresolvedCreateError = serviceError
+                retirePendingCreate(operationId: operationId)
+            case .serverError(let code, _)
+                where RequestOperationErrorCode.isDefinitiveNonCreate(code)
+                    || RequestOperationErrorCode.isPreLedgerRefusal(code):
+                retirePendingCreate(operationId: operationId)
             default:
-                // Do not broaden either classification: other received
-                // outcomes retain their existing behavior.
-                break
+                // `ambiguousCreateOutcome`, a readable
+                // `REQUEST_CREATION_FAILED` (which `createRequestRoute.ts` can
+                // return from a path that follows a write attempt), and any
+                // answer this build cannot classify: the write result is not
+                // proven, so the operation stays durable and blocks a
+                // replacement until authoritative reconciliation resolves it.
+                armUnresolvedCreate(serviceError, recordedOperationId: recordedOperationId)
             }
+            applyParticipantVerdict(
+                serviceError,
+                presentedAuthority: participantAuthority
+            )
             throw serviceError
         }
     }
 
-    /// W3-D1 relaunch reconciliation. Restores a durable unresolved
-    /// request-create operation left over from a previous process (or an
-    /// earlier ambiguous attempt still unresolved this session) and
-    /// reconciles it against authoritative backend truth, using the exact
-    /// same operation identity and submitted fields as the original attempt —
-    /// never a newly minted identity and never a re-derived payload.
+    /// W4-D2: re-derives the create block and recovery presentation from
+    /// durable storage and the participant current now. Synchronous and
+    /// local — it never reconciles, retries, or clears anything, so calling it
+    /// whenever participant identity changes is always safe.
     ///
-    /// Safe to call more than once — a no-op once nothing durable remains, and
-    /// a no-op while a create is already in flight. Never exposes or acts on
-    /// restored state that is malformed or bound to a different participant
-    /// than the one currently verified: `.isValidRecord` and the
-    /// participant-identifier comparison below are the only shape/authority
-    /// checks this performs, and neither ever repairs or reinterprets what it
-    /// finds. Returns `true` only once the restored operation has been
-    /// confirmed created.
+    /// - Any entry whose identity is unreadable: blocked, identity
+    ///   unavailable. It could be anyone's on this installation.
+    /// - Restored entries but no usable current participant: blocked with no
+    ///   check. Whose operation it is cannot be established, so it is never
+    ///   treated as unrelated.
+    /// - Entries for the current participant: blocked, with `Check again`
+    ///   only while one of them can be exactly reconciled from here.
+    /// - Only entries for a different, confirmed participant: not blocked,
+    ///   and left untouched.
+    func refreshPendingCreateState() {
+        let entries = operationStorage.restoreAll()
+        let restored = entries.compactMap { entry -> RestoredPendingRequestOperation? in
+            guard case .restored(let operation) = entry,
+                  operation.identity.operationId != inFlightCreateOperationId else { return nil }
+            return operation
+        }
+        let currentIdentifier = participantAuthorityProvider()
+            .flatMap(ParticipantAuthorityShape.participantIdentifier(ofAuthority:))
+
+        if entries.contains(.identityUnavailable) {
+            setCreateBlock(
+                unresolvedCreateError ?? .ambiguousCreateOutcome(underlying: PendingRequestOperationUnreadable()),
+                presentation: .identityUnavailable
+            )
+            return
+        }
+        guard !restored.isEmpty else {
+            if let unrecordedCreateAmbiguity {
+                setCreateBlock(unrecordedCreateAmbiguity, presentation: .unresolved(canCheckAgain: false))
+            } else {
+                clearCreateBlock()
+            }
+            return
+        }
+        guard let currentIdentifier else {
+            setCreateBlock(
+                unrecordedCreateAmbiguity
+                    ?? unresolvedCreateError
+                    ?? .ambiguousCreateOutcome(underlying: PendingRequestOperationRestored()),
+                presentation: .unresolved(canCheckAgain: false)
+            )
+            return
+        }
+        let current = restored.filter { $0.identity.participantIdentifier == currentIdentifier }
+        guard !current.isEmpty else {
+            if let unrecordedCreateAmbiguity {
+                setCreateBlock(unrecordedCreateAmbiguity, presentation: .unresolved(canCheckAgain: false))
+            } else {
+                clearCreateBlock()
+            }
+            return
+        }
+        let error = current.lazy.compactMap { self.pendingCreateErrors[$0.identity.operationId] }.first
+            ?? unrecordedCreateAmbiguity
+            ?? unresolvedCreateError
+            ?? .ambiguousCreateOutcome(underlying: PendingRequestOperationRestored())
+        setCreateBlock(
+            error,
+            presentation: .unresolved(canCheckAgain: current.contains(where: isExactlyReconcilable))
+        )
+    }
+
+    private func setCreateBlock(
+        _ error: RequestServiceError,
+        presentation: RequestCreateRecoveryPresentation
+    ) {
+        // A block supersedes any NO-CREATE notice about an older operation.
+        hasNotCreatedNotice = false
+        unresolvedCreateError = error
+        if createRecoveryPresentation != presentation {
+            createRecoveryPresentation = presentation
+        }
+    }
+
+    private func clearCreateBlock() {
+        if unresolvedCreateError != nil {
+            unresolvedCreateError = nil
+        }
+        let presentation: RequestCreateRecoveryPresentation = hasNotCreatedNotice ? .notCreated : .none
+        if createRecoveryPresentation != presentation {
+            createRecoveryPresentation = presentation
+        }
+    }
+
+    /// Whether an exact reconciliation of `operation` can be attempted from
+    /// this installation right now: it recorded a ledger authority, was sent
+    /// to the origin this build is configured for, and has not already been
+    /// answered by a different ledger this process. The ledger itself is
+    /// re-checked against the backend before anything is sent.
+    private func isExactlyReconcilable(_ operation: RestoredPendingRequestOperation) -> Bool {
+        guard let authority = operation.identity.operationAuthority else { return false }
+        return authority.origin == service.operationAuthorityOrigin
+            && !authorityMismatchedOperations.contains(operation.identity.operationId)
+    }
+
+    private func armUnresolvedCreate(
+        _ error: RequestServiceError,
+        recordedOperationId: String?
+    ) {
+        if let recordedOperationId {
+            pendingCreateErrors[recordedOperationId] = error
+        } else {
+            // Nothing durable names this operation (no participant identity,
+            // or storage refused the record), so nothing can ever reconcile
+            // it: the block lasts for the rest of this process.
+            unrecordedCreateAmbiguity = error
+        }
+        refreshPendingCreateState()
+    }
+
+    /// Retires exactly one operation — its durable entry and its in-process
+    /// bookkeeping — and nothing else.
+    private func retirePendingCreate(operationId: String) {
+        operationStorage.clear(operationId: operationId)
+        pendingCreateErrors[operationId] = nil
+        authorityMismatchedOperations.remove(operationId)
+        refreshPendingCreateState()
+    }
+
+    /// W3-D1 relaunch reconciliation, with W4-D2 exact terminal authority.
+    /// Reconciles the current participant's durable unresolved request-create
+    /// operations against authoritative backend truth under their exact same
+    /// operation identities — never a newly minted identity and never a
+    /// re-derived or reconstructed payload.
+    ///
+    /// The W4-D2 recovery matrix, per operation:
+    ///
+    /// - identity unreadable: fail closed — never sent, never cleared, and
+    ///   the create block stays armed (`.identityUnavailable`);
+    /// - no usable current participant: nothing is sent; the block stays
+    ///   armed with no check action;
+    /// - bound to a different confirmed participant: left untouched,
+    ///   unexposed, and non-blocking;
+    /// - recorded ledger authority absent (pre-D2), sent to a different
+    ///   origin, or not the ledger the backend now reports: nothing further is
+    ///   sent — neither replay nor terminalization may cross authorities — and
+    ///   the block stays armed with no check action;
+    /// - payload readable and valid: the exact D1 replay; a received
+    ///   post-lookup refusal or an unacceptable success body then converges
+    ///   through exact terminal reconciliation;
+    /// - payload unreadable or invalid: exact terminal reconciliation only;
+    /// - created / NO-CREATE / expired / unauthorized / invalid identity:
+    ///   retire that operation only;
+    /// - anything else (rate limit, pause, 404, participant or ledger
+    ///   authority unavailable, transport, write-uncertain failure): keep it
+    ///   and the block, with `Check again` available.
+    ///
+    /// Safe to call more than once — a no-op once nothing the current
+    /// participant can reconcile remains, and a no-op while a create is
+    /// already in flight. Returns `true` only once a restored operation has
+    /// been confirmed created.
     @discardableResult
     func reconcilePendingCreateOperationIfNeeded() async -> Bool {
-        guard !isCreating, let record = operationStorage.load() else {
-            // Either nothing durable remains to reconcile, or a fresh
-            // `createRequest()` already owns this process's D1 state (which
-            // establishes W3-I4 removal-safety readiness itself) — both are
-            // resolved conclusions, not an inconclusive read.
-            hasResolvedPendingCreateStateForRemoval = true
+        // Removal-safety readiness for D1 comes from durable storage itself,
+        // which the refresh below reads synchronously; an inconclusive
+        // network answer never makes a blocked state look safe.
+        hasResolvedPendingCreateStateForRemoval = true
+        refreshPendingCreateState()
+        guard !isCreating else {
             return false
         }
-        guard Self.isValidRecord(record) else {
-            // Never guessed at or repaired: unusable restored state is
-            // retired outright, exactly like a definitive non-create outcome
-            // would be, since there is nothing here that could ever be
-            // reconciled.
-            operationStorage.clear()
-            hasResolvedPendingCreateStateForRemoval = true
+        guard let participantAuthority = participantAuthorityProvider(),
+              let currentIdentifier = ParticipantAuthorityShape.participantIdentifier(ofAuthority: participantAuthority) else {
             return false
         }
-        let participantAuthority = participantAuthorityProvider()
-        guard let participantAuthority,
-              let currentIdentifier = Self.participantIdentifier(fromAuthority: participantAuthority),
-              currentIdentifier == record.participantIdentifier else {
-            // Left in storage untouched: the participant it belongs to may
-            // still return this session (or a later one). This session simply
-            // cannot act on it, expose it, or fold it into an ordinary create
-            // under a different identity — which also means it cannot block
-            // *this* principal's Remove Email, so readiness is resolved.
-            hasResolvedPendingCreateStateForRemoval = true
+        let operations = operationStorage.restoreAll().compactMap { entry -> RestoredPendingRequestOperation? in
+            guard case .restored(let operation) = entry,
+                  operation.identity.participantIdentifier == currentIdentifier,
+                  isExactlyReconcilable(operation) else {
+                return nil
+            }
+            return operation
+        }
+        guard !operations.isEmpty else {
             return false
         }
 
-        // Restored state takes over immediately, before the network call:
-        // the mere existence of a valid, participant-matched unresolved
-        // operation already means "your request may already exist", the same
-        // truth an in-process ambiguous outcome tells this store. This also
-        // conclusively determines W3-I4 removal-safety readiness for D1:
-        // `unresolvedCreateError` now already blocks Remove Email regardless
-        // of how the network reconciliation below resolves.
-        if unresolvedCreateError == nil {
-            unresolvedCreateError = .ambiguousCreateOutcome(underlying: PendingRequestOperationRestored())
-        }
-        hasResolvedPendingCreateStateForRemoval = true
         isCreating = true
         createError = nil
-        defer { isCreating = false }
+        defer {
+            isCreating = false
+            refreshPendingCreateState()
+        }
 
+        var didCreate = false
+        for operation in operations {
+            // A participant replaced or discarded mid-recovery ends it: the
+            // remaining operations are not this authority's to act on.
+            guard participantAuthorityProvider() == participantAuthority else { break }
+            let operationId = operation.identity.operationId
+            switch await reconcilePendingCreate(operation, participantAuthority: participantAuthority) {
+            case .created(let created):
+                retirePendingCreate(operationId: operationId)
+                advanceCollectionRevision()
+                // W4-H2: a reconciled D1 create is the same authenticated
+                // knowledge as a fresh one — this exact authority created this
+                // request — so it is confirmed `.owned` under that authority.
+                // Like a fresh create (W4-R2 2026-09-05 sync item 5), it only
+                // updates an entry already in the collection; H4's own
+                // authoritative fetch surfaces it, not this reconciliation.
+                applyConfirmed(created, createdUnderAuthority: participantAuthority, insertIfMissing: false)
+                didCreate = true
+            case .notCreated:
+                // Authoritative and permanent: the old operation can never
+                // create. Nothing is submitted in its place; a later
+                // intentional submission mints a fresh identity under
+                // ordinary rules.
+                retirePendingCreate(operationId: operationId)
+                hasNotCreatedNotice = true
+            case .retired:
+                retirePendingCreate(operationId: operationId)
+            case .authorityMismatch:
+                // W4-D2 matrix row 8: this backend is not the ledger the
+                // create was recorded against. Nothing it answers can resolve
+                // the operation, and no check from here can change that.
+                authorityMismatchedOperations.insert(operationId)
+            case .unresolved(let error):
+                // W4-D2 matrix row 6: the durable record and the block stay
+                // exactly as armed, so a later exact reconciliation can still
+                // resolve this same operation.
+                if let error {
+                    pendingCreateErrors[operationId] = error
+                }
+            }
+        }
+        return didCreate
+    }
+
+    /// Dismisses the terminal NO-CREATE notice after `Start a new request`.
+    /// Changes nothing else: the old operation is already retired, and a new
+    /// submission still goes through `createRequest` with a fresh identity.
+    func acknowledgeCreateNotPosted() {
+        guard hasNotCreatedNotice else { return }
+        hasNotCreatedNotice = false
+        refreshPendingCreateState()
+    }
+
+    private enum PendingCreateRecoveryOutcome {
+        case created(FoodRequest)
+        case notCreated
+        /// Retired without a requester-facing notice: expired, unauthorized,
+        /// or an identity no create could ever accept.
+        case retired
+        /// The backend answering is not the recorded ledger authority.
+        case authorityMismatch
+        /// Inconclusive; `nil` means cancellation, which changes nothing.
+        case unresolved(RequestServiceError?)
+    }
+
+    /// One operation's exact reconciliation, only against its recorded
+    /// ledger: the ledger the backend reports now is compared first, and the
+    /// same ledger is named on every request so the backend enforces it too.
+    private func reconcilePendingCreate(
+        _ operation: RestoredPendingRequestOperation,
+        participantAuthority: String
+    ) async -> PendingCreateRecoveryOutcome {
+        let identity = operation.identity
+        guard let recorded = identity.operationAuthority else {
+            return .authorityMismatch
+        }
+        let currentLedger: String
+        do {
+            currentLedger = try await service.fetchOperationLedger()
+        } catch is CancellationError {
+            return .unresolved(nil)
+        } catch {
+            return .unresolved(.ambiguousCreateOutcome(underlying: Self.asServiceError(error)))
+        }
+        guard currentLedger == recorded.ledger else {
+            return .authorityMismatch
+        }
+
+        switch operation.payload {
+        case .current(let payload) where Self.isValidPayload(payload):
+            return await replayPendingCreate(
+                payload,
+                operationId: identity.operationId,
+                participantAuthority: participantAuthority,
+                operationLedger: recorded.ledger
+            )
+        case .current, .legacy, .unreadable:
+            // W4-D2 matrix row 2: the exact payload is not available to
+            // resend (unreadable, malformed, or a pre-R4 body — which only a
+            // pre-D2 record carries, and those record no ledger), so the
+            // operation is resolved by identity alone. Nothing is repaired,
+            // reconstructed, or partially resent.
+            return await terminalizePendingCreate(
+                operationId: identity.operationId,
+                participantAuthority: participantAuthority,
+                operationLedger: recorded.ledger
+            )
+        }
+    }
+
+    /// The exact D1 replay, classified for recovery (W4-D2): only an
+    /// authoritative operation answer resolves the operation. Refusals that
+    /// follow a not-found lookup, and a success body this build cannot
+    /// accept, converge through exact terminal reconciliation instead of
+    /// being taken as proof on their own.
+    private func replayPendingCreate(
+        _ payload: CreateRequestPayload,
+        operationId: String,
+        participantAuthority: String,
+        operationLedger: String
+    ) async -> PendingCreateRecoveryOutcome {
         // Re-read here, immediately before sending, exactly like the fresh
         // path: the record itself never carries this — it is store-owned
         // installation identity, not part of the operation's durable
         // identity — so a recovered create restores the *current*
         // association rather than reconstructing a stale one.
-        var recoveredPayload = Self.payload(from: record)
+        var recoveredPayload = payload
         recoveredPayload.installationCredential = installationCredentialProvider()
-
         do {
             let created = try await service.createRequest(
                 recoveredPayload,
-                operationId: record.operationId,
-                participantAuthority: participantAuthority
+                operationId: operationId,
+                participantAuthority: participantAuthority,
+                operationLedger: operationLedger
             )
-            operationStorage.clear()
-            unresolvedCreateError = nil
-            advanceCollectionRevision()
-            // W4-H2: a reconciled D1 create is the same authenticated
-            // knowledge as a fresh one — this exact authority created this
-            // exact request — so it carries the same immediate ownership.
-            // The equality check inside `applyConfirmed` still withholds it
-            // if the authority changed while reconciliation was in flight;
-            // ownership is never inferred from the request id alone.
-            // W4-R2 2026-09-05 sync item 5: same as the fresh-create path —
-            // this reconciled request has never been fetched, so H4's own
-            // authoritative fetch surfaces it, not this reconciliation.
-            applyConfirmed(created, createdUnderAuthority: participantAuthority, insertIfMissing: false)
-            return true
+            return .created(created)
         } catch is CancellationError {
-            return false
+            return .unresolved(nil)
         } catch {
             let serviceError = Self.asServiceError(error)
-            applyParticipantVerdict(
-                serviceError,
-                presentedAuthority: participantAuthority
-            )
+            applyParticipantVerdict(serviceError, presentedAuthority: participantAuthority)
             switch serviceError {
-            case .notFound:
-                // The create route is absent at this base URL, so no handler
-                // ran and this restored operation cannot have been created by
-                // this response. Retire it like the fresh-create path does.
-                operationStorage.clear()
-                unresolvedCreateError = nil
-            case .serverError(let code, _) where RequestOperationErrorCode.isDefinitiveNonCreate(code):
-                operationStorage.clear()
-                unresolvedCreateError = nil
+            case .serverError(let code, _) where code == RequestOperationErrorCode.operationNotCreated:
+                return .notCreated
+            case .serverError(let code, _) where RequestOperationErrorCode.isTerminalOperationRetirement(code):
+                return .retired
+            case .serverError(let code, _) where code == RequestOperationErrorCode.operationAuthorityMismatch:
+                return .authorityMismatch
+            case .serverError(let code, _) where RequestOperationErrorCode.isPostLookupRefusal(code):
+                break
+            case .ambiguousCreateOutcome(let underlying) where Self.isUnacceptableSuccessResponse(underlying):
+                break
             default:
-                // Still unresolved: transport/decoding failures and every
-                // other outcome leave both the durable record and the block
-                // exactly as armed as they already were, so a later attempt —
-                // automatic or the next relaunch — can reconcile the same
-                // exact operation again.
-                unresolvedCreateError = serviceError
+                // Rate limiting, pause, a bare 404, participant or ledger
+                // authority unavailable, `REQUEST_CREATION_FAILED`, transport
+                // loss, timeout: none of these ran the identity lookup to a
+                // terminal answer.
+                return .unresolved(serviceError)
             }
-            return false
+            // A participant rejected by that answer cannot reconcile now.
+            guard participantAuthorityProvider() == participantAuthority else {
+                return .unresolved(serviceError)
+            }
+            return await terminalizePendingCreate(
+                operationId: operationId,
+                participantAuthority: participantAuthority,
+                operationLedger: operationLedger
+            )
         }
     }
 
-    /// The participant-identity segment of a verified authority credential —
-    /// the same leading component `ParticipantAuthorityShape` parses — never
-    /// the bearer authority itself. Used only to compare a restored W3-D1
-    /// record against the currently verified participant; never sent
-    /// anywhere and never usable on its own as a credential.
-    private static func participantIdentifier(fromAuthority authority: String) -> String? {
-        guard let separator = authority.firstIndex(of: ".") else { return nil }
-        let identifier = String(authority[authority.startIndex..<separator])
-        return identifier.isEmpty ? nil : identifier
-    }
-
-    private static let operationIdCharacters = CharacterSet(
-        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
-    )
-
-    /// Mirrors the backend's own `[A-Za-z0-9._-]{1,128}` operation-identity
-    /// shape (`createRequestRoute.ts`) so a corrupted or foreign value in
-    /// durable storage is never treated as recoverable.
-    private static func isValidOperationId(_ value: String) -> Bool {
-        (1...128).contains(value.count)
-            && value.unicodeScalars.allSatisfy(operationIdCharacters.contains)
-    }
-
-    /// Whether a restored durable record is well-formed enough to reconcile
-    /// at all — shape only, never a guess at what a malformed record "meant".
-    private static func isValidRecord(_ record: PendingRequestOperationRecord) -> Bool {
-        guard isValidOperationId(record.operationId),
-              !record.participantIdentifier.isEmpty,
-              !record.vendor.isEmpty,
-              !record.food.isEmpty,
-              !record.pickupName.isEmpty,
-              (1...5).contains(record.mealSwipes) else {
-            return false
+    /// W4-D2 exact terminal reconciliation for one issued operation.
+    private func terminalizePendingCreate(
+        operationId: String,
+        participantAuthority: String,
+        operationLedger: String
+    ) async -> PendingCreateRecoveryOutcome {
+        do {
+            switch try await service.reconcileRequestOperationTerminal(
+                operationId: operationId,
+                participantAuthority: participantAuthority,
+                operationLedger: operationLedger
+            ) {
+            case .created(let created):
+                return .created(created)
+            case .notCreated:
+                return .notCreated
+            }
+        } catch is CancellationError {
+            return .unresolved(nil)
+        } catch {
+            let serviceError = Self.asServiceError(error)
+            applyParticipantVerdict(serviceError, presentedAuthority: participantAuthority)
+            if case .serverError(let code, _) = serviceError {
+                if RequestOperationErrorCode.isTerminalOperationRetirement(code) {
+                    return .retired
+                }
+                if code == RequestOperationErrorCode.operationAuthorityMismatch {
+                    return .authorityMismatch
+                }
+            }
+            // Keep the store's existing write-uncertain presentation of the
+            // block rather than replacing it with a transport-shaped error.
+            return .unresolved(.ambiguousCreateOutcome(underlying: serviceError))
         }
-        switch record.timing {
+    }
+
+    /// A create response that reached iOS with a success status but could not
+    /// be accepted (undecodable, or not the shape a fresh create returns).
+    /// The backend answered, so backend authority can settle it exactly;
+    /// transport loss, timeouts, and unreadable error statuses are not this.
+    private static func isUnacceptableSuccessResponse(_ underlying: Error) -> Bool {
+        if case APIClientError.decoding = underlying {
+            return true
+        }
+        return false
+    }
+
+    /// Structural validity of a restored current payload before it may be
+    /// replayed. A payload that fails is never repaired: recovery resolves
+    /// that operation by identity alone (W4-D2).
+    private static func isValidPayload(_ payload: CreateRequestPayload) -> Bool {
+
+        // W4-R4 structural validity of the frozen payload. Still shape only,
+        // never a guess at what a malformed record "meant": a record that
+        // does not describe exactly one coherent menu path is never repaired
+        // into one; it is reconciled by identity alone instead.
+        guard !payload.vendor.isEmpty else { return false }
+
+        switch payload.menuPath {
+        case .mealExchange:
+            guard (1...RequestFoodFormDraft.maxMealSwipes).contains(payload.mealSwipes),
+                  payload.mealItems.count == payload.mealSwipes,
+                  payload.mealItems.allSatisfy({ !$0.isEmpty }),
+                  payload.orderDetails == nil else {
+                return false
+            }
+            if let cents = payload.estimatedDiningDollarsCents {
+                guard cents > 0,
+                      cents <= RequestFoodFormDraft.mealExchangeDiningDollarsCeilingCents else {
+                    return false
+                }
+            }
+        case .diningDollars:
+            guard payload.mealSwipes == 0,
+                  payload.mealItems.isEmpty,
+                  let orderDetails = payload.orderDetails,
+                  !orderDetails.isEmpty,
+                  let cents = payload.estimatedDiningDollarsCents,
+                  cents > 0,
+                  cents <= RequestFoodFormDraft.diningDollarsOnlyCeilingCents else {
+                return false
+            }
+        }
+
+        switch payload.timing {
         case .asap:
-            return record.windowStart == nil
+            return payload.windowStart == nil
         case .scheduled:
-            return record.windowStart != nil
+            return payload.windowStart != nil
         }
-    }
-
-    private static func payload(from record: PendingRequestOperationRecord) -> CreateRequestPayload {
-        CreateRequestPayload(
-            vendor: record.vendor,
-            food: record.food,
-            pickupName: record.pickupName,
-            timing: record.timing,
-            windowStart: record.windowStart,
-            mealSwipes: record.mealSwipes
-        )
     }
 
     /// Publishes the pickup name and stores the raw token only after a confirmed
@@ -1202,17 +1684,16 @@ final class RequestStore: ObservableObject {
     /// POST so the single active claim, token, and lifecycle timer cannot be
     /// overwritten.
     func claim(requestID: String) async throws {
-        // One unacknowledged placement result gates the next claim so a real
-        // sent, failed, or unknown-email outcome cannot be overwritten. The
-        // refusal is recorded before any POST so the detail screen can explain it.
-        if let confirmation = fulfillmentConfirmation {
-            recordPreflightClaimRefusal(
-                .unacknowledgedPlacement,
-                requestID: requestID,
-                operationID: confirmation.id
-            )
-            throw RequestServiceError.unacknowledgedPlacement
-        }
+        // W4-H1: `fulfillmentConfirmation` deliberately does NOT appear in this
+        // preflight. Once fulfillment is authoritatively confirmed successful,
+        // `applyConfirmedFulfillment` has already cleared the active claim and
+        // the helper relationship is complete, so the surviving confirmation is
+        // presentation only. Nothing here — and nothing anywhere else in this
+        // store — may read success presentation, its dismissal, its dwell, or
+        // any derived local flag as claim authority. Unresolved or ambiguous
+        // fulfillment is a different thing entirely: it keeps `activeClaim`
+        // alive, so it is still refused by the `existingActiveClaim` guard
+        // immediately below.
         if let activeClaim {
             let refusal: RequestServiceError = activeClaim.requestID == requestID
                 ? .operationInProgress
@@ -1277,7 +1758,6 @@ final class RequestStore: ObservableObject {
             beginActiveClaim(
                 presentation: ActiveClaimPresentation(
                     request: outcome.request,
-                    pickupName: outcome.pickupName,
                     claimExpiresAt: outcome.claimExpiresAt,
                     claimExtendedAt: nil,
                     isExtensionAvailable: Self.extensionIsAvailable(
@@ -1374,7 +1854,6 @@ final class RequestStore: ObservableObject {
             case .reservation(let reservation):
                 let presentation = ActiveClaimPresentation(
                     request: reservation.request,
-                    pickupName: reservation.pickupName,
                     claimExpiresAt: reservation.claimExpiresAt,
                     claimExtendedAt: reservation.claimExtendedAt,
                     isExtensionAvailable: Self.extensionIsAvailable(
@@ -1399,13 +1878,22 @@ final class RequestStore: ObservableObject {
                     )
                 )
                 return .active(presentation)
-            case .placed(let placed):
-                // W3-H2 fulfillment re-entry: no active reservation, but this
-                // participant most recently placed a still-existing request.
-                // Restores Got It/already-placed presentation only — never
-                // reservation authority, and never a path back to Place
-                // Order for this request.
-                restorePlacedFulfillmentConfirmationIfNeeded(placed)
+            case .placed:
+                // W4-H1: the backend authoritatively reports no active
+                // reservation and a settled placement by this participant.
+                // That is confirmed success, which completes the helper
+                // relationship — so this reconciles to exactly the same
+                // normal helper-available state as `.none` below and
+                // deliberately reconstructs no success/acknowledgement
+                // presentation. Superseding W3-H2's placed re-entry restore
+                // is the point: rebuilding a stale confirmation here would
+                // recreate the acknowledgement gate H1 removes, and the
+                // success screen is not durable domain state. Nothing is
+                // fabricated in either direction — no reservation authority,
+                // no raw token, and no claim to know what the helper has
+                // already seen. Unresolved fulfillment never reaches this
+                // branch: it leaves the request `claimed`, which the
+                // `.reservation` case above reconstructs instead.
                 reservationWarningScheduler.cancelAllWarnings()
                 hasResolvedReservationStateForRemoval = true
                 return .none
@@ -1429,40 +1917,6 @@ final class RequestStore: ObservableObject {
                 presentedAuthority: participantAuthority
             )
             return .unknown
-        }
-    }
-
-    /// Restores Got It/already-placed presentation from the W3-H2
-    /// fulfillment re-entry read, mirroring `applyConfirmedFulfillment`'s own
-    /// mapping from a settled notification outcome. Never overwrites an
-    /// existing confirmation this process already produced — that can only
-    /// be more current than a relaunch-time backend read.
-    private func restorePlacedFulfillmentConfirmationIfNeeded(
-        _ placed: PlacedReservationOutcome
-    ) {
-        guard fulfillmentConfirmation == nil else { return }
-
-        let kind: FulfillmentConfirmationKind
-        switch placed.notificationStatus {
-        case .sent:
-            kind = .notificationSent
-        case .failed:
-            kind = .notificationFailed
-        case nil:
-            kind = .emailStatusUnknown
-        }
-        fulfillmentConfirmation = FulfillmentConfirmation(
-            id: UUID(),
-            requestID: placed.request.id,
-            vendor: placed.request.diningSpot.name,
-            foodDescription: placed.request.foodDescription,
-            kind: kind
-        )
-        if let notificationStatus = placed.notificationStatus {
-            confirmedFulfillmentOutcome = FulfillOutcome(
-                request: placed.request,
-                notificationStatus: notificationStatus
-            )
         }
     }
 
@@ -1681,9 +2135,10 @@ final class RequestStore: ObservableObject {
     }
 
     /// `POST /api/request/:id/claim/extend`, sending the active claim's raw
-    /// token. Answering the prompt resolves it either way, so a failed or
-    /// unconfirmed attempt cannot re-open the prompt into a retry loop, and
-    /// the local expiration advances only on a confirmed backend response.
+    /// token. Starting an attempt consumes the one offer either way, so a
+    /// failed or unconfirmed attempt cannot re-open the control into a retry
+    /// loop, and the local expiration advances only on a confirmed backend
+    /// response.
     var canExtendActiveClaim: Bool {
         guard !isExtendingClaim,
               activeClaimExtensionAttempt == nil,
@@ -1717,7 +2172,7 @@ final class RequestStore: ObservableObject {
         activeClaimExtensionAttempt = attempt
         isExtendingClaim = true
         claimExtensionError = nil
-        resolveClaimExtensionPrompt()
+        consumeExtensionOffer()
         claimLifecycleTask?.cancel()
         claimLifecycleTask = nil
         defer {
@@ -1791,12 +2246,6 @@ final class RequestStore: ObservableObject {
             }
             resumeLifecycleAfterFailedExtension(attempt)
         }
-    }
-
-    /// The helper declined the prompt. The claim continues untouched; only the
-    /// prompt is retired so it cannot reappear.
-    func dismissClaimExtensionPrompt() {
-        resolveClaimExtensionPrompt()
     }
 
     /// Ends the claim locally: the in-memory claim and its raw token are
@@ -1908,11 +2357,10 @@ final class RequestStore: ObservableObject {
         fulfillmentAmbiguityContext = nil
         fulfillmentSubmissionClaimID = nil
         // `fulfillmentConfirmation` and its outcome are deliberately untouched.
-        // A confirmed placement the helper has not acknowledged yet is terminal
-        // information about a real order; starting to help with something else
-        // is not a reason to drop it, and Active Requests keeps it reachable.
-        isShowingClaimExtensionPrompt = false
-        hasResolvedClaimExtensionPrompt = false
+        // W4-H1: it exists only to drive the brief in-process success
+        // presentation, which retires it itself after its automatic Home
+        // return. It gates nothing; reaching this line at all already proves a
+        // new claim was allowed while a confirmation was live.
         // A new claim — including one just restored by continuation — starts
         // its own W3-H1 warning cycle.
         hasShownReservationWarning = false
@@ -1941,8 +2389,6 @@ final class RequestStore: ObservableObject {
         invalidateActiveReleaseAttempt()
         activeClaim = nil
         activeClaimAuthorization = nil
-        isShowingClaimExtensionPrompt = false
-        hasResolvedClaimExtensionPrompt = false
         isShowingReservationWarning = false
         hasShownReservationWarning = false
         claimExtensionError = nil
@@ -2001,7 +2447,7 @@ final class RequestStore: ObservableObject {
         return true
     }
 
-    /// Schedules the prompt moment and the expiration moment from the backend's
+    /// Schedules the warning moment and the expiration moment from the backend's
     /// `claimExpiresAt`. Device time is used only to decide *when* to run these
     /// local UI steps — it never decides whether a claim is valid, which stays
     /// the backend's answer on the next mutation.
@@ -2022,28 +2468,15 @@ final class RequestStore: ObservableObject {
         let requestID = claim.requestID
         let expiration = claim.claimExpiresAt
         let warningMoment = expiration.addingTimeInterval(-Self.reservationWarningLead)
-        let promptMoment = expiration.addingTimeInterval(-Self.claimExtensionPromptLead)
 
         claimLifecycleTask = Task { [weak self] in
-            // T-5 always precedes T-3 (five minutes remaining comes before
-            // three), so this step's own effect — resolving the T-3 prompt
-            // once the warning has something to say about the same decision
-            // — always lands before the T-3 step below can run.
+            // W4-H1: the five-minute warning is the only timed reservation
+            // presentation. The legacy T−3 prompt step no longer exists.
             if let interval = Self.secondsUntil(warningMoment) {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
             guard !Task.isCancelled else { return }
             self?.presentReservationWarningIfEligible(
-                claimID: claimID,
-                requestID: requestID,
-                expiration: expiration
-            )
-
-            if let interval = Self.secondsUntil(promptMoment) {
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-            }
-            guard !Task.isCancelled else { return }
-            self?.presentClaimExtensionPromptIfEligible(
                 claimID: claimID,
                 requestID: requestID,
                 expiration: expiration
@@ -2100,10 +2533,10 @@ final class RequestStore: ObservableObject {
     /// notification untouched; the visible path cancels it here rather than
     /// let both surfaces interrupt for the same live moment.
     ///
-    /// Also resolves the pre-existing T-3 "Still ordering?" prompt: the
-    /// warning now carries the same `Add 5 minutes` / `Release reservation`
-    /// actions the T-3 prompt exists to offer, so letting T-3 still interrupt
-    /// two minutes later would ask the same question twice.
+    /// W4-H1: presenting the warning creates no controls or decision of its
+    /// own. It only draws attention back to the Helping page, whose existing
+    /// `+ Add 5 minutes` / `× Stop helping` controls remain the one place the
+    /// helper acts on the reservation.
     private func presentReservationWarningIfEligible(
         claimID: UUID,
         requestID: String,
@@ -2119,39 +2552,8 @@ final class RequestStore: ObservableObject {
         }
         hasShownReservationWarning = true
         isShowingReservationWarning = true
-        hasResolvedClaimExtensionPrompt = true
-        isShowingClaimExtensionPrompt = false
         reservationWarningScheduler.cancelWarning(requestID: requestID)
         reconcileExtensionAvailability()
-    }
-
-    private func presentClaimExtensionPromptIfEligible(
-        claimID: UUID,
-        requestID: String,
-        expiration: Date
-    ) {
-        guard let claim = activeClaim,
-              activeClaimAuthorization?.claimID == claimID,
-              claim.requestID == requestID,
-              claim.claimExpiresAt == expiration,
-              isApplicationVisible,
-              claim.isExtensionAvailable,
-              canExtendActiveClaim,
-              !hasResolvedClaimExtensionPrompt else {
-            return
-        }
-        // A prompt the backend is guaranteed to refuse is worse than no prompt:
-        // extension is granted only when a full five minutes still fits inside
-        // the request's own expiration.
-        guard claim.claimExpiresAt.addingTimeInterval(Self.claimExtensionDuration)
-                <= claim.requestExpiresAt else {
-            hasResolvedClaimExtensionPrompt = true
-            var resolvedClaim = claim
-            resolvedClaim.isExtensionAvailable = false
-            activeClaim = resolvedClaim
-            return
-        }
-        isShowingClaimExtensionPrompt = true
     }
 
     /// Whether the helper may already be holding a completed external order for
@@ -2207,9 +2609,9 @@ final class RequestStore: ObservableObject {
         )
     }
 
-    private func resolveClaimExtensionPrompt() {
-        isShowingClaimExtensionPrompt = false
-        hasResolvedClaimExtensionPrompt = true
+    /// Retires the single extension offer the moment an attempt begins, so
+    /// no outcome — confirmed, refused, or ambiguous — can offer a second one.
+    private func consumeExtensionOffer() {
         if var claim = activeClaim {
             claim.isExtensionAvailable = false
             activeClaim = claim
@@ -2279,7 +2681,7 @@ final class RequestStore: ObservableObject {
             activeClaim = current
         default:
             // Insufficient time, paused, rate limited, internal failure: the
-            // current reservation still stands and the prompt stays retired.
+            // current reservation still stands and the offer stays consumed.
             break
         }
     }
@@ -2693,10 +3095,12 @@ final class RequestStore: ObservableObject {
     /// fields are validated by the view; this checks the same-request claim,
     /// private raw token, backend deadline, duplicate guard, and ambiguity lock.
     ///
-    /// The confirmation check is request-scoped on purpose. A confirmed
-    /// placement blocks resubmitting *that* request, but an outstanding
-    /// confirmation the helper has not acknowledged yet says nothing about a
-    /// different reservation and must not disable it.
+    /// The confirmation check is request-scoped on purpose, and stays that way
+    /// under W4-H1. A confirmed placement blocks resubmitting *that* request —
+    /// which is what keeps a second CommonPlate submission, and any suggestion
+    /// of a second external order, off the table — while a still-displayed
+    /// confirmation says nothing about a different reservation and must not
+    /// disable it.
     func canSubmitFulfillment(requestID: String, now: Date = Date()) -> Bool {
         guard !isFulfilling,
               !isReleasingClaim,
@@ -2718,21 +3122,20 @@ final class RequestStore: ObservableObject {
         return true
     }
 
-    /// Clears one confirmation, matched by exact ID so a queued newer result is
-    /// never dropped by an acknowledgement meant for an older one. Callable from
-    /// the claimant screen's success section and from the Active Requests item
-    /// that keeps the same confirmation reachable after that screen is gone.
-    func acknowledgeFulfillmentConfirmation(id: UUID) {
+    /// Retires one success presentation, matched by exact ID so a newer
+    /// result is never dropped by a retirement meant for an older one. Called
+    /// only by the automatic W4-H1 success presentation once it has returned
+    /// the helper to Home — there is no user-facing acknowledgement control.
+    ///
+    /// Presentation only, with no lifecycle authority. The active helper
+    /// relationship already ended when placement was authoritatively
+    /// confirmed (`applyConfirmedFulfillment` → `clearActiveClaim`); calling
+    /// this, not calling this, or calling it late changes nothing about what
+    /// the helper may claim next.
+    func dismissFulfillmentConfirmation(id: UUID) {
         guard fulfillmentConfirmation?.id == id else { return }
         fulfillmentConfirmation = nil
         confirmedFulfillmentOutcome = nil
-        // The refusal this confirmation caused is now obsolete. Left in place it
-        // would keep explaining a block that no longer exists on whichever
-        // detail screen recorded it.
-        clearPreflightClaimRefusal { error in
-            if case .unacknowledgedPlacement = error { return true }
-            return false
-        }
     }
 
     private func fulfillmentAttemptIsCurrent(_ attempt: FulfillmentAttempt) -> Bool {
@@ -2832,9 +3235,8 @@ final class RequestStore: ObservableObject {
         startClaimLifecycleTimer()
         // The one-shot placement result now owns the safety state. An extension
         // POST cannot help resolve it and could clear context on a predictable
-        // no-longer-claimed response.
-        isShowingClaimExtensionPrompt = false
-        hasResolvedClaimExtensionPrompt = true
+        // no-longer-claimed response; `canExtendActiveClaim` already refuses
+        // while `fulfillmentAmbiguityContext` is set.
 
         do {
             let request = try await service.fetchRequest(id: context.requestID)

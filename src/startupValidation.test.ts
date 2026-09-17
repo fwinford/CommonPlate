@@ -325,6 +325,27 @@ describe("participant signing secret activation wiring", () => {
   });
 });
 
+/**
+ * W4-D2: the request-operation identity index is the created-vs-NO-CREATE
+ * one-winner primitive, so it — and the ledger authority identity clients
+ * record — must be established after connecting and before listening.
+ * `requestOperationStartup.mongo.test.ts` proves the same against a real
+ * fresh database with auto-indexing disabled.
+ */
+describe("request-operation ledger startup barrier wiring", () => {
+  const barrier = "await establishRequestOperationLedger();";
+
+  it("is awaited exactly once, after connecting and before listening", () => {
+    expect(appSource.split(barrier)).toHaveLength(2);
+    expect(indexIn(barrier)).toBeGreaterThan(
+      indexIn("await mongoose.connect(MONGO_URI);")
+    );
+    expect(indexIn(barrier)).toBeLessThan(indexIn("app.listen("));
+    // A module-level await, not one inside a callback that could run later.
+    expect(appSource).toMatch(/^await establishRequestOperationLedger\(\);$/m);
+  });
+});
+
 interface StartupResult {
   code: number | null;
   stderr: string;

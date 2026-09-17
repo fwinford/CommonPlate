@@ -136,7 +136,10 @@ describe("GET /api/participant/active-reservation", () => {
     });
     const body = responseBody(context);
     expect(body.reservation.request.id).toBe(String(requestId));
-    expect(body.reservation.pickupName).toBe("Private Pickup Name");
+    // W4-R4: pickup name is gone from the request contract, so an active
+    // reservation no longer republishes one.
+    expect(body.reservation).not.toHaveProperty("pickupName");
+    expect(JSON.stringify(body)).not.toMatch(/Private Pickup/);
     expect(body.reservation.claimExpiresAt).toEqual(claimExpiresAt);
     expect(body.reservation.claimExtendedAt).toBeNull();
     // The raw claim token was never persisted, so it can never appear here.

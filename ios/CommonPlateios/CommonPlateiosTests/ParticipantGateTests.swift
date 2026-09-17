@@ -203,8 +203,8 @@ final class ParticipantGateTests: XCTestCase {
             XCTAssertNil(result, code)
             XCTAssertEqual(draft, original, code)
             XCTAssertEqual(draft.selectedDiningSpot?.name, "Palladium", code)
-            XCTAssertEqual(draft.foodRequest, "Chicken bowl", code)
-            XCTAssertEqual(draft.pickupName, "Taylor", code)
+            XCTAssertEqual(draft.mealEntries[0], "Chicken bowl", code)
+            XCTAssertEqual(draft.menuPath, .mealExchange, code)
             XCTAssertEqual(draft.timing, .later, code)
             XCTAssertEqual(draft.preferredPickupTime, original.preferredPickupTime, code)
             // Nothing was created, so resuming after verification is safe.
@@ -246,8 +246,8 @@ final class ParticipantGateTests: XCTestCase {
 
         XCTAssertTrue(result.didSubmit)
         XCTAssertEqual(submitted?.vendor, "Palladium")
-        XCTAssertEqual(submitted?.food, "Chicken bowl")
-        XCTAssertEqual(submitted?.pickupName, "Taylor")
+        XCTAssertEqual(submitted?.menuPath, .mealExchange)
+        XCTAssertEqual(submitted?.mealItems, ["Chicken bowl"])
         XCTAssertEqual(submitted?.windowStart, draft.preferredPickupTime)
     }
 
@@ -278,21 +278,24 @@ final class ParticipantGateTests: XCTestCase {
     private func completedDraft() -> RequestFoodFormDraft {
         RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: "140 E 14th St"),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
+            menuPath: .mealExchange,
             timing: .later,
-            preferredPickupTime: try! date("2026-07-28T17:00:00.000Z")
+            preferredPickupTime: try! date("2026-07-28T17:00:00.000Z"),
+            mealSwipes: 1,
+            mealEntries: ["Chicken bowl", "", "", "", ""]
         )
     }
 
     private func payload() -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: "Chicken bowl",
-            pickupName: "Taylor",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: 2
+            menuPath: .mealExchange,
+            mealSwipes: 2,
+            mealItems: ["Chicken bowl", "Side salad"],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 
@@ -323,6 +326,10 @@ final class ParticipantGateTests: XCTestCase {
           "food": "Chicken bowl",
           "pickupWindowText": "ASAP",
           "mealSwipes": 2,
+          "menuPath": "meal-exchange",
+          "mealItems": ["Meal 1", "Meal 2"],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": null,
           "windowEnd": null,
           "status": "open",
@@ -341,6 +348,10 @@ final class ParticipantGateTests: XCTestCase {
             "food": "Chicken bowl",
             "pickupWindowText": "ASAP",
             "mealSwipes": 2,
+            "menuPath": "meal-exchange",
+            "mealItems": ["Meal 1", "Meal 2"],
+            "orderDetails": null,
+            "estimatedDiningDollarsCents": null,
             "windowStart": null,
             "windowEnd": null,
             "status": "claimed",
@@ -365,6 +376,10 @@ final class ParticipantGateTests: XCTestCase {
             "food": "Chicken bowl",
             "pickupWindowText": "ASAP",
             "mealSwipes": 2,
+            "menuPath": "meal-exchange",
+            "mealItems": ["Meal 1", "Meal 2"],
+            "orderDetails": null,
+            "estimatedDiningDollarsCents": null,
             "windowStart": null,
             "windowEnd": null,
             "status": "placed",

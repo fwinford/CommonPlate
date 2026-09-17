@@ -19,8 +19,7 @@ describe("callScreenshotProvider", () => {
       })
     );
     const result = await callScreenshotProvider({
-      imageBase64: "aGVsbG8=",
-      mimeType: "image/png",
+      images: [{ imageBase64: "aGVsbG8=", mimeType: "image/png" }],
       apiKey: "test-key",
       timeoutMs: 5000,
       fetchImpl,
@@ -44,8 +43,7 @@ describe("callScreenshotProvider", () => {
       jsonResponse({}, { ok: false, status: 401 })
     );
     const result = await callScreenshotProvider({
-      imageBase64: "aGVsbG8=",
-      mimeType: "image/png",
+      images: [{ imageBase64: "aGVsbG8=", mimeType: "image/png" }],
       apiKey: "bad-key",
       timeoutMs: 5000,
       fetchImpl,
@@ -58,8 +56,7 @@ describe("callScreenshotProvider", () => {
       jsonResponse({}, { ok: false, status: 429 })
     );
     const result = await callScreenshotProvider({
-      imageBase64: "aGVsbG8=",
-      mimeType: "image/png",
+      images: [{ imageBase64: "aGVsbG8=", mimeType: "image/png" }],
       apiKey: "test-key",
       timeoutMs: 5000,
       fetchImpl,
@@ -72,8 +69,7 @@ describe("callScreenshotProvider", () => {
       jsonResponse({}, { ok: false, status: 500 })
     );
     const result = await callScreenshotProvider({
-      imageBase64: "aGVsbG8=",
-      mimeType: "image/png",
+      images: [{ imageBase64: "aGVsbG8=", mimeType: "image/png" }],
       apiKey: "test-key",
       timeoutMs: 5000,
       fetchImpl,
@@ -88,8 +84,7 @@ describe("callScreenshotProvider", () => {
       json: async () => ({ choices: [{ message: { content: "not json" } }] }),
     } as Response);
     const result = await callScreenshotProvider({
-      imageBase64: "aGVsbG8=",
-      mimeType: "image/png",
+      images: [{ imageBase64: "aGVsbG8=", mimeType: "image/png" }],
       apiKey: "test-key",
       timeoutMs: 5000,
       fetchImpl,
@@ -108,8 +103,7 @@ describe("callScreenshotProvider", () => {
       });
     });
     const result = await callScreenshotProvider({
-      imageBase64: "aGVsbG8=",
-      mimeType: "image/png",
+      images: [{ imageBase64: "aGVsbG8=", mimeType: "image/png" }],
       apiKey: "test-key",
       timeoutMs: 10,
       fetchImpl,
@@ -120,8 +114,7 @@ describe("callScreenshotProvider", () => {
   it("classifies an unexpected transport rejection as unknown", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error("network down"));
     const result = await callScreenshotProvider({
-      imageBase64: "aGVsbG8=",
-      mimeType: "image/png",
+      images: [{ imageBase64: "aGVsbG8=", mimeType: "image/png" }],
       apiKey: "test-key",
       timeoutMs: 5000,
       fetchImpl,

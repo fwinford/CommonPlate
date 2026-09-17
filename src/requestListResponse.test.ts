@@ -16,9 +16,18 @@ function requestDocument(overrides: Record<string, unknown> = {}) {
     _id: "request-1",
     vendor: "Campus Market",
     food: "Vegetable rice bowl",
+    // W4-R4 removed `pickupName` from the request contract. It is deliberately
+    // still present on this fixture: like `email`, `phone`, and the claim/
+    // fulfillment fields beside it, it is here to prove the projection's
+    // allowlist omits whatever it does not name — a stray stored value on a
+    // pre-R4 document must not reach the wire either.
     pickupName: "Requester Name",
     pickupWindowText: "1:00 PM – 2:00 PM",
     mealSwipes: 3,
+    menuPath: "meal-exchange",
+    mealItems: ["Vegetable rice bowl", "Side salad", "Iced tea"],
+    orderDetails: undefined,
+    estimatedDiningDollarsCents: undefined,
     email: "requester@example.edu",
     requesterPhone: "555-0100",
     requesterPhoneNumber: "555-0101",
@@ -64,6 +73,10 @@ describe("buildPublicRequestListResponse", () => {
           food: "Vegetable rice bowl",
           pickupWindowText: "1:00 PM – 2:00 PM",
           mealSwipes: 3,
+          menuPath: "meal-exchange",
+          mealItems: ["Vegetable rice bowl", "Side salad", "Iced tea"],
+          orderDetails: null,
+          estimatedDiningDollarsCents: null,
           windowStart: new Date("2026-07-26T20:00:00.000Z"),
           windowEnd: new Date("2026-07-26T21:00:00.000Z"),
           status: "open",
@@ -242,6 +255,10 @@ describe("buildPublicRequestListResponse", () => {
       "food",
       "pickupWindowText",
       "mealSwipes",
+      "menuPath",
+      "mealItems",
+      "orderDetails",
+      "estimatedDiningDollarsCents",
       "windowStart",
       "windowEnd",
       "status",

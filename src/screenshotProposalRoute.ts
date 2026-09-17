@@ -36,8 +36,10 @@ export const IMAGE_PROPOSAL_UNAVAILABLE_MESSAGE =
   "AI screenshot assistance is temporarily unavailable";
 
 export const INVALID_IMAGE_CODE = "INVALID_IMAGE";
+/** W4-R4: up to five screenshots may be submitted as evidence for one
+ * logical order, so this no longer says "a single". */
 export const INVALID_IMAGE_MESSAGE =
-  "Choose a single supported screenshot image.";
+  "Choose up to 5 supported screenshot images.";
 
 export const PROVIDER_UNAVAILABLE_CODE = "PROVIDER_UNAVAILABLE";
 export const PROVIDER_UNAVAILABLE_MESSAGE =
@@ -57,13 +59,26 @@ export const PROPOSAL_FAILED_MESSAGE =
 const MAX_IMAGE_BYTES = 5_000_000;
 
 /**
+ * W4-R4: the exact number of screenshots this route accepts as evidence for
+ * one logical Grubhub order. Enforced here, server-side, independent of what
+ * any client claims to have selected — a sixth image is refused
+ * deterministically rather than silently dropped, so a requester is never
+ * told an analysis covered evidence it never saw.
+ */
+export const MAX_SCREENSHOT_IMAGES = 5;
+
+/**
  * The explicit bounded image transport this route owns, separate from the
  * 100 KB global JSON parser (`app.ts`) request-create and every other route
  * shares. Registered ahead of the global parser, exactly like
  * `registerParticipantVerificationRoutes`, so this route's own limit is what
  * actually governs its body rather than the global one rejecting it first.
+ *
+ * W4-R4 raises this from the single-image 7 MB ceiling to hold up to five
+ * normalized screenshots plus their base64 expansion; `MAX_IMAGE_BYTES`
+ * still bounds each individual decoded image.
  */
-const SCREENSHOT_BODY_LIMIT = "7mb";
+const SCREENSHOT_BODY_LIMIT = "34mb";
 
 /**
  * Bounded so a caller cannot use this field to smuggle an arbitrarily large
@@ -72,12 +87,19 @@ const SCREENSHOT_BODY_LIMIT = "7mb";
  */
 const MAX_LOCAL_EVIDENCE_TEXT_LENGTH = 20_000;
 
-const screenshotProposalBodySchema = z
+/**
+ * One selected screenshot and its own independent on-device evidence.
+ * Evidence is per image, not per request: eligibility is decided for each
+ * screenshot separately, so one unsupported image in a set cannot borrow
+ * another's eligibility and an ineligible image is never forwarded to the
+ * provider.
+ */
+const screenshotImageSchema = z
   .object({
     imageBase64: z.string().min(1),
     mimeType: z.enum(["image/jpeg", "image/png"]),
     /**
-     * On-device Apple Vision OCR transcription of the selected screenshot —
+     * On-device Apple Vision OCR transcription of this exact screenshot —
      * a different engine than the OpenAI provider below, produced and sent
      * before that provider is ever called. This is the sole eligibility and
      * meal-swipe-corroboration evidence source; the provider's own output is
@@ -85,6 +107,20 @@ const screenshotProposalBodySchema = z
      * image), which the eligibility rule below simply rejects.
      */
     localEvidenceText: z.string().max(MAX_LOCAL_EVIDENCE_TEXT_LENGTH),
+  })
+  .strict();
+
+/**
+ * W4-R4: 1 to 5 screenshots, which are evidence for ONE logical order rather
+ * than several independent analyses. `.strict()` and the explicit `max`
+ * together mean a sixth image is a structural refusal, never a silent trim.
+ */
+const screenshotProposalBodySchema = z
+  .object({
+    images: z
+      .array(screenshotImageSchema)
+      .min(1)
+      .max(MAX_SCREENSHOT_IMAGES),
   })
   .strict();
 
@@ -474,36 +510,51 @@ export async function handleScreenshotProposal(
     return sendDay4Error(res, 400, INVALID_IMAGE_CODE, INVALID_IMAGE_MESSAGE);
   }
 
-  if (!isStrictBase64(parsedBody.data.imageBase64)) {
-    return sendDay4Error(res, 400, INVALID_IMAGE_CODE, INVALID_IMAGE_MESSAGE);
-  }
+  // Every image is structurally validated before any of them is analyzed: a
+  // set containing one malformed image is refused as a whole rather than
+  // quietly analyzed without it, so the requester is never shown a result
+  // that silently covered less evidence than they chose.
+  for (const image of parsedBody.data.images) {
+    if (!isStrictBase64(image.imageBase64)) {
+      return sendDay4Error(res, 400, INVALID_IMAGE_CODE, INVALID_IMAGE_MESSAGE);
+    }
 
-  let imageBuffer: Buffer;
-  try {
-    imageBuffer = Buffer.from(parsedBody.data.imageBase64, "base64");
-  } catch {
-    return sendDay4Error(res, 400, INVALID_IMAGE_CODE, INVALID_IMAGE_MESSAGE);
-  }
+    let imageBuffer: Buffer;
+    try {
+      imageBuffer = Buffer.from(image.imageBase64, "base64");
+    } catch {
+      return sendDay4Error(res, 400, INVALID_IMAGE_CODE, INVALID_IMAGE_MESSAGE);
+    }
 
-  if (
-    imageBuffer.length === 0 ||
-    imageBuffer.length > MAX_IMAGE_BYTES ||
-    !isStructurallyValidImage(imageBuffer, parsedBody.data.mimeType)
-  ) {
-    return sendDay4Error(res, 400, INVALID_IMAGE_CODE, INVALID_IMAGE_MESSAGE);
+    if (
+      imageBuffer.length === 0 ||
+      imageBuffer.length > MAX_IMAGE_BYTES ||
+      !isStructurallyValidImage(imageBuffer, image.mimeType)
+    ) {
+      return sendDay4Error(res, 400, INVALID_IMAGE_CODE, INVALID_IMAGE_MESSAGE);
+    }
   }
 
   // Independent eligibility gate, evaluated from on-device Vision OCR text
-  // ONLY — never from anything the provider below could say. An ineligible
-  // screenshot is refused here, before the provider is ever called: no
-  // unsupported-category image reaches OpenAI, and no provider claim can
+  // ONLY — never from anything the provider below could say. Applied per
+  // image, so an ineligible screenshot is never forwarded to OpenAI even
+  // when it arrives alongside eligible ones, and no provider claim can
   // reverse this decision.
-  const eligibility = evaluateEligibility(parsedBody.data.localEvidenceText);
-  if (!eligibility.eligible) {
+  const eligibleImages = parsedBody.data.images.filter(
+    (image) => evaluateEligibility(image.localEvidenceText).eligible
+  );
+  if (eligibleImages.length === 0) {
     logProposalOutcome("ineligible");
     const body: ScreenshotProposalResponseBody = { eligible: false, proposal: {} };
     return res.status(200).json(body);
   }
+
+  // The corroboration evidence for this one logical order: the combined
+  // independent OCR text of exactly the images that will actually be sent.
+  // An ineligible image contributes neither bytes nor evidence.
+  const combinedEvidenceText = eligibleImages
+    .map((image) => image.localEvidenceText)
+    .join("\n");
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -522,9 +573,15 @@ export async function handleScreenshotProposal(
     );
   }
 
+  // One call carrying every eligible image, not one call per image: they are
+  // evidence for one order, and analyzing them jointly is what lets the
+  // provider describe that single order instead of returning several
+  // independent results a caller would then have to merge.
   const providerResult = await callScreenshotProvider({
-    imageBase64: parsedBody.data.imageBase64,
-    mimeType: parsedBody.data.mimeType,
+    images: eligibleImages.map((image) => ({
+      imageBase64: image.imageBase64,
+      mimeType: image.mimeType,
+    })),
     apiKey,
     timeoutMs: PROVIDER_TIMEOUT_MS,
   });
@@ -537,7 +594,8 @@ export async function handleScreenshotProposal(
 
   const validation = validateProviderOutput(
     providerResult.rawJson,
-    parsedBody.data.localEvidenceText
+    combinedEvidenceText,
+    eligibleImages.length
   );
   if (!validation.ok) {
     // The provider returned a well-formed HTTP response but content this

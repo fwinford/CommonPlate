@@ -38,20 +38,65 @@ function sanitizeModifiers(
   }));
 }
 
-function formatFoodRequest(foodItems: ScreenshotFoodItem[]): string | undefined {
-  const lines = foodItems
-    .map((item) => {
-      const name = item.name.trim();
-      if (!name) return null;
-      const quantityPrefix =
-        item.quantity !== null && item.quantity > 0 ? `${item.quantity} ` : "";
-      const modifierSuffix = item.modifiers.length
-        ? ` (${item.modifiers.join(", ")})`
-        : "";
-      return `${quantityPrefix}${name}${modifierSuffix}`;
-    })
-    .filter((line): line is string => line !== null);
-  return lines.length ? lines.join("; ") : undefined;
+function formatFoodItem(item: ScreenshotFoodItem): string | null {
+  const name = item.name.trim();
+  if (!name) return null;
+  const quantityPrefix =
+    item.quantity !== null && item.quantity > 0 ? `${item.quantity} ` : "";
+  const modifierSuffix = item.modifiers.length
+    ? ` (${item.modifiers.join(", ")})`
+    : "";
+  return `${quantityPrefix}${name}${modifierSuffix}`;
+}
+
+function itemIdentity(item: ScreenshotFoodItem): string {
+  const normalize = (text: string) => text.trim().toLowerCase().replace(/\s+/g, " ");
+  return JSON.stringify([
+    normalize(item.name),
+    item.quantity,
+    item.modifiers.map(normalize).sort(),
+  ]);
+}
+
+/**
+ * W4-R4 overlap handling for multi-image evidence.
+ *
+ * Up to five screenshots describe ONE logical order, and real screenshots of
+ * one order overlap. The provider is asked to report an item seen in several
+ * screenshots once, but its output is one merged list with no record of
+ * which screenshot each line came from. So when two lines share an exact
+ * identity after normalization (same name, quantity, and modifier set), the
+ * output cannot say whether that is one item seen twice or two identical
+ * items ordered — collapsing to one, keeping both, or adding quantities
+ * would each be a guess.
+ *
+ * The only provenance available is how many screenshots were analyzed:
+ *
+ * - One screenshot cannot overlap with itself, so repeated identical lines
+ *   are separate order lines and every line is kept, as before W4-R4.
+ * - With several screenshots, a repeated identity is ambiguous and is
+ *   `null`: the caller proposes no meal items (and no swipe count, which
+ *   depends on the same question) rather than a list that silently gained
+ *   or lost an item. Lines that differ in quantity or any modifier are
+ *   different items, never ambiguous with each other.
+ */
+function proposedMealItems(
+  foodItems: ScreenshotFoodItem[],
+  evidenceImageCount: number
+): string[] | null {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+
+  for (const item of foodItems) {
+    const line = formatFoodItem(item);
+    if (line === null) continue;
+    const identity = itemIdentity(item);
+    if (seen.has(identity) && evidenceImageCount > 1) return null;
+    seen.add(identity);
+    lines.push(line);
+  }
+
+  return lines;
 }
 
 function normalizeVenueText(text: string): string {
@@ -130,6 +175,7 @@ function resolveVendor(
 
 function buildProposal(
   evidenceText: string,
+  evidenceImageCount: number,
   visibleVenueText: string | null,
   foodItems: ScreenshotFoodItem[],
   mealSwipes: number | null
@@ -141,17 +187,29 @@ function buildProposal(
     proposal.selectedDiningSpot = { name: vendor.name, address: vendor.address };
   }
 
-  const foodRequest = formatFoodRequest(sanitizeModifiers(foodItems));
-  if (foodRequest) {
-    proposal.foodRequest = foodRequest;
+  // W4-R4: one entry per observed order line. `null` means repeated
+  // identical lines across several screenshots could be overlap or a real
+  // repeat, so neither meal items nor a swipe count is proposed.
+  const mealItems = proposedMealItems(sanitizeModifiers(foodItems), evidenceImageCount);
+  if (mealItems?.length) {
+    proposal.mealItems = mealItems;
   }
 
-  if (mealSwipes !== null && mealSwipes >= 1 && mealSwipes <= 5) {
+  if (mealItems !== null && mealSwipes !== null && mealSwipes >= 1 && mealSwipes <= 5) {
     // Independent corroboration (accepted "1M" signal): the candidate
     // survives only when the literal marker count in `evidenceText` — the
     // on-device Apple Vision OCR text this provider never saw or produced —
     // matches it exactly. A mismatch drops the value rather than coercing
     // it. This is never evaluated against anything the provider returned.
+    //
+    // W4-R4 multi-image consequence, and an intended one: `evidenceText` is
+    // the combined evidence of every eligible screenshot, so an item visible
+    // in two overlapping screenshots contributes its `1M` marker twice and
+    // the count no longer matches. The candidate is dropped and the
+    // requester chooses the quantity themselves. Ambiguous cross-screenshot
+    // evidence stays ambiguous: deduplicating markers here would be a guess
+    // about which markers describe the same swipe, and a wrong guess sets a
+    // quantity the requester never chose.
     if (countMealSwipeMarkers(evidenceText) === mealSwipes) {
       proposal.mealSwipes = mealSwipes;
     }
@@ -174,11 +232,13 @@ function buildProposal(
  * reaches this function or the provider. `evidenceText` is that same
  * independent evidence, passed through here only for meal-swipe
  * corroboration; it is never re-derived from, or trusted against, anything
- * the provider itself returned.
+ * the provider itself returned. `evidenceImageCount` is how many eligible
+ * screenshots the provider analyzed together (see `proposedMealItems`).
  */
 export function validateProviderOutput(
   raw: unknown,
-  evidenceText: string
+  evidenceText: string,
+  evidenceImageCount: number
 ): ProviderValidationResult {
   if (raw && typeof raw === "object") {
     for (const key of Object.keys(raw as Record<string, unknown>)) {
@@ -196,6 +256,12 @@ export function validateProviderOutput(
   const { visibleVenueText, foodItems, mealSwipes } = result.data;
   return {
     ok: true,
-    proposal: buildProposal(evidenceText, visibleVenueText, foodItems, mealSwipes),
+    proposal: buildProposal(
+      evidenceText,
+      evidenceImageCount,
+      visibleVenueText,
+      foodItems,
+      mealSwipes
+    ),
   };
 }

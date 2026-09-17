@@ -24,6 +24,11 @@ import {
   INITIAL_UNSUBSCRIBE_CREDENTIAL_VERSION,
   MAXIMUM_UNSUBSCRIBE_CREDENTIAL_VERSION,
 } from "../src/unsubscribeCredential.js";
+import {
+  DINING_DOLLARS_PATH,
+  MEAL_EXCHANGE_PATH,
+  type MenuPath,
+} from "../src/structuredRequest.js";
 
 // Subscriber model
 export interface ISubscriber extends Document {
@@ -211,21 +216,58 @@ export type HelperNotificationState = "awaiting-eligibility" | "initiated";
 
 export interface IRequest extends Document {
   vendor: string;
+  /**
+   * The single-line summary every already-accepted downstream projection,
+   * email, push payload, and digest line renders. Since W4-R4 this is derived
+   * once at creation from the structured fields below
+   * (`deriveFoodSummary`, `src/structuredRequest.ts`) rather than supplied
+   * flat by a client — the structured representation is the authority, and
+   * this is its compatibility rendering.
+   */
   food: string;
-  pickupName: string;
   pickupWindowText: string;
   /**
-   * V1 meal-swipe requirement (W3-C1): the exact integer count of meal swipes
-   * this request needs, 1 through 5. Requester-owned truth, required by every
-   * accepted `POST /api/request` shape (enforced in `createRequestRoute.ts`,
-   * the authoritative validator) and written once at creation, never
-   * recomputed or defaulted. Not `required` at the schema level so that
-   * fixtures and Mongo suites unrelated to this slice, across many
-   * pre-existing Request documents and test files, are not forced to supply
-   * it; existing database contents are disposable test data, not a migration
-   * target.
+   * W4-R4 structured menu path. Exactly one of `meal-exchange` (1-5 swipes,
+   * one meal-detail entry each, optional Dining Dollar estimate) or
+   * `dining-dollars` (0 swipes, required order details and estimate).
+   * Requester-owned truth written once at creation, never inferred from the
+   * other fields.
+   */
+  menuPath?: MenuPath;
+  /**
+   * The exact integer count of meal swipes this request needs. W3-C1
+   * established the 1-5 Meal Exchange range; W4-R4 widens the stored bound to
+   * 0-5 so a Dining-Dollars-only request can record that it needs none.
+   * Requester-owned truth, required by every accepted `POST /api/request`
+   * shape (enforced in `createRequestRoute.ts`, the authoritative validator)
+   * and written once at creation, never recomputed or defaulted. Not
+   * `required` at the schema level so that fixtures and Mongo suites
+   * unrelated to this slice, across many pre-existing Request documents and
+   * test files, are not forced to supply it; existing database contents are
+   * disposable test data, not a migration target.
    */
   mealSwipes?: number;
+  /**
+   * One structured meal-detail entry per selected swipe (W4-R4), in the
+   * requester's own order. Empty on a Dining-Dollars-only request. Entries a
+   * requester hid by lowering their swipe count are excluded by the client
+   * before submission and refused by validation if sent anyway, so this array
+   * always describes exactly the swipes the request actually needs.
+   */
+  mealItems?: string[];
+  /** The single structured order-details value a Dining-Dollars-only request
+   * requires (W4-R4). Absent on a Meal Exchange request. */
+  orderDetails?: string;
+  /**
+   * The requester's Dining Dollar estimate in exact cents (W4-R4) — never a
+   * float, so no accepted user-visible value can acquire rounding behaviour.
+   * Absent means no Dining Dollars are needed; it is never persisted as `0`,
+   * because a fabricated `$0.00` would claim the requester stated something
+   * they deliberately left empty. Always present on a Dining-Dollars-only
+   * request, where it is required. An estimate, never a guarantee of the
+   * provider's final total.
+   */
+  estimatedDiningDollarsCents?: number;
   email: string;
   windowStart?: Date;
   windowEnd?: Date;
@@ -256,15 +298,31 @@ export interface IRequest extends Document {
 const RequestSchema = new Schema<IRequest>({
   vendor: { type: String, required: true, trim: true },
   food: { type: String, required: true, trim: true },
-  pickupName: { type: String, required: true, trim: true },
   pickupWindowText: { type: String, required: true, trim: true },
+  menuPath: {
+    type: String,
+    enum: [MEAL_EXCHANGE_PATH, DINING_DOLLARS_PATH],
+  },
   mealSwipes: {
+    // W4-R4: `0` admits the Dining-Dollars-only path. The integer/range
+    // enforcement is otherwise unchanged in kind and applies identically to
+    // whichever shape was submitted.
     type: Number,
-    min: 1,
+    min: 0,
     max: 5,
     validate: {
       validator: Number.isInteger,
       message: "mealSwipes must be an integer",
+    },
+  },
+  mealItems: { type: [String], default: undefined },
+  orderDetails: { type: String, trim: true },
+  estimatedDiningDollarsCents: {
+    type: Number,
+    min: 1,
+    validate: {
+      validator: Number.isInteger,
+      message: "estimatedDiningDollarsCents must be an integer",
     },
   },
   email: { type: String, required: true, trim: true, lowercase: true },
@@ -423,10 +481,28 @@ RequestSchema.index(
 // is a handful of bytes, and the alternative — freeing them after some
 // duration — would eventually let the exact defect above resurface, only
 // delayed rather than fixed.
+//
+// W4-D2 adds the second terminal outcome an exact identity can hold. A
+// `"no-create"` row is terminal NO-CREATE: backend authority's durable answer
+// that this exact operation never created a Request and never will. It
+// occupies the same unique identity slot a created row does, so whichever of
+// the create transaction and terminalization inserts first is the one winner
+// for that identity forever. It carries no `requestId` and, like every row
+// here, no request content. Rows written before W4-D2 have no `outcome` and
+// always a `requestId`; they are created rows.
+export const REQUEST_OPERATION_CREATED = "created";
+export const REQUEST_OPERATION_NO_CREATE = "no-create";
+export type RequestOperationOutcome =
+  | typeof REQUEST_OPERATION_CREATED
+  | typeof REQUEST_OPERATION_NO_CREATE;
+
 export interface IRequestOperation extends Document {
   operationId: string;
   participantId: Types.ObjectId;
-  requestId: Types.ObjectId;
+  /** Absent means created (every pre-W4-D2 row). */
+  outcome?: RequestOperationOutcome;
+  /** Present exactly when the row is a created row. */
+  requestId?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -434,6 +510,10 @@ export interface IRequestOperation extends Document {
 const RequestOperationSchema = new Schema<IRequestOperation>(
   {
     operationId: { type: String, required: true, trim: true },
+    outcome: {
+      type: String,
+      enum: [REQUEST_OPERATION_CREATED, REQUEST_OPERATION_NO_CREATE],
+    },
     // Private lookup/authority fields, `select: false` like their `Request`
     // counterparts: never a public read target and never returned by an
     // ordinary query on this collection.
@@ -446,7 +526,11 @@ const RequestOperationSchema = new Schema<IRequestOperation>(
     requestId: {
       type: Schema.Types.ObjectId,
       ref: "Request",
-      required: true,
+      // A created row always points at its Request; a terminal NO-CREATE row
+      // never does, because no Request exists or ever will for it.
+      required: function (this: IRequestOperation) {
+        return this.outcome !== REQUEST_OPERATION_NO_CREATE;
+      },
       select: false,
     },
   },
@@ -458,8 +542,10 @@ const RequestOperationSchema = new Schema<IRequestOperation>(
 // transaction that creates the Request, and a concurrent racer for the same
 // exact identity loses this insert with a duplicate-key error. Not sparse —
 // unlike the retired `Request.operationId` index — because every row here
-// corresponds to exactly one succeeded create; there is no legacy/absent case
-// to keep separate from a shared `undefined`.
+// corresponds to exactly one terminal outcome for one identity (a succeeded
+// create, or since W4-D2 a terminal NO-CREATE); there is no legacy/absent case
+// to keep separate from a shared `undefined`. Terminalization inserts into
+// this same index, which is what makes created vs NO-CREATE one-winner.
 RequestOperationSchema.index(
   { operationId: 1 },
   { unique: true, name: "request_operation_ledger_identity_unique" }
@@ -470,6 +556,36 @@ export const RequestOperation =
   mongoose.model<IRequestOperation>(
     "RequestOperation",
     RequestOperationSchema
+  );
+
+// W4-D2 ledger authority identity: one non-secret random identifier minted
+// the first time a process establishes the `RequestOperation` ledger in this
+// database, and never changed afterwards. It lives in the same database as
+// the ledger it names, so a reset, replaced, or different database behind the
+// same URL carries a different identifier (or none), and a client can tell
+// that the authority it recorded is not the one it is now talking to. It is
+// not a credential and authorizes nothing. Exactly one row, under a fixed
+// `_id`; see `src/requestOperationAuthority.ts`.
+export interface IRequestOperationAuthority {
+  _id: string;
+  authorityId: string;
+  createdAt: Date;
+}
+
+const RequestOperationAuthoritySchema = new Schema<IRequestOperationAuthority>(
+  {
+    _id: { type: String, required: true },
+    authorityId: { type: String, required: true },
+    createdAt: { type: Date, required: true },
+  },
+  { versionKey: false }
+);
+
+export const RequestOperationAuthority =
+  (mongoose.models.RequestOperationAuthority as mongoose.Model<IRequestOperationAuthority>) ||
+  mongoose.model<IRequestOperationAuthority>(
+    "RequestOperationAuthority",
+    RequestOperationAuthoritySchema
   );
 
 /* ========================= RequestParticipation ========================= */

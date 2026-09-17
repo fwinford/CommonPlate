@@ -104,6 +104,15 @@ final class ControlledHelperNotificationResolver: HelperNotificationResolving {
         satisfied.forEach { $0.continuation.resume() }
     }
 
+    /// W4-H1: consulted only for an `.unavailable` resolution. Confirmed
+    /// absence by default, so these timing cases keep the accepted
+    /// `no longer available` outcome.
+    var heldRequestTruth: HeldRequestNotificationTruth = .notHeld
+
+    func resolveHeldRequestForNotification(requestID: String) async throws -> HeldRequestNotificationTruth {
+        heldRequestTruth
+    }
+
     func reportRequestUnavailableFromNotification(requestID: String) {
         unavailableReports.append(requestID)
     }
@@ -394,6 +403,8 @@ final class HelperNotificationTerminatedLaunchRoutingTests: XCTestCase {
             "requestId": requestID
         ])
         HelperNotificationRoutingURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
+        // W4-H1: continuation truth confirms this helper holds no reservation.
+        HelperNotificationRoutingURLProtocol.enqueue(.response(data: Data(#"{"reservation":null}"#.utf8)))
 
         let resolvedPath = await HelperNotificationRouteDriver.routeIfNeeded(router: router, resolver: store)
 
@@ -543,6 +554,10 @@ final class HelperNotificationTerminatedLaunchRoutingTests: XCTestCase {
             "food": "Rice bowl",
             "pickupWindowText": "ASAP",
             "mealSwipes": 2,
+            "menuPath": "meal-exchange",
+            "mealItems": ["Meal 1", "Meal 2"],
+            "orderDetails": null,
+            "estimatedDiningDollarsCents": null,
             "windowStart": null,
             "windowEnd": null,
             "status": "\(status)",

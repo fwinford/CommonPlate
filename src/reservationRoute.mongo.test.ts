@@ -127,7 +127,9 @@ describeMongo("real MongoDB active-reservation continuation (W3-H1)", () => {
 
     expect(context.statusCode).toBe(200);
     expect(context.body.reservation.request.id).toBe(String(request._id));
-    expect(context.body.reservation.pickupName).toBe("Continuation Pickup");
+    // W4-R4: an active reservation no longer republishes a pickup name.
+    expect(context.body.reservation).not.toHaveProperty("pickupName");
+    expect(JSON.stringify(context.body)).not.toMatch(/Continuation Pickup/);
     expect(new Date(context.body.reservation.claimExpiresAt)).toEqual(
       claimExpiresAt
     );

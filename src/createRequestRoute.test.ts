@@ -32,6 +32,7 @@ import {
   Request as MealRequest,
   Participant,
   RequestOperation,
+  RequestOperationAuthority,
 } from "../models/db.js";
 import {
   ASAP_WINDOW_TEXT,
@@ -42,6 +43,8 @@ import {
   OPERATION_EXPIRED_CODE,
   OPERATION_EXPIRED_MESSAGE,
   OPERATION_IDENTITY_HEADER,
+  OPERATION_NOT_CREATED_CODE,
+  OPERATION_NOT_CREATED_MESSAGE,
   OPERATION_UNAUTHORIZED_CODE,
   OPERATION_UNAUTHORIZED_MESSAGE,
 } from "./createRequestRoute.js";
@@ -55,6 +58,7 @@ import {
   signParticipantAuthority,
 } from "./participantCredentials.js";
 import { PUBLIC_ACTIONS_PAUSED_ENV } from "./publicActionsPause.js";
+import { OPERATION_AUTHORITY_HEADER } from "./requestOperationAuthority.js";
 import { SUPPORTED_VENDORS } from "./supportedVendors.js";
 
 /**
@@ -96,14 +100,21 @@ const scheduledStart = new Date("2026-07-28T17:00:00.000Z");
 /** Three hours after `scheduledStart`, derived by the backend. */
 const scheduledExpiresAt = new Date("2026-07-28T20:00:00.000Z");
 
+/**
+ * W4-R4 canonical Meal Exchange payload: two swipes, one required structured
+ * meal-detail entry each, and no Dining Dollar estimate (the optional case).
+ * There is deliberately no `food` and no `pickupName` — the first is derived
+ * by the backend from the structured fields, and the second no longer exists
+ * in the V1 contract at all.
+ */
 function canonicalAsap(overrides: Record<string, unknown> = {}) {
   return {
     vendor: "  Palladium  ",
-    food: "  Vegetable rice bowl  ",
-    pickupName: "  Requester Private Name  ",
     email: "  REQUESTER@NYU.EDU  ",
     timing: "asap",
+    menuPath: "meal-exchange",
     mealSwipes: 2,
+    mealItems: ["  Vegetable rice bowl  ", "  Side salad  "],
     ...overrides,
   };
 }
@@ -111,12 +122,33 @@ function canonicalAsap(overrides: Record<string, unknown> = {}) {
 function canonicalScheduled(overrides: Record<string, unknown> = {}) {
   return {
     vendor: "Palladium",
-    food: "Vegetable rice bowl",
-    pickupName: "Requester Private Name",
     email: "requester@nyu.edu",
     timing: "scheduled",
     windowStart: "2026-07-28T17:00:00.000Z",
+    menuPath: "meal-exchange",
     mealSwipes: 2,
+    mealItems: ["Vegetable rice bowl", "Side salad"],
+    ...overrides,
+  };
+}
+
+/** Exactly `count` distinct structured meal-detail entries — one per selected
+ * swipe, which is what W4-R4 Meal Exchange validation requires. */
+function mealEntries(count: number): string[] {
+  return Array.from({ length: count }, (_, index) => `Meal detail ${index + 1}`);
+}
+
+/** The W4-R4 Dining-Dollars-only shape: zero swipes, one required structured
+ * order-details value, and a required estimate in exact cents. */
+function diningDollarsOnly(overrides: Record<string, unknown> = {}) {
+  return {
+    vendor: "Palladium",
+    email: "requester@nyu.edu",
+    timing: "asap",
+    menuPath: "dining-dollars",
+    mealSwipes: 0,
+    orderDetails: "Grain bowl with extra avocado",
+    estimatedDiningDollarsCents: 1_850,
     ...overrides,
   };
 }
@@ -146,7 +178,6 @@ function persistedDocument(input: Record<string, unknown>) {
     // Deliberately no `expiresAt` override: the persisted document echoes
     // whatever the route wrote, so the response assertions prove the canonical
     // backend expiration rather than a fixture constant.
-    pickupName: input.pickupName,
     email: input.email,
     claimToken: "private-claim-token",
     orderNumber: "private-order-number",
@@ -210,9 +241,13 @@ describe("POST /api/request validation and persistence", () => {
 
     expect(createDocument).toHaveBeenCalledWith({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      // Derived by the backend from the structured entries below, never
+      // supplied by the client (W4-R4). Each entry is trimmed exactly as
+      // every other requester string on this route already is.
+      food: "Vegetable rice bowl; Side salad",
+      menuPath: "meal-exchange",
       mealSwipes: 2,
+      mealItems: ["Vegetable rice bowl", "Side salad"],
       // Both written from the verified participant, never from the payload.
       email: participantPrincipal,
       requesterParticipantId: participantId.toString(),
@@ -420,9 +455,13 @@ describe("POST /api/request validation and persistence", () => {
     expect(body.request).toEqual({
       id: requestId.toString(),
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
+      food: "Vegetable rice bowl; Side salad",
       pickupWindowText: "Jul 28, 1:00 PM – 4:00 PM",
       mealSwipes: 2,
+      menuPath: "meal-exchange",
+      mealItems: ["Vegetable rice bowl", "Side salad"],
+      orderDetails: null,
+      estimatedDiningDollarsCents: null,
       windowStart: "2026-07-28T17:00:00.000Z",
       windowEnd: "2026-07-28T20:00:00.000Z",
       status: "open",
@@ -461,13 +500,18 @@ describe("POST /api/request meal-swipe quantity (W3-C1)", () => {
   it.each([1, 2, 3, 4, 5])(
     "accepts and persists an exact integer quantity of %d",
     async (mealSwipes) => {
-      const context = routeContext(canonicalAsap({ mealSwipes }));
+      const context = routeContext(
+        canonicalAsap({ mealSwipes, mealItems: mealEntries(mealSwipes) })
+      );
 
       await createRequest(context.req, context.res);
 
       expect(context.status).toHaveBeenCalledWith(201);
       expect(createDocument).toHaveBeenCalledWith(
-        expect.objectContaining({ mealSwipes })
+        expect.objectContaining({
+          mealSwipes,
+          mealItems: mealEntries(mealSwipes),
+        })
       );
       const body = context.json.mock.calls[0][0] as {
         request: Record<string, unknown>;
@@ -513,13 +557,15 @@ describe("POST /api/request meal-swipe quantity (W3-C1)", () => {
   });
 
   it("accepts a canonical scheduled request with a bounded quantity", async () => {
-    const context = routeContext(canonicalScheduled({ mealSwipes: 5 }));
+    const context = routeContext(
+      canonicalScheduled({ mealSwipes: 5, mealItems: mealEntries(5) })
+    );
 
     await createRequest(context.req, context.res);
 
     expect(context.status).toHaveBeenCalledWith(201);
     expect(createDocument).toHaveBeenCalledWith(
-      expect.objectContaining({ mealSwipes: 5 })
+      expect.objectContaining({ mealSwipes: 5, mealItems: mealEntries(5) })
     );
   });
 
@@ -528,8 +574,8 @@ describe("POST /api/request meal-swipe quantity (W3-C1)", () => {
       countDocuments.mockResolvedValue(0 as never);
       const context = routeContext({
         vendor: "Palladium",
-        food: "Vegetable rice bowl",
-        pickupName: "Requester Private Name",
+        menuPath: "meal-exchange",
+        mealItems: mealEntries(mealSwipes),
         email: "requester@nyu.edu",
         pickupWindowText: "client display text",
         mealSwipes,
@@ -559,8 +605,8 @@ describe("POST /api/request meal-swipe quantity (W3-C1)", () => {
   ])("rejects an invalid quantity %j on the legacy web shape", async (mealSwipes) => {
     const context = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "client display text",
       mealSwipes,
@@ -583,8 +629,8 @@ describe("POST /api/request meal-swipe quantity (W3-C1)", () => {
   it("rejects a legacy web submission omitting the quantity entirely", async () => {
     const context = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "client display text",
     });
@@ -601,8 +647,8 @@ describe("POST /api/request meal-swipe quantity (W3-C1)", () => {
       canonicalScheduled({ mealSwipes: undefined }),
       {
         vendor: "Palladium",
-        food: "Vegetable rice bowl",
-        pickupName: "Requester Private Name",
+        menuPath: "meal-exchange",
+        mealItems: mealEntries(2),
         email: "requester@nyu.edu",
         pickupWindowText: "client display text",
       },
@@ -710,8 +756,8 @@ describe("POST /api/request requester gate (W3-I1)", () => {
     const context = routeContext(
       {
         vendor: "Palladium",
-        food: "Vegetable rice bowl",
-        pickupName: "Requester Private Name",
+        menuPath: "meal-exchange",
+        mealItems: mealEntries(2),
         email: participantPrincipal,
         pickupWindowText: "Legacy display",
       },
@@ -799,11 +845,11 @@ describe("POST /api/request requester identity comes from participant authority 
   function legacyWeb(email: string) {
     return {
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
       email,
       pickupWindowText: "Legacy display",
+      menuPath: "meal-exchange",
       mealSwipes: 2,
+      mealItems: mealEntries(2),
     };
   }
 
@@ -1089,8 +1135,8 @@ describe("POST /api/request supported-vendor allowlist", () => {
 
     const legacy = routeContext({
       vendor: "Off-Campus Diner",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       mealSwipes: 2,
@@ -1107,8 +1153,8 @@ describe("POST /api/request supported-vendor allowlist", () => {
 
     const allowedLegacy = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       mealSwipes: 2,
@@ -1257,8 +1303,8 @@ describe("POST /api/request backend-owned visibility and expiration", () => {
 
     const legacy = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       expiresAt: clientExpiration,
@@ -1413,8 +1459,8 @@ describe("POST /api/request backend-owned visibility and expiration", () => {
     function legacy(windowStart: string, windowEnd: string) {
       return {
         vendor: "Palladium",
-        food: "Vegetable rice bowl",
-        pickupName: "Requester Private Name",
+        menuPath: "meal-exchange",
+        mealItems: mealEntries(2),
         email: "requester@nyu.edu",
         pickupWindowText: "Legacy display",
         windowStart,
@@ -1526,8 +1572,8 @@ describe("POST /api/request eligibility-time notification ownership (W3-N3)", ()
   it("applies the same ownership rule to the legacy web scheduled shape", async () => {
     const context = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "ignored legacy display text",
       windowStart: "2026-07-28T17:00:00.000Z",
@@ -1582,8 +1628,8 @@ describe("POST /api/request narrow legacy web compatibility", () => {
   it("infers ASAP only when both window fields are absent and ignores legacy display text", async () => {
     const context = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "Client-owned text must be ignored",
       mealSwipes: 2,
@@ -1604,8 +1650,8 @@ describe("POST /api/request narrow legacy web compatibility", () => {
   it("infers scheduled only from two valid legacy timestamps and generates canonical text", async () => {
     const context = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "Wrong client display text",
       windowStart: "2026-07-28T17:00:00.000Z",
@@ -1648,8 +1694,8 @@ describe("POST /api/request narrow legacy web compatibility", () => {
   ])("rejects an invalid legacy window pair", async (window) => {
     const context = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       ...window,
@@ -1664,8 +1710,8 @@ describe("POST /api/request narrow legacy web compatibility", () => {
   it("requires pickupWindowText when timing is absent and rejects extra fields", async () => {
     const missingCompatibilityMarker = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
     });
     await createRequest(
@@ -1675,8 +1721,8 @@ describe("POST /api/request narrow legacy web compatibility", () => {
 
     const broadenedLegacyPayload = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "Legacy display",
       status: "requested",
@@ -2281,8 +2327,8 @@ describe("POST /api/request installation association (Slice 6E)", () => {
   it("legacy web requests remain valid without an installation credential", async () => {
     const context = routeContext({
       vendor: "Palladium",
-      food: "Vegetable rice bowl",
-      pickupName: "Requester Private Name",
+      menuPath: "meal-exchange",
+      mealItems: mealEntries(2),
       email: "requester@nyu.edu",
       pickupWindowText: "ASAP",
       mealSwipes: 2,
@@ -2889,6 +2935,56 @@ describe("POST /api/request durable create-operation identity (W3-D1)", () => {
     expect(retry.status).toHaveBeenCalledWith(201);
   });
 
+  /** The exact body a pre-R4 iOS build sent, which W4-R4 iOS recovery now
+   * replays verbatim for a pending operation that build persisted. */
+  function preR4IosBody() {
+    return {
+      vendor: "Palladium",
+      food: "Chicken over rice",
+      pickupName: "Requester Name",
+      timing: "asap",
+      mealSwipes: 2,
+    };
+  }
+
+  it("reconciles a pre-R4 body under an already-created operation identity before validating its shape", async () => {
+    stubLedgerLookups(ledgerRow({ operationId: "op-pre-r4-created" }));
+    stubRequestLookups(existingOperationDocument());
+    const context = routeContext(
+      preR4IosBody(),
+      headersWithOperation("op-pre-r4-created")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(createLedgerEntry).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(200);
+    expect(context.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ id: String(requestId) }),
+      })
+    );
+  });
+
+  it("refuses a pre-R4 body under a never-created operation identity as a definitive non-create", async () => {
+    stubLedgerLookups(null);
+    const context = routeContext(
+      preR4IosBody(),
+      headersWithOperation("op-pre-r4-not-found")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(createLedgerEntry).not.toHaveBeenCalled();
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(context.json).toHaveBeenCalledWith({
+      error: { code: "INVALID_REQUEST", message: "Invalid request payload" },
+    });
+  });
+
   it("proceeds with ordinary, non-idempotent behavior when no operation identity is presented", async () => {
     const lookup = vi.spyOn(RequestOperation, "findOne");
     const context = routeContext(canonicalAsap());
@@ -2901,5 +2997,487 @@ describe("POST /api/request durable create-operation identity (W3-D1)", () => {
       expect.not.objectContaining({ operationId: expect.anything() })
     );
     expect(context.status).toHaveBeenCalledWith(201);
+  });
+
+  // W4-D2: terminal NO-CREATE on the create path.
+
+  function noCreateRow(overrides: Record<string, unknown> = {}) {
+    return {
+      operationId: "op-generic",
+      participantId,
+      outcome: "no-create",
+      ...overrides,
+    };
+  }
+
+  const notCreatedBody = {
+    error: {
+      code: OPERATION_NOT_CREATED_CODE,
+      message: OPERATION_NOT_CREATED_MESSAGE,
+    },
+  };
+
+  it("records a created ledger row with an explicit created outcome", async () => {
+    stubLedgerLookups(null);
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-created-outcome")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(createLedgerEntry).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          operationId: "op-created-outcome",
+          outcome: "created",
+          requestId,
+        }),
+      ],
+      expect.anything()
+    );
+    expect(context.status).toHaveBeenCalledWith(201);
+  });
+
+  it.each([
+    { label: "a valid payload", body: () => canonicalAsap() },
+    { label: "an invalid payload", body: () => canonicalAsap({ vendor: "   " }) },
+    { label: "a pre-R4 body", body: () => preR4IosBody() },
+  ])(
+    "answers a terminalized identity with NO-CREATE for $label, never validating, counting, creating, or notifying",
+    async ({ body }) => {
+      stubLedgerLookups(noCreateRow({ operationId: "op-terminalized" }));
+      const requestLookup = vi.spyOn(MealRequest, "findOne");
+      const context = routeContext(
+        body(),
+        headersWithOperation("op-terminalized")
+      );
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(409);
+      expect(context.json).toHaveBeenCalledWith(notCreatedBody);
+      expect(requestLookup).not.toHaveBeenCalled();
+      expect(countDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(createLedgerEntry).not.toHaveBeenCalled();
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+    }
+  );
+
+  it("keeps answering NO-CREATE for the same terminalized identity on every later replay", async () => {
+    stubLedgerLookups(
+      noCreateRow({ operationId: "op-terminal-repeat" }),
+      noCreateRow({ operationId: "op-terminal-repeat" })
+    );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const context = routeContext(
+        canonicalAsap(),
+        headersWithOperation("op-terminal-repeat")
+      );
+      await createRequest(context.req, context.res);
+      expect(context.status).toHaveBeenCalledWith(409);
+      expect(context.json).toHaveBeenCalledWith(notCreatedBody);
+    }
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("resolves an in-flight create that loses the identity to terminalization as NO-CREATE, not a write-uncertain failure", async () => {
+    // Nothing existed at the pre-write check; terminalization then won the
+    // unique identity before this create's ledger insert, so the insert
+    // loses and the transaction (Request included) rolls back.
+    stubLedgerLookups(null, noCreateRow({ operationId: "op-lost-to-terminal" }));
+    createLedgerEntry.mockRejectedValueOnce(
+      Object.assign(new Error("duplicate key"), { code: 11000 })
+    );
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-lost-to-terminal")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(409);
+    expect(context.status).not.toHaveBeenCalledWith(201);
+    expect(context.status).not.toHaveBeenCalledWith(500);
+    expect(context.json).toHaveBeenCalledWith(notCreatedBody);
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("refuses another participant's terminalized identity generically, without revealing that it is terminalized", async () => {
+    stubLedgerLookups(
+      noCreateRow({
+        operationId: "op-terminalized-by-someone-else",
+        participantId: otherParticipantId,
+      })
+    );
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-terminalized-by-someone-else")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(403);
+    expect(context.json).toHaveBeenCalledWith({
+      error: {
+        code: OPERATION_UNAUTHORIZED_CODE,
+        message: OPERATION_UNAUTHORIZED_MESSAGE,
+      },
+    });
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  // W4-D2: a create that names a ledger authority is served only by it.
+
+  const ledgerAuthority = "7d8f1c2a-3b4e-4f60-8a71-92b3c4d5e6f7";
+
+  function stubLedgerAuthority(
+    row: Record<string, unknown> | null | Error = {
+      _id: "request-operation-ledger",
+      authorityId: ledgerAuthority,
+    }
+  ) {
+    return vi.spyOn(RequestOperationAuthority, "findById").mockReturnValue({
+      lean: () =>
+        row instanceof Error ? Promise.reject(row) : Promise.resolve(row),
+    } as unknown as ReturnType<typeof RequestOperationAuthority.findById>);
+  }
+
+  it("creates normally when the named ledger authority is this database's", async () => {
+    stubLedgerAuthority();
+    stubLedgerLookups(null);
+    const context = routeContext(canonicalAsap(), {
+      ...headersWithOperation("op-matching-authority"),
+      [OPERATION_AUTHORITY_HEADER]: ledgerAuthority,
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createLedgerEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it("never reads the authority row when no authority is named, keeping pre-D2 behavior", async () => {
+    const authorityLookup = stubLedgerAuthority();
+    stubLedgerLookups(null);
+    const context = routeContext(
+      canonicalAsap(),
+      headersWithOperation("op-no-authority")
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(authorityLookup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "a different ledger",
+      header: "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3",
+      row: undefined,
+      status: 409,
+      code: "OPERATION_AUTHORITY_MISMATCH",
+    },
+    {
+      label: "a malformed authority",
+      header: "https://commonplate.example",
+      row: undefined,
+      status: 409,
+      code: "OPERATION_AUTHORITY_MISMATCH",
+    },
+    {
+      label: "a database with no ledger identity",
+      header: ledgerAuthority,
+      row: null,
+      status: 503,
+      code: "OPERATION_AUTHORITY_UNAVAILABLE",
+    },
+    {
+      label: "an unreadable ledger identity",
+      header: ledgerAuthority,
+      row: new Error("connection reset"),
+      status: 503,
+      code: "OPERATION_AUTHORITY_UNAVAILABLE",
+    },
+  ])(
+    "refuses $label before the ledger, validation, quota, or any write",
+    async ({ header, row, status, code }) => {
+      stubLedgerAuthority(row);
+      const ledgerLookup = vi.spyOn(RequestOperation, "findOne");
+      const context = routeContext(canonicalAsap(), {
+        ...headersWithOperation("op-other-authority"),
+        [OPERATION_AUTHORITY_HEADER]: header,
+      });
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(status);
+      expect(context.json).toHaveBeenCalledWith(
+        expect.objectContaining({ error: expect.objectContaining({ code }) })
+      );
+      expect(ledgerLookup).not.toHaveBeenCalled();
+      expect(countDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(createLedgerEntry).not.toHaveBeenCalled();
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+    }
+  );
+
+  it("resolves participant authority before reading the ledger authority", async () => {
+    const authorityLookup = stubLedgerAuthority();
+    const context = routeContext(canonicalAsap(), {
+      [OPERATION_IDENTITY_HEADER]: "op-unverified-authority",
+      [OPERATION_AUTHORITY_HEADER]: ledgerAuthority,
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(401);
+    expect(authorityLookup).not.toHaveBeenCalled();
+  });
+});
+
+describe("W4-R4 structured request representation", () => {
+  it("persists a Dining-Dollars-only request with zero swipes and exact cents", async () => {
+    const context = routeContext(diningDollarsOnly());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        menuPath: "dining-dollars",
+        mealSwipes: 0,
+        mealItems: [],
+        orderDetails: "Grain bowl with extra avocado",
+        // Exactly the submitted cents, never a float and never rescaled.
+        estimatedDiningDollarsCents: 1_850,
+        food: "Grain bowl with extra avocado ($18.50 Dining Dollars)",
+      })
+    );
+  });
+
+  it("persists an optional Meal Exchange estimate exactly, and omits the field entirely when there is none", async () => {
+    const withEstimate = routeContext(
+      canonicalAsap({ estimatedDiningDollarsCents: 1_250 })
+    );
+    await createRequest(withEstimate.req, withEstimate.res);
+
+    expect(withEstimate.status).toHaveBeenCalledWith(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        estimatedDiningDollarsCents: 1_250,
+        food: "Vegetable rice bowl; Side salad + $12.50 Dining Dollars",
+      })
+    );
+
+    createDocument.mockClear();
+    const withoutEstimate = routeContext(canonicalAsap());
+    await createRequest(withoutEstimate.req, withoutEstimate.res);
+
+    expect(withoutEstimate.status).toHaveBeenCalledWith(201);
+    const [persisted] = createDocument.mock.calls[0] as [
+      Record<string, unknown>,
+    ];
+    // Absent, not `$0.00` and not an explicit `undefined` key: the requester
+    // needed no Dining Dollars and the document says so by carrying nothing.
+    expect(persisted).not.toHaveProperty("estimatedDiningDollarsCents");
+    expect(persisted.food).toBe("Vegetable rice bowl; Side salad");
+  });
+
+  it("projects the structured representation on the public wrapper for a Dining-Dollars-only request", async () => {
+    const context = routeContext(diningDollarsOnly());
+
+    await createRequest(context.req, context.res);
+
+    const body = context.json.mock.calls[0][0] as {
+      request: Record<string, unknown>;
+    };
+    expect(body.request).toMatchObject({
+      menuPath: "dining-dollars",
+      mealSwipes: 0,
+      mealItems: [],
+      orderDetails: "Grain bowl with extra avocado",
+      estimatedDiningDollarsCents: 1_850,
+    });
+    // No private field rides along with the new representation.
+    expect(body.request).not.toHaveProperty("email");
+    expect(body.request).not.toHaveProperty("pickupName");
+    expect(body.request).not.toHaveProperty("requesterParticipantId");
+  });
+
+  it.each([
+    ["canonical ASAP", () => canonicalAsap({ pickupName: "Requester Name" })],
+    [
+      "canonical scheduled",
+      () => canonicalScheduled({ pickupName: "Requester Name" }),
+    ],
+    [
+      "Dining-Dollars-only",
+      () => diningDollarsOnly({ pickupName: "Requester Name" }),
+    ],
+  ])(
+    "refuses a %s payload still carrying the removed pickupName field",
+    async (_label, build) => {
+      const context = routeContext(build());
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(400);
+      expect(context.json).toHaveBeenCalledWith({
+        error: { code: "INVALID_REQUEST", message: "Invalid request payload" },
+      });
+      expect(createDocument).not.toHaveBeenCalled();
+    }
+  );
+
+  it("refuses a legacy web payload still carrying pickupName", async () => {
+    const context = routeContext({
+      vendor: "Palladium",
+      email: participantPrincipal,
+      pickupWindowText: "Legacy display",
+      pickupName: "Requester Name",
+      menuPath: "meal-exchange",
+      mealSwipes: 2,
+      mealItems: mealEntries(2),
+    });
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("refuses a client-supplied food summary on every accepted shape", async () => {
+    for (const body of [
+      canonicalAsap({ food: "Client summary" }),
+      canonicalScheduled({ food: "Client summary" }),
+      diningDollarsOnly({ food: "Client summary" }),
+    ]) {
+      const context = routeContext(body);
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(400);
+    }
+
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "a Meal Exchange request with fewer entries than swipes",
+      () => canonicalAsap({ mealSwipes: 3, mealItems: mealEntries(2) }),
+    ],
+    [
+      "a Meal Exchange request with a blank entry",
+      () => canonicalAsap({ mealSwipes: 2, mealItems: ["Rice bowl", "   "] }),
+    ],
+    [
+      "a Meal Exchange request with an estimate above $25.00",
+      () => canonicalAsap({ estimatedDiningDollarsCents: 2_501 }),
+    ],
+    [
+      "a Dining-Dollars-only request with swipes",
+      () => diningDollarsOnly({ mealSwipes: 2 }),
+    ],
+    [
+      "a Dining-Dollars-only request with no estimate",
+      () => {
+        const body = diningDollarsOnly();
+        delete (body as Record<string, unknown>).estimatedDiningDollarsCents;
+        return body;
+      },
+    ],
+    [
+      "a Dining-Dollars-only request with an estimate above $50.00",
+      () => diningDollarsOnly({ estimatedDiningDollarsCents: 5_001 }),
+    ],
+    [
+      "a Dining-Dollars-only request with no order details",
+      () => {
+        const body = diningDollarsOnly();
+        delete (body as Record<string, unknown>).orderDetails;
+        return body;
+      },
+    ],
+    [
+      "a Meal Exchange request carrying order details",
+      () => canonicalAsap({ orderDetails: "Wrong path" }),
+    ],
+  ])("refuses %s before any side effect", async (_label, build) => {
+    const context = routeContext(build());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(resendSend).not.toHaveBeenCalled();
+    expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+  });
+
+  it("creates requests whose meal details and order details exceed 500 characters", async () => {
+    const longText = "Long detail ".repeat(42).trim();
+    expect(longText.length).toBeGreaterThan(500);
+
+    for (const body of [
+      canonicalAsap({ mealSwipes: 1, mealItems: [longText] }),
+      diningDollarsOnly({ orderDetails: longText }),
+    ]) {
+      createDocument.mockClear();
+      const context = routeContext(body);
+
+      await createRequest(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(201);
+      const persisted = createDocument.mock.calls[0][0] as {
+        mealItems: string[];
+        orderDetails?: string;
+      };
+      expect([...persisted.mealItems, persisted.orderDetails]).toContain(longText);
+    }
+  });
+
+  it("excludes hidden higher-index meal content by refusing more entries than swipes", async () => {
+    // The requester lowered their swipe count to 1; the draft still holds the
+    // second entry's text, but a payload carrying it is refused rather than
+    // posting content the requester hid.
+    const context = routeContext(
+      canonicalAsap({
+        mealSwipes: 1,
+        mealItems: ["Rice bowl", "Hidden second-swipe content"],
+      })
+    );
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  it("names the derived summary, and no pickup name, in the requester confirmation email", async () => {
+    const context = routeContext(diningDollarsOnly());
+
+    await createRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(201);
+    const [email] = resendSend.mock.calls[0] as [
+      { html: string; text: string; to: string },
+    ];
+    expect(email.to).toBe(participantPrincipal);
+    expect(email.html).toContain(
+      "Grain bowl with extra avocado ($18.50 Dining Dollars)"
+    );
+    expect(email.text).toContain(
+      "Grain bowl with extra avocado ($18.50 Dining Dollars)"
+    );
+    expect(email.html).not.toContain("Pickup Name");
+    expect(email.text).not.toContain("Pickup Name");
   });
 });

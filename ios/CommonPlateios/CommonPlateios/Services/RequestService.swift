@@ -25,6 +25,11 @@ enum RequestServiceError: Error {
     case serverError(code: String, message: String)
     /// A failure known not to represent an uncertain POST outcome.
     case transport(underlying: Error)
+    /// Store-level precondition failure (W4-D2 FIX): the exact-operation
+    /// recovery record could not be durably persisted before transmission.
+    /// No create POST was sent — this is a pre-transmission local failure,
+    /// never an uncertain write.
+    case durablePersistenceFailed
     /// A create POST may have been applied server-side, but iOS did not
     /// receive and validate a usable success response.
     case ambiguousCreateOutcome(underlying: Error)
@@ -57,11 +62,12 @@ enum RequestServiceError: Error {
     /// would be untrue here — nothing has been started for this one, and the
     /// wait is short rather than a commitment made elsewhere.
     case otherClaimInProgress
-    /// Store-level precondition failure: a confirmed placement result is still
-    /// waiting to be acknowledged. Week 2 holds one confirmation at a time, so
-    /// starting another claim would eventually overwrite and lose a real sent /
-    /// failed / unknown-email outcome. Acknowledgement is the gate.
-    case unacknowledgedPlacement
+    // W4-H1 deliberately removes the former `unacknowledgedPlacement` case.
+    // Authoritatively confirmed fulfillment completes the helper relationship
+    // immediately, so no client-side acknowledgement of a placement result may
+    // refuse a later claim. The case is not renamed or replaced: there is no
+    // remaining store-level precondition that reads confirmation presentation
+    // as claim authority.
     /// Store-level precondition failure: a confirmed claim on a *different*
     /// request is already held, so this one cannot be claimed. Kept distinct
     /// from `operationInProgress` because the helper's situation and next step
@@ -71,11 +77,11 @@ enum RequestServiceError: Error {
 }
 
 /// Result of a successful claim, mirroring the backend's claim response shape.
-/// `pickupName`/`claimToken`/`claimExpiresAt` are claim-private and are not
-/// folded into the public `FoodRequest` mapping.
+/// `claimToken`/`claimExpiresAt` are claim-private and are not folded into the
+/// public `FoodRequest` mapping. W4-R4 removed `pickupName` from the request
+/// contract, so the claim response no longer carries one either.
 struct ClaimOutcome {
     let request: FoodRequest
-    let pickupName: String
     let claimToken: String
     let claimExpiresAt: Date
 }
@@ -93,7 +99,6 @@ struct ClaimExtensionOutcome {
 /// persisted, so continuation cannot recover it.
 struct ActiveReservationOutcome {
     let request: FoodRequest
-    let pickupName: String
     let claimExpiresAt: Date
     let claimExtendedAt: Date?
 }
@@ -142,6 +147,9 @@ struct RequestService {
     /// identity from. It has to match `OPERATION_IDENTITY_HEADER` in
     /// `src/createRequestRoute.ts`.
     static let operationIdentityHeader = "x-commonplate-operation-id"
+    /// W4-D2: the ledger authority a create operation was recorded against.
+    /// The backend serves such a request only from that ledger.
+    static let operationAuthorityHeader = "x-commonplate-operation-authority"
 
     /// Builds the credential header, or none at all.
     ///
@@ -287,16 +295,30 @@ struct RequestService {
     /// at all and gets the exact pre-D1, non-idempotent create behavior — this
     /// default exists so a caller with no operation concept (a direct
     /// `RequestService` test) does not have to invent one.
-    func createRequest(
-        _ payload: CreateRequestPayload,
+    ///
+    /// Generic over the body only so W3-D1 recovery can replay a pre-R4
+    /// pending operation with its exact original body
+    /// (`LegacyCreateRequestPayload`); every new create sends
+    /// `CreateRequestPayload`.
+    ///
+    /// `operationLedger` (W4-D2) is the ledger authority the pending operation
+    /// recorded. When present, only a backend holding exactly that ledger will
+    /// read or create under `operationId`; any other answers
+    /// `OPERATION_AUTHORITY_MISMATCH` before touching its ledger.
+    func createRequest<Payload: Encodable>(
+        _ payload: Payload,
         operationId: String? = nil,
-        participantAuthority: String? = nil
+        participantAuthority: String? = nil,
+        operationLedger: String? = nil
     ) async throws -> FoodRequest {
         try Task.checkCancellation()
 
         var headers = Self.participantHeaders(participantAuthority)
         if let operationId {
             headers[Self.operationIdentityHeader] = operationId
+        }
+        if let operationLedger {
+            headers[Self.operationAuthorityHeader] = operationLedger
         }
 
         let response: RequestDetailResponseDTO
@@ -337,6 +359,114 @@ struct RequestService {
             return request
         } catch {
             throw RequestServiceError.ambiguousCreateOutcome(underlying: error)
+        }
+    }
+
+    /// W4-D2: where this service sends request-create operations — the
+    /// normalized configured base URL (scheme, host, effective port, and path;
+    /// never credentials, query, or fragment). Only half of an operation
+    /// authority: the same origin can front a reset or replaced ledger, which
+    /// `fetchOperationLedger()` distinguishes.
+    var operationAuthorityOrigin: String {
+        Self.operationAuthorityOrigin(for: client.configuration.baseURL)
+    }
+
+    static func operationAuthorityOrigin(for baseURL: URL) -> String {
+        guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: true),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              !host.isEmpty else {
+            // Not a usable network origin; this still never matches a
+            // well-formed origin recorded by another configuration.
+            return baseURL.absoluteString
+        }
+        let port = components.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : -1)
+        var path = components.path
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+        let renderedHost = host.contains(":") ? "[\(host)]" : host
+        return "\(scheme)://\(renderedHost):\(port)\(path)"
+    }
+
+    /// `GET /api/request-operation/authority` (W4-D2).
+    ///
+    /// The identity of the operation ledger behind this service right now. A
+    /// create records it before transmission and sends it with the create;
+    /// recovery compares it with what was recorded. Anything but a
+    /// well-formed identity throws: no ledger is ever assumed.
+    func fetchOperationLedger() async throws -> String {
+        do {
+            let response: RequestOperationAuthorityResponseDTO = try await client.send(
+                path: "/api/request-operation/authority",
+                method: .get
+            )
+            guard RequestOperationAuthorityIdentity.isValidLedger(response.operationAuthority) else {
+                throw APIClientError.decoding(
+                    DecodingError.dataCorrupted(
+                        .init(codingPath: [], debugDescription: "Malformed operation ledger identity")
+                    )
+                )
+            }
+            return response.operationAuthority
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
+    /// `POST /api/request-operation/terminal` (W4-D2).
+    ///
+    /// Asks backend authority for the one terminal outcome of the exact
+    /// operation `operationId`, establishing terminal NO-CREATE when nothing
+    /// has created it — only in the ledger `operationLedger` names, which the
+    /// backend enforces. Sends no request content. Every thrown error means the
+    /// outcome was not established by this call: a decoded envelope stays a
+    /// `.serverError` for the caller to classify, and everything else —
+    /// transport loss, an unreadable or unrecognized answer, a bare 404 — is
+    /// inconclusive. Never retried here.
+    func reconcileRequestOperationTerminal(
+        operationId: String,
+        participantAuthority: String,
+        operationLedger: String
+    ) async throws -> RequestOperationTerminalOutcome {
+        var headers = Self.participantHeaders(participantAuthority)
+        headers[Self.operationIdentityHeader] = operationId
+        headers[Self.operationAuthorityHeader] = operationLedger
+        do {
+            let response: RequestOperationTerminalResponseDTO = try await client.send(
+                path: "/api/request-operation/terminal",
+                method: .post,
+                headers: headers
+            )
+            switch response.outcome {
+            case .notCreated:
+                guard response.request == nil else {
+                    throw APIClientError.decoding(
+                        DecodingError.dataCorrupted(
+                            .init(codingPath: [], debugDescription: "A not-created outcome carried a request")
+                        )
+                    )
+                }
+                return .notCreated
+            case .created:
+                guard let dto = response.request else {
+                    throw APIClientError.decoding(
+                        DecodingError.dataCorrupted(
+                            .init(codingPath: [], debugDescription: "A created outcome carried no request")
+                        )
+                    )
+                }
+                // Any current lifecycle status is authoritative here: the
+                // explicit outcome, not the request's present status, says
+                // this operation created it.
+                return .created(try Self.mapPublicRequest(dto, ownership: .unresolved))
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
         }
     }
 
@@ -392,7 +522,6 @@ struct RequestService {
             }
             return ClaimOutcome(
                 request: request,
-                pickupName: response.claim.pickupName,
                 claimToken: response.claim.claimToken,
                 claimExpiresAt: response.claim.claimExpiresAt
             )
@@ -518,9 +647,10 @@ struct RequestService {
     ///
     /// Resolves the verified participant's current active reservation from
     /// backend truth; when they hold none, the same read additionally
-    /// resolves whether they most recently placed a still-existing request,
-    /// so a relaunched client can restore Got It/already-placed presentation
-    /// instead of silently discarding it. Never fabricates either from local
+    /// resolves whether they most recently placed a still-existing request.
+    /// W4-H1 uses that placed answer as a safety read only: a relaunched
+    /// client reconciles it to helper-available state and reconstructs no
+    /// success presentation. Never fabricates either from local
     /// state — only a confirmed backend answer, or a thrown error the caller
     /// must treat as "truth not established", is returned.
     func fetchParticipantReservationState(
@@ -545,7 +675,6 @@ struct RequestService {
             let request = try Self.mapPublicRequest(reservation.request, ownership: .unresolved)
             return .reservation(ActiveReservationOutcome(
                 request: request,
-                pickupName: reservation.pickupName,
                 claimExpiresAt: reservation.claimExpiresAt,
                 claimExtendedAt: reservation.claimExtendedAt
             ))
@@ -748,9 +877,10 @@ struct RequestService {
 
     /// Maps a public `RequestResponseDTO` (list/detail/create/claim/fulfill's
     /// embedded `request`) to the canonical domain model. Never fabricates
-    /// requester-private fields (`pickupName`, `email`, `phoneNumber`) — the
-    /// public wire shape never carries them, and `FoodRequest` has no properties
-    /// in which to store them.
+    /// requester-private fields (`email`, `phoneNumber`) — the public wire
+    /// shape never carries them, and `FoodRequest` has no properties in which
+    /// to store them. Pickup name is not among them because W4-R4 removed it
+    /// from the request contract entirely.
     ///
     /// An unrecognized wire status value throws (via `RequestStatusWire`'s
     /// `Decodable` conformance failing at decode time) rather than silently
@@ -771,6 +901,16 @@ struct RequestService {
             foodDescription: dto.food,
             pickupWindowText: dto.pickupWindowText,
             mealSwipes: dto.mealSwipes,
+            // W4-R4: the structured representation exactly as the backend
+            // projected it. Passed explicitly at this one mapping site — the
+            // sole production decode path — so no surface ever sees the
+            // `.unspecified` placeholder `FoodRequest.init` defaults to.
+            resource: RequestResource(
+                menuPath: dto.menuPath.domainMenuPath,
+                mealItems: dto.mealItems,
+                orderDetails: dto.orderDetails,
+                estimatedDiningDollarsCents: dto.estimatedDiningDollarsCents
+            ),
             windowStart: dto.windowStart,
             windowEnd: dto.windowEnd,
             createdAt: dto.createdAt,

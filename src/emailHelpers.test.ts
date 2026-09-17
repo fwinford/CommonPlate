@@ -423,12 +423,18 @@ describe("requester email separation", () => {
     };
 
     expect(email.to).toBe(requesterEmail);
-    expect(email.html).toContain(`Pickup name:</strong> ${pickupName}`);
+    // W4-R4 removed pickup name from the V1 request contract, so the
+    // fulfillment email no longer carries one. `pickupName` is still on the
+    // fixture, so this proves removal from the composition rather than merely
+    // an absent input.
+    expect(email.html).not.toContain("Pickup name");
+    expect(email.html).not.toContain(pickupName);
+    expect(email.text).not.toContain("Pickup name");
+    expect(email.text).not.toContain(pickupName);
     expect(email.html).toContain("Order number:</strong> 70154321");
     expect(email.html).toContain("Pickup window:</strong> 1:00 PM – 2:00 PM");
     expect(email.html).toContain("ETA:</strong> 15 minutes");
     expect(email.html).toContain("Your meal is ready");
-    expect(email.text).toContain(`Pickup name: ${pickupName}`);
     expect(email.text).toContain("Order number: 70154321");
     expect(email.text).toContain("Pickup window: 1:00 PM – 2:00 PM");
     expect(email.text).toContain("ETA: 15 minutes");
@@ -514,7 +520,14 @@ describe("requester email separation", () => {
 
     // Everything that actually lets the requester collect their food survives.
     expect(email.to).toBe(requesterEmail);
-    expect(email.html).toContain(`Pickup name:</strong> ${pickupName}`);
+    // W4-R4 removed pickup name from the V1 request contract, so the
+    // fulfillment email no longer carries one. `pickupName` is still on the
+    // fixture, so this proves removal from the composition rather than merely
+    // an absent input.
+    expect(email.html).not.toContain("Pickup name");
+    expect(email.html).not.toContain(pickupName);
+    expect(email.text).not.toContain("Pickup name");
+    expect(email.text).not.toContain(pickupName);
     expect(email.html).toContain("Order number:</strong> 70154321");
     expect(email.html).toContain("Pickup window:</strong> 1:00 PM – 2:00 PM");
     expect(email.html).toContain("ETA:</strong> 15 minutes");
@@ -525,7 +538,7 @@ describe("requester email separation", () => {
     expect(email.text).toContain("Thanks for using CommonPlate!");
   });
 
-  it("keeps requester confirmation pickup information intact", () => {
+  it("keeps requester confirmation window information intact and carries no pickup name", () => {
     const routeSource = readFileSync(
       new URL("./createRequestRoute.ts", import.meta.url),
       "utf8"
@@ -547,12 +560,17 @@ describe("requester email separation", () => {
 
     expect(confirmationStart).toBeGreaterThan(-1);
     expect(confirmationEnd).toBeGreaterThan(confirmationStart);
+    // The window the backend actually granted is still stated, in both parts.
     expect(requesterConfirmation).toContain(
-      "<strong>Pickup Name:</strong> ${htmlPickupName}"
+      "<strong>Pickup Window:</strong> ${htmlPickupWindow}"
     );
     expect(requesterConfirmation).toContain(
-      "Pickup Name: ${request.pickupName}"
+      "Pickup Window: ${pickupWindowText}"
     );
+    // W4-R4: pickup name is gone from the V1 request contract, so the
+    // requester confirmation must no longer compose one in either part.
+    expect(requesterConfirmation).not.toContain("Pickup Name");
+    expect(requesterConfirmation).not.toContain("pickupName");
   });
 });
 

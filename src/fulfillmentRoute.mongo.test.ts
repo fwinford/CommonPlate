@@ -593,7 +593,9 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(String(notified._id)).toBe(String(request._id));
     expect(notified.status).toBe("placed");
     expect(notified.email).toBe("requester@example.edu");
-    expect(notified.pickupName).toBe("Requester Pickup");
+    // W4-R4: the Request the fulfillment email is composed from carries no
+    // pickup name, because the schema no longer has the field at all.
+    expect(notified.pickupName).toBeUndefined();
     expect(orderNumber).toBe("70154321");
     expect(eta).toBe("15 minutes");
     expect(contactMessage).toBe("Your meal is ready");

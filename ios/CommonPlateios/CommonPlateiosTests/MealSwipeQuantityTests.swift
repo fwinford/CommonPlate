@@ -35,6 +35,7 @@ private final class MealSwipeQuantityURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if answerOperationLedgerReadIfNeeded() { return }
         let body: Data
         if let stream = request.httpBodyStream {
             stream.open()
@@ -92,45 +93,37 @@ final class MealSwipeQuantityTests: XCTestCase {
 
     func testMakePayloadCarriesTheExactSelectedQuantityForASAP() throws {
         let payload = try RequestFoodView.makePayload(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            timing: .asap,
-            preferredPickupTime: Date(timeIntervalSince1970: 0),
-            mealSwipes: 5,
+            draft: mealExchangeDraft(mealSwipes: 5, timing: .asap),
             now: Date(timeIntervalSince1970: 1_000),
             calendar: Calendar(identifier: .gregorian)
         )
 
         XCTAssertEqual(payload.mealSwipes, 5)
+        // W4-R4: the structured entries travel with the count they describe.
+        XCTAssertEqual(payload.mealItems.count, 5)
     }
 
     func testMakePayloadCarriesTheExactSelectedQuantityForScheduled() throws {
         let now = Date(timeIntervalSince1970: 1_000)
         let preferredPickupTime = Date(timeIntervalSince1970: 2_000)
         let payload = try RequestFoodView.makePayload(
-            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-            foodRequest: "Chicken bowl",
-            pickupName: "Taylor",
-            timing: .later,
-            preferredPickupTime: preferredPickupTime,
-            mealSwipes: 3,
+            draft: mealExchangeDraft(
+                mealSwipes: 3,
+                timing: .later,
+                preferredPickupTime: preferredPickupTime
+            ),
             now: now,
             calendar: Calendar(identifier: .gregorian)
         )
 
         XCTAssertEqual(payload.mealSwipes, 3)
+        XCTAssertEqual(payload.mealItems.count, 3)
     }
 
     func testEveryPickerOptionEncodesUnchangedInTheOutgoingPayload() throws {
         for quantity in RequestFoodFormDraft.mealSwipeOptions {
             let payload = try RequestFoodView.makePayload(
-                selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
-                foodRequest: "Chicken bowl",
-                pickupName: "Taylor",
-                timing: .asap,
-                preferredPickupTime: Date(timeIntervalSince1970: 0),
-                mealSwipes: quantity,
+                draft: mealExchangeDraft(mealSwipes: quantity, timing: .asap),
                 now: Date(timeIntervalSince1970: 1_000),
                 calendar: Calendar(identifier: .gregorian)
             )
@@ -151,6 +144,10 @@ final class MealSwipeQuantityTests: XCTestCase {
           "food": "Rice bowl",
           "pickupWindowText": "ASAP",
           "mealSwipes": 4,
+          "menuPath": "meal-exchange",
+          "mealItems": ["Meal 1", "Meal 2", "Meal 3", "Meal 4"],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": null,
           "windowEnd": null,
           "status": "open",
@@ -243,11 +240,35 @@ final class MealSwipeQuantityTests: XCTestCase {
     private func makePayload(mealSwipes: Int) -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: "Vegetable rice bowl",
-            pickupName: "Requester Private Name",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: mealSwipes
+            menuPath: .mealExchange,
+            mealSwipes: mealSwipes,
+            mealItems: (0..<mealSwipes).map { "Meal \($0 + 1)" },
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
+        )
+    }
+
+    /// A complete W4-R4 Meal Exchange draft: one filled structured
+    /// meal-detail entry per selected swipe, which is what validation now
+    /// requires before a payload can be built at all.
+    private func mealExchangeDraft(
+        mealSwipes: Int,
+        timing: RequestTiming,
+        preferredPickupTime: Date = Date(timeIntervalSince1970: 0)
+    ) -> RequestFoodFormDraft {
+        var entries = RequestFoodFormDraft.emptyMealEntries
+        for index in 0..<mealSwipes {
+            entries[index] = "Chicken bowl \(index + 1)"
+        }
+        return RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            menuPath: .mealExchange,
+            timing: timing,
+            preferredPickupTime: preferredPickupTime,
+            mealSwipes: mealSwipes,
+            mealEntries: entries
         )
     }
 
@@ -281,6 +302,10 @@ final class MealSwipeQuantityTests: XCTestCase {
             "food": "Vegetable rice bowl",
             "pickupWindowText": "ASAP (available for the next 3 hours)",
             \(mealSwipesLine)
+            "menuPath": "meal-exchange",
+            "mealItems": ["Vegetable rice bowl"],
+            "orderDetails": null,
+            "estimatedDiningDollarsCents": null,
             "windowStart": null,
             "windowEnd": null,
             "status": "open",

@@ -79,8 +79,9 @@ enum ClaimPresentationError: Equatable {
     case otherClaimInProgress
     /// A confirmed reservation on a different request is already held.
     case existingActiveClaim
-    /// A confirmed placement result is still waiting to be acknowledged.
-    case pendingPlacementAcknowledgement
+    // W4-H1 removes the former `pendingPlacementAcknowledgement` case with the
+    // gate it explained. A confirmed placement completes the helper
+    // relationship, so there is no longer any refusal to present for it.
     /// A definitive claim failure that does not have a more specific mapping.
     case couldNotStart
 
@@ -108,9 +109,6 @@ enum ClaimPresentationError: Equatable {
                 + ". " + RequestDetailView.otherClaimInProgressNotice
         case .existingActiveClaim:
             return "You’re already helping with another request. Finish that one or wait for its reservation to end."
-        case .pendingPlacementAcknowledgement:
-            return RequestDetailView.pendingPlacementTitle
-                + ". " + RequestDetailView.pendingPlacementNotice
         case .couldNotStart:
             return "We couldn’t start helping with this request. Please try again in a moment."
         }
@@ -158,8 +156,6 @@ enum ClaimPresentationError: Equatable {
             return .otherClaimInProgress
         case .existingActiveClaim:
             return .existingActiveClaim
-        case .unacknowledgedPlacement:
-            return .pendingPlacementAcknowledgement
         default:
             return .couldNotStart
         }
@@ -352,11 +348,12 @@ struct RequestDetailView: View {
         activeClaim?.requestID == requestID
     }
 
-    /// The fulfillment route to open once a claim is confirmed or continued:
-    /// always the active claim's own request, never this screen's pre-claim
-    /// value-type copy. Any field confirmed or set at claim time — W3-C1's
-    /// meal-swipe quantity included — must come from here, not from a value
-    /// captured before the claim existed.
+    /// The Helping route for the active claim: always the active claim's own
+    /// request, never this screen's pre-claim value-type copy. (A confirmed
+    /// claim on *this* request replaces the screen through
+    /// `AppRoute.enteringHeldRequest`, which applies the same rule.) Any field
+    /// confirmed or set at claim time — W3-C1's meal-swipe quantity included —
+    /// must come from here, not from a value captured before the claim existed.
     static func fulfillmentDestination(activeClaim: ActiveClaimPresentation) -> AppRoute {
         .fulfillment(activeClaim.request)
     }
@@ -386,36 +383,27 @@ struct RequestDetailView: View {
     }
 
     var body: some View {
-        Form {
-            Section("Food request") {
-                Text(request.diningSpot.name)
-                    .font(.headline)
-                if let address = request.diningSpot.address {
-                    Text(address)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Text(request.foodDescription)
-                Text(request.timingDescription)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                // V1 meal-swipe requirement (W3-C1). Shown before the Reserve
-                // action below, so a helper knows the exact requirement before
-                // committing. Every request carries one, so this is never
-                // conditional on its presence.
-                Text("Meal swipes: \(request.mealSwipes)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("request-meal-swipes")
-            }
-
-            Section {
+        ScrollView {
+            requestSummary
+        }
+        .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
+        // W4-H1 (Figma 357:1085): the helper action lives in a pinned bottom
+        // area beneath the flat request summary. Every gate below is
+        // unchanged; only its placement moved. The surface reuses Home's
+        // production `Request a Meal` bottom-action geometry
+        // (`HomeExchangeView.requestMealButton`): the shared
+        // `homeContentColumnInset` column, the major primary action style, a
+        // `Spacing.xl` canvas fade above, and `.safeAreaInset` as the only
+        // bottom clearance.
+        .safeAreaInset(edge: .bottom) {
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
                 if Self.opensClaimedFlow(activeClaim: store.activeClaim, requestID: request.id) {
-                    // Already reserved by this helper. Offering the claim action
-                    // again would only produce a refusal, so this screen becomes
-                    // a way back into the reservation they already hold.
-                    continueHelpingLink
+                    // W4-H1: Request Detail is pre-claim only. A request this
+                    // helper holds is never presented here — the `.onChange`
+                    // below replaces this screen with Helping — so there is no
+                    // continuation state, reservation control, or claim action
+                    // to render for it, even for the frame before that lands.
+                    EmptyView()
                 } else if currentOwnership == .own {
                     // W4-H2: authoritative backend ownership truth. The owner
                     // of a request can never expose or execute Reserve/Help
@@ -459,8 +447,26 @@ struct RequestDetailView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
+            .background(CommonPlateStyle.Color.baseCanvas)
+            .padding(.top, CommonPlateStyle.Spacing.xl)
+            .background(alignment: .top) {
+                LinearGradient(
+                    colors: [
+                        CommonPlateStyle.Color.baseCanvas.opacity(0),
+                        CommonPlateStyle.Color.baseCanvas
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: CommonPlateStyle.Spacing.xl)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
         }
         .navigationTitle("Request")
+        .navigationBarTitleDisplayMode(.inline)
         .task(id: staleParticipationKey) {
             // The key is captured before the asynchronous read starts, and
             // re-derived (not reused) after it completes: `identityStore` is
@@ -504,18 +510,22 @@ struct RequestDetailView: View {
             }
         }
         // Confirmed claim success is the only thing that opens the flow, and it
-        // opens it by pushing a route rather than by flipping a presentation
+        // opens it by rewriting the path rather than by flipping a presentation
         // flag this screen would then have to keep in sync with store state.
-        // Closing the flow belongs to the claimant screen itself: a manual Back
-        // leaves `activeClaim` untouched, so this does not fire and the
-        // reservation survives the navigation.
-        .onChange(of: store.activeClaim?.requestID) { _, _ in
+        //
+        // W4-H1 active-reservation navigation: Helping *replaces* this detail
+        // (`AppRoute.enteringHeldRequest`), so Back from Helping returns to
+        // whatever preceded the detail — normally Home — never to a stale
+        // detail for a request the helper now holds. `initial: true` applies
+        // the same rule if this screen is ever opened for an already-held
+        // request, so no entry can present one here. Closing the flow belongs
+        // to the claimant screen itself: a manual Back leaves `activeClaim`
+        // untouched and the reservation survives the navigation.
+        .onChange(of: store.activeClaim?.requestID, initial: true) { _, _ in
             if let activeClaim = store.activeClaim,
-               Self.opensClaimedFlow(activeClaim: activeClaim, requestID: request.id) {
-                path = AppRoute.appending(
-                    Self.fulfillmentDestination(activeClaim: activeClaim),
-                    to: path
-                )
+               Self.opensClaimedFlow(activeClaim: activeClaim, requestID: request.id),
+               path.contains(.requestDetail(request)) {
+                path = AppRoute.enteringHeldRequest(activeClaim, from: path)
             }
         }
         // A stale detail screen must never outlive the backend's verdict. The
@@ -596,19 +606,63 @@ struct RequestDetailView: View {
         )
     }
 
-    @ViewBuilder
-    private var continueHelpingLink: some View {
-        if let activeClaim = store.activeClaim {
-            NavigationLink(value: Self.fulfillmentDestination(activeClaim: activeClaim)) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(Self.continueHelpingTitle)
-                    Text(ActiveRequestsView.reservedUntilText(activeClaim.claimExpiresAt))
+    /// The approved flat H1 request summary (Figma `Helper / Request Summary`,
+    /// 360:1104): the commitment first — meal swipes with the request's timing
+    /// — then dining location, then the meal request. No card treatment.
+    private var requestSummary: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                RequestDetailEyebrow(text: "Meal swipes")
+                // V1 meal-swipe requirement (W3-C1), shown before the helper
+                // action so the exact requirement is known before committing.
+                HStack(alignment: .firstTextBaseline, spacing: CommonPlateStyle.Spacing.s) {
+                    Text(RequestCardView.mealSwipesText(request.mealSwipes))
+                        .font(.title2.weight(.bold))
+                        .foregroundStyle(Color.primary)
+                        .accessibilityIdentifier("request-meal-swipes")
+                    Spacer(minLength: CommonPlateStyle.Spacing.s)
+                    Text(request.timingDescription)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityIdentifier("request-timing")
+                }
+            }
+            .accessibilityElement(children: .combine)
+
+            RequestDetailDivider()
+                .padding(.top, 18)
+                .padding(.bottom, 22)
+
+            VStack(alignment: .leading, spacing: 7) {
+                RequestDetailEyebrow(text: "Dining location")
+                Text(request.diningSpot.name)
+                    .font(.headline)
+                    .foregroundStyle(Color.primary)
+                if let address = request.diningSpot.address {
+                    Text(address)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
-            .accessibilityIdentifier("claim-continue")
+            .accessibilityElement(children: .combine)
+
+            RequestDetailDivider()
+                .padding(.vertical, 23)
+
+            VStack(alignment: .leading, spacing: 7) {
+                RequestDetailEyebrow(text: "Meal request")
+                Text(request.foodDescription)
+                    .font(.callout)
+                    .foregroundStyle(Color.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, CommonPlateStyle.Metrics.settingsPageInset)
+        .padding(.top, 40)
+        .padding(.bottom, CommonPlateStyle.Spacing.l)
     }
 
     @ViewBuilder
@@ -660,15 +714,8 @@ struct RequestDetailView: View {
         // accepted recovery is named separately above. An unconfirmed claim also
         // withdraws it because the POST may already have been applied.
         if Self.showsClaimAction(for: inlineClaimError) {
-            // Stated before the tap, because the tap is the commitment: it
-            // reserves the request immediately and there is no way to hand it
-            // back early. Deliberately vague about the length — the backend caps
-            // the reservation at the request's own expiration, so a full fifteen
-            // minutes is never guaranteed.
-            Text(Self.claimConsequenceNotice)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("claim-consequence-notice")
+            // W4-H1 physical acceptance: no explanatory reservation copy sits
+            // above `Start helping`.
 
             // Browsing needed no identity, so the first mention of verification
             // belongs here, beside the action that needs one — before the tap,
@@ -693,6 +740,9 @@ struct RequestDetailView: View {
                     Text(Self.claimActionTitle)
                 }
             }
+            // W4-H1: the same major primary action Home's `Request a Meal`
+            // uses, so the two pinned CTAs share height, radius, and width.
+            .commonPlateMajorPrimaryAction()
             // Request-scoped: an in-flight claim on another request must
             // not silently grey out this one. The store's own mutex
             // stays authoritative and refuses the duplicate with
@@ -703,19 +753,9 @@ struct RequestDetailView: View {
         }
     }
 
-    /// Locked action title: tapping it claims immediately, with no confirmation
-    /// step in between.
-    static let claimActionTitle = "Help with this request"
-
-    /// What the tap actually does, said before it happens. One tap is enough —
-    /// a confirmation screen would not add understanding, but an unexplained
-    /// action would leave a helper reserving a real student's meal, and blocking
-    /// every other helper from it, without knowing they had done so.
-    static let claimConsequenceNotice =
-        "This holds the meal for you for a few minutes so no one else orders it. You place the Grubhub order, then save the order details here."
-
-    /// Re-entry for a request this helper already reserved.
-    static let continueHelpingTitle = "Continue helping with this request"
+    /// Locked action title (W4-H1 `Start helping`): tapping it claims
+    /// immediately, with no confirmation step in between.
+    static let claimActionTitle = "Start helping"
 
     /// Re-entry for the *other* request whose reservation is blocking this one.
     static let goToActiveReservationTitle = "Go to the request you’re helping with"
@@ -726,12 +766,6 @@ struct RequestDetailView: View {
     static let otherClaimInProgressTitle = "Please wait"
     static let otherClaimInProgressNotice =
         "We’re still reserving another request. Try this one again in a moment."
-
-    /// An unacknowledged placement result gates new claims until it is dismissed
-    /// from Active Requests.
-    static let pendingPlacementTitle = "Check your last order first"
-    static let pendingPlacementNotice =
-        "Go back to Active Requests and tap “Got it” on your last order. Then you can help with another request."
 
     static let pauseRecoveryActionTitle = "Check again"
 
@@ -745,14 +779,15 @@ struct RequestDetailView: View {
 
     /// The claim action is withheld only where offering it would be untruthful:
     /// a paused backend uses its explicit recovery action instead, an unconfirmed
-    /// claim may already have succeeded, an existing reservation elsewhere makes
-    /// this claim impossible until that one ends, and an unacknowledged placement
-    /// result blocks every new claim until it is read.
+    /// claim may already have succeeded, and an existing reservation elsewhere
+    /// makes this claim impossible until that one ends.
+    ///
+    /// W4-H1: a confirmed placement is deliberately absent from this list. The
+    /// helper relationship it ended is complete, so it withholds nothing.
     static func showsClaimAction(for error: ClaimPresentationError?) -> Bool {
         error != .publicActionsPaused
             && error != .ambiguous
             && error != .existingActiveClaim
-            && error != .pendingPlacementAcknowledgement
     }
 
     private func startClaim() {
@@ -826,5 +861,26 @@ struct RequestDetailView: View {
             ) else { return }
             performClaim()
         }
+    }
+}
+
+/// A flat request-summary label (Figma eyebrow): uppercase, tracked, secondary.
+private struct RequestDetailEyebrow: View {
+    let text: String
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.caption.weight(.semibold))
+            .tracking(0.6)
+            .foregroundStyle(.secondary)
+    }
+}
+
+private struct RequestDetailDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(CommonPlateStyle.Color.requestCardBorder)
+            .frame(height: 1)
+            .accessibilityHidden(true)
     }
 }

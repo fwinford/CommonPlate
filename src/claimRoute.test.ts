@@ -59,10 +59,14 @@ function document(overrides: Record<string, unknown> = {}) {
     food: "Vegetable rice bowl",
     pickupName: "Private Pickup Name",
     pickupWindowText: "ASAP (available for the next 3 hours)",
-    // Every request accepted since W3-C1 carries an integer 1-5, on every
-    // accepted shape including the legacy web one, so an ordinary fixture
-    // always supplies it.
+    // Every request accepted since W3-C1 carries an integer quantity, on
+    // every accepted shape including the legacy web one, so an ordinary
+    // fixture always supplies it — now alongside the W4-R4 structured fields.
+    // `pickupName` above is retained deliberately, as a stray pre-R4 stored
+    // value neither the public projection nor the claim response may emit.
     mealSwipes: 4,
+    menuPath: "meal-exchange",
+    mealItems: ["Vegetable rice bowl", "Side salad", "Iced tea", "Cookie"],
     windowStart: null,
     windowEnd: null,
     status: "claimed",
@@ -345,13 +349,21 @@ describe("POST /api/request/:id/claim", () => {
       food: "Vegetable rice bowl",
       pickupWindowText: "ASAP (available for the next 3 hours)",
       mealSwipes: 4,
+      menuPath: "meal-exchange",
+      mealItems: ["Vegetable rice bowl", "Side salad", "Iced tea", "Cookie"],
+      orderDetails: null,
+      estimatedDiningDollarsCents: null,
       windowStart: null,
       windowEnd: null,
       status: "claimed",
       createdAt: new Date("2026-07-30T15:00:00.000Z"),
       expiresAt,
     });
-    expect(body.claim.pickupName).toBe("Private Pickup Name");
+    // W4-R4: `pickupName` is gone from the V1 request contract, so the
+    // claimant-private half carries only the claim authorization itself. A
+    // stray stored value on a pre-R4 document must not reappear here either.
+    expect(body.claim).not.toHaveProperty("pickupName");
+    expect(JSON.stringify(body.claim)).not.toMatch(/Private Pickup/);
     expect(body.claim.claimToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(body.claim.claimExpiresAt).toEqual(claimed.claimExpiresAt);
     expect(update[0].$set.claimTokenDigest).toBe(

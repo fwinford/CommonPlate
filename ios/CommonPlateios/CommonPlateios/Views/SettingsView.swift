@@ -199,7 +199,7 @@ struct SettingsView: View {
     static let removeEmailBlockedByReservationNotice =
         "You can’t remove your email while you have an active reservation or an in-progress request. Finish or release that first."
     static let removeEmailBlockedByPendingCreateNotice =
-        "CommonPlate is still confirming a request you submitted. You can remove your email once that finishes."
+        "CommonPlate can’t remove your email while a request tied to it is unresolved. This helps prevent a duplicate request."
 
     /// Identical precedence to `ContentView`'s pre-H2 implementation (W3-I4):
     /// the cold/relaunch readiness check first, then an active
@@ -208,6 +208,13 @@ struct SettingsView: View {
         !requestStore.hasEstablishedRemovalSafety
             || requestStore.activeClaim != nil
             || requestStore.hasUnresolvedCreateAmbiguity
+            // W4-D2 FIX (2026-09-18, independent-review MUST FIX): an issued
+            // create's outcome may still be unknown while `isCreating` is
+            // true — its operation is intentionally excluded from
+            // `hasUnresolvedCreateAmbiguity`'s projection until the create
+            // call itself resolves. Remove Email must stay fail-closed for
+            // that window too, not only once ambiguity is armed.
+            || requestStore.isCreating
     }
 
     private var removeEmailBlockedNotice: String {

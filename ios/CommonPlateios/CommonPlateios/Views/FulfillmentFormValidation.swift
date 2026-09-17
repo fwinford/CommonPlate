@@ -10,13 +10,15 @@ import Foundation
 struct FulfillmentFormDraft: Equatable {
     var orderNumber: String
     var eta: String
-    var readyTime: FulfillmentReadyTime
+    /// W4-H1: `nil` until the helper chooses a Pickup ETA. The field is
+    /// required, so no choice is preselected on the helper's behalf.
+    var readyTime: FulfillmentReadyTime?
     var contactMessage: String
 
     init(
         orderNumber: String = "",
         eta: String = "",
-        readyTime: FulfillmentReadyTime = .asap,
+        readyTime: FulfillmentReadyTime? = nil,
         contactMessage: String = ""
     ) {
         self.orderNumber = orderNumber
@@ -31,7 +33,8 @@ struct FulfillmentFormDraft: Equatable {
 /// in after a rejected submit.
 ///
 /// Ready time is deliberately absent: it is a picker over a fixed set of
-/// choices, so it cannot hold an invalid value and has nothing to say about one.
+/// choices, so it cannot hold an invalid value — only no value yet, which keeps
+/// `Finish helping` disabled rather than producing a message.
 /// The helper's email is absent for a different reason (W3-I1): it is no longer
 /// a field at all, because the helper is the verified participant the
 /// reservation is already bound to.

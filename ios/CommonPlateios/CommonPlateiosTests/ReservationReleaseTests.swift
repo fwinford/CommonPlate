@@ -331,12 +331,13 @@ final class ReservationReleaseTests: XCTestCase {
             ),
             encoding: .utf8
         )
+        // W4-H1: `× Stop helping` on the Helping page is the release control.
         let sectionStart = try XCTUnwrap(
-            source.range(of: "private func reservationActionsSection")
+            source.range(of: "private var stopHelpingControl")
         )
         let sectionEnd = try XCTUnwrap(
             source.range(
-                of: "static func reservationNotice",
+                of: "static func extensionControlState",
                 range: sectionStart.upperBound..<source.endIndex
             )
         )
@@ -580,6 +581,10 @@ final class ReservationReleaseTests: XCTestCase {
           "food": "Rice bowl",
           "pickupWindowText": "ASAP",
           "mealSwipes": 2,
+          "menuPath": "meal-exchange",
+          "mealItems": ["Meal 1", "Meal 2"],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": null,
           "windowEnd": null,
           "status": "\(status)",

@@ -86,13 +86,53 @@ final class RequestFetchingURLProtocol: URLProtocol {
         lock.unlock()
     }
 
+    // W4-D2: `RequestStore` reads the operation ledger
+    // (`GET /api/request-operation/authority`) before every participant-bound
+    // create and before every recovery. Those reads are answered here, outside
+    // the FIFO queue and outside `capturedRequestedPaths`, so a test about any
+    // other request keeps its exact sequence. Queued ledger answers are used
+    // first; with none queued the answer is `defaultOperationLedger`. D2 tests
+    // assert on the captured ledger reads directly.
+    static let operationLedgerPath = "/api/request-operation/authority"
+    static let defaultOperationLedger = "7d8f1c2a-3b4e-4f60-8a71-92b3c4d5e6f7"
+    private nonisolated(unsafe) static var operationLedgerStubs: [Stub] = []
+    private nonisolated(unsafe) static var operationLedgerReads = 0
+
+    static func enqueueOperationLedger(_ stub: Stub) {
+        lock.lock()
+        operationLedgerStubs.append(stub)
+        lock.unlock()
+    }
+
+    static func operationLedgerResponse(_ ledger: String = defaultOperationLedger) -> Stub {
+        .response(data: Data(#"{"operationAuthority":"\#(ledger)"}"#.utf8))
+    }
+
+    static var capturedOperationLedgerReadCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return operationLedgerReads
+    }
+
     static func reset() {
         lock.lock()
         stubs.removeAll()
         requestedPaths.removeAll()
         capturedHeaders.removeAll()
         capturedBodies.removeAll()
+        operationLedgerStubs.removeAll()
+        operationLedgerReads = 0
         lock.unlock()
+    }
+
+    private static func dequeueOperationLedger() -> Stub {
+        lock.lock()
+        defer { lock.unlock() }
+        operationLedgerReads += 1
+        guard !operationLedgerStubs.isEmpty else {
+            return operationLedgerResponse()
+        }
+        return operationLedgerStubs.removeFirst()
     }
 
     static var capturedRequestedPaths: [String] {
@@ -155,15 +195,21 @@ final class RequestFetchingURLProtocol: URLProtocol {
             headers[field.lowercased()] = value
         }
 
-        Self.lock.lock()
-        Self.requestedPaths.append(request.url?.path ?? "")
-        Self.capturedHeaders.append(headers)
-        Self.capturedBodies.append(body)
-        Self.lock.unlock()
+        let stub: Stub
+        if request.url?.path == Self.operationLedgerPath {
+            stub = Self.dequeueOperationLedger()
+        } else {
+            Self.lock.lock()
+            Self.requestedPaths.append(request.url?.path ?? "")
+            Self.capturedHeaders.append(headers)
+            Self.capturedBodies.append(body)
+            Self.lock.unlock()
 
-        guard let stub = Self.dequeue() else {
-            client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
-            return
+            guard let queued = Self.dequeue() else {
+                client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
+                return
+            }
+            stub = queued
         }
 
         let completeRequest = {
@@ -201,6 +247,29 @@ final class RequestFetchingURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+extension URLProtocol {
+    /// W4-D2: `RequestStore` reads the operation ledger before every
+    /// participant-bound create. A stub that models only other requests
+    /// answers that read here with `RequestFetchingURLProtocol`'s default
+    /// ledger, outside whatever it captures or queues. Returns whether it did.
+    func answerOperationLedgerReadIfNeeded() -> Bool {
+        guard request.url?.path == RequestFetchingURLProtocol.operationLedgerPath,
+              let url = request.url,
+              let response = HTTPURLResponse(
+                  url: url,
+                  statusCode: 200,
+                  httpVersion: nil,
+                  headerFields: ["Content-Type": "application/json"]
+              ) else {
+            return false
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: RequestFetchingURLProtocol.operationLedgerResponse().data)
+        client?.urlProtocolDidFinishLoading(self)
+        return true
+    }
 }
 
 @MainActor
@@ -1034,11 +1103,13 @@ final class RequestFetchingTests: XCTestCase {
     private func makeCreatePayload() -> CreateRequestPayload {
         CreateRequestPayload(
             vendor: "Palladium",
-            food: "Chicken bowl",
-            pickupName: "Taylor",
             timing: .asap,
             windowStart: nil,
-            mealSwipes: 2
+            menuPath: .mealExchange,
+            mealSwipes: 2,
+            mealItems: ["Chicken bowl"],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
         )
     }
 
@@ -1064,6 +1135,10 @@ final class RequestFetchingTests: XCTestCase {
           "food": "\(food)",
           "pickupWindowText": "\(pickupWindowText)",
           "mealSwipes": \(mealSwipes),
+          "menuPath": "meal-exchange",
+          "mealItems": [],
+          "orderDetails": null,
+          "estimatedDiningDollarsCents": null,
           "windowStart": \(windowStartJSON),
           "windowEnd": \(windowEndJSON),
           "status": "\(status)",

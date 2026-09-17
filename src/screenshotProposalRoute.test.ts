@@ -83,13 +83,34 @@ function routeContext(
 }
 
 /** Every case sends a well-formed image plus `localEvidenceText`; only the
- * evidence text varies per test. */
+ * evidence text varies per test. Overrides apply to that one image, so
+ * existing single-image cases read exactly as they did before W4-R4 wrapped
+ * the transport in an `images` array. */
 function imageBody(localEvidenceText: string, overrides: Record<string, unknown> = {}) {
   return {
-    imageBase64: ONE_PIXEL_PNG_BASE64,
-    mimeType: "image/png",
-    localEvidenceText,
-    ...overrides,
+    images: [
+      {
+        imageBase64: ONE_PIXEL_PNG_BASE64,
+        mimeType: "image/png",
+        localEvidenceText,
+        ...overrides,
+      },
+    ],
+  };
+}
+
+/** W4-R4: several screenshots submitted as evidence for one logical order.
+ * Each entry supplies its own independent on-device evidence text, exactly
+ * as iOS sends it. */
+function multiImageBody(
+  images: { localEvidenceText: string; imageBase64?: string; mimeType?: string }[]
+) {
+  return {
+    images: images.map((image) => ({
+      imageBase64: image.imageBase64 ?? ONE_PIXEL_PNG_BASE64,
+      mimeType: image.mimeType ?? "image/png",
+      localEvidenceText: image.localEvidenceText,
+    })),
   };
 }
 
@@ -284,7 +305,7 @@ describe("handleScreenshotProposal", () => {
           name: "Palladium",
           address: "Palladium Hall, 140 E 14th St",
         },
-        foodRequest: "1 Fries",
+        mealItems: ["1 Fries"],
       },
     });
   });
@@ -1057,5 +1078,412 @@ describe("handleScreenshotProposal malformed/truncated image structural validati
     await handleScreenshotProposal(req, res);
     expect(status).toHaveBeenCalledWith(200);
     expect(callScreenshotProvider).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("W4-R4 multi-screenshot evidence for one logical order", () => {
+  it.each([1, 2, 3, 4, 5])(
+    "accepts %d eligible screenshots and analyzes them in one provider call",
+    async (count) => {
+      process.env.OPENAI_API_KEY = "test-key";
+      callScreenshotProvider.mockResolvedValue({
+        ok: true,
+        rawJson: {
+          visibleVenueText: null,
+          foodItems: [{ name: "Fries", quantity: 1, modifiers: [] }],
+          mealSwipes: null,
+        },
+      });
+      const context = routeContext(
+        multiImageBody(
+          Array.from({ length: count }, () => ({
+            localEvidenceText: cartEvidenceText,
+          }))
+        )
+      );
+
+      await handleScreenshotProposal(context.req, context.res);
+
+      expect(context.status).toHaveBeenCalledWith(200);
+      // One order, one analysis — never one call per screenshot.
+      expect(callScreenshotProvider).toHaveBeenCalledTimes(1);
+      const [options] = callScreenshotProvider.mock.calls[0] as [
+        { images: unknown[] },
+      ];
+      expect(options.images).toHaveLength(count);
+    }
+  );
+
+  it("refuses a sixth screenshot deterministically, before any provider transfer", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    const context = routeContext(
+      multiImageBody(
+        Array.from({ length: 6 }, () => ({
+          localEvidenceText: cartEvidenceText,
+        }))
+      )
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    // Refused outright rather than silently trimmed to five, so a requester
+    // is never told an analysis covered evidence it never received.
+    expect(callScreenshotProvider).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty image set", async () => {
+    const context = routeContext({ images: [] });
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(callScreenshotProvider).not.toHaveBeenCalled();
+  });
+
+  it("forwards only the independently eligible screenshots, and their evidence", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [{ name: "Fries", quantity: 1, modifiers: [] }],
+        mealSwipes: null,
+      },
+    });
+    const eligibleImage = ONE_PIXEL_PNG_BASE64;
+    const context = routeContext({
+      images: [
+        {
+          imageBase64: eligibleImage,
+          mimeType: "image/png",
+          localEvidenceText: cartEvidenceText,
+        },
+        {
+          imageBase64: eligibleImage,
+          mimeType: "image/png",
+          localEvidenceText: ineligibleEvidenceText,
+        },
+        {
+          imageBase64: eligibleImage,
+          mimeType: "image/png",
+          localEvidenceText: historicalEvidenceText,
+        },
+      ],
+    });
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(200);
+    const [options] = callScreenshotProvider.mock.calls[0] as [
+      { images: unknown[] },
+    ];
+    // The ineligible screenshot's bytes never reach the provider, exactly as
+    // W4-S1's single-image gate already guaranteed.
+    expect(options.images).toHaveLength(2);
+  });
+
+  it("answers ineligible, and calls no provider, when no screenshot is eligible", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: ineligibleEvidenceText },
+        { localEvidenceText: ineligibleEvidenceText },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(200);
+    expect(context.json).toHaveBeenCalledWith({
+      eligible: false,
+      proposal: {},
+    });
+    expect(callScreenshotProvider).not.toHaveBeenCalled();
+  });
+
+  it("refuses the whole set when any one image is structurally malformed", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    const context = routeContext({
+      images: [
+        {
+          imageBase64: ONE_PIXEL_PNG_BASE64,
+          mimeType: "image/png",
+          localEvidenceText: cartEvidenceText,
+        },
+        {
+          imageBase64: "not-valid-base64!!! ***",
+          mimeType: "image/png",
+          localEvidenceText: cartEvidenceText,
+        },
+      ],
+    });
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(callScreenshotProvider).not.toHaveBeenCalled();
+  });
+
+  it("proposes an item once when overlapping screenshots are reported once", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    // Two overlapping screenshots of one cart, reported by the provider as
+    // the one order they describe.
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [
+          { name: "Burger", quantity: 1, modifiers: ["No Bag"] },
+          { name: "Fries", quantity: 1, modifiers: [] },
+        ],
+        mealSwipes: null,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: cartEvidenceText },
+        { localEvidenceText: cartEvidenceText },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    const [body] = context.json.mock.calls[0] as [
+      { eligible: boolean; proposal: { mealItems?: string[] } },
+    ];
+    expect(body.eligible).toBe(true);
+    expect(body.proposal.mealItems).toEqual(["1 Burger (No Bag)", "1 Fries"]);
+  });
+
+  it("does not duplicate or collapse an identical line repeated across several screenshots", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    // The same burger line twice from two screenshots: overlap of one burger
+    // and an order of two burgers look exactly alike, so no meal items and
+    // no swipe count are proposed — never two burgers, never one.
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [
+          { name: "Burger", quantity: 1, modifiers: ["No Bag"] },
+          { name: "Fries", quantity: 1, modifiers: [] },
+          { name: " burger ", quantity: 1, modifiers: ["no bag"] },
+        ],
+        mealSwipes: 2,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: `${cartEvidenceText} Palladium 1M` },
+        { localEvidenceText: `${cartEvidenceText} Palladium 1M` },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    const [body] = context.json.mock.calls[0] as [
+      {
+        eligible: boolean;
+        proposal: {
+          mealItems?: string[];
+          mealSwipes?: number;
+          selectedDiningSpot?: { name: string };
+        };
+      },
+    ];
+    expect(body.eligible).toBe(true);
+    expect(body.proposal.mealItems).toBeUndefined();
+    expect(body.proposal.mealSwipes).toBeUndefined();
+    // Location does not depend on the item question and still survives.
+    expect(body.proposal.selectedDiningSpot?.name).toBe("Palladium");
+  });
+
+  it("keeps genuinely repeated identical lines when only one screenshot is analyzed", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    // One screenshot cannot overlap itself: two identical lines on it are two
+    // ordered burgers. An ineligible second image is filtered before the
+    // provider and does not count as evidence.
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [
+          { name: "Burger", quantity: 1, modifiers: ["No Bag"] },
+          { name: "Burger", quantity: 1, modifiers: ["No Bag"] },
+        ],
+        mealSwipes: 2,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: `${cartEvidenceText} 1M 1M` },
+        { localEvidenceText: ineligibleEvidenceText },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    const [options] = callScreenshotProvider.mock.calls[0] as [
+      { images: unknown[] },
+    ];
+    expect(options.images).toHaveLength(1);
+    const [body] = context.json.mock.calls[0] as [
+      { proposal: { mealItems?: string[]; mealSwipes?: number } },
+    ];
+    expect(body.proposal.mealItems).toEqual([
+      "1 Burger (No Bag)",
+      "1 Burger (No Bag)",
+    ]);
+    expect(body.proposal.mealSwipes).toBe(2);
+  });
+
+  it("keeps genuinely different items that merely resemble each other", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [
+          { name: "Burger", quantity: 1, modifiers: ["No Bag"] },
+          { name: "Burger", quantity: 2, modifiers: ["No Bag"] },
+          { name: "Burger", quantity: 1, modifiers: ["No Side"] },
+        ],
+        mealSwipes: null,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([{ localEvidenceText: cartEvidenceText }])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    const [body] = context.json.mock.calls[0] as [
+      { proposal: { mealItems?: string[] } },
+    ];
+    // Deduplication is exact-identity, never fuzzy: a different quantity or a
+    // different modifier is a different item, and collapsing them would be a
+    // guess about what the requester meant.
+    expect(body.proposal.mealItems).toEqual([
+      "1 Burger (No Bag)",
+      "2 Burger (No Bag)",
+      "1 Burger (No Side)",
+    ]);
+  });
+
+  it("drops a meal-swipe candidate that overlapping evidence double-counts", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    // Both screenshots show the same single `1M` marker. Combined evidence
+    // therefore carries two markers against a candidate of one.
+    const oneMarkerEvidence = `${cartEvidenceText} 1M`;
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [{ name: "Burger", quantity: 1, modifiers: [] }],
+        mealSwipes: 1,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: oneMarkerEvidence },
+        { localEvidenceText: oneMarkerEvidence },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    const [body] = context.json.mock.calls[0] as [
+      { proposal: { mealSwipes?: number; mealItems?: string[] } },
+    ];
+    // Ambiguous cross-screenshot evidence stays ambiguous: the requester
+    // chooses the count rather than receiving a guessed one.
+    expect(body.proposal.mealSwipes).toBeUndefined();
+    // The safe part of the proposal still survives independently.
+    expect(body.proposal.mealItems).toEqual(["1 Burger"]);
+  });
+
+  it("omits location when screenshots ground conflicting venues", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [{ name: "Burger", quantity: 1, modifiers: [] }],
+        mealSwipes: null,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: `${cartEvidenceText} Palladium` },
+        { localEvidenceText: `${cartEvidenceText} Cafe 370` },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    const [body] = context.json.mock.calls[0] as [
+      { proposal: { selectedDiningSpot?: unknown } },
+    ];
+    // Two screenshots naming two different dining spots is a conflict, not a
+    // majority vote: the proposal omits location rather than picking one.
+    expect(body.proposal.selectedDiningSpot).toBeUndefined();
+  });
+
+  it("never proposes a menu path, order details, or a Dining Dollar amount", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [{ name: "Burger", quantity: 1, modifiers: [] }],
+        mealSwipes: null,
+        menuPath: "dining-dollars",
+        estimatedDiningDollarsCents: 1_850,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([{ localEvidenceText: cartEvidenceText }])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    // A provider attempting to select the requester's menu path or invent an
+    // amount is refused wholesale by the forbidden-field gate — the proposal
+    // is not merely stripped of those keys.
+    expect(context.status).toHaveBeenCalledWith(503);
+    const [body] = context.json.mock.calls[0] as [
+      { error: { code: string } },
+    ];
+    expect(body.error.code).toBe("SCREENSHOT_PROPOSAL_FAILED");
+  });
+
+  it("creates no request, consumes no quota, and sends no notification on the multi-image path", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: null,
+        foodItems: [{ name: "Burger", quantity: 1, modifiers: [] }],
+        mealSwipes: null,
+      },
+    });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: cartEvidenceText },
+        { localEvidenceText: historicalEvidenceText },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(200);
+    // The route's module graph can never reach request creation or D1; this
+    // asserts the response vocabulary stays analysis-only alongside it.
+    const [body] = context.json.mock.calls[0] as [Record<string, unknown>];
+    expect(Object.keys(body).sort()).toEqual(["eligible", "proposal"]);
+    expect(JSON.stringify(body)).not.toMatch(
+      /operationId|requestId|createRequest|claimToken/
+    );
   });
 });

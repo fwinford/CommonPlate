@@ -18,14 +18,31 @@ struct ParticipantIdentityRecord: Codable, Equatable {
 /// local shape validation: it does not and cannot authenticate the signature.
 /// Participant existence, version, and signature validity remain backend truth.
 enum ParticipantAuthorityShape {
+    private static let lowercaseHex = CharacterSet(charactersIn: "0123456789abcdef")
+
+    /// The backend's canonical participant id: exactly 24 lowercase hex
+    /// characters (`PARTICIPANT_ID_PATTERN` in `participantCredentials.ts`).
+    /// Anything else names no participant.
+    static func isCanonicalParticipantIdentifier(_ candidate: String) -> Bool {
+        candidate.unicodeScalars.count == 24
+            && candidate.unicodeScalars.allSatisfy(lowercaseHex.contains)
+    }
+
+    /// The canonical participant id an authority credential leads with, or
+    /// `nil` when its leading segment is not one. Local shape only: it proves
+    /// nothing about the credential and is never itself a credential.
+    static func participantIdentifier(ofAuthority authority: String) -> String? {
+        guard let separator = authority.firstIndex(of: ".") else { return nil }
+        let identifier = String(authority[authority.startIndex..<separator])
+        return isCanonicalParticipantIdentifier(identifier) ? identifier : nil
+    }
+
     static func isCanonical(_ candidate: String) -> Bool {
         let parts = candidate.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3 else { return false }
 
         let participantID = String(parts[0])
-        let lowercaseHex = CharacterSet(charactersIn: "0123456789abcdef")
-        guard participantID.count == 24,
-              participantID.unicodeScalars.allSatisfy(lowercaseHex.contains) else {
+        guard isCanonicalParticipantIdentifier(participantID) else {
             return false
         }
 

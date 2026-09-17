@@ -84,8 +84,20 @@ enum ScreenshotProposalNotice: Equatable {
 /// field that was never touched.
 struct ScreenshotFieldManualEditState: Equatable {
     var hasManuallyEditedLocation = false
-    var hasManuallyEditedFoodRequest = false
     var hasManuallyEditedMealSwipes = false
+    /// W4-R4: manual ownership is tracked per structured meal-detail entry
+    /// rather than for one combined food field, so editing the second meal
+    /// does not lock the first out of a future suggestion. Indices are draft
+    /// positions, so an entry hidden by a lowered swipe count keeps its
+    /// ownership if the requester raises the count again.
+    var manuallyEditedMealEntries: Set<Int> = []
+    /// The Dining-Dollars-only order-details field, which the same
+    /// manual-precedence rule covers.
+    var hasManuallyEditedOrderDetails = false
+
+    func hasManuallyEditedMealEntry(_ index: Int) -> Bool {
+        manuallyEditedMealEntries.contains(index)
+    }
 }
 
 /// Which of the three allowlisted proposal fields a single `apply(...)` call
@@ -97,10 +109,14 @@ struct ScreenshotFieldManualEditState: Equatable {
 /// allowlist and manual-precedence rules below.
 struct ScreenshotProposalAppliedFields: Equatable {
     var location = false
-    var foodRequest = false
     var mealSwipes = false
+    /// Exactly the structured meal-detail entries this call wrote.
+    var mealEntries: Set<Int> = []
+    var orderDetails = false
 
-    var isEmpty: Bool { !location && !foodRequest && !mealSwipes }
+    var isEmpty: Bool {
+        !location && !mealSwipes && mealEntries.isEmpty && !orderDetails
+    }
 }
 
 /// A specific screenshot selection's identity, minted synchronously by
@@ -120,6 +136,12 @@ struct ScreenshotSelectionToken: Equatable {
 
 @MainActor
 final class ScreenshotProposalStore: ObservableObject {
+    /// W4-R4: the exact number of screenshots that may be selected as
+    /// evidence for one logical Grubhub order. Mirrors the backend's own
+    /// `MAX_SCREENSHOT_IMAGES` (`src/screenshotProposalRoute.ts`), which
+    /// enforces the same bound independently of what this client sends.
+    static let maxScreenshotSelection = 5
+
     @Published private(set) var notice: ScreenshotProposalNotice?
     @Published private(set) var isAIAssistanceEnabled: Bool
     @Published private(set) var hasRecordedThirdPartyConsent: Bool
@@ -273,12 +295,20 @@ final class ScreenshotProposalStore: ObservableObject {
         if !manualEdits.hasManuallyEditedLocation {
             draft.selectedDiningSpot = nil
         }
-        if !manualEdits.hasManuallyEditedFoodRequest {
-            draft.foodRequest = ""
+        for index in 0..<RequestFoodFormDraft.maxMealSwipes
+        where !manualEdits.hasManuallyEditedMealEntry(index) {
+            draft.mealEntries[index] = ""
+        }
+        if !manualEdits.hasManuallyEditedOrderDetails {
+            draft.orderDetails = ""
         }
         if !manualEdits.hasManuallyEditedMealSwipes {
             draft.mealSwipes = RequestFoodFormDraft.mealSwipeOptions.first!
         }
+        // `menuPath` and `diningDollarsText` are deliberately untouched here
+        // and everywhere else in this store: Screenshot Assistance proposes
+        // values, it does not decide which menu the requester is using or how
+        // many Dining Dollars they need.
         return ScreenshotSelectionToken(generation: currentGeneration)
     }
 
@@ -317,13 +347,19 @@ final class ScreenshotProposalStore: ObservableObject {
     /// synchronously afterward via `apply(_:manualEdits:to:)`, since a
     /// SwiftUI `@State` draft cannot be passed `inout` across an `await`
     /// suspension point.
+    /// W4-R4: `images` is the complete set of normalized screenshots for one
+    /// logical order (1 to 5). They are analyzed together in one call rather
+    /// than one at a time, so overlapping evidence describes one order
+    /// instead of several.
     func analyzeScreenshot(
-        imageData: Data,
-        mimeType: String,
-        localEvidenceText: String,
+        images: [ScreenshotAnalysisInput],
         participantAuthority: String?,
         token: ScreenshotSelectionToken
     ) async -> ScreenshotProposalOutcome? {
+        guard !images.isEmpty,
+              images.count <= ScreenshotProposalStore.maxScreenshotSelection else {
+            return nil
+        }
         guard isCurrent(token) else { return nil }
         guard isAIAssistanceEnabled else { return nil }
         guard let participantAuthority else {
@@ -338,9 +374,7 @@ final class ScreenshotProposalStore: ObservableObject {
                 // reached in that case.
                 try Task.checkCancellation()
                 let outcome = try await service.requestProposal(
-                    imageData: imageData,
-                    mimeType: mimeType,
-                    localEvidenceText: localEvidenceText,
+                    images: images,
                     authority: participantAuthority
                 )
                 return .success(outcome)
@@ -396,13 +430,37 @@ final class ScreenshotProposalStore: ObservableObject {
             draft.selectedDiningSpot = spot
             applied.location = true
         }
-        if let food = outcome.proposal.foodRequest, !manualEdits.hasManuallyEditedFoodRequest {
-            draft.foodRequest = food
-            applied.foodRequest = true
-        }
+        // Meal swipes first, so the entry fill below writes into the count
+        // this same proposal just established rather than the previous one.
         if let mealSwipes = outcome.proposal.mealSwipes, !manualEdits.hasManuallyEditedMealSwipes {
             draft.mealSwipes = mealSwipes
             applied.mealSwipes = true
+        }
+
+        if let mealItems = outcome.proposal.mealItems, !mealItems.isEmpty {
+            switch draft.menuPath {
+            case .mealExchange:
+                // One proposed item per active meal field, in order. Only
+                // currently active fields are filled: writing into a field
+                // the requester has hidden would put AI content somewhere
+                // they cannot see it, and only fields they have not edited
+                // are touched, so manual precedence holds per entry.
+                for index in draft.activeMealEntryIndices
+                where index < mealItems.count
+                    && !manualEdits.hasManuallyEditedMealEntry(index) {
+                    draft.mealEntries[index] = mealItems[index]
+                    applied.mealEntries.insert(index)
+                }
+            case .diningDollars:
+                // The Dining-Dollars-only path has one order-details field
+                // rather than per-swipe entries, so the observed items are
+                // joined into it — the same values, in the same order, in the
+                // one field this path actually has.
+                if !manualEdits.hasManuallyEditedOrderDetails {
+                    draft.orderDetails = mealItems.joined(separator: "; ")
+                    applied.orderDetails = true
+                }
+            }
         }
 
         if !outcome.eligible {

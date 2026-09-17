@@ -25,31 +25,10 @@ struct ScreenshotAnalysisInput {
 /// occurred, only that a completed analysis exists to show/replace with
 /// `Change`.
 
-enum RequestFoodFormError: Error, Equatable {
-    case missingDiningSpot
-    case missingFood
-    case missingPickupName
-    case invalidScheduledTime
-    /// A `Later` selection that outlived scheduling itself. Distinct from
-    /// `invalidScheduledTime` because the correction is different: there is no
-    /// pickup time left to choose today, only ASAP.
-    case scheduledTimingUnavailable
-
-    var message: String {
-        switch self {
-        case .missingDiningSpot:
-            return "Choose an NYU dining spot."
-        case .missingFood:
-            return "Tell us what food you need."
-        case .missingPickupName:
-            return "Enter the name to use for the order."
-        case .invalidScheduledTime:
-            return "Choose a pickup time later today."
-        case .scheduledTimingUnavailable:
-            return RequestFoodView.lapsedScheduledTimingNotice
-        }
-    }
-}
+// W4-R4: `RequestFoodFormError` now lives beside the draft and validator it
+// describes, in `RequestFoodFormValidation.swift`, where its per-field cases
+// (`missingMealDetail`, `missingOrderDetails`, the Dining Dollar cases) are
+// declared alongside the fields that produce them.
 
 enum RequestCreatePresentationError: Equatable {
     case invalidRequest
@@ -105,7 +84,8 @@ enum RequestCreatePresentationError: Equatable {
         case .creationFailed:
             return "We couldn’t post your request. Please try again in a moment."
         case .ambiguous:
-            return "We couldn’t confirm whether your request was posted. Check Active Requests before submitting again."
+            // W4-D2 supersedes the former "Check Active Requests" sentence.
+            return RequestFoodView.unresolvedCreateBody
         case .operationInProgress:
             return "Your request is already being posted."
         }
@@ -153,6 +133,13 @@ enum RequestCreatePresentationError: Equatable {
 /// The one form-level error rendered beside the request submission action.
 /// Field validation never enters this state; those errors remain owned by
 /// their adjacent field rows.
+/// W4-D2: the copy and single optional action of one recovery state.
+struct RequestCreateRecoveryCopy: Equatable {
+    let headline: String
+    let body: String
+    let actionLabel: String?
+}
+
 struct RequestSubmissionSectionPresentation: Equatable {
     let error: RequestCreatePresentationError
     let message: String
@@ -186,6 +173,13 @@ enum RequestFormPresentation: Equatable {
     /// coming, and neither success nor error semantics apply while it is
     /// pending.
     case checkingCreateAmbiguity
+    /// W4-D2: a pending operation is persisted but its recovery identity
+    /// cannot be read. Creation stays blocked with no check, retry, or clear
+    /// action; ordinary navigation away remains available.
+    case createIdentityUnavailable
+    /// W4-D2: backend authority established terminal NO-CREATE for the
+    /// earlier operation. Shown until `Start a new request`; blocks nothing.
+    case createNotPosted
     /// Posting is paused, or availability could not be established. `retryable`
     /// is false for a paused backend, where retrying changes nothing.
     case unavailable(message: String, retryable: Bool)
@@ -300,7 +294,11 @@ struct RequestFoodView: View {
 
     // MARK: - W4-S1 AI screenshot assistance
 
-    @State private var selectedScreenshotItem: PhotosPickerItem?
+    /// W4-R4: up to five screenshots, selected together, as evidence for one
+    /// logical Grubhub order. `PhotosPicker`'s own `maxSelectionCount` bounds
+    /// the selection at the source; `ScreenshotProposalStore` and the backend
+    /// each re-check the same bound independently.
+    @State private var selectedScreenshotItems: [PhotosPickerItem] = []
     /// W4-R2 2026-09-01 sync: the required remote-AI disclosure now gates
     /// *before* photo selection, not after — see `beginScreenshotAssistanceFlow()`.
     /// There is therefore no pending-selection-awaiting-consent state to hold
@@ -414,7 +412,8 @@ struct RequestFoodView: View {
             isCheckingAvailability: store.isCheckingRequestCreationAvailability,
             hasAttemptedAvailabilityCheck: store.hasAttemptedRequestCreationAvailabilityCheck,
             didCreateRequest: didCreateRequest,
-            isCreating: store.isCreating
+            isCreating: store.isCreating,
+            createRecovery: store.createRecoveryPresentation
         )
     }
 
@@ -426,6 +425,10 @@ struct RequestFoodView: View {
                     blockedByAmbiguityView
                 case .checkingCreateAmbiguity:
                     checkingCreateAmbiguityView
+                case .createIdentityUnavailable:
+                    createIdentityUnavailableView
+                case .createNotPosted:
+                    createNotPostedView
                 case .posting:
                     postingView
                 case .success:
@@ -554,6 +557,23 @@ struct RequestFoodView: View {
                 cancel: verificationCoordinator.requesterCancelled
             )
         }
+        // A local `.ambiguous` only ever mirrors the store's block. Once the
+        // store retires the operation (expired, unauthorized, or NO-CREATE),
+        // it must stop disabling submission on this screen.
+        .onChange(of: store.hasUnresolvedCreateAmbiguity) { _, isUnresolved in
+            if !isUnresolved, submissionError == .ambiguous {
+                submissionError = nil
+            }
+            // W4-D2: a block that clears without a NO-CREATE notice (another
+            // retirement, or a confirmed different participant becoming
+            // current) reaches the form only through the ordinary
+            // availability check this screen skipped while blocked.
+            if !isUnresolved,
+               store.createRecoveryPresentation == .none,
+               !store.hasAttemptedRequestCreationAvailabilityCheck {
+                Task { await store.refreshRequestCreationAvailability() }
+            }
+        }
         .onChange(of: identityStore.identity) { previous, current in
             guard case .requestCreation(let submittedDraft)? =
                     verificationCoordinator.requesterIdentityDidChange(
@@ -580,8 +600,8 @@ struct RequestFoodView: View {
             // ever reused.
             screenshotProposalStore.invalidateCurrentSelection()
         }
-        .onChange(of: selectedScreenshotItem) { _, newItem in
-            guard let newItem else { return }
+        .onChange(of: selectedScreenshotItems) { _, newItems in
+            guard !newItems.isEmpty else { return }
             // Minted synchronously, here, before any async work for this
             // selection starts — "last selection wins from the moment the
             // requester chooses it," not from whenever its preprocessing
@@ -595,14 +615,18 @@ struct RequestFoodView: View {
             // exactly when its stale AI value is cleared, never a field
             // manual ownership already covers.
             if !screenshotManualEdits.hasManuallyEditedLocation { screenshotProvenance.location = false }
-            if !screenshotManualEdits.hasManuallyEditedFoodRequest { screenshotProvenance.foodRequest = false }
             if !screenshotManualEdits.hasManuallyEditedMealSwipes { screenshotProvenance.mealSwipes = false }
+            if !screenshotManualEdits.hasManuallyEditedOrderDetails { screenshotProvenance.orderDetails = false }
+            for index in 0..<RequestFoodFormDraft.maxMealSwipes
+            where !screenshotManualEdits.hasManuallyEditedMealEntry(index) {
+                screenshotProvenance.mealEntries.remove(index)
+            }
             screenshotAfterglowFields = ScreenshotProposalAppliedFields()
             // A fresh selection starts its own result: the prior selection's
             // `✓ Screenshot checked` row must not keep describing this new,
             // not-yet-analyzed selection.
             screenshotChecked = false
-            Task { await processSelectedScreenshot(newItem, token: token) }
+            Task { await processSelectedScreenshots(newItems, token: token) }
         }
         // W4-R2 2026-09-01 round-2 sync: the disclosure is now the local
         // centered-modal overlay above, not a `.sheet` — see
@@ -614,7 +638,8 @@ struct RequestFoodView: View {
         // immediately on tap.
         .photosPicker(
             isPresented: $isPresentingScreenshotPicker,
-            selection: $selectedScreenshotItem,
+            selection: $selectedScreenshotItems,
+            maxSelectionCount: ScreenshotProposalStore.maxScreenshotSelection,
             matching: .images,
             photoLibrary: .shared()
         )
@@ -836,37 +861,59 @@ struct RequestFoodView: View {
     /// AI Assistance being turned Off at any point must stop this exact
     /// attempt from reaching the next stage, and in particular must make
     /// network transfer for it impossible.
+    /// W4-R4: every selected screenshot is prepared, then all of them are
+    /// analyzed together as evidence for one logical order. Preparing them
+    /// sequentially keeps the existing per-stage staleness checks meaningful
+    /// — a newer selection retires this whole set partway through rather than
+    /// letting some of its images reach the provider.
+    ///
+    /// A single image that fails to load, decode, or normalize abandons the
+    /// whole attempt rather than silently analyzing a subset: the requester
+    /// chose those screenshots together, and a result quietly computed from
+    /// fewer of them would misrepresent what was examined.
     @MainActor
-    private func processSelectedScreenshot(
-        _ item: PhotosPickerItem,
+    private func processSelectedScreenshots(
+        _ items: [PhotosPickerItem],
         token: ScreenshotSelectionToken
     ) async {
-        selectedScreenshotItem = nil
+        selectedScreenshotItems = []
 
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-        guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
-            return
+        // Defense in depth beside `PhotosPicker`'s own `maxSelectionCount`:
+        // the bound is re-checked here, in the store, and again server-side.
+        let bounded = Array(items.prefix(ScreenshotProposalStore.maxScreenshotSelection))
+        guard bounded.count == items.count else { return }
+
+        var inputs: [ScreenshotAnalysisInput] = []
+        for item in bounded {
+            guard let data = try? await item.loadTransferable(type: Data.self) else { return }
+            guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
+                return
+            }
+
+            guard let uiImage = UIImage(data: data),
+                  let normalized = ScreenshotImageNormalizer.normalize(uiImage) else {
+                return
+            }
+            guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
+                return
+            }
+
+            let evidenceText = await ScreenshotLocalTextRecognizer.recognizeText(in: uiImage)
+            guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
+                return
+            }
+
+            inputs.append(
+                ScreenshotAnalysisInput(
+                    data: normalized.data,
+                    mimeType: normalized.mimeType,
+                    localEvidenceText: evidenceText
+                )
+            )
         }
 
-        guard let uiImage = UIImage(data: data),
-              let normalized = ScreenshotImageNormalizer.normalize(uiImage) else {
-            return
-        }
-        guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
-            return
-        }
-
-        let evidenceText = await ScreenshotLocalTextRecognizer.recognizeText(in: uiImage)
-        guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
-            return
-        }
-
-        let input = ScreenshotAnalysisInput(
-            data: normalized.data,
-            mimeType: normalized.mimeType,
-            localEvidenceText: evidenceText
-        )
-        await beginScreenshotAnalysis(input, token: token)
+        guard !inputs.isEmpty else { return }
+        await beginScreenshotAnalysis(inputs, token: token)
     }
 
     /// W4-R2 2026-09-01 round-2 sync item 2: `Continue` turns Screenshot
@@ -919,13 +966,11 @@ struct RequestFoodView: View {
 
     @MainActor
     private func beginScreenshotAnalysis(
-        _ input: ScreenshotAnalysisInput,
+        _ inputs: [ScreenshotAnalysisInput],
         token: ScreenshotSelectionToken
     ) async {
         let outcome = await screenshotProposalStore.analyzeScreenshot(
-            imageData: input.data,
-            mimeType: input.mimeType,
-            localEvidenceText: input.localEvidenceText,
+            images: inputs,
             participantAuthority: identityStore.currentAuthority(),
             token: token
         )
@@ -942,8 +987,9 @@ struct RequestFoodView: View {
             to: &draft
         )
         if applied.location { screenshotProvenance.location = true }
-        if applied.foodRequest { screenshotProvenance.foodRequest = true }
         if applied.mealSwipes { screenshotProvenance.mealSwipes = true }
+        if applied.orderDetails { screenshotProvenance.orderDetails = true }
+        screenshotProvenance.mealEntries.formUnion(applied.mealEntries)
 
         // W4-R2 2026-08-31 sync: an ineligible screenshot keeps its existing
         // `unsupportedScreenshot` notice presentation untouched — only an
@@ -1003,28 +1049,62 @@ struct RequestFoodView: View {
         )
     }
 
-    /// The only path that may set
-    /// `screenshotManualEdits.hasManuallyEditedFoodRequest` — latches on a
-    /// nonempty manual edit. Clearing the field back to empty (W4-R2
-    /// 2026-08-31 sync: "a manually cleared field becomes empty and eligible
-    /// for future screenshot suggestions again") unlatches it, rather than
-    /// permanently locking out a later AI proposal just because the
-    /// requester once typed something here.
-    private var foodRequestBinding: Binding<String> {
+    /// The only path that may mark a structured meal-detail entry manually
+    /// edited (W4-R4) — latches on a nonempty manual edit to that exact
+    /// entry. Clearing it back to empty (W4-R2 2026-08-31 sync: "a manually
+    /// cleared field becomes empty and eligible for future screenshot
+    /// suggestions again") unlatches it, rather than permanently locking out
+    /// a later AI proposal just because the requester once typed here.
+    ///
+    /// Per-entry rather than per-form: editing the second meal must not make
+    /// the first ineligible for a suggestion.
+    private func mealEntryBinding(_ index: Int) -> Binding<String> {
         Binding(
-            get: { draft.foodRequest },
+            get: { draft.mealEntries[index] },
             set: { newValue in
-                draft.foodRequest = newValue
-                screenshotManualEdits.hasManuallyEditedFoodRequest = !newValue.isEmpty
-                screenshotProvenance.foodRequest = false
+                draft.mealEntries[index] = newValue
+                if newValue.isEmpty {
+                    screenshotManualEdits.manuallyEditedMealEntries.remove(index)
+                } else {
+                    screenshotManualEdits.manuallyEditedMealEntries.insert(index)
+                }
+                screenshotProvenance.mealEntries.remove(index)
             }
         )
     }
 
-    private var pickupNameBinding: Binding<String> {
+    /// The Dining-Dollars-only order-details field, under the same
+    /// manual-precedence rule as a meal entry.
+    private var orderDetailsBinding: Binding<String> {
         Binding(
-            get: { draft.pickupName },
-            set: { draft.pickupName = $0 }
+            get: { draft.orderDetails },
+            set: { newValue in
+                draft.orderDetails = newValue
+                screenshotManualEdits.hasManuallyEditedOrderDetails = !newValue.isEmpty
+                screenshotProvenance.orderDetails = false
+            }
+        )
+    }
+
+    /// Dining Dollars carry no screenshot provenance at all: Screenshot
+    /// Assistance never proposes an amount, so there is no AI ownership for a
+    /// manual edit to override.
+    private var diningDollarsBinding: Binding<String> {
+        Binding(
+            get: { draft.diningDollarsText },
+            set: { draft.diningDollarsText = $0 }
+        )
+    }
+
+    /// Switching menus is purely a requester decision, and deliberately
+    /// destroys nothing: the meal entries, order details, and typed estimate
+    /// all survive a switch, so a requester who changes their mind twice
+    /// finds their own words still there. Which of them are submitted is
+    /// decided by `menuPath` at submission, not by clearing fields here.
+    private var menuPathBinding: Binding<RequestMenuPath> {
+        Binding(
+            get: { draft.menuPath },
+            set: { draft.menuPath = $0 }
         )
     }
 
@@ -1049,57 +1129,40 @@ struct RequestFoodView: View {
         )
     }
 
-    /// The blocked screen. It deliberately renders no fields and no submit
+    /// The blocked screen (W4-D2 state 1: exact recovery identity known,
+    /// outcome unresolved). It deliberately renders no fields and no submit
     /// control — there is nothing here to correct and nothing to resend.
     /// No haptic: D1 unresolved is neither success nor error semantics.
-    /// Identical presentation to `checkingCreateAmbiguityView` (approved
-    /// Figma `12 · D1 ambiguity · checking`, which shows the progress glyph,
-    /// title, duplicate-submission warning, and `Go to Home` together as one
-    /// state) — the only difference is whether reconciliation is still
-    /// actively running.
     private var blockedByAmbiguityView: some View {
         unresolvedCreateAmbiguityView(isActivelyChecking: false)
     }
 
-    /// W4-R2 D1: reconciliation of a durable unresolved create is actively
-    /// running. No success/error haptic — this state always has an answer
-    /// coming, resolving into either `.success` or the same still-unresolved
-    /// presentation once reconciliation stops without resolving.
+    /// The same state while an exact reconciliation is actually running: the
+    /// `Check again` action is replaced by progress until it answers.
     private var checkingCreateAmbiguityView: some View {
         unresolvedCreateAmbiguityView(isActivelyChecking: true)
     }
 
-    /// Approved Figma `12 · D1 ambiguity · checking`: icon + title, an
-    /// explanatory subtitle, a duplicate-submission warning callout, and one
-    /// `Go to Home` exit — present regardless of whether reconciliation is
-    /// still actively polling, since leaving is always safe and the durable
-    /// record survives this screen closing.
+    /// Faith's 2026-09-16 copy. `Check again` appears only when the store
+    /// says another exact reconciliation can change the answer. `Go to Home`
+    /// is ordinary navigation, present because leaving is always safe and the
+    /// durable record survives this screen closing.
     private func unresolvedCreateAmbiguityView(isActivelyChecking: Bool) -> some View {
-        VStack(spacing: CommonPlateStyle.Spacing.l) {
-            statusIcon(systemName: "ellipsis")
-
-            VStack(spacing: CommonPlateStyle.Spacing.xs) {
-                Text(Self.checkingCreateAmbiguityTitle)
-                    .font(.title3.weight(.bold))
-                    .multilineTextAlignment(.center)
-
-                Text(Self.checkingCreateAmbiguitySubtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+        let copy = Self.presentedRecoveryCopy(for: Self.unresolvedRecovery(store.createRecoveryPresentation))
+        return recoveryStateView(systemName: "ellipsis", copy: copy) {
+            if isActivelyChecking {
+                ProgressView()
+                    .tint(Color.accentColor)
+                    .accessibilityLabel(Self.checkAgainLabel)
+                    .accessibilityIdentifier("request-checking-again")
+            } else if let action = copy.actionLabel {
+                Button(action) {
+                    checkAgain()
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: CommonPlateStyle.Control.majorActionMaximumWidth)
+                .accessibilityIdentifier("request-check-again")
             }
-            .frame(maxWidth: CommonPlateStyle.Metrics.stateContentWidth)
-
-            Text(Self.duplicateSubmissionWarning)
-                .font(.footnote)
-                .multilineTextAlignment(.leading)
-                .padding(CommonPlateStyle.Spacing.m)
-                .frame(maxWidth: CommonPlateStyle.Metrics.stateContentWidth, alignment: .leading)
-                .background(
-                    CommonPlateStyle.Color.warmSurface,
-                    in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
-                )
-                .accessibilityIdentifier("request-submission-error")
 
             Button(Self.goToHomeLabel) {
                 onExit()
@@ -1107,10 +1170,92 @@ struct RequestFoodView: View {
             .buttonStyle(.bordered)
             .accessibilityIdentifier("request-ambiguous-dismiss")
         }
+        .accessibilityIdentifier(isActivelyChecking ? "request-checking-ambiguity" : "request-blocked-ambiguity")
+    }
+
+    /// W4-D2 state 2: a pending operation exists but its recovery identity
+    /// cannot be read. No recovery action of any kind; `Go to Home` is only
+    /// the ordinary way out, so this is never a dead end. No haptic.
+    private var createIdentityUnavailableView: some View {
+        recoveryStateView(
+            systemName: "exclamationmark",
+            copy: Self.presentedRecoveryCopy(for: .identityUnavailable)
+        ) {
+            Button(Self.goToHomeLabel) {
+                onExit()
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("request-ambiguous-dismiss")
+        }
+        .accessibilityIdentifier("request-identity-unavailable")
+    }
+
+    /// W4-D2 state 3: authoritative terminal NO-CREATE. `Start a new request`
+    /// only dismisses this notice and returns to the form; it resends nothing.
+    /// A later submission mints a fresh operation identity.
+    private var createNotPostedView: some View {
+        let copy = Self.presentedRecoveryCopy(for: .notCreated)
+        return recoveryStateView(systemName: "xmark", copy: copy) {
+            if let action = copy.actionLabel {
+                Button(action) {
+                    startNewRequest()
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: CommonPlateStyle.Control.majorActionMaximumWidth)
+                .accessibilityIdentifier("request-start-new")
+            }
+        }
+        .accessibilityIdentifier("request-not-posted")
+    }
+
+    /// The shared centered layout of the three W4-D2 recovery states.
+    private func recoveryStateView<Actions: View>(
+        systemName: String,
+        copy: RequestCreateRecoveryCopy,
+        @ViewBuilder actions: () -> Actions
+    ) -> some View {
+        VStack(spacing: CommonPlateStyle.Spacing.l) {
+            statusIcon(systemName: systemName)
+
+            VStack(spacing: CommonPlateStyle.Spacing.xs) {
+                Text(copy.headline)
+                    .font(.title3.weight(.bold))
+                    .multilineTextAlignment(.center)
+
+                Text(copy.body)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("request-submission-error")
+            }
+            .frame(maxWidth: CommonPlateStyle.Metrics.stateContentWidth)
+
+            VStack(spacing: CommonPlateStyle.Spacing.m) {
+                actions()
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
         .background(CommonPlateStyle.Color.baseCanvas)
-        .accessibilityIdentifier(isActivelyChecking ? "request-checking-ambiguity" : "request-blocked-ambiguity")
+    }
+
+    private func checkAgain() {
+        Task {
+            guard await store.reconcilePendingCreateOperationIfNeeded() else { return }
+            // Backend authority says this exact operation created the
+            // request: the same authoritative success a submission gets.
+            didCreateRequest = true
+            draftSession.clearAfterAuthoritativeCreation()
+        }
+    }
+
+    private func startNewRequest() {
+        store.acknowledgeCreateNotPosted()
+        submissionError = nil
+        isShowingFailureSummary = false
+        Task {
+            await store.refreshRequestCreationAvailability()
+        }
     }
 
     /// W4-R2 Posting: one native indeterminate progress owner, centered, no
@@ -1207,9 +1352,15 @@ struct RequestFoodView: View {
     }
 
     static let goToHomeLabel = "Go to Home"
-    static let checkingCreateAmbiguityTitle = "Checking your request"
-    static let checkingCreateAmbiguitySubtitle = "CommonPlate can’t confirm yet whether it was posted."
-    static let duplicateSubmissionWarning = "Don’t submit another request yet. CommonPlate will keep checking this one."
+    // W4-D2 recovery copy (Faith, 2026-09-16).
+    static let unresolvedCreateHeadline = "We couldn’t confirm your request yet."
+    static let unresolvedCreateBody = "Don’t submit another request until this one is resolved."
+    static let checkAgainLabel = "Check again"
+    static let identityUnavailableHeadline = "We can’t safely confirm what happened to this request."
+    static let identityUnavailableBody = "To prevent a duplicate, CommonPlate won’t submit another request."
+    static let notPostedHeadline = "Your request wasn’t posted."
+    static let notPostedBody = "You can submit a new request."
+    static let startNewRequestLabel = "Start a new request"
     static let postingTitle = "Posting request…"
     static let definitiveFailureTitle = "Your request wasn’t posted"
     static let savedDraftLabel = "SAVED DRAFT"
@@ -1234,6 +1385,59 @@ struct RequestFoodView: View {
         return "\(vendor) · \(quantity) · \(timing)"
     }
 
+    /// The headline, body, and at most one recovery action for a W4-D2
+    /// recovery state. `nil` when there is nothing to present.
+    static func recoveryCopy(
+        for recovery: RequestCreateRecoveryPresentation
+    ) -> RequestCreateRecoveryCopy? {
+        switch recovery {
+        case .none:
+            return nil
+        case .unresolved(let canCheckAgain):
+            return RequestCreateRecoveryCopy(
+                headline: unresolvedCreateHeadline,
+                body: unresolvedCreateBody,
+                actionLabel: canCheckAgain ? checkAgainLabel : nil
+            )
+        case .identityUnavailable:
+            return RequestCreateRecoveryCopy(
+                headline: identityUnavailableHeadline,
+                body: identityUnavailableBody,
+                actionLabel: nil
+            )
+        case .notCreated:
+            return RequestCreateRecoveryCopy(
+                headline: notPostedHeadline,
+                body: notPostedBody,
+                actionLabel: startNewRequestLabel
+            )
+        }
+    }
+
+    /// `recoveryCopy` for a state a view is actually rendering. `.none` is
+    /// never rendered; if it were, it would read as unresolved with no check.
+    static func presentedRecoveryCopy(
+        for recovery: RequestCreateRecoveryPresentation
+    ) -> RequestCreateRecoveryCopy {
+        recoveryCopy(for: recovery) ?? RequestCreateRecoveryCopy(
+            headline: unresolvedCreateHeadline,
+            body: unresolvedCreateBody,
+            actionLabel: nil
+        )
+    }
+
+    /// The blocked state always presents as unresolved. A block the store has
+    /// not described (which no current path produces) offers no check,
+    /// rather than one that could do nothing.
+    static func unresolvedRecovery(
+        _ recovery: RequestCreateRecoveryPresentation
+    ) -> RequestCreateRecoveryPresentation {
+        if case .unresolved = recovery {
+            return recovery
+        }
+        return .unresolved(canCheckAgain: false)
+    }
+
     /// Only confirmed availability reveals the form. An `.unknown` result after
     /// a completed probe becomes retryable once no check is running.
     static func presentation(
@@ -1246,13 +1450,19 @@ struct RequestFoodView: View {
         /// the W4-R2 centered Posting/Checking states is unaffected: passing
         /// no value reproduces the exact presentation this function already
         /// returned before those states existed.
-        isCreating: Bool = false
+        isCreating: Bool = false,
+        /// W4-D2 store-owned recovery state. Defaults to `.none` so existing
+        /// call sites keep the presentation they already had.
+        createRecovery: RequestCreateRecoveryPresentation = .none
     ) -> RequestFormPresentation {
         // First, ahead of everything. A paused or unresolved availability answer
         // is true but beside the point once a create may already have posted:
         // showing it would replace the one warning that matters with a smaller
         // one, and the student would leave thinking nothing had happened.
         if hasUnresolvedCreateAmbiguity {
+            if createRecovery == .identityUnavailable {
+                return .createIdentityUnavailable
+            }
             // D1 reconciliation actively running (`isCreating`) reads
             // "Checking your request" with progress; already-resolved
             // still-unresolved ambiguity reads the static warning with its
@@ -1262,6 +1472,13 @@ struct RequestFoodView: View {
 
         if didCreateRequest {
             return .success
+        }
+
+        // W4-D2: the earlier operation authoritatively did not post. Said
+        // once, ahead of the form, until the requester chooses to start a new
+        // request.
+        if createRecovery == .notCreated && !isCreating {
+            return .createNotPosted
         }
 
         // An ordinary submission in flight (never true except from `.form`,
@@ -1303,6 +1520,7 @@ struct RequestFoodView: View {
         case .posting, .success:
             return true
         case .blockedByUnresolvedCreateAmbiguity, .checkingCreateAmbiguity,
+             .createIdentityUnavailable, .createNotPosted,
              .checkingAvailability, .unavailable, .form:
             return false
         }
@@ -1463,75 +1681,34 @@ struct RequestFoodView: View {
                     }
                 }
 
-                // Major relationship: Dining location → Order details.
+                // Major relationship: Dining location → menu selection.
+                adaptiveMajorGap()
+
+                // W4-R4: which menu the requester is using decides which
+                // resource fields exist below it. Deliberately not wrapped in
+                // an extra grouping/background box — the menu-dependent
+                // fields use the same `RequesterFormFieldContainer` grammar
+                // and vertical rhythm as every other field on this form.
+                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                    Text(Self.menuPathLabel)
+                        .font(.subheadline.weight(.semibold))
+
+                    menuPathControl
+                }
+
+                // Major relationship: menu selection → its resource fields.
                 adaptiveMajorGap()
 
                 VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                    RequesterFormFieldContainer(
-                        label: Self.orderDetailsLabel,
-                        isMultiline: true,
-                        showsProvenance: screenshotProvenance.foodRequest,
-                        isGlowing: screenshotAfterglowFields.foodRequest,
-                        provenanceIdentifier: "request-food-provenance"
-                    ) {
-                        // A custom binding, not `$draft.foodRequest` directly
-                        // — see `foodRequestBinding`'s declaration.
-                        TextField(Self.orderDetailsPlaceholder, text: foodRequestBinding, axis: .vertical)
-                            .font(.subheadline)
-                            .lineLimit(4, reservesSpace: true)
-                            .focused($focusedField, equals: .foodDescription)
-                            .accessibilityLabel(Self.orderDetailsLabel)
-                            .accessibilityHint(Text(fieldError(.foodDescription, errors: errors) ?? ""))
+                    switch draft.menuPath {
+                    case .mealExchange:
+                        mealExchangeFields(errors: errors)
+                    case .diningDollars:
+                        diningDollarsOnlyFields(errors: errors)
                     }
-
-                    fieldErrorText(
-                        .foodDescription,
-                        errors: errors,
-                        identifier: "request-food-error"
-                    )
                 }
 
-                // Major relationship: Order details → Meal swipes.
-                adaptiveMajorGap()
-
-                RequesterFormFieldContainer(
-                    label: Self.mealSwipesLabel,
-                    showsProvenance: screenshotProvenance.mealSwipes,
-                    isGlowing: screenshotAfterglowFields.mealSwipes,
-                    provenanceIdentifier: "request-meal-swipes-provenance"
-                ) {
-                    mealSwipesControl
-                }
-
-                // Major relationship: Meal swipes → PICKUP / Name on order.
-                adaptiveMajorGap()
-
-                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                    Text(Self.pickupEyebrow)
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.secondary)
-                        .accessibilityAddTraits(.isHeader)
-
-                    RequesterFormFieldContainer(
-                        label: Self.pickupNameLabel,
-                        showsProvenance: false,
-                        provenanceIdentifier: "request-pickup-name-provenance"
-                    ) {
-                        TextField(Self.pickupNamePlaceholder, text: pickupNameBinding)
-                            .font(.subheadline)
-                            .focused($focusedField, equals: .pickupName)
-                            .accessibilityLabel(Self.pickupNameLabel)
-                            .accessibilityHint(Text(fieldError(.pickupName, errors: errors) ?? ""))
-                    }
-
-                    fieldErrorText(
-                        .pickupName,
-                        errors: errors,
-                        identifier: "request-pickup-name-error"
-                    )
-                }
-
-                // Major relationship: Name on order → Timing.
+                // Major relationship: resource fields → Timing.
                 adaptiveMajorGap()
 
                 // W4-R2 2026-08-31 round-2 sync: every timing-related row
@@ -1547,7 +1724,7 @@ struct RequestFoodView: View {
                 // empty gaps down to the tighter `.xs` rhythm already used
                 // between this block's own rows, while Later's real content
                 // is unaffected. This whole block is the Timing side of the
-                // adjacent "Name on order → Timing" adaptive gap above — its
+                // adjacent "resource fields → Timing" adaptive gap above — its
                 // own internal `.xs` rhythm is unrelated and untouched.
                 VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
                         // W4-R2 2026-09-02 physical-walkthrough sync: the
@@ -1780,13 +1957,186 @@ struct RequestFoodView: View {
         )
     }
 
+    /// W4-R4 `Which menu are you using?`: the requester's choice between Meal
+    /// Exchange and Dining Dollars. Reuses the same segmented grammar the
+    /// accepted `Requester / Timing` control already uses, so the new
+    /// selection reads as part of the existing native CommonPlate form
+    /// language rather than a new control vocabulary.
+    private var menuPathControl: some View {
+        HStack(spacing: CommonPlateStyle.Spacing.xs) {
+            ForEach(Self.menuPathOptions, id: \.self) { option in
+                let isSelected = draft.menuPath == option
+                Button {
+                    menuPathBinding.wrappedValue = option
+                } label: {
+                    Text(Self.menuPathTitle(option))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, CommonPlateStyle.Spacing.s)
+                        .background(
+                            isSelected ? CommonPlateStyle.Color.baseCanvas : Color.clear,
+                            in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard - 3, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+                .accessibilityIdentifier(
+                    option == .mealExchange
+                        ? "request-menu-path-meal-exchange"
+                        : "request-menu-path-dining-dollars"
+                )
+            }
+        }
+        .padding(CommonPlateStyle.Spacing.xs)
+        .background(
+            CommonPlateStyle.Color.requestCardSurface,
+            in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("request-menu-path-picker")
+    }
+
+    /// The Meal Exchange resource fields: the swipe count, then exactly one
+    /// required meal-detail field per selected swipe, then the optional
+    /// Dining Dollar estimate.
+    @ViewBuilder
+    private func mealExchangeFields(errors: [RequestFoodFieldError]) -> some View {
+        RequesterFormFieldContainer(
+            label: Self.mealSwipesLabel,
+            showsProvenance: screenshotProvenance.mealSwipes,
+            isGlowing: screenshotAfterglowFields.mealSwipes,
+            provenanceIdentifier: "request-meal-swipes-provenance"
+        ) {
+            mealSwipesControl
+        }
+
+        // One field per currently selected swipe. Fields above the count are
+        // simply not built — their draft contents are untouched and reappear
+        // unchanged if the requester raises the count again.
+        ForEach(Array(draft.activeMealEntryIndices), id: \.self) { index in
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                RequesterFormFieldContainer(
+                    label: Self.mealDetailLabel(index: index),
+                    isMultiline: true,
+                    showsProvenance: screenshotProvenance.mealEntries.contains(index),
+                    isGlowing: screenshotAfterglowFields.mealEntries.contains(index),
+                    provenanceIdentifier: "request-meal-detail-provenance-\(index)"
+                ) {
+                    TextField(
+                        Self.mealDetailPlaceholder,
+                        text: mealEntryBinding(index),
+                        axis: .vertical
+                    )
+                    .font(.subheadline)
+                    .lineLimit(3, reservesSpace: true)
+                    .focused($focusedField, equals: .mealDetail(index: index))
+                    .accessibilityLabel(Self.mealDetailLabel(index: index))
+                    .accessibilityHint(
+                        Text(fieldError(.mealDetail(index: index), errors: errors) ?? "")
+                    )
+                    .accessibilityIdentifier("request-meal-detail-\(index)")
+                }
+
+                fieldErrorText(
+                    .mealDetail(index: index),
+                    errors: errors,
+                    identifier: "request-meal-detail-error-\(index)"
+                )
+            }
+        }
+
+        diningDollarsField(
+            label: Self.diningDollarsOptionalLabel,
+            placeholder: Self.diningDollarsPlaceholder,
+            note: Self.diningDollarsOptionalNote,
+            errors: errors
+        )
+    }
+
+    /// The Dining-Dollars-only resource fields: one required order-details
+    /// value and a required estimate.
+    @ViewBuilder
+    private func diningDollarsOnlyFields(errors: [RequestFoodFieldError]) -> some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+            RequesterFormFieldContainer(
+                label: Self.orderDetailsLabel,
+                isMultiline: true,
+                showsProvenance: screenshotProvenance.orderDetails,
+                isGlowing: screenshotAfterglowFields.orderDetails,
+                provenanceIdentifier: "request-order-details-provenance"
+            ) {
+                TextField(
+                    Self.orderDetailsPlaceholder,
+                    text: orderDetailsBinding,
+                    axis: .vertical
+                )
+                .font(.subheadline)
+                .lineLimit(4, reservesSpace: true)
+                .focused($focusedField, equals: .orderDetails)
+                .accessibilityLabel(Self.orderDetailsLabel)
+                .accessibilityHint(Text(fieldError(.orderDetails, errors: errors) ?? ""))
+                .accessibilityIdentifier("request-order-details")
+            }
+
+            fieldErrorText(
+                .orderDetails,
+                errors: errors,
+                identifier: "request-order-details-error"
+            )
+        }
+
+        diningDollarsField(
+            label: Self.diningDollarsRequiredLabel,
+            placeholder: Self.diningDollarsPlaceholder,
+            note: Self.diningDollarsEstimateNote,
+            errors: errors
+        )
+    }
+
+    /// The shared Dining Dollar entry field. Ordinary dollar entry with a
+    /// decimal keypad; the exact value is parsed to integer cents
+    /// (`DiningDollarsEntry`) rather than through any floating-point step.
+    @ViewBuilder
+    private func diningDollarsField(
+        label: String,
+        placeholder: String,
+        note: String,
+        errors: [RequestFoodFieldError]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+            RequesterFormFieldContainer(
+                label: label,
+                showsProvenance: false,
+                provenanceIdentifier: "request-dining-dollars-provenance"
+            ) {
+                TextField(placeholder, text: diningDollarsBinding)
+                    .font(.subheadline)
+                    .keyboardType(.decimalPad)
+                    .focused($focusedField, equals: .diningDollars)
+                    .accessibilityLabel(label)
+                    .accessibilityHint(Text(fieldError(.diningDollars, errors: errors) ?? ""))
+                    .accessibilityIdentifier("request-dining-dollars")
+            }
+
+            Text(note)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            fieldErrorText(
+                .diningDollars,
+                errors: errors,
+                identifier: "request-dining-dollars-error"
+            )
+        }
+    }
+
     /// A custom binding, not `$draft.mealSwipes` directly, so
     /// `screenshotManualEdits.hasManuallyEditedMealSwipes` latches on genuine
     /// user interaction only — never on an AI-applied write, which mutates
-    /// `draft` directly rather than through this binding. V1 meal-swipe
-    /// requirement (W3-C1): meal swipes only, no Dining Dollars — a bounded
-    /// menu, not free-form entry, so this app can never submit a value the
-    /// backend would refuse.
+    /// `draft` directly rather than through this binding. A bounded menu, not
+    /// free-form entry, so this app can never submit a value the backend
+    /// would refuse.
     private var mealSwipesControl: some View {
         Menu {
             ForEach(RequestFoodFormDraft.mealSwipeOptions, id: \.self) { count in
@@ -1971,7 +2321,6 @@ struct RequestFoodView: View {
     }
 
     static let yourOrderEyebrow = "YOUR ORDER"
-    static let pickupEyebrow = "PICKUP"
     static let diningLocationLabel = "Dining location"
     static let selectDiningLocationPlaceholder = "Choose dining location"
     static let orderDetailsLabel = "Order details"
@@ -1979,9 +2328,40 @@ struct RequestFoodView: View {
     static let mealSwipesLabel = "Meal swipes"
     static let timingLabel = "Timing"
     static let chooseTimeLabel = "Choose time"
-    static let pickupNameLabel = "Name on order"
-    static let pickupNamePlaceholder = "Name for the Grubhub order"
     static let postRequestLabel = "Post request"
+
+    // MARK: - W4-R4 structured request copy
+
+    static let menuPathLabel = "Which menu are you using?"
+    static let mealExchangeTitle = "Meal Exchange"
+    static let diningDollarsTitle = "Dining Dollars"
+    static let menuPathOptions: [RequestMenuPath] = [.mealExchange, .diningDollars]
+
+    static func menuPathTitle(_ menuPath: RequestMenuPath) -> String {
+        switch menuPath {
+        case .mealExchange: return mealExchangeTitle
+        case .diningDollars: return diningDollarsTitle
+        }
+    }
+
+    /// One label per selected swipe, numbered from the requester's point of
+    /// view rather than from the zero-based draft index.
+    static func mealDetailLabel(index: Int) -> String {
+        "Meal \(index + 1)"
+    }
+
+    static let mealDetailPlaceholder = "What would you like for this meal swipe?"
+    static let diningDollarsOptionalLabel = "Estimated Dining Dollars (optional)"
+    static let diningDollarsRequiredLabel = "Estimated Dining Dollars"
+    static let diningDollarsPlaceholder = "$0.00"
+    /// States plainly that leaving the field empty is a real answer, so no
+    /// requester feels obliged to invent an amount they do not need.
+    static let diningDollarsOptionalNote =
+        "Leave empty if you don’t need any Dining Dollars. Up to $25.00."
+    /// The estimate is explicitly an estimate: CommonPlate does not process
+    /// payments and cannot promise the provider's final total.
+    static let diningDollarsEstimateNote =
+        "An estimate, not a guaranteed total. Up to $50.00."
     static let asapTimingNotice =
         "If no one places the order, it expires 3 hours after you post it."
     /// W4-R2 2026-09-02 sync item 4: exact on-demand explanation replacing
@@ -2142,10 +2522,7 @@ struct RequestFoodView: View {
             calendar: calendar
         )
         let errors = RequestFoodFormValidator.validate(
-            selectedDiningSpot: draft.selectedDiningSpot,
-            foodRequest: draft.foodRequest,
-            pickupName: draft.pickupName,
-            timing: draft.timing,
+            draft: draft,
             isScheduledWindowValid: scheduledWindowIsValid,
             // Same `now` as the window check above: one snapshot decides both
             // halves of this submission, so they cannot disagree.
@@ -2165,16 +2542,7 @@ struct RequestFoodView: View {
             )
         }
 
-        let payload = try makePayload(
-            selectedDiningSpot: draft.selectedDiningSpot,
-            foodRequest: draft.foodRequest,
-            pickupName: draft.pickupName,
-            timing: draft.timing,
-            preferredPickupTime: draft.preferredPickupTime,
-            mealSwipes: draft.mealSwipes,
-            now: now,
-            calendar: calendar
-        )
+        let payload = try makePayload(draft: draft, now: now, calendar: calendar)
         try await submission(payload)
         return RequestFoodSubmissionResult(
             presentation: updatedPresentation,
@@ -2188,10 +2556,7 @@ struct RequestFoodView: View {
     /// and what is drawn are all answers about the same instant.
     private func validationErrors(now: Date) -> [RequestFoodFieldError] {
         RequestFoodFormValidator.validate(
-            selectedDiningSpot: draft.selectedDiningSpot,
-            foodRequest: draft.foodRequest,
-            pickupName: draft.pickupName,
-            timing: draft.timing,
+            draft: draft,
             isScheduledWindowValid: Self.isValidScheduledWindow(
                 startingAt: draft.preferredPickupTime,
                 now: now,
@@ -2384,26 +2749,26 @@ struct RequestFoodView: View {
         return formatter.string(from: date)
     }
 
+    /// Builds the exact payload this draft submits.
+    ///
+    /// W4-R4: the structured half is taken from the draft's *active* values
+    /// only. A meal field the requester hid by lowering their swipe count is
+    /// excluded here, by construction — `activeMealEntries` never reaches
+    /// past the active count, so hidden content cannot be sent and then
+    /// filtered somewhere downstream. The draft keeps that content; the
+    /// request simply does not contain it.
     static func makePayload(
-        selectedDiningSpot: DiningSpot?,
-        foodRequest: String,
-        pickupName: String,
-        timing: RequestTiming,
-        preferredPickupTime: Date,
-        mealSwipes: Int,
+        draft: RequestFoodFormDraft,
         now: Date,
         calendar: Calendar
     ) throws -> CreateRequestPayload {
         let scheduledWindowIsValid = isValidScheduledWindow(
-            startingAt: preferredPickupTime,
+            startingAt: draft.preferredPickupTime,
             now: now,
             calendar: calendar
         )
         let errors = RequestFoodFormValidator.validate(
-            selectedDiningSpot: selectedDiningSpot,
-            foodRequest: foodRequest,
-            pickupName: pickupName,
-            timing: timing,
+            draft: draft,
             isScheduledWindowValid: scheduledWindowIsValid,
             isScheduledTimingAvailable: isScheduledTimingAvailable(
                 now: now,
@@ -2413,23 +2778,50 @@ struct RequestFoodView: View {
         if let firstError = errors.first {
             throw firstError.error
         }
-        guard let selectedDiningSpot else {
+        guard let selectedDiningSpot = draft.selectedDiningSpot else {
             throw RequestFoodFormError.missingDiningSpot
         }
 
         let trimmedVendor = selectedDiningSpot.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedFood = foodRequest.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedPickupName = pickupName.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        switch timing {
+        // Exact cents, never a `Double`. `.empty` on the Meal Exchange path
+        // sends no amount at all rather than a fabricated `$0.00`; validation
+        // above has already refused `.empty` on the Dining-Dollars-only path,
+        // where it is required.
+        let estimatedDiningDollarsCents: Int?
+        switch draft.diningDollars {
+        case .cents(let cents):
+            estimatedDiningDollarsCents = cents
+        case .empty, .invalid:
+            estimatedDiningDollarsCents = nil
+        }
+
+        let menuPath: RequestMenuPathWire
+        let mealItems: [String]
+        let orderDetails: String?
+        switch draft.menuPath {
+        case .mealExchange:
+            menuPath = .mealExchange
+            mealItems = draft.activeMealEntries
+            orderDetails = nil
+        case .diningDollars:
+            menuPath = .diningDollars
+            mealItems = []
+            orderDetails = draft.orderDetails
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        switch draft.timing {
         case .asap:
             return CreateRequestPayload(
                 vendor: trimmedVendor,
-                food: trimmedFood,
-                pickupName: trimmedPickupName,
                 timing: .asap,
                 windowStart: nil,
-                mealSwipes: mealSwipes
+                menuPath: menuPath,
+                mealSwipes: draft.activeMealSwipes,
+                mealItems: mealItems,
+                orderDetails: orderDetails,
+                estimatedDiningDollarsCents: estimatedDiningDollarsCents
             )
         case .later:
             // Only the start. The end of a request's availability is derived
@@ -2438,11 +2830,13 @@ struct RequestFoodView: View {
             // claim authority this app does not have.
             return CreateRequestPayload(
                 vendor: trimmedVendor,
-                food: trimmedFood,
-                pickupName: trimmedPickupName,
                 timing: .scheduled,
-                windowStart: preferredPickupTime,
-                mealSwipes: mealSwipes
+                windowStart: draft.preferredPickupTime,
+                menuPath: menuPath,
+                mealSwipes: draft.activeMealSwipes,
+                mealItems: mealItems,
+                orderDetails: orderDetails,
+                estimatedDiningDollarsCents: estimatedDiningDollarsCents
             )
         }
     }
@@ -2496,8 +2890,8 @@ struct RequestFoodView: View {
 /// W4-R2 approved `Requester / Form Field` visual language (Figma node
 /// `209:364`): a bold field label with inline trailing `Filled from
 /// screenshot` provenance, and a bordered warm-canvas control box beneath.
-/// Reused for Dining location, Order details, Meal swipes, and Pickup name —
-/// the four approved field kinds. Purely presentational: it owns no draft
+/// Reused for the requester form's approved field kinds (Dining location,
+/// Order details, Meal swipes). Purely presentational: it owns no draft
 /// state and enforces no validation; the caller's `content` is the actual
 /// interactive control.
 struct RequesterFormFieldContainer<Content: View>: View {

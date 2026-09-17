@@ -5,9 +5,15 @@ import { z } from "zod";
 import {
   type IRequest,
   Request as MealRequest,
+  REQUEST_OPERATION_CREATED,
+  REQUEST_OPERATION_NO_CREATE,
   RequestOperation,
 } from "../models/db.js";
 import { escapeHtml } from "./htmlEscape.js";
+import {
+  checkOperationAuthority,
+  sendOperationAuthorityRefusal,
+} from "./requestOperationAuthority.js";
 import { startHelperNewRequestPush } from "./helperNewRequestPush.js";
 import { isValidRawInstallationCredential } from "./installationCredential.js";
 import { notifySubscribersForRequest } from "./notifySubscribers.js";
@@ -36,6 +42,12 @@ import {
   resolveParticipantAuthority,
   sendParticipantAuthorityRefusal,
 } from "./participantAuthorityGate.js";
+import {
+  deriveFoodSummary,
+  refineStructuredRequest,
+  structuredRequestFields,
+  type StructuredRequestInput,
+} from "./structuredRequest.js";
 
 /**
  * Per-IP create throttle that returns the structured error envelope. Because
@@ -86,9 +98,20 @@ export const OPERATION_EXPIRED_CODE = "OPERATION_EXPIRED";
 export const OPERATION_EXPIRED_MESSAGE =
   "This request can no longer be recovered. Submit a new request if you still want one.";
 
+/**
+ * W4-D2 terminal NO-CREATE: backend authority has durably established that
+ * this exact operation identity never created a Request and never will
+ * (`requestOperationTerminalRoute.ts`). Definitive, permanent, and distinct
+ * from `OPERATION_EXPIRED`, which says a Request once existed. Presenting the
+ * same identity again never falls through to validation or a create.
+ */
+export const OPERATION_NOT_CREATED_CODE = "OPERATION_NOT_CREATED";
+export const OPERATION_NOT_CREATED_MESSAGE =
+  "This request was not posted. Submit a new request if you still want one.";
+
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
-function isValidOperationId(value: string): boolean {
+export function isValidOperationId(value: string): boolean {
   return OPERATION_ID_PATTERN.test(value);
 }
 
@@ -102,7 +125,7 @@ function isValidOperationId(value: string): boolean {
  * one exact identity, exactly the same reasoning the participant gate applies
  * to its own header.
  */
-function readOperationIdentity(req: Request): string | null | undefined {
+export function readOperationIdentity(req: Request): string | null | undefined {
   const header = req.headers?.[OPERATION_IDENTITY_HEADER];
   if (header === undefined) return undefined;
   if (typeof header === "string") return header;
@@ -131,10 +154,11 @@ function operationBelongsToParticipant(
   );
 }
 
-type OperationReconciliation =
+export type OperationReconciliation =
   | { outcome: "created"; document: PublicRequestDocument }
   | { outcome: "unauthorized" }
   | { outcome: "expired" }
+  | { outcome: "not-created" }
   | { outcome: "not-found" };
 
 /**
@@ -149,6 +173,12 @@ type OperationReconciliation =
  * bounded recovery horizon — a terminal `"expired"` outcome, never
  * `"not-found"`, so cleanup of the original Request can never make this exact
  * identity look like a fresh one.
+ *
+ * W4-D2: a terminal NO-CREATE row answers `"not-created"`, but only to the
+ * participant that owns it — the ownership check runs first, so another
+ * participant learns nothing about which terminal outcome the identity holds.
+ * `"not-found"` remains what it always was: no row yet, which is never
+ * terminal authority on its own.
  */
 async function reconcileOperation(
   operationId: string,
@@ -161,6 +191,9 @@ async function reconcileOperation(
   if (!ledgerEntry) return { outcome: "not-found" };
   if (String(ledgerEntry.participantId) !== participantId) {
     return { outcome: "unauthorized" };
+  }
+  if (ledgerEntry.outcome === REQUEST_OPERATION_NO_CREATE) {
+    return { outcome: "not-created" };
   }
 
   const existing = await MealRequest.findOne({
@@ -218,7 +251,14 @@ async function createRequestWithOperation(
         session,
       });
       await RequestOperation.create(
-        [{ operationId, participantId, requestId: createdDocument._id }],
+        [
+          {
+            operationId,
+            participantId,
+            outcome: REQUEST_OPERATION_CREATED,
+            requestId: createdDocument._id,
+          },
+        ],
         { session }
       );
       created = createdDocument;
@@ -234,6 +274,9 @@ async function createRequestWithOperation(
     // against another in-flight create for the same exact operation, and
     // aborted — including its Request insert. Reconciling here finds the
     // winner's row and answers with it instead of a spurious failure.
+    // W4-D2: the winner may instead be terminalization's NO-CREATE row, in
+    // which case this create resolves to that terminal outcome — never to a
+    // write-uncertain failure merely because it lost the race.
     if (isDuplicateKeyError(error)) {
       const reconciliation = await reconcileOperation(
         operationId,
@@ -246,6 +289,53 @@ async function createRequestWithOperation(
     throw error;
   } finally {
     await session.endSession();
+  }
+}
+
+/**
+ * W4-D2 exact-operation terminal authority. For one exact identity and the
+ * participant already resolved from authority, answers the one terminal
+ * outcome that identity holds, establishing NO-CREATE when nothing else has
+ * won:
+ *
+ * - an identity that created answers `"created"` (or `"expired"` once that
+ *   Request is gone) exactly as replay does;
+ * - an identity owned by another participant answers `"unauthorized"`;
+ * - an identity already terminalized answers `"not-created"` again;
+ * - otherwise a NO-CREATE row is inserted and `"not-created"` is answered.
+ *
+ * The insert into `request_operation_ledger_identity_unique` — the same index
+ * `createRequestWithOperation` inserts into inside its transaction — is the
+ * linearization point. If the create's transaction commits first, this insert
+ * loses with a duplicate-key error and the reconciliation below answers the
+ * created outcome. If this insert commits first, the create's ledger insert
+ * loses instead, its transaction (Request included) aborts, and that create
+ * answers NO-CREATE. The leading read is only a fast path; it is never what
+ * decides the outcome, so a missing row alone is never treated as terminal.
+ *
+ * Reads, stores, and needs no request content, and consumes no quota and
+ * sends no notification: the only possible write is the NO-CREATE row.
+ */
+export async function terminalizeOperation(
+  operationId: string,
+  participantId: string
+): Promise<Exclude<OperationReconciliation, { outcome: "not-found" }>> {
+  const existing = await reconcileOperation(operationId, participantId);
+  if (existing.outcome !== "not-found") return existing;
+
+  try {
+    await RequestOperation.create({
+      operationId,
+      participantId,
+      outcome: REQUEST_OPERATION_NO_CREATE,
+    });
+    return { outcome: "not-created" };
+  } catch (error) {
+    if (isDuplicateKeyError(error)) {
+      const winner = await reconcileOperation(operationId, participantId);
+      if (winner.outcome !== "not-found") return winner;
+    }
+    throw error;
   }
 }
 
@@ -276,29 +366,30 @@ const optionalInstallationCredential = z
   .refine(isValidRawInstallationCredential)
   .optional();
 
+/**
+ * W4-R4: `food` and `pickupName` are both gone from every accepted shape.
+ * `pickupName` is removed from the V1 request contract entirely, and `food`
+ * is no longer client-supplied at all — it is derived at creation from the
+ * structured representation (`src/structuredRequest.ts`), so there is exactly
+ * one authoritative request representation with no second flat-food ingress
+ * path. `.strict()` on each schema below means a client still sending either
+ * key is refused as a structural failure rather than having it silently
+ * ignored.
+ */
 const requesterFields = {
   vendor: requesterString,
-  food: requesterString,
-  pickupName: requesterString,
   email: submittedRequesterEmail.optional(),
 };
-
-/**
- * V1 meal-swipe requirement (W3-C1): an exact integer 1 through 5. Required on
- * every accepted request shape, including `legacyWebSchema` — the legacy web
- * form has no picker to supply it yet, so its submissions are rejected like
- * any other missing-field submission until later website-parity work.
- */
-const mealSwipesField = z.number().int().min(1).max(5);
 
 const canonicalAsapSchema = z
   .object({
     ...requesterFields,
+    ...structuredRequestFields,
     timing: z.literal("asap"),
-    mealSwipes: mealSwipesField,
     installationCredential: optionalInstallationCredential,
   })
-  .strict();
+  .strict()
+  .superRefine(refineStructuredRequest);
 
 /**
  * The requester selects one instant, and only one. Under the W3-R1 timing
@@ -311,12 +402,13 @@ const canonicalAsapSchema = z
 const canonicalScheduledSchema = z
   .object({
     ...requesterFields,
+    ...structuredRequestFields,
     timing: z.literal("scheduled"),
     windowStart: isoTimestamp,
-    mealSwipes: mealSwipesField,
     installationCredential: optionalInstallationCredential,
   })
-  .strict();
+  .strict()
+  .superRefine(refineStructuredRequest);
 
 const canonicalSchema = z.union([
   canonicalAsapSchema,
@@ -339,13 +431,23 @@ const canonicalSchema = z.union([
 const legacyWebSchema = z
   .object({
     ...requesterFields,
+    ...structuredRequestFields,
     pickupWindowText: requesterString,
     windowStart: isoTimestamp.optional(),
     windowEnd: isoTimestamp.optional(),
-    mealSwipes: mealSwipesField,
   })
   .strict()
-  .superRefine(({ windowStart, windowEnd }, context) => {
+  .superRefine((value, context) => {
+    // W4-R4: the legacy web shape validates the exact same structured
+    // representation the canonical iOS shapes do. The legacy form has no
+    // control that can supply it — exactly as it already had no meal-swipe
+    // picker (`docs/system-contract.md` section 6.2) — so its submissions
+    // stay rejected as ordinary missing-field failures until the separate
+    // website-parity work supplies them. Accepting a weaker flat shape here
+    // instead would reintroduce the second, unstructured ingress path R4
+    // exists to remove.
+    refineStructuredRequest(value, context);
+    const { windowStart, windowEnd } = value;
     if ((windowStart === undefined) !== (windowEnd === undefined)) {
       context.addIssue({
         code: "custom",
@@ -368,10 +470,15 @@ const legacyWebSchema = z
     }
   });
 
+/**
+ * The validated create request. `structured` carries the complete W4-R4
+ * structured representation exactly as submitted — this route persists those
+ * values as received and derives `food` from them, never a fallback,
+ * migrated, or inferred value.
+ */
 interface ValidatedCreateRequest {
   vendor: string;
-  food: string;
-  pickupName: string;
+  structured: StructuredRequestInput;
   /**
    * What the caller claimed, when it claimed anything. Compared against the
    * verified principal and then discarded; the persisted requester is always
@@ -385,13 +492,25 @@ interface ValidatedCreateRequest {
    * and the display text are all derived from it plus the backend clock.
    */
   windowStart?: Date;
-  /**
-   * Required on every accepted request shape (W3-C1); this route persists it
-   * exactly as received — never a fallback or migrated value.
-   */
-  mealSwipes: number;
   /** Present only on the canonical iOS shapes; the legacy web shape has none. */
   installationCredential?: string;
+}
+
+/**
+ * Lifts the structured half out of an already-parsed create payload. The
+ * `mealItems` normalization is deliberate rather than cosmetic: a Meal
+ * Exchange request always persists an explicit array, and a
+ * Dining-Dollars-only request always persists an empty one, so no reader
+ * downstream has to distinguish "absent" from "none".
+ */
+function structuredFrom(data: StructuredRequestInput): StructuredRequestInput {
+  return {
+    menuPath: data.menuPath,
+    mealSwipes: data.mealSwipes,
+    mealItems: data.mealItems ?? [],
+    orderDetails: data.orderDetails,
+    estimatedDiningDollarsCents: data.estimatedDiningDollarsCents,
+  };
 }
 
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -419,6 +538,12 @@ function requestTimingWindow(
 
 function errorEnvelope(code: string, message: string) {
   return { error: { code, message } };
+}
+
+function sendOperationNotCreated(res: Response): Response {
+  return res
+    .status(409)
+    .json(errorEnvelope(OPERATION_NOT_CREATED_CODE, OPERATION_NOT_CREATED_MESSAGE));
 }
 
 function hasTiming(value: unknown): boolean {
@@ -482,11 +607,9 @@ function validateCreateShape(
     if (result.data.timing === "asap") {
       return {
         vendor: result.data.vendor,
-        food: result.data.food,
-        pickupName: result.data.pickupName,
+        structured: structuredFrom(result.data),
         submittedEmail: result.data.email,
         timing: "asap",
-        mealSwipes: result.data.mealSwipes,
         installationCredential: result.data.installationCredential,
       };
     }
@@ -496,12 +619,10 @@ function validateCreateShape(
 
     return {
       vendor: result.data.vendor,
-      food: result.data.food,
-      pickupName: result.data.pickupName,
+      structured: structuredFrom(result.data),
       submittedEmail: result.data.email,
       timing: "scheduled",
       windowStart,
-      mealSwipes: result.data.mealSwipes,
       installationCredential: result.data.installationCredential,
     };
   }
@@ -515,11 +636,9 @@ function validateCreateShape(
   ) {
     return {
       vendor: result.data.vendor,
-      food: result.data.food,
-      pickupName: result.data.pickupName,
+      structured: structuredFrom(result.data),
       submittedEmail: result.data.email,
       timing: "asap",
-      mealSwipes: result.data.mealSwipes,
     };
   }
 
@@ -528,12 +647,10 @@ function validateCreateShape(
 
   return {
     vendor: result.data.vendor,
-    food: result.data.food,
-    pickupName: result.data.pickupName,
+    structured: structuredFrom(result.data),
     submittedEmail: result.data.email,
     timing: "scheduled",
     windowStart,
-    mealSwipes: result.data.mealSwipes,
   };
 }
 
@@ -598,13 +715,16 @@ function validateCreateRequest(
 
 async function attemptRequesterConfirmation(
   request: ValidatedCreateRequest,
+  food: string,
   requesterEmail: string,
   pickupWindowText: string,
   requestId: string
 ): Promise<void> {
   const htmlVendor = escapeHtml(request.vendor);
-  const htmlFood = escapeHtml(request.food);
-  const htmlPickupName = escapeHtml(request.pickupName);
+  // The same derived summary persisted on the Request and shown to helpers
+  // (W4-R4), so the requester's confirmation describes exactly the request
+  // that exists. The `Pickup Name` line is gone with the field itself.
+  const htmlFood = escapeHtml(food);
   // The same backend-derived, NYU-campus-time text helpers see, so the
   // requester's confirmation cannot state a window the request does not have.
   const htmlPickupWindow = escapeHtml(pickupWindowText);
@@ -618,12 +738,11 @@ async function attemptRequesterConfirmation(
         <h2>Your meal request has been submitted!</h2>
         <p><strong>Vendor:</strong> ${htmlVendor}</p>
         <p><strong>Food:</strong> ${htmlFood}</p>
-        <p><strong>Pickup Name:</strong> ${htmlPickupName}</p>
         <p><strong>Pickup Window:</strong> ${htmlPickupWindow}</p>
         <p>When someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.</p>
         <p>Request ID: ${requestId}</p>
       `,
-      text: `Your meal request has been submitted!\nVendor: ${request.vendor}\nFood: ${request.food}\nPickup Name: ${request.pickupName}\nPickup Window: ${pickupWindowText}\nWhen someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.\nRequest ID: ${requestId}`,
+      text: `Your meal request has been submitted!\nVendor: ${request.vendor}\nFood: ${food}\nPickup Window: ${pickupWindowText}\nWhen someone helps, CommonPlate will attempt to email you the order details. Request creation does not guarantee that later email will be delivered.\nRequest ID: ${requestId}`,
     });
 
     if (result.error) {
@@ -722,6 +841,16 @@ export async function createRequest(
   }
   const operationId = operationHeader;
 
+  // W4-D2: a caller that names the ledger authority it recorded for this
+  // operation is served only by that ledger. Checked before the ledger is
+  // read, so a different or reset database behind the same URL can neither
+  // answer for the operation nor create under its identity. A caller that
+  // names none keeps the unchanged pre-D2 behavior.
+  const authorityCheck = await checkOperationAuthority(req);
+  if (authorityCheck === "mismatched" || authorityCheck === "unavailable") {
+    return sendOperationAuthorityRefusal(res, authorityCheck);
+  }
+
   if (operationId !== undefined) {
     let reconciliation: OperationReconciliation;
     try {
@@ -750,6 +879,11 @@ export async function createRequest(
       return res
         .status(410)
         .json(errorEnvelope(OPERATION_EXPIRED_CODE, OPERATION_EXPIRED_MESSAGE));
+    }
+    if (reconciliation.outcome === "not-created") {
+      // W4-D2: terminal and permanent. A terminalized identity never falls
+      // through to validation, quota, or a create.
+      return sendOperationNotCreated(res);
     }
     if (reconciliation.outcome === "created") {
       return res
@@ -837,11 +971,28 @@ export async function createRequest(
       );
     }
 
+    // W4-R4: the structured representation is persisted exactly as submitted,
+    // and `food` is derived from it once, here, so the stored summary can
+    // never contradict the structured fields it summarizes.
+    const { structured } = validated;
+    const food = deriveFoodSummary(structured);
+
     const documentFields = {
       vendor: validated.vendor,
-      food: validated.food,
-      pickupName: validated.pickupName,
-      mealSwipes: validated.mealSwipes,
+      food,
+      menuPath: structured.menuPath,
+      mealSwipes: structured.mealSwipes,
+      mealItems: structured.mealItems ?? [],
+      // Spread conditionally rather than written as an explicit `undefined`:
+      // an absent Dining Dollar estimate means the requester needs none, and
+      // the persisted document says so by carrying no field at all rather
+      // than by carrying a key whose value happens to be undefined.
+      ...(structured.orderDetails !== undefined
+        ? { orderDetails: structured.orderDetails }
+        : {}),
+      ...(structured.estimatedDiningDollarsCents !== undefined
+        ? { estimatedDiningDollarsCents: structured.estimatedDiningDollarsCents }
+        : {}),
       // Both written from the resolved participant, never from the payload.
       // `email` stays the requester address every downstream path already
       // reads; `requesterParticipantId` is the durable binding to the identity
@@ -907,6 +1058,12 @@ export async function createRequest(
               errorEnvelope(OPERATION_EXPIRED_CODE, OPERATION_EXPIRED_MESSAGE)
             );
         }
+        if (reconciliation.outcome === "not-created") {
+          // Terminalization won the identity before this transaction's
+          // ledger insert, so the transaction — Request included — rolled
+          // back. Nothing was created, and nothing ever will be.
+          return sendOperationNotCreated(res);
+        }
         if (reconciliation.outcome === "not-found") {
           // Unreachable in practice: `createRequestWithOperation` only
           // reaches reconciliation after a duplicate-key error, which means
@@ -936,6 +1093,7 @@ export async function createRequest(
 
     await attemptRequesterConfirmation(
       validated,
+      food,
       principal,
       pickupWindowText,
       requestId
