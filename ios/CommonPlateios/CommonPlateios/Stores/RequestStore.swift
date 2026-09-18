@@ -433,7 +433,19 @@ enum RequestCreateRecoveryPresentation: Equatable {
     case identityUnavailable
     /// Backend authority established terminal NO-CREATE for the operation.
     /// Informational until acknowledged; it blocks nothing.
-    case notCreated
+    ///
+    /// W4-D2 2026-09-17 Path A/B split, FIX 2026-09-18 (independent-review
+    /// MUST FIX 1): the exact ambiguity-recovery payload remains private to
+    /// `RequestStore` — this presentation carries only which terminal
+    /// NO-CREATE case applies, never the frozen `CreateRequestPayload`
+    /// itself. `.notCreatedRecoverable` is Path A: the payload was actually
+    /// readable at the moment NO-CREATE was established, and
+    /// `consumeRecoverableDraftForReturnToRequest()` is the one store-owned
+    /// way to act on it. `.notCreatedUnavailable` is Path B: NO-CREATE was
+    /// reached with an unreadable payload (matrix row 2), so
+    /// `Start a new request` opens an empty form.
+    case notCreatedRecoverable
+    case notCreatedUnavailable
 }
 
 /// Stable backend claim and extension error codes, centralized so handling
@@ -480,6 +492,43 @@ enum RequestCreationAvailability: Equatable {
     case paused
     /// The probe failed, returned a non-success status, or could not be decoded.
     case unavailable
+}
+
+/// W4-D2 Success→Home continuity state.
+///
+/// Deliberately not a bare `FoodRequest?`: a plain optional carries no
+/// evidence of *which* operation produced it or *whose* it is, so a value
+/// left behind by an interrupted earlier operation is indistinguishable from
+/// a live one and can be presented for a later, unrelated create. Every field
+/// here exists to make that reuse structurally impossible:
+///
+/// - `id` is the presentation identity. Retirement is addressed to it, so a
+///   late callback from a superseded presentation can only ever retire its
+///   own.
+/// - `operationId` binds the presentation to the exact request-create
+///   operation backend authority confirmed CREATED.
+/// - `participantAuthority` is the authority current at that confirmation,
+///   so an authority change can retire it without guessing.
+/// - `request` is the ownership-resolved requester-owned request itself, as
+///   `applyConfirmed` resolved it under that same authority — the actual
+///   Home card, never a synthetic or approximate one.
+struct RequestCreationContinuity: Identifiable, Equatable {
+    let id: UUID
+    let operationId: String
+    let participantAuthority: String
+    let request: FoodRequest
+
+    init(
+        id: UUID = UUID(),
+        operationId: String,
+        participantAuthority: String,
+        request: FoodRequest
+    ) {
+        self.id = id
+        self.operationId = operationId
+        self.participantAuthority = participantAuthority
+        self.request = request
+    }
 }
 
 @MainActor
@@ -561,6 +610,66 @@ final class RequestStore: ObservableObject {
     /// terminal NO-CREATE retired an operation and nothing else blocks.
     @Published private(set) var createRecoveryPresentation: RequestCreateRecoveryPresentation = .none
 
+    /// W4-D2 Success→Home continuity: the one live continuity presentation,
+    /// scoped to the exact operation just authoritatively confirmed CREATED
+    /// for the authority current at that confirmation. Never a bare
+    /// "last created request" — see `RequestCreationContinuity` for why the
+    /// identity is what makes stale reuse structurally impossible.
+    ///
+    /// Published only by the two create-confirmation sites
+    /// (`createRequest(_:)` and `reconcilePendingCreateOperationIfNeeded()`),
+    /// and only when `applyConfirmed`'s own single still-current-authority
+    /// read actually resolved the created request as this participant's own
+    /// and inserted it. An authority that changed mid-flight therefore
+    /// publishes nothing at all, so no surface can present a fabricated or
+    /// stale actual-card continuity for it.
+    ///
+    /// Retired by `retireCreationContinuity(id:)` on every path that ends the
+    /// presentation or supersedes it: the landing itself, the presenting
+    /// view's disappearance/cancellation, a later create attempt, a later
+    /// reconciliation pass, and any participant/authority change observed by
+    /// `refreshPendingCreateState()`.
+    @Published private(set) var createdRequestContinuity: RequestCreationContinuity?
+
+    /// Retires the continuity presentation identified by `id`, and only that
+    /// one. Taking the identity rather than clearing unconditionally is the
+    /// point: a late callback from a superseded presentation (a cancelled
+    /// Success task, a disappearing view) can never retire the continuity of
+    /// an operation confirmed after it. Idempotent, and a no-op for an
+    /// identity that is no longer current.
+    func retireCreationContinuity(id: UUID) {
+        guard createdRequestContinuity?.id == id else { return }
+        createdRequestContinuity = nil
+    }
+
+    /// Publishes continuity for one authoritatively confirmed CREATED
+    /// operation. Any earlier continuity is superseded in the same step, so
+    /// two can never be live at once.
+    private func publishCreationContinuity(
+        operationId: String,
+        participantAuthority: String,
+        request: FoodRequest
+    ) {
+        createdRequestContinuity = RequestCreationContinuity(
+            operationId: operationId,
+            participantAuthority: participantAuthority,
+            request: request
+        )
+    }
+
+    /// Retires any live continuity whose authority is no longer the one
+    /// current now — a participant verified, replaced, removed, or discarded
+    /// mid-presentation. Called from `refreshPendingCreateState()`, which is
+    /// already the one place participant change is re-derived locally, so no
+    /// surface has to re-derive authority for itself.
+    private func retireCreationContinuityIfAuthorityChanged() {
+        guard let continuity = createdRequestContinuity else { return }
+        guard participantAuthorityProvider() == continuity.participantAuthority else {
+            createdRequestContinuity = nil
+            return
+        }
+    }
+
     /// W4-D2 in-process recovery bookkeeping. The durable entries themselves
     /// are the recovery state; these only refine how it is presented.
     ///
@@ -574,12 +683,18 @@ final class RequestStore: ObservableObject {
     /// - `inFlightCreateOperationId`: the fresh create being posted right
     ///   now, whose own entry is not yet a block.
     /// - `hasNotCreatedNotice`: terminal NO-CREATE retired an operation and
-    ///   the requester has not yet chosen to start a new request.
+    ///   the requester has not yet chosen `Return to request`/`Start a new
+    ///   request`.
+    /// - `notCreatedRecoverablePayload`: the frozen payload behind that
+    ///   notice, exactly as `reconcilePendingCreateOperationIfNeeded()`
+    ///   established it (Path A) — `nil` when the payload was unreadable at
+    ///   that moment (Path B). Meaningful only while `hasNotCreatedNotice`.
     private var unrecordedCreateAmbiguity: RequestServiceError?
     private var pendingCreateErrors: [String: RequestServiceError] = [:]
     private var authorityMismatchedOperations: Set<String> = []
     private var inFlightCreateOperationId: String?
     private var hasNotCreatedNotice = false
+    private var notCreatedRecoverablePayload: CreateRequestPayload?
 
     @Published private(set) var isClaiming = false
     @Published private(set) var claimErrorEvent: ClaimErrorEvent?
@@ -1090,10 +1205,22 @@ final class RequestStore: ObservableObject {
         }
         isCreating = true
         createError = nil
+        // W4-D2 continuity supersession: a later intentional create retires
+        // any continuity still live from an earlier one, whatever happened to
+        // that presentation (its dwell was cut short, its screen went away,
+        // its task was cancelled). A previous request's card can therefore
+        // never be shown as the outcome of this create — this attempt either
+        // publishes its own continuity on authoritative CREATED, or there is
+        // none.
+        createdRequestContinuity = nil
         // A new intentional submission supersedes a NO-CREATE notice about an
-        // older, already-retired operation.
+        // older, already-retired operation. W4-D2 FIX (rereview MUST FIX 1):
+        // this must retire the notice and its private payload together —
+        // `retireNotCreatedNotice()` is the one coupled primitive for that,
+        // so a fresh create can never leave the old payload allocated behind
+        // a now-hidden notice.
         if hasNotCreatedNotice {
-            hasNotCreatedNotice = false
+            retireNotCreatedNotice()
             refreshPendingCreateState()
         }
         defer { isCreating = false }
@@ -1176,11 +1303,43 @@ final class RequestStore: ObservableObject {
             inFlightCreateOperationId = nil
             retirePendingCreate(operationId: operationId)
             advanceCollectionRevision()
-            // W4-R2 2026-09-05 sync item 5: this request has never been
-            // fetched, so H4's own authoritative fetch — not this create
-            // confirmation — is what surfaces it on Home, in H4's own order
-            // and partition.
-            applyConfirmed(created, createdUnderAuthority: participantAuthority, insertIfMissing: false)
+            // W4-D2 Success→Home continuity (narrowly supersedes the W4-R2
+            // 2026-09-05 "no R2-authored Home insertion" note this replaces,
+            // for the still-current-authority case only): the accepted
+            // Success→Home continuity sequence requires the requester-owned
+            // Home card to already exist, in its correct newest-first slot,
+            // the instant Home is revealed — it cannot depend on H4's own
+            // authoritative fetch completing first, which is unbounded and
+            // can race the reveal. `applyConfirmed` inserts only when this
+            // exact authority is still current at its own one read of
+            // `participantAuthorityProvider()` (the same read that resolves
+            // ownership) — an authority that changed mid-flight keeps the
+            // original "never insert" behavior unchanged, and its return
+            // value's `isOwnRequest` reports that same single-read answer, so
+            // `justCreatedOwnRequest` cannot disagree with it via a separate,
+            // possibly-stale re-read. H4's own ownership partition/newest-
+            // first ordering (`HomeExchangeView.partitionByOwnership`) still
+            // owns where it lands, and a later authoritative fetch simply
+            // reconciles the same entry in place.
+            let confirmedOwnRequest = applyConfirmed(
+                created,
+                createdUnderAuthority: participantAuthority,
+                insertIfMissing: true
+            )
+            // `isOwnRequest` here is exactly `applyConfirmed`'s own single
+            // still-current-authority read: true only when this authority is
+            // still current and the card was actually inserted into the
+            // collection Home renders. Continuity is therefore published only
+            // for a request that genuinely has a current-authority Home slot
+            // to land in; an authority that changed mid-flight publishes
+            // nothing, and the Success presentation is not entered at all.
+            if confirmedOwnRequest.isOwnRequest, let participantAuthority {
+                publishCreationContinuity(
+                    operationId: operationId,
+                    participantAuthority: participantAuthority,
+                    request: confirmedOwnRequest
+                )
+            }
         } catch is CancellationError {
             // `RequestService.createRequest` only ever lets a raw
             // `CancellationError` reach here from its own leading
@@ -1242,6 +1401,11 @@ final class RequestStore: ObservableObject {
     /// - Only entries for a different, confirmed participant: not blocked,
     ///   and left untouched.
     func refreshPendingCreateState() {
+        // W4-D2 continuity lifetime: this is already the one local re-derivation
+        // of "whose operations are these, for the participant current now",
+        // called on every participant/identity change, so it is also where a
+        // continuity presentation belonging to a superseded authority retires.
+        retireCreationContinuityIfAuthorityChanged()
         let entries = operationStorage.restoreAll()
         let restored = entries.compactMap { entry -> RestoredPendingRequestOperation? in
             guard case .restored(let operation) = entry,
@@ -1294,12 +1458,24 @@ final class RequestStore: ObservableObject {
         )
     }
 
+    /// W4-D2 FIX (rereview MUST FIX 1): the one store-owned way to retire the
+    /// terminal NO-CREATE notice and the private payload behind it together.
+    /// `hasNotCreatedNotice` and `notCreatedRecoverablePayload` share one
+    /// lifetime by construction — every path that hides, supersedes, or
+    /// consumes the notice must go through this rather than clearing either
+    /// flag on its own, so a payload can never outlive the notice it belongs
+    /// to or survive into a later, unrelated operation.
+    private func retireNotCreatedNotice() {
+        hasNotCreatedNotice = false
+        notCreatedRecoverablePayload = nil
+    }
+
     private func setCreateBlock(
         _ error: RequestServiceError,
         presentation: RequestCreateRecoveryPresentation
     ) {
         // A block supersedes any NO-CREATE notice about an older operation.
-        hasNotCreatedNotice = false
+        retireNotCreatedNotice()
         unresolvedCreateError = error
         if createRecoveryPresentation != presentation {
             createRecoveryPresentation = presentation
@@ -1310,7 +1486,14 @@ final class RequestStore: ObservableObject {
         if unresolvedCreateError != nil {
             unresolvedCreateError = nil
         }
-        let presentation: RequestCreateRecoveryPresentation = hasNotCreatedNotice ? .notCreated : .none
+        let presentation: RequestCreateRecoveryPresentation
+        if hasNotCreatedNotice {
+            presentation = notCreatedRecoverablePayload != nil
+                ? .notCreatedRecoverable
+                : .notCreatedUnavailable
+        } else {
+            presentation = .none
+        }
         if createRecoveryPresentation != presentation {
             createRecoveryPresentation = presentation
         }
@@ -1411,6 +1594,10 @@ final class RequestStore: ObservableObject {
 
         isCreating = true
         createError = nil
+        // Same supersession rule as a fresh create: a reconciliation pass
+        // that is about to establish its own terminal outcomes must not leave
+        // an earlier operation's continuity live behind it.
+        createdRequestContinuity = nil
         defer {
             isCreating = false
             refreshPendingCreateState()
@@ -1429,18 +1616,41 @@ final class RequestStore: ObservableObject {
                 // W4-H2: a reconciled D1 create is the same authenticated
                 // knowledge as a fresh one — this exact authority created this
                 // request — so it is confirmed `.owned` under that authority.
-                // Like a fresh create (W4-R2 2026-09-05 sync item 5), it only
-                // updates an entry already in the collection; H4's own
-                // authoritative fetch surfaces it, not this reconciliation.
-                applyConfirmed(created, createdUnderAuthority: participantAuthority, insertIfMissing: false)
+                // W4-D2 Success→Home continuity: `Check again`'s reconciled
+                // CREATED outcome enters the same Success→Home continuity
+                // screen as a fresh create (see `RequestFormPresentation`),
+                // so it needs the same immediate, correctly-ordered Home
+                // presence — see `applyConfirmed`'s own doc comment for why
+                // its single internal authority read (not a separate re-read
+                // here) governs both ownership and insertion together.
+                let confirmedOwnRequest = applyConfirmed(
+                    created,
+                    createdUnderAuthority: participantAuthority,
+                    insertIfMissing: true
+                )
+                // Identical rule to the fresh-create site above: a reconciled
+                // CREATED publishes continuity only when this authority is
+                // still current and the card was actually inserted, so
+                // reconciliation can never present a card the current
+                // participant does not own.
+                if confirmedOwnRequest.isOwnRequest {
+                    publishCreationContinuity(
+                        operationId: operationId,
+                        participantAuthority: participantAuthority,
+                        request: confirmedOwnRequest
+                    )
+                }
                 didCreate = true
-            case .notCreated:
+            case .notCreated(let recoverablePayload):
                 // Authoritative and permanent: the old operation can never
                 // create. Nothing is submitted in its place; a later
                 // intentional submission mints a fresh identity under
-                // ordinary rules.
+                // ordinary rules. `recoverablePayload` is Path A/B: the
+                // frozen payload when it was actually readable, `nil` when
+                // NO-CREATE was reached through matrix row 2 instead.
                 retirePendingCreate(operationId: operationId)
                 hasNotCreatedNotice = true
+                notCreatedRecoverablePayload = recoverablePayload
             case .retired:
                 retirePendingCreate(operationId: operationId)
             case .authorityMismatch:
@@ -1460,18 +1670,47 @@ final class RequestStore: ObservableObject {
         return didCreate
     }
 
-    /// Dismisses the terminal NO-CREATE notice after `Start a new request`.
-    /// Changes nothing else: the old operation is already retired, and a new
-    /// submission still goes through `createRequest` with a fresh identity.
+    /// Dismisses the terminal NO-CREATE notice after `Return to request` or
+    /// `Start a new request`. Changes nothing else: the old operation is
+    /// already retired, and a new submission still goes through
+    /// `createRequest` with a fresh identity — never the terminalized one.
     func acknowledgeCreateNotPosted() {
         guard hasNotCreatedNotice else { return }
-        hasNotCreatedNotice = false
+        retireNotCreatedNotice()
         refreshPendingCreateState()
+    }
+
+    /// W4-D2 FIX 2026-09-18 (independent-review MUST FIX 1): Path A's one
+    /// store-owned restoration operation. The raw `CreateRequestPayload`
+    /// behind a terminal NO-CREATE notice never leaves this store; this is
+    /// the only way a caller may act on it. Verifies the current terminal
+    /// recovery state is still the exact recoverable NO-CREATE notice this
+    /// operation established, then atomically consumes and retires it —
+    /// exactly like `acknowledgeCreateNotPosted()` — before returning a
+    /// restoration-ready `RequestFoodFormDraft` built from the payload.
+    /// Because the payload is cleared in the same step it is read, it can
+    /// never be consumed twice, and a later, unrelated NO-CREATE can never
+    /// inherit it.
+    ///
+    /// Returns `nil` when there is no recoverable notice to consume —
+    /// already consumed, acknowledged, superseded by a fresh submission, or
+    /// this is actually a Path B (unavailable) notice — so a caller can
+    /// never restore a stale, repeated, or nonexistent payload.
+    func consumeRecoverableDraftForReturnToRequest() -> RequestFoodFormDraft? {
+        guard hasNotCreatedNotice, let payload = notCreatedRecoverablePayload else {
+            return nil
+        }
+        retireNotCreatedNotice()
+        refreshPendingCreateState()
+        return RequestFoodFormDraft(restoring: payload)
     }
 
     private enum PendingCreateRecoveryOutcome {
         case created(FoodRequest)
-        case notCreated
+        /// W4-D2 2026-09-17 Path A/B: the frozen payload when it was actually
+        /// readable at this reconciliation (Path A), `nil` when NO-CREATE was
+        /// reached with an unreadable payload (matrix row 2, Path B).
+        case notCreated(recoverablePayload: CreateRequestPayload?)
         /// Retired without a requester-facing notice: expired, unauthorized,
         /// or an identity no create could ever accept.
         case retired
@@ -1559,7 +1798,9 @@ final class RequestStore: ObservableObject {
             applyParticipantVerdict(serviceError, presentedAuthority: participantAuthority)
             switch serviceError {
             case .serverError(let code, _) where code == RequestOperationErrorCode.operationNotCreated:
-                return .notCreated
+                // The exact payload just replayed is known and readable —
+                // Path A.
+                return .notCreated(recoverablePayload: payload)
             case .serverError(let code, _) where RequestOperationErrorCode.isTerminalOperationRetirement(code):
                 return .retired
             case .serverError(let code, _) where code == RequestOperationErrorCode.operationAuthorityMismatch:
@@ -1579,11 +1820,18 @@ final class RequestStore: ObservableObject {
             guard participantAuthorityProvider() == participantAuthority else {
                 return .unresolved(serviceError)
             }
-            return await terminalizePendingCreate(
+            // The exact payload just replayed is known and readable here too
+            // — a NO-CREATE reached through this post-lookup-refusal
+            // terminalization is still Path A, not Path B.
+            let outcome = await terminalizePendingCreate(
                 operationId: operationId,
                 participantAuthority: participantAuthority,
                 operationLedger: operationLedger
             )
+            if case .notCreated = outcome {
+                return .notCreated(recoverablePayload: payload)
+            }
+            return outcome
         }
     }
 
@@ -1602,7 +1850,11 @@ final class RequestStore: ObservableObject {
             case .created(let created):
                 return .created(created)
             case .notCreated:
-                return .notCreated
+                // Called with no payload in hand (matrix row 2 direct path)
+                // — Path B. A caller that does have the payload (the
+                // post-lookup-refusal fallback in `replayPendingCreate`)
+                // re-attaches it itself.
+                return .notCreated(recoverablePayload: nil)
             }
         } catch is CancellationError {
             return .unresolved(nil)
@@ -3371,34 +3623,50 @@ final class RequestStore: ObservableObject {
     /// If the authority changed while the create was in flight, the
     /// A-relative conclusion is not applied for B — ownership stays
     /// `.unresolved` and fails closed until B's own read resolves it.
-    /// W4-R2 2026-09-05 sync item 5: `insertIfMissing` defaults to `true`,
-    /// preserving this function's original behavior for every call site not
-    /// concerned with H4's Home-authority conflict — in particular claim
-    /// confirmation (`applyConfirmed(outcome.request)`), which always hits the
+    /// `insertIfMissing` defaults to `true`, preserving this function's
+    /// original behavior for every call site not concerned with
+    /// `createdUnderAuthority` at all — in particular claim confirmation
+    /// (`applyConfirmed(outcome.request)`), which always hits the
     /// update-in-place branch anyway, since a claimable request must already
-    /// exist in Home's fetched collection. Only R2's two create-confirmation
-    /// call sites (a fresh `createRequest` and D1's unresolved-create
-    /// reconciliation) pass `insertIfMissing: false`: a request neither has
-    /// ever been fetched, so both always exercised the append branch,
-    /// inserting the new request into Home's shared collection immediately on
-    /// creation — ahead of, and independent from, H4's own authoritative
-    /// fetch. H4's own committed contract already owns surfacing it, in the
-    /// correct order and partition, on the requester's next Home appearance.
+    /// exist in Home's fetched collection.
+    ///
+    /// W4-D2 Success→Home continuity: when `createdUnderAuthority` is given,
+    /// `insertIfMissing` is additionally gated by that *same* still-current-
+    /// authority read this function already performs for ownership — a
+    /// second, independent re-read at the call site would not necessarily
+    /// observe the same answer (an authority provider can advance between
+    /// two separate calls), which would let insertion and ownership resolve
+    /// inconsistently. An authority that changed mid-flight therefore never
+    /// inserts here at all, matching the superseded W4-R2 2026-09-05 sync
+    /// item 5 "never insert" behavior for that case exactly; only the
+    /// still-current-authority case inserts, per the W4-D2 Success→Home
+    /// continuity contract.
+    ///
+    /// `@discardableResult` so every existing call site not concerned with
+    /// the confirmed, ownership-resolved value (e.g. claim confirmation)
+    /// stays exactly as it was; the W4-D2 create-confirmation sites use the
+    /// return value to drive `justCreatedOwnRequest` below.
+    @discardableResult
     private func applyConfirmed(
         _ request: FoodRequest,
         createdUnderAuthority: String? = nil,
         insertIfMissing: Bool = true
-    ) {
+    ) -> FoodRequest {
         var confirmed = request
-        if let createdUnderAuthority,
-           participantAuthorityProvider() == createdUnderAuthority {
-            confirmed = request.withOwnership(.own)
+        var resolvedInsertIfMissing = insertIfMissing
+        if let createdUnderAuthority {
+            let isStillCurrentAuthority = participantAuthorityProvider() == createdUnderAuthority
+            if isStillCurrentAuthority {
+                confirmed = request.withOwnership(.own)
+            }
+            resolvedInsertIfMissing = insertIfMissing && isStillCurrentAuthority
         }
         if let index = requests.firstIndex(where: { $0.id == confirmed.id }) {
             requests[index] = confirmed
-        } else if insertIfMissing {
+        } else if resolvedInsertIfMissing {
             requests.append(confirmed)
         }
+        return confirmed
     }
 
     private static func asServiceError(_ error: Error) -> RequestServiceError {

@@ -414,7 +414,15 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         XCTAssertEqual(RequestFetchingURLProtocol.capturedRequestedPaths, [Self.createPath])
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
+        // Path A: the replayed payload was known and readable. The raw
+        // payload never leaves the store — presentation carries only the
+        // discriminator, and the consume operation is the sole way to see
+        // the exact restored content.
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedRecoverable)
+        XCTAssertEqual(
+            normalizingPickupTime(store.consumeRecoverableDraftForReturnToRequest()),
+            normalizingPickupTime(RequestFoodFormDraft(restoring: mealPayload("ROW1-NOT-CREATED meal")))
+        )
     }
 
     func testPostLookupRefusalsAreNotProofOnTheirOwn() async throws {
@@ -571,8 +579,11 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         XCTAssertNil(rawStoredValue)
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
         XCTAssertEqual(store.createRecoveryPresentation, .none)
-        // Same ingestion boundary as any reconciled create (W4-R2).
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity: same ingestion boundary as any
+        // reconciled create under the still-current authority — inserts
+        // immediately, ownership-resolved `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["row2-created"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
     }
 
     func testNoCreateRetiresTheOldOperationWithoutSubmittingAnythingAndALaterSubmissionIsFresh() async throws {
@@ -587,7 +598,8 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         XCTAssertNil(rawStoredValue)
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
         XCTAssertTrue(store.hasResolvedPendingCreateStateForRemoval)
-        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
+        // Path B: the payload was never readable.
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
         // Nothing was auto-submitted.
         XCTAssertEqual(RequestFetchingURLProtocol.capturedRequestedPaths, [Self.terminalPath])
 
@@ -612,7 +624,7 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         let store = makeStore(storage: UserDefaultsPendingRequestOperationStorage(defaults: defaults))
         RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: notCreatedBody))
         _ = await store.reconcilePendingCreateOperationIfNeeded()
-        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
 
         RequestFetchingURLProtocol.enqueue(.response(statusCode: 201, data: createdReplayBody(id: "fresh")))
         try await store.createRequest(mealPayload("Submitted without acknowledging"))
@@ -678,7 +690,7 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
             RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: notCreatedBody))
             _ = await store.reconcilePendingCreateOperationIfNeeded()
             XCTAssertNil(rawStoredValue, label)
-            XCTAssertEqual(store.createRecoveryPresentation, .notCreated, label)
+            XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable, label)
             XCTAssertEqual(
                 RequestFetchingURLProtocol.capturedRequestedPaths,
                 [Self.terminalPath, Self.terminalPath],
@@ -754,7 +766,7 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         _ = await store.reconcilePendingCreateOperationIfNeeded()
 
         XCTAssertEqual(RequestFetchingURLProtocol.capturedRequestedPaths, [Self.terminalPath])
-        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
     }
 
     func testSameURLWithADifferentLedgerFailsClosedAndNeverTerminalizes() async throws {
@@ -844,7 +856,7 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
             _ = await store.reconcilePendingCreateOperationIfNeeded()
             XCTAssertEqual(RequestFetchingURLProtocol.capturedRequestedPaths, [Self.terminalPath], label)
             XCTAssertNil(rawStoredValue, label)
-            XCTAssertEqual(store.createRecoveryPresentation, .notCreated, label)
+            XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable, label)
         }
     }
 
@@ -905,22 +917,24 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
 
     // MARK: - Presentation
 
+    /// Faith's final 2026-09-17 recovery-UX decision: the stable-unresolved
+    /// copy, and the NO-CREATE Path A/Path B split.
     func testRecoveryCopyAndActionsMatchTheRecordedDecision() {
         XCTAssertNil(RequestFoodView.recoveryCopy(for: .none))
 
         XCTAssertEqual(
             RequestFoodView.recoveryCopy(for: .unresolved(canCheckAgain: true)),
             RequestCreateRecoveryCopy(
-                headline: "We couldn’t confirm your request yet.",
-                body: "Don’t submit another request until this one is resolved.",
+                headline: "Your request may have posted",
+                body: "CommonPlate couldn’t confirm whether your request posted.",
                 actionLabel: "Check again"
             )
         )
         XCTAssertEqual(
             RequestFoodView.recoveryCopy(for: .unresolved(canCheckAgain: false)),
             RequestCreateRecoveryCopy(
-                headline: "We couldn’t confirm your request yet.",
-                body: "Don’t submit another request until this one is resolved.",
+                headline: "Your request may have posted",
+                body: "CommonPlate couldn’t confirm whether your request posted.",
                 actionLabel: nil
             )
         )
@@ -932,30 +946,46 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
                 actionLabel: nil
             )
         )
+        // Path A: the submitted information is recoverable.
         XCTAssertEqual(
-            RequestFoodView.recoveryCopy(for: .notCreated),
+            RequestFoodView.recoveryCopy(for: .notCreatedRecoverable),
             RequestCreateRecoveryCopy(
-                headline: "Your request wasn’t posted.",
-                body: "You can submit a new request.",
+                headline: "Your request wasn’t posted",
+                body: "Your request details are still here. Return to your request to review them before submitting again.",
+                actionLabel: "Return to request"
+            )
+        )
+        // Path B: the submitted information is genuinely unavailable.
+        XCTAssertEqual(
+            RequestFoodView.recoveryCopy(for: .notCreatedUnavailable),
+            RequestCreateRecoveryCopy(
+                headline: "Your request wasn’t posted",
+                body: "You’ll need to enter the request details again.",
                 actionLabel: "Start a new request"
             )
         )
 
         // No state promises checking it does not do, and no state offers a
-        // retry, clear, or reinstall.
+        // retry, clear, or reinstall. Neither NO-CREATE path uses drafts
+        // product language.
         for state: RequestCreateRecoveryPresentation in [
             .unresolved(canCheckAgain: true), .unresolved(canCheckAgain: false),
-            .identityUnavailable, .notCreated,
+            .identityUnavailable,
+            .notCreatedRecoverable,
+            .notCreatedUnavailable,
         ] {
             let copy = RequestFoodView.presentedRecoveryCopy(for: state)
             let text = [copy.headline, copy.body, copy.actionLabel ?? ""].joined(separator: " ").lowercased()
-            for forbidden in ["keep checking", "try again", "clear", "reinstall", "check active requests"] {
+            for forbidden in [
+                "keep checking", "try again", "clear", "reinstall", "check active requests",
+                "saved draft", "review draft",
+            ] {
                 XCTAssertFalse(text.contains(forbidden), "\(state) must not say \(forbidden)")
             }
         }
         XCTAssertEqual(
             RequestCreatePresentationError.ambiguous.message,
-            "Don’t submit another request until this one is resolved."
+            "CommonPlate couldn’t confirm whether your request posted."
         )
     }
 
@@ -992,9 +1022,20 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
             presentation(unresolved: true, recovery: .identityUnavailable),
             .createIdentityUnavailable
         )
-        XCTAssertEqual(presentation(unresolved: false, recovery: .notCreated), .createNotPosted)
+        // Both NO-CREATE paths gate the same presentation.
+        XCTAssertEqual(
+            presentation(unresolved: false, recovery: .notCreatedRecoverable),
+            .createNotPosted
+        )
+        XCTAssertEqual(
+            presentation(unresolved: false, recovery: .notCreatedUnavailable),
+            .createNotPosted
+        )
         // A new submission in flight is ordinary posting, not the old notice.
-        XCTAssertEqual(presentation(unresolved: false, isCreating: true, recovery: .notCreated), .posting)
+        XCTAssertEqual(
+            presentation(unresolved: false, isCreating: true, recovery: .notCreatedUnavailable),
+            .posting
+        )
         XCTAssertEqual(presentation(unresolved: false, recovery: .none), .form)
 
         // Normal navigation away stays available in every recovery state.
@@ -1031,6 +1072,393 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         XCTAssertTrue(recoverySource.contains("createNotPostedView"))
     }
 
+    /// Faith's final 2026-09-17 decision: no separate `Checking your
+    /// request` screen exists — the unresolved screen's own primary action
+    /// becomes `Checking…` while reconciliation is in flight. Source
+    /// inspection, matching the existing no-haptics precedent above: there is
+    /// no iOS UI-test target (`docs/testing.md`).
+    func testCheckAgainRemainsOnTheSameScreenWithACheckingLoadingLabel() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("CommonPlateios/Views/RequestFoodView.swift"),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(source.range(of: "private func unresolvedCreateAmbiguityView"))
+        let end = try XCTUnwrap(source.range(of: "/// W4-D2 state 2: a pending operation exists"))
+        let unresolvedSource = source[start.lowerBound..<end.lowerBound]
+        XCTAssertTrue(unresolvedSource.contains("checkingAgainLabel"))
+        XCTAssertTrue(unresolvedSource.contains("isActivelyChecking"))
+        // No distinct "Checking your request" screen/string anywhere live.
+        XCTAssertFalse(source.contains("\"Checking your request\""))
+    }
+
+    /// Both NO-CREATE paths always offer `Go to Home` as ordinary,
+    /// non-mutating navigation alongside their one distinguishing action.
+    func testCreateNotPostedOffersGoToHomeAlongsideEitherPathsAction() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("CommonPlateios/Views/RequestFoodView.swift"),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(source.range(of: "private var createNotPostedView"))
+        let end = try XCTUnwrap(source.range(of: "/// The shared centered layout"))
+        let section = source[start.lowerBound..<end.lowerBound]
+        XCTAssertTrue(section.contains("goToHomeLabel"))
+        XCTAssertTrue(section.contains("request-return-to-request"))
+        XCTAssertTrue(section.contains("request-start-new"))
+    }
+
+    /// W4-D2 FIX 2026-09-18 (independent-review MUST FIX 2): Path A and Path
+    /// B must reset the same centralized set of form-local presentation
+    /// state, and must route the draft/session replacement through
+    /// `RequestFoodDraftSession`'s own terminal-recovery operations rather
+    /// than assigning `draft` directly — so the two paths can never drift on
+    /// what they clear. No UI-test target exists (`docs/testing.md`), so
+    /// this remains production-wiring source inspection, supplementary to
+    /// the behavioral proof below (rereview MUST FIX 3) rather than the
+    /// primary proof of the reset itself.
+    func testPathAAndPathBBothRouteThroughTheCentralizedLocalStateReset() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("CommonPlateios/Views/RequestFoodView.swift"),
+            encoding: .utf8
+        )
+
+        let resetStart = try XCTUnwrap(source.range(of: "private func resetFormLocalPresentationState()"))
+        let resetEnd = try XCTUnwrap(source.range(of: "private func startNewRequest()"))
+        let resetBody = source[resetStart.lowerBound..<resetEnd.lowerBound]
+        // The reset body itself now delegates every field it owns to
+        // `RequestFoodMountedPresentationState`'s own tested reset, rather
+        // than assigning them inline — this only proves the delegation is
+        // wired, not that the reset behaves correctly (the behavioral test
+        // below does that).
+        XCTAssertTrue(resetBody.contains("RequestFoodMountedPresentationState("))
+        XCTAssertTrue(resetBody.contains("mountedState.resetForTerminalRecovery(screenshotProposalStore:"))
+        for field in ["focusedField = nil", "selectedScreenshotItems = []"] {
+            XCTAssertTrue(resetBody.contains(field), "resetFormLocalPresentationState must reset \(field)")
+        }
+
+        let startNewStart = try XCTUnwrap(source.range(of: "private func startNewRequest()"))
+        let startNewEnd = try XCTUnwrap(source.range(of: "private func returnToRequest()"))
+        let startNewBody = source[startNewStart.lowerBound..<startNewEnd.lowerBound]
+        XCTAssertTrue(startNewBody.contains("draftSession.startEmptyAfterTerminalRecovery()"))
+        XCTAssertTrue(startNewBody.contains("resetFormLocalPresentationState()"))
+        XCTAssertFalse(
+            startNewBody.contains("draft = RequestFoodFormDraft()"),
+            "Path B must go through the session's own reset, never assign draft directly"
+        )
+
+        let returnStart = try XCTUnwrap(source.range(of: "private func returnToRequest()"))
+        let returnEnd = try XCTUnwrap(source.range(of: "/// W4-R2 Posting: one native indeterminate progress owner"))
+        let returnBody = source[returnStart.lowerBound..<returnEnd.lowerBound]
+        XCTAssertTrue(returnBody.contains("store.consumeRecoverableDraftForReturnToRequest()"))
+        XCTAssertTrue(returnBody.contains("draftSession.replaceForTerminalRecovery(restoring:"))
+        XCTAssertTrue(returnBody.contains("resetFormLocalPresentationState()"))
+        XCTAssertFalse(
+            returnBody.contains("draft = RequestFoodFormDraft(restoring:"),
+            "Path A must go through the session's own reset, never assign draft directly"
+        )
+        XCTAssertFalse(
+            returnBody.contains("CreateRequestPayload"),
+            "The raw payload type must never appear in the view's restoration path"
+        )
+        // FIX (rereview MUST FIX 2): a failed/stale/repeated Path A consume
+        // (`store.consumeRecoverableDraftForReturnToRequest()` returning
+        // `nil`) must never fall through to Path B behavior — it is not
+        // proof Path B is now authoritative, only that Path A is no longer
+        // current. The store-level proof that `nil` means exactly
+        // "already consumed / superseded / not actually Path A" lives in
+        // `testConsumeRecoverableDraftConsumesExactlyOnceAndNeverTwice` and
+        // `testConsumeRecoverableDraftReturnsNilOutsidePathA` below.
+        XCTAssertFalse(
+            returnBody.contains("startNewRequest()"),
+            "a failed Path A consume must do nothing, never fall back to Path B's startNewRequest()"
+        )
+    }
+
+    // MARK: - Mounted-view local-state reset (rereview MUST FIX 3)
+
+    /// Behavioral proof, not source inspection: contaminates every field
+    /// `RequestFoodMountedPresentationState` owns, calls the exact production
+    /// reset `resetFormLocalPresentationState()` delegates to
+    /// (`resetForTerminalRecovery(screenshotProposalStore:)`), and asserts
+    /// the result is indistinguishable from a fresh instance. Also proves the
+    /// `ScreenshotProposalStore` integration is real: a token minted by
+    /// `beginSelection(...)` — standing in for an in-flight analysis for the
+    /// form being replaced — is current before the reset and stale after it,
+    /// which only actually invalidating the store's current selection (not
+    /// merely calling a method that exists) can produce. There is no
+    /// UI-test target (`docs/testing.md`); this is the seam that stands in
+    /// for mounting `RequestFoodView` and exercising Path A/B end to end.
+    func testMountedPresentationStateResetProducesCleanStateAndInvalidatesScreenshotSelection() {
+        var contaminated = RequestFoodMountedPresentationState(
+            validationPresentation: {
+                var presentation = RequestFoodValidationPresentation()
+                presentation.presentAll([
+                    RequestFoodFieldError(field: .orderDetails, error: .missingOrderDetails),
+                ])
+                return presentation
+            }(),
+            submissionError: .ambiguous,
+            showsLocalRejectionPointer: true,
+            isShowingFailureSummary: true,
+            isPresentingScreenshotPicker: true,
+            isPresentingExactTimePicker: true,
+            isPresentingTimingInfo: true,
+            screenshotAfterglowFields: ScreenshotProposalAppliedFields(
+                location: true,
+                mealSwipes: true,
+                mealEntries: [0, 1],
+                orderDetails: true
+            ),
+            screenshotChecked: true
+        )
+        XCTAssertNotEqual(contaminated, RequestFoodMountedPresentationState())
+
+        let screenshotProposalStore = makeScreenshotProposalStore()
+        var draftForSelection = RequestFoodFormDraft()
+        let staleSelectionToken = screenshotProposalStore.beginSelection(
+            clearing: &draftForSelection,
+            manualEdits: ScreenshotFieldManualEditState()
+        )
+        XCTAssertTrue(screenshotProposalStore.isCurrent(staleSelectionToken))
+
+        contaminated.resetForTerminalRecovery(screenshotProposalStore: screenshotProposalStore)
+
+        XCTAssertEqual(contaminated, RequestFoodMountedPresentationState())
+        XCTAssertFalse(
+            screenshotProposalStore.isCurrent(staleSelectionToken),
+            "the previous selection's in-flight work must stop mattering, exactly as leaving the screen would"
+        )
+    }
+
+    // MARK: - Path A/B restoration
+
+    /// Path A round-trip: the frozen Dining-Dollars-only payload restores
+    /// into a fresh draft with nothing reconstructed or guessed — only what
+    /// the payload itself carries. `mealSwipes` falls back to the picker's
+    /// own first option since `0` (this path's submitted value) is out of
+    /// the picker's bounded range.
+    func testPathARestoresTheFrozenDiningDollarsPayloadIntoAFreshDraft() {
+        let payload = CreateRequestPayload(
+            vendor: "Palladium",
+            timing: .scheduled,
+            windowStart: Date(timeIntervalSince1970: 1_800_000_000),
+            menuPath: .diningDollars,
+            mealSwipes: 0,
+            mealItems: [],
+            orderDetails: "Two burritos, extra guac",
+            estimatedDiningDollarsCents: 1234
+        )
+
+        let draft = RequestFoodFormDraft(restoring: payload)
+
+        XCTAssertEqual(draft.selectedDiningSpot, DiningSpot(name: "Palladium", address: nil))
+        XCTAssertEqual(draft.menuPath, .diningDollars)
+        XCTAssertEqual(draft.timing, .later)
+        XCTAssertEqual(draft.preferredPickupTime, payload.windowStart)
+        XCTAssertEqual(draft.mealSwipes, RequestFoodFormDraft.mealSwipeOptions.first)
+        XCTAssertEqual(draft.orderDetails, "Two burritos, extra guac")
+        XCTAssertEqual(draft.diningDollarsText, "$12.34")
+        XCTAssertEqual(draft.activeMealEntries, [])
+    }
+
+    /// Path A round-trip: the frozen Meal Exchange payload's entries land
+    /// back at their original active positions.
+    func testPathARestoresMealExchangeEntriesIntoTheirOriginalPositions() {
+        let payload = CreateRequestPayload(
+            vendor: "Kimmel",
+            timing: .asap,
+            windowStart: nil,
+            menuPath: .mealExchange,
+            mealSwipes: 3,
+            mealItems: ["Burger", "Fries", "Shake"],
+            orderDetails: nil,
+            estimatedDiningDollarsCents: nil
+        )
+
+        let draft = RequestFoodFormDraft(restoring: payload)
+
+        XCTAssertEqual(draft.menuPath, .mealExchange)
+        XCTAssertEqual(draft.timing, .asap)
+        XCTAssertEqual(draft.mealSwipes, 3)
+        XCTAssertEqual(draft.activeMealEntries, ["Burger", "Fries", "Shake"])
+        XCTAssertEqual(draft.diningDollarsText, "")
+    }
+
+    /// W4-D2 FIX (rereview MUST FIX 1): a direct fresh `createRequest()`
+    /// supersession of an unacknowledged Path A notice must clear the
+    /// private frozen payload in the same step as the notice flag, not
+    /// merely hide the notice while leaving the payload allocated. This is
+    /// the specific gap the rereview found: `createRequest()`'s own
+    /// supersession branch previously cleared only `hasNotCreatedNotice`.
+    /// `notCreatedRecoverablePayload` has no public accessor by design (the
+    /// payload never leaves the store) — `Mirror` reflection is used only to
+    /// prove this private invariant directly, the same technique this test
+    /// target already uses elsewhere to prove absent/present fields.
+    func testFreshCreateSupersessionClearsThePrivatePayloadNotJustTheNoticeFlag() async throws {
+        writeRaw(d2Envelope(
+            operationId: "SUPERSEDE-PATHA",
+            payloadJSON: try encodedPayloadJSON(mealPayload("Superseded meal"))
+        ))
+        let store = makeStore(storage: UserDefaultsPendingRequestOperationStorage(defaults: defaults))
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorBody(code: RequestOperationErrorCode.operationNotCreated)
+        ))
+        _ = await store.reconcilePendingCreateOperationIfNeeded()
+        guard store.createRecoveryPresentation == .notCreatedRecoverable else {
+            return XCTFail("Expected Path A")
+        }
+        XCTAssertTrue(isNotCreatedRecoverablePayloadAllocated(in: store))
+
+        // A fresh intentional submission supersedes the old, unacknowledged
+        // notice — never acknowledged or consumed first.
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 201, data: createdReplayBody(id: "fresh-supersede")))
+        try await store.createRequest(mealPayload("Fresh submission"))
+
+        XCTAssertEqual(store.createRecoveryPresentation, .none)
+        XCTAssertFalse(
+            isNotCreatedRecoverablePayloadAllocated(in: store),
+            "a fresh create's supersession must retire the private payload along with the notice"
+        )
+    }
+
+    /// A dismissed Path A notice must never leak its payload into an
+    /// unrelated, later NO-CREATE for a different operation.
+    func testAcknowledgingNoCreateClearsTheRecoveredPayloadForTheNextOperation() async throws {
+        let storage = UserDefaultsPendingRequestOperationStorage(defaults: defaults)
+        let store = makeStore(storage: storage)
+
+        // Path A: a readable payload, answered directly by the replayed
+        // create attempt.
+        let readablePayload = #"{"vendor":"Palladium","timing":"asap","menuPath":"meal-exchange","mealSwipes":1,"mealItems":["x"]}"#
+        writeRaw(d2Envelope(operationId: "PATHA-FIRST", payloadJSON: readablePayload))
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorBody(code: RequestOperationErrorCode.operationNotCreated)
+        ))
+        _ = await store.reconcilePendingCreateOperationIfNeeded()
+        guard store.createRecoveryPresentation == .notCreatedRecoverable else {
+            return XCTFail("Expected Path A")
+        }
+
+        store.acknowledgeCreateNotPosted()
+        XCTAssertEqual(store.createRecoveryPresentation, .none)
+
+        // Path B: a second, unrelated NO-CREATE with an unreadable payload
+        // must never carry the earlier operation's payload forward.
+        RequestFetchingURLProtocol.reset()
+        writeRaw(d2Envelope(operationId: "PATHB-SECOND", payloadJSON: "null"))
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: notCreatedBody))
+        _ = await store.reconcilePendingCreateOperationIfNeeded()
+
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
+    }
+
+    // MARK: - Store privacy boundary (independent-review 2026-09-18 MUST FIX 1)
+
+    /// The public recovery presentation is a plain, payload-free enum — the
+    /// exact ambiguity-recovery payload can never cross this boundary by
+    /// construction, not merely by convention or call-site discipline.
+    func testNotCreatedPresentationCarriesNoRecoverablePayloadByConstruction() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("CommonPlateios/Stores/RequestStore.swift"),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(source.range(of: "enum RequestCreateRecoveryPresentation: Equatable {"))
+        let end = try XCTUnwrap(source.range(of: "enum ClaimErrorCode {"))
+        let enumSource = source[start.lowerBound..<end.lowerBound]
+        // The type may still be named in prose explaining the boundary; what
+        // must never reappear is an associated value carrying it.
+        XCTAssertFalse(enumSource.contains("recoverablePayload: CreateRequestPayload"))
+        XCTAssertFalse(enumSource.contains("(CreateRequestPayload"))
+        XCTAssertTrue(enumSource.contains("case notCreatedRecoverable"))
+        XCTAssertTrue(enumSource.contains("case notCreatedUnavailable"))
+    }
+
+    /// Path A: the store-owned consume operation is the only way to see the
+    /// exact restored draft, and it can never be called twice for the same
+    /// operation — the second call, after the notice is already gone, must
+    /// return nothing rather than repeat the earlier restoration.
+    func testConsumeRecoverableDraftConsumesExactlyOnceAndNeverTwice() async throws {
+        let store = makeStore(storage: UserDefaultsPendingRequestOperationStorage(defaults: defaults))
+        let readablePayload = mealPayload("CONSUME-ONCE meal")
+        writeRaw(d2Envelope(operationId: "CONSUME-ONCE", payloadJSON: try encodedPayloadJSON(readablePayload)))
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorBody(code: RequestOperationErrorCode.operationNotCreated)
+        ))
+        _ = await store.reconcilePendingCreateOperationIfNeeded()
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedRecoverable)
+
+        let restored = store.consumeRecoverableDraftForReturnToRequest()
+
+        XCTAssertEqual(
+            normalizingPickupTime(restored),
+            normalizingPickupTime(RequestFoodFormDraft(restoring: readablePayload))
+        )
+        // Consumed: the notice is gone and cannot be acted on again.
+        XCTAssertEqual(store.createRecoveryPresentation, .none)
+        XCTAssertNil(store.consumeRecoverableDraftForReturnToRequest())
+    }
+
+    /// Path B, and the absence of any notice, must never hand back a draft:
+    /// there is nothing trusted to restore, and the attempt must not disturb
+    /// whatever notice (if any) is actually showing.
+    func testConsumeRecoverableDraftReturnsNilOutsidePathA() async throws {
+        let store = makeStore(storage: UserDefaultsPendingRequestOperationStorage(defaults: defaults))
+        XCTAssertNil(store.consumeRecoverableDraftForReturnToRequest())
+
+        writeRaw(d2Envelope(operationId: "NIL-PATH-B", payloadJSON: "null"))
+        RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: notCreatedBody))
+        _ = await store.reconcilePendingCreateOperationIfNeeded()
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
+
+        XCTAssertNil(store.consumeRecoverableDraftForReturnToRequest())
+        // A Path B notice is not silently consumed by the failed attempt.
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
+    }
+
+    /// A consumed Path A payload can never leak into a later, unrelated
+    /// operation's own Path A notice.
+    func testConsumeRecoverableDraftNeverLeaksAcrossOperations() async throws {
+        let store = makeStore(storage: UserDefaultsPendingRequestOperationStorage(defaults: defaults))
+        let firstPayload = mealPayload("LEAK-FIRST meal")
+        writeRaw(d2Envelope(operationId: "LEAK-FIRST", payloadJSON: try encodedPayloadJSON(firstPayload)))
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorBody(code: RequestOperationErrorCode.operationNotCreated)
+        ))
+        _ = await store.reconcilePendingCreateOperationIfNeeded()
+        XCTAssertEqual(
+            normalizingPickupTime(store.consumeRecoverableDraftForReturnToRequest()),
+            normalizingPickupTime(RequestFoodFormDraft(restoring: firstPayload))
+        )
+
+        RequestFetchingURLProtocol.reset()
+        let secondPayload = mealPayload("LEAK-SECOND meal")
+        writeRaw(d2Envelope(operationId: "LEAK-SECOND", payloadJSON: try encodedPayloadJSON(secondPayload)))
+        RequestFetchingURLProtocol.enqueue(.response(
+            statusCode: 409,
+            data: errorBody(code: RequestOperationErrorCode.operationNotCreated)
+        ))
+        _ = await store.reconcilePendingCreateOperationIfNeeded()
+
+        let restoredSecond = normalizingPickupTime(store.consumeRecoverableDraftForReturnToRequest())
+        XCTAssertEqual(restoredSecond, normalizingPickupTime(RequestFoodFormDraft(restoring: secondPayload)))
+        XCTAssertNotEqual(restoredSecond, normalizingPickupTime(RequestFoodFormDraft(restoring: firstPayload)))
+    }
+
     // MARK: - Helpers
 
     private func makeStore(
@@ -1056,6 +1484,21 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         ))
     }
 
+    /// A real `ScreenshotProposalStore` for the mounted-view reset test
+    /// (rereview MUST FIX 3) — no network call is ever exercised, so this
+    /// needs no request stub, only a valid client. Reuses
+    /// `InMemoryScreenshotProposalPreferencesStorage` from
+    /// `ScreenshotProposalStoreTests.swift`, in the same test target.
+    private func makeScreenshotProposalStore() -> ScreenshotProposalStore {
+        ScreenshotProposalStore(
+            service: ScreenshotProposalService(client: APIClient(
+                configuration: APIConfiguration(baseURL: baseURL),
+                session: URLSession(configuration: .ephemeral)
+            )),
+            preferences: InMemoryScreenshotProposalPreferencesStorage()
+        )
+    }
+
     private func savedStorage(operationId: String) -> InMemoryPendingRequestOperationStorage {
         let storage = InMemoryPendingRequestOperationStorage()
         storage.save(PendingRequestOperationRecord(
@@ -1078,6 +1521,46 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
             orderDetails: nil,
             estimatedDiningDollarsCents: nil
         )
+    }
+
+    /// W4-D2 FIX (rereview MUST FIX 1) white-box helper: whether `store`'s
+    /// private `notCreatedRecoverablePayload` currently holds a value.
+    /// `Mirror` reflects an `Optional`-typed stored property as a nested
+    /// single-child `.optional` mirror (`.some` has exactly one child,
+    /// `.none` has zero) regardless of the wrapped type, which is what makes
+    /// this reliable without casting to `CreateRequestPayload` directly.
+    private func isNotCreatedRecoverablePayloadAllocated(in store: RequestStore) -> Bool {
+        guard let field = Mirror(reflecting: store).children
+            .first(where: { $0.label == "notCreatedRecoverablePayload" }) else {
+            return false
+        }
+        let wrapped = Mirror(reflecting: field.value)
+        guard wrapped.displayStyle == .optional else { return true }
+        return !wrapped.children.isEmpty
+    }
+
+    /// Encodes a payload exactly as the durable record's `frozenPayload`
+    /// would (installation credential cleared), for building a `d2Envelope`
+    /// without hand-writing its JSON.
+    private func encodedPayloadJSON(_ payload: CreateRequestPayload) throws -> String {
+        var frozen = payload
+        frozen.installationCredential = nil
+        let data = try JSONEncoder().encode(frozen)
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
+    /// `RequestFoodFormDraft(restoring:)` falls back to `Date()` for an ASAP
+    /// payload's `preferredPickupTime` (there is no frozen `windowStart` to
+    /// restore), so two independently restored drafts for the identical
+    /// payload can differ by microseconds in that one field alone. Tests
+    /// that restore the same ASAP payload twice, or restore it and separately
+    /// construct the expected value, compare with that field normalized away
+    /// rather than asserting exact wall-clock equality neither call site can
+    /// guarantee.
+    private func normalizingPickupTime(_ draft: RequestFoodFormDraft?) -> RequestFoodFormDraft? {
+        guard var draft else { return nil }
+        draft.preferredPickupTime = Date(timeIntervalSince1970: 0)
+        return draft
     }
 
     private func d2Envelope(

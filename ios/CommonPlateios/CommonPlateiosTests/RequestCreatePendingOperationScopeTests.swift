@@ -519,7 +519,8 @@ final class RequestCreatePendingOperationScopeTests: XCTestCase {
             authorityA
         )
         XCTAssertNil(defaults.object(forKey: UserDefaultsPendingRequestOperationStorage.collectionKey))
-        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
+        // Path B: this record's payload was never readable.
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
     }
 
     func testARejectionDuringAFreshCreateLeavesAnOlderPendingOperationBlockingWithoutCheck() async throws {

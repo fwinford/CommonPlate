@@ -923,7 +923,7 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(presentation?.error, .ambiguous)
         XCTAssertEqual(
             presentation?.message,
-            "Don’t submit another request until this one is resolved."
+            "CommonPlate couldn’t confirm whether your request posted."
         )
         XCTAssertTrue(presentation?.showsReturnHomeAction ?? false)
     }
@@ -1017,10 +1017,11 @@ final class RequestCreationViewTests: XCTestCase {
     func testSuccessViewDoesNotReintroduceTheExpirationPolicy() throws {
         let successViewSource = try successViewDeclarationSource()
 
-        // W4-R2: the confirmation state directly replaces Posting in the
-        // same centered locus with this exact copy, and carries no CTA — the
-        // dwell/native-dismissal sequence is the only continuation.
-        XCTAssertTrue(successViewSource.contains("Text(Self.successMessage)"))
+        // W4-D2: the confirmation state directly replaces Posting in the
+        // same centered locus with the actual created card and this exact
+        // headline copy, and carries no CTA — the dwell/native-dismissal
+        // sequence is the only continuation.
+        XCTAssertTrue(successViewSource.contains("Self.successMessage"))
         XCTAssertFalse(successViewSource.contains("Button("))
 
         // No duration or expiration wording of any kind belongs on this
@@ -1039,8 +1040,9 @@ final class RequestCreationViewTests: XCTestCase {
     /// requester with two or more other open owned requests sees the new
     /// request only behind `See all N`, not inline, so the promise was no
     /// longer always true. This is a pure removal with no invented
-    /// replacement copy: the checkmark icon and `successMessage` title remain
-    /// the entire accepted Success hierarchy.
+    /// replacement copy. W4-D2 later replaces the checkmark icon with the
+    /// actual created card, but keeps this same invariant: one headline
+    /// `Text`, no separate subtitle `Text`.
     @MainActor
     func testSuccessSubtitlePromisingHomeAppearanceIsRemovedWithNoReplacementCopy() throws {
         let source = try String(
@@ -1063,19 +1065,81 @@ final class RequestCreationViewTests: XCTestCase {
     @MainActor
     func testFinalSuccessDwellHapticFenceAndOpticalPlacement() throws {
         // W4-R2 final READY contract: supersedes every earlier ~1.7-second
-        // requirement with ~1.6 seconds.
+        // requirement with ~1.6 seconds. W4-D2 preserves this exact total —
+        // it only splits it between the settle and landing sub-phases, never
+        // introducing a new, separate total dwell, and never lengthening it
+        // for Reduce Motion either.
         XCTAssertEqual(RequestFoodView.successDwellDuration, .milliseconds(1600))
+        for plan in [
+            RequestCreationContinuityMotionPlan.standard,
+            RequestCreationContinuityMotionPlan.reducedMotion,
+        ] {
+            XCTAssertEqual(plan.settleDwell + plan.landingDuration, plan.totalDuration)
+            XCTAssertEqual(plan.totalDuration, RequestCreationContinuityMotionPlan.successDwellDuration)
+        }
 
         let successViewSource = try successViewDeclarationSource()
-        XCTAssertTrue(successViewSource.contains("guard !hasAcknowledgedSuccess else { return }"))
+        XCTAssertTrue(successViewSource.contains("guard !hasAcknowledged else { return }"))
         XCTAssertEqual(
             successViewSource.components(separatedBy: "CommonPlateHaptics.success()").count - 1,
-            1
+            1,
+            "exactly one success haptic — the landing sub-phase must not add a second one"
+        )
+        XCTAssertEqual(
+            successViewSource.components(separatedBy: "UIAccessibility.post(").count - 1,
+            1,
+            "exactly one VoiceOver announcement for the whole sequence"
         )
         XCTAssertTrue(successViewSource.contains(".padding(.bottom, 60)"))
-        XCTAssertTrue(successViewSource.contains("UIAccessibility.post("))
-        XCTAssertTrue(successViewSource.contains("try await Task.sleep(for: Self.successDwellDuration)"))
-        XCTAssertTrue(successViewSource.contains("onExit()"))
+        XCTAssertTrue(successViewSource.contains("try await Task.sleep(for: plan.settleDwell)"))
+        XCTAssertTrue(successViewSource.contains("try await Task.sleep(for: plan.landingDuration)"))
+        // Retirement is addressed to this exact continuity, on both the
+        // completed and the interrupted ending.
+        XCTAssertEqual(
+            successViewSource.components(separatedBy: "onFinished(continuity.id)").count - 1,
+            2,
+            "the sequence must retire its own continuity when it completes and when it goes away"
+        )
+
+        // W4-D2: the authoritative CREATED path never shows a generic
+        // checkmark, meal-swipe ticket, or invented icon — the actual
+        // created card is the entire visual.
+        XCTAssertFalse(successViewSource.contains("statusIcon(systemName: \"checkmark\")"))
+
+        // The Request Food screen's own Success state is now a silent
+        // handoff: no second copy, card, icon, haptic, or announcement
+        // underneath the overlay.
+        let handoffSource = try requestFoodSuccessHandoffSource()
+        XCTAssertFalse(handoffSource.contains("Text("))
+        XCTAssertFalse(handoffSource.contains("RequestCardView("))
+        XCTAssertFalse(handoffSource.contains("CommonPlateHaptics"))
+        XCTAssertFalse(handoffSource.contains("UIAccessibility.post("))
+        XCTAssertTrue(handoffSource.contains("onExit()"))
+    }
+
+    /// Bounded extraction of `RequestFoodView`'s own Success handoff state,
+    /// matching `successViewDeclarationSource()`'s pattern.
+    private func requestFoodSuccessHandoffSource() throws -> String {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        let startMarker = "private var successHandoffView: some View {"
+        let endMarker = "static let successMessage"
+
+        guard let startRange = source.range(of: startMarker) else {
+            XCTFail("expected to find \(startMarker)")
+            return ""
+        }
+        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find \(endMarker) after successHandoffView")
+            return ""
+        }
+
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 
     func testMenuSelectionPrecedesTimingWithoutHelperAndTimingKeepsExplanation() throws {
@@ -1205,27 +1269,33 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(source.contains(".padding(.bottom, CommonPlateStyle.Spacing.l)"))
     }
 
-    /// Extracts the `successView` computed property's own source text — from
-    /// its declaration up to (not including) the next declaration,
-    /// `requestForm` — so assertions about the success state cannot be
+    /// Extracts the Success presentation's own source text.
+    ///
+    /// W4-D2 moved that presentation out of `RequestFoodView` and into
+    /// `RequestCreationContinuityView`, which is the only place the Success
+    /// card, copy, haptic, announcement, and dwell now exist — a pushed
+    /// screen structurally cannot reveal Home beneath itself or land into
+    /// Home's real slot geometry. These assertions follow the presentation
+    /// rather than the former file, and stay bounded to the view's own
+    /// `body` (up to its `card(containerWidth:)` helper) so they cannot be
     /// satisfied or defeated by unrelated content elsewhere in the file.
     private func successViewDeclarationSource() throws -> String {
         let source = try String(
             contentsOf: repositoryFile(
-                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+                "ios/CommonPlateios/CommonPlateios/Views/RequestCreationContinuityView.swift"
             ),
             encoding: .utf8
         )
 
-        let startMarker = "private var successView: some View {"
-        let endMarker = "private var requestForm: some View {"
+        let startMarker = "var body: some View {"
+        let endMarker = "private func card(containerSize: CGSize, containerFrame: CGRect) -> some View {"
 
         guard let startRange = source.range(of: startMarker) else {
             XCTFail("expected to find \(startMarker)")
             return ""
         }
         guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
-            XCTFail("expected to find \(endMarker) after successView")
+            XCTFail("expected to find \(endMarker) after the continuity body")
             return ""
         }
 
@@ -1952,7 +2022,7 @@ final class RequestCreationViewTests: XCTestCase {
 
         XCTAssertEqual(
             message,
-            "Don’t submit another request until this one is resolved."
+            "CommonPlate couldn’t confirm whether your request posted."
         )
         XCTAssertFalse(message.lowercased().contains("submit again"))
         XCTAssertFalse(message.lowercased().contains("try again"))
@@ -2239,6 +2309,37 @@ final class RequestCreationViewTests: XCTestCase {
             "We couldn’t check whether posting is available right now. Please try again in a moment."
         )
         XCTAssertNotEqual(RequestFoodView.availabilityUnknownNotice, RequestFoodView.pauseNotice)
+    }
+
+    /// W4-D2 Success→Home continuity gating (required proof): an unresolved
+    /// D1 ambiguity outranks `didCreateRequest` — this exact process never
+    /// entered the Success→Home continuity screen for *this* operation
+    /// (production never sets both simultaneously; `didCreateRequest` only
+    /// becomes true once the store has confirmed CREATED, which retires the
+    /// ambiguity block), but the presentation function's own precedence must
+    /// still fail closed if it ever did.
+    @MainActor
+    func testUnresolvedAmbiguityOutranksConfirmedCreateForSuccessGating() {
+        XCTAssertEqual(
+            RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: true,
+                availability: .available,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: true,
+                didCreateRequest: true
+            ),
+            .blockedByUnresolvedCreateAmbiguity
+        )
+        XCTAssertNotEqual(
+            RequestFoodView.presentation(
+                hasUnresolvedCreateAmbiguity: true,
+                availability: .available,
+                isCheckingAvailability: false,
+                hasAttemptedAvailabilityCheck: true,
+                didCreateRequest: true
+            ),
+            .success
+        )
     }
 
     /// A confirmed create keeps its success screen regardless of what the
@@ -2598,7 +2699,7 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(presentation.error, .ambiguous)
         XCTAssertEqual(
             presentation.message,
-            "Don’t submit another request until this one is resolved."
+            "CommonPlate couldn’t confirm whether your request posted."
         )
         // The only offered move is leaving, never a retry.
         XCTAssertTrue(presentation.showsReturnHomeAction)
@@ -2777,7 +2878,7 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(presentation.error, .ambiguous)
         XCTAssertEqual(
             presentation.message,
-            "Don’t submit another request until this one is resolved."
+            "CommonPlate couldn’t confirm whether your request posted."
         )
         XCTAssertTrue(presentation.showsReturnHomeAction)
     }
@@ -3133,9 +3234,11 @@ final class RequestCreationViewTests: XCTestCase {
             RequestFetchingURLProtocol.capturedRequestedPaths,
             ["/api/request", "/api/request"]
         )
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity: a fresh create under the still-
+        // current authority now inserts immediately, ownership-resolved
+        // `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["after-404"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
     }
 
     // MARK: - Genuine indeterminacy stays ambiguous

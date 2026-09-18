@@ -93,6 +93,20 @@ struct ContentView: View {
     /// lifecycle decision.
     @StateObject private var helperSuccessCoordinator = HelperSuccessPresentationCoordinator()
 
+    /// W4-D2 Success→Home continuity: Home's own first requester-owned slot
+    /// frame, relayed from its layout to the continuity overlay below so the
+    /// in-flight card lands in the real slot rather than at an assumed
+    /// position. `nil` whenever Home renders no owned slot right now.
+    @State private var homeOwnedRequestSlotFrame: CGRect?
+
+    /// W4-D2 crossfade handoff (Reduce Motion with a usable destination, and
+    /// the no-usable-target in-place crossfade): relayed from the
+    /// continuity overlay's `RequestCreationContinuityHandoffKey`, exactly
+    /// like `homeOwnedRequestSlotFrame` above, so Home's own destination card
+    /// fades in on the identical signal and timing the overlay's card fades
+    /// out on — never a second, independently guessed reveal timeline.
+    @State private var isRevealingLandingContinuityCard = false
+
     /// `remoteNotificationRegistrar` must be the same instance
     /// `PushAppDelegate` forwards APNs callbacks into — see
     /// `CommonPlateiosApp.swift` — so, matching every other injected
@@ -252,6 +266,26 @@ struct ContentView: View {
                 .zIndex(1)
             }
 
+            // W4-D2 Success→Home continuity: presented only while
+            // `RequestStore` holds a live continuity for an operation it
+            // authoritatively confirmed CREATED under the authority current
+            // now. Keyed by that continuity's identity, so a later create
+            // starts its own presentation and can never inherit this one's
+            // phase or acknowledgement; retired through the store's
+            // identity-scoped retirement, so an interrupted presentation
+            // leaves nothing behind. Sits above the stack (not inside it) so
+            // Home is already revealed beneath the card as it lands.
+            if let continuity = requestStore.createdRequestContinuity {
+                RequestCreationContinuityView(
+                    continuity: continuity,
+                    homeSlotFrame: homeOwnedRequestSlotFrame,
+                    reduceMotion: reduceMotion,
+                    onFinished: { requestStore.retireCreationContinuity(id: $0) }
+                )
+                .id(continuity.id)
+                .zIndex(3)
+            }
+
             // W4-H1: shown only while an in-process, authoritatively confirmed
             // placement exists. Relaunch never restores a confirmation, so it
             // never reconstructs this presentation, its haptic, or its Home
@@ -266,6 +300,20 @@ struct ContentView: View {
                 .transition(.opacity)
                 .zIndex(2)
             }
+        }
+        // W4-D2 coordinate-system FIX: Home's published first-slot frame and
+        // the continuity overlay's own card frame are both measured in
+        // `.global` now, not in a space named here. A name declared on this
+        // container does not resolve across `NavigationStack`'s own hosting
+        // boundary (Home renders inside it; this overlay is a sibling of it),
+        // which silently compared two frames in two different origins — see
+        // `RequestCreationContinuityLayout.landingSlot` and
+        // `HomeExchangeView.firstOwnedSlotFrameReporter`.
+        .onPreferenceChange(HomeOwnedRequestSlotFrameKey.self) { frame in
+            homeOwnedRequestSlotFrame = frame
+        }
+        .onPreferenceChange(RequestCreationContinuityHandoffKey.self) { isRevealing in
+            isRevealingLandingContinuityCard = isRevealing
         }
         // Cold-launch and relaunch-after-termination continuation (W3-H1):
         // reconstructs "do I have an active reservation" from backend truth,
@@ -431,6 +479,7 @@ struct ContentView: View {
             alertSubscriptionStore: alertSubscriptionStore,
             pushSubscriptionStore: pushSubscriptionStore,
             unsubscribeStore: participantEmailUnsubscribeStore,
+            isRevealingLandingContinuityCard: isRevealingLandingContinuityCard,
             onRequestMeal: { startRouteFlow(.requestFood) }
         )
         .opacity(brandHasSettled ? 1 : 0)

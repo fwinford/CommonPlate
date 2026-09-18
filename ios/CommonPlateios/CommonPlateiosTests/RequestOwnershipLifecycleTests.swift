@@ -159,26 +159,26 @@ final class RequestOwnershipLifecycleTests: XCTestCase {
         XCTAssertEqual(store.requests.first { $0.id == "b" }?.ownership, .own)
     }
 
-    // MARK: - Post-create ingestion (W4-R2 2026-09-05 sync item 5)
+    // MARK: - Post-create ingestion (W4-D2 Success→Home continuity)
 
-    /// Supersedes the former "created request is own immediately" contract:
-    /// live inspection during the 2026-09-05 sync confirmed this unconditional
-    /// immediate insertion directly conflicted with H4's own committed "no
-    /// R2-authored Home insertion" contract, since `RequestFoodView`/
-    /// `RequestFoodEntryView` never read `store.requests` and have no
-    /// dependency on it. A fresh create must not insert into `store.requests`
-    /// ahead of H4's own authoritative fetch — that fetch (already proven by
-    /// the fetch-based ownership tests above, e.g.
-    /// `testStableAuthorityResolvesOwnershipNormally`) is what correctly
-    /// resolves this same request's ownership once it actually surfaces on
-    /// Home, in H4's own order and partition.
-    func testCreatedRequestDoesNotInsertIntoRequestsAheadOfH4sAuthoritativeFetch() async throws {
+    /// W4-D2 Success→Home continuity supersedes the former (W4-R2
+    /// 2026-09-05 sync item 5) "no R2-authored Home insertion" contract for
+    /// the still-current-authority case only: the Success→Home continuity
+    /// sequence needs the requester-owned Home card to exist, correctly
+    /// slotted, the instant Home is revealed — it cannot depend on H4's own
+    /// authoritative fetch completing first. A fresh create under the still-
+    /// current authority now inserts immediately, ownership-resolved
+    /// `.own`; H4's own authoritative fetch still reconciles the same entry
+    /// in place afterward.
+    func testCreatedRequestInsertsOwnershipResolvedForTheStillCurrentAuthority() async throws {
         ClaimFlowURLProtocol.enqueue(.response(data: createResponse(id: "new-1")))
         let store = makeStore(ScriptedAuthority([authorityA]))
 
         try await store.createRequest(payload())
 
-        XCTAssertTrue(store.requests.isEmpty)
+        XCTAssertEqual(store.requests.map(\.id), ["new-1"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
+        XCTAssertEqual(store.createdRequestContinuity?.request.id, "new-1")
     }
 
     /// The same non-insertion property holds regardless of whether the
@@ -187,22 +187,29 @@ final class RequestOwnershipLifecycleTests: XCTestCase {
     /// fabricated ownership truth.
     func testCreatedRequestDoesNotInsertRegardlessOfAuthorityChangeMidFlight() async throws {
         ClaimFlowURLProtocol.enqueue(.response(data: createResponse(id: "new-2")))
-        // Read once when the create captures its authority, then changed by
-        // the time the confirmed result would have been applied.
-        let store = makeStore(ScriptedAuthority([authorityA, authorityB]))
+        // `createRequest`'s own leading `refreshPendingCreateState()` reads
+        // the authority once before this function's own capture does, so the
+        // script needs three values, not two, to actually model "captures A,
+        // changed to B by confirmation time": the first satisfies that
+        // leading read (also A — nothing about D1 state is under test here),
+        // the second is this call's own captured `participantAuthority`, and
+        // the third is the still-current authority `applyConfirmed` reads at
+        // confirmation — genuinely different from the second.
+        let store = makeStore(ScriptedAuthority([authorityA, authorityA, authorityB]))
 
         try await store.createRequest(payload())
 
         XCTAssertTrue(store.requests.isEmpty)
+        XCTAssertNil(store.createdRequestContinuity)
     }
 
-    // MARK: - D1 create reconciliation (W4-R2 2026-09-05 sync item 5)
+    // MARK: - D1 create reconciliation (W4-D2 Success→Home continuity)
 
-    /// The identical non-insertion property for a recovered D1 create: it
-    /// must not insert into `store.requests` ahead of H4's own authoritative
-    /// fetch either, superseding the former "becomes own immediately"
-    /// contract for the same reason as the fresh-create path above.
-    func testReconciledCreateDoesNotInsertIntoRequestsAheadOfH4sAuthoritativeFetch() async throws {
+    /// The identical still-current-authority insertion property for a
+    /// recovered D1 create: `Check again`'s reconciled CREATED outcome
+    /// enters the same Success→Home continuity screen as a fresh create, so
+    /// it needs the same immediate, ownership-resolved Home presence.
+    func testReconciledCreateInsertsOwnershipResolvedForTheStillCurrentAuthority() async throws {
         let storage = InMemoryPendingRequestOperationStorage()
         storage.save(pendingRecord(operationId: "recover-own"))
         ClaimFlowURLProtocol.enqueue(.response(data: createResponse(id: "recovered-1")))
@@ -211,7 +218,9 @@ final class RequestOwnershipLifecycleTests: XCTestCase {
         let reconciled = await store.reconcilePendingCreateOperationIfNeeded()
 
         XCTAssertTrue(reconciled)
-        XCTAssertTrue(store.requests.isEmpty)
+        XCTAssertEqual(store.requests.map(\.id), ["recovered-1"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
+        XCTAssertEqual(store.createdRequestContinuity?.request.id, "recovered-1")
     }
 
     /// Same non-insertion property when the authority changed while

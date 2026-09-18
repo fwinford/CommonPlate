@@ -178,13 +178,53 @@ enum RequestFormPresentation: Equatable {
     /// action; ordinary navigation away remains available.
     case createIdentityUnavailable
     /// W4-D2: backend authority established terminal NO-CREATE for the
-    /// earlier operation. Shown until `Start a new request`; blocks nothing.
+    /// earlier operation. Shown until `Return to request` (information
+    /// recoverable) or `Start a new request` (information unavailable);
+    /// blocks nothing.
     case createNotPosted
     /// Posting is paused, or availability could not be established. `retryable`
     /// is false for a paused backend, where retrying changes nothing.
     case unavailable(message: String, retryable: Bool)
     /// A create was confirmed by the backend.
     case success
+}
+
+/// W4-D2 FIX (rereview MUST FIX 3): the mounted-view local presentation
+/// state that must never survive a Path A/B terminal-recovery replacement,
+/// extracted into one directly testable owner so `resetFormLocalPresentationState()`
+/// — the exact reset both `returnToRequest()` and `startNewRequest()` call —
+/// can be exercised and proven clean without mounting `RequestFoodView`
+/// itself. This project has no UI-test target (`docs/testing.md`), so this
+/// seam is what stands in for one.
+///
+/// `focusedField` (`FocusState`, view-only) and `selectedScreenshotItems`
+/// (`PhotosPickerItem`, no test-constructible instance) stay owned directly
+/// by the view's own `@State`; their reset remains an unconditional one-line
+/// assignment inside `resetFormLocalPresentationState()`, covered by the
+/// existing production-wiring source test.
+struct RequestFoodMountedPresentationState: Equatable {
+    var validationPresentation = RequestFoodValidationPresentation()
+    var submissionError: RequestCreatePresentationError?
+    var showsLocalRejectionPointer = false
+    var isShowingFailureSummary = false
+    var isPresentingScreenshotPicker = false
+    var isPresentingExactTimePicker = false
+    var isPresentingTimingInfo = false
+    var screenshotAfterglowFields = ScreenshotProposalAppliedFields()
+    var screenshotChecked = false
+
+    /// The one production reset both Path A and Path B route through.
+    /// Always converges on the same clean defaults regardless of what this
+    /// instance held before — stale validation, submission-error, focus
+    /// pointer, failure-summary, picker/timing-sheet, and screenshot
+    /// afterglow/checked state from a previous request can never survive it
+    /// — and invalidates `screenshotProposalStore`'s current selection in
+    /// the same step, so no in-flight analysis for the replaced form can
+    /// repopulate it afterward.
+    mutating func resetForTerminalRecovery(screenshotProposalStore: ScreenshotProposalStore) {
+        self = RequestFoodMountedPresentationState()
+        screenshotProposalStore.invalidateCurrentSelection()
+    }
 }
 
 /// Requester-facing request form. Temporary input and presentation state stay
@@ -263,8 +303,12 @@ struct RequestFoodView: View {
     /// authoritative message for anything the server decided.
     @State private var showsLocalRejectionPointer = false
     @State private var didCreateRequest = false
-    /// Fences the semantic Success acknowledgement if SwiftUI re-evaluates
-    /// the success task while this destination remains mounted.
+    /// Fences the one Success→Home handoff if SwiftUI re-evaluates the
+    /// handoff task while this destination remains mounted, so the finished
+    /// screen is removed exactly once. The semantic success acknowledgement
+    /// itself (haptic and announcement) belongs to
+    /// `RequestCreationContinuityView`, which fences it the same way against
+    /// its own continuity identity.
     @State private var hasAcknowledgedSuccess = false
     /// W4-R2 definitive-failure presentation: true only while the centered
     /// `SAVED DRAFT` / `Review draft` failure state (rather than the ordinary
@@ -432,7 +476,7 @@ struct RequestFoodView: View {
                 case .posting:
                     postingView
                 case .success:
-                    successView
+                    successHandoffView
                 case .checkingAvailability:
                     availabilityCheckView
                 case .unavailable(let message, let retryable):
@@ -1143,18 +1187,28 @@ struct RequestFoodView: View {
         unresolvedCreateAmbiguityView(isActivelyChecking: true)
     }
 
-    /// Faith's 2026-09-16 copy. `Check again` appears only when the store
-    /// says another exact reconciliation can change the answer. `Go to Home`
-    /// is ordinary navigation, present because leaving is always safe and the
-    /// durable record survives this screen closing.
+    /// Faith's final 2026-09-17 copy. `Check again` appears only when the
+    /// store says another exact reconciliation can change the answer. `Go to
+    /// Home` is ordinary navigation, present because leaving is always safe
+    /// and the durable record survives this screen closing. There is no
+    /// separate `Checking your request` screen: while reconciliation is in
+    /// flight the requester stays on this exact screen and the primary
+    /// action's own label becomes `Checking…`.
     private func unresolvedCreateAmbiguityView(isActivelyChecking: Bool) -> some View {
         let copy = Self.presentedRecoveryCopy(for: Self.unresolvedRecovery(store.createRecoveryPresentation))
         return recoveryStateView(systemName: "ellipsis", copy: copy) {
             if isActivelyChecking {
-                ProgressView()
-                    .tint(Color.accentColor)
-                    .accessibilityLabel(Self.checkAgainLabel)
-                    .accessibilityIdentifier("request-checking-again")
+                Button {
+                } label: {
+                    HStack(spacing: CommonPlateStyle.Spacing.xs) {
+                        ProgressView()
+                        Text(Self.checkingAgainLabel)
+                    }
+                    .frame(maxWidth: CommonPlateStyle.Control.majorActionMaximumWidth)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(true)
+                .accessibilityIdentifier("request-checking-again")
             } else if let action = copy.actionLabel {
                 Button(action) {
                     checkAgain()
@@ -1190,20 +1244,38 @@ struct RequestFoodView: View {
         .accessibilityIdentifier("request-identity-unavailable")
     }
 
-    /// W4-D2 state 3: authoritative terminal NO-CREATE. `Start a new request`
-    /// only dismisses this notice and returns to the form; it resends nothing.
-    /// A later submission mints a fresh operation identity.
+    /// W4-D2 state 3: authoritative terminal NO-CREATE, split 2026-09-17 into
+    /// Path A (`Return to request`, submitted information recoverable) and
+    /// Path B (`Start a new request`, information genuinely unavailable) —
+    /// decided by which of the two `.notCreated…` cases
+    /// `store.createRecoveryPresentation` reports. FIX 2026-09-18
+    /// (independent-review MUST FIX 1): this view never holds the raw
+    /// `CreateRequestPayload` — `returnToRequest()` asks the store to
+    /// consume and restore it. Neither path resends or reuses the
+    /// terminalized operation identity; a later submission always mints a
+    /// fresh one.
     private var createNotPostedView: some View {
-        let copy = Self.presentedRecoveryCopy(for: .notCreated)
+        let isRecoverable = store.createRecoveryPresentation == .notCreatedRecoverable
+        let copy = Self.presentedRecoveryCopy(for: store.createRecoveryPresentation)
         return recoveryStateView(systemName: "xmark", copy: copy) {
             if let action = copy.actionLabel {
                 Button(action) {
-                    startNewRequest()
+                    if isRecoverable {
+                        returnToRequest()
+                    } else {
+                        startNewRequest()
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .frame(maxWidth: CommonPlateStyle.Control.majorActionMaximumWidth)
-                .accessibilityIdentifier("request-start-new")
+                .accessibilityIdentifier(isRecoverable ? "request-return-to-request" : "request-start-new")
             }
+
+            Button(Self.goToHomeLabel) {
+                onExit()
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("request-not-posted-dismiss")
         }
         .accessibilityIdentifier("request-not-posted")
     }
@@ -1249,10 +1321,86 @@ struct RequestFoodView: View {
         }
     }
 
+    /// W4-D2 FIX 2026-09-18 (independent-review MUST FIX 2): the one place
+    /// Path A and Path B reset every form-local presentation field that must
+    /// not survive a terminal-recovery replacement, so the two paths can
+    /// never drift apart on what they clear. Covers validation/error
+    /// presentation, the local rejection pointer, focus, screenshot
+    /// selection/analysis/afterglow/check state, and picker state. Never
+    /// touches `draftSession` — that boundary is
+    /// `RequestFoodDraftSession`'s own terminal-recovery operations, called
+    /// separately by each path below.
+    ///
+    /// FIX (rereview MUST FIX 3): the fields `RequestFoodMountedPresentationState`
+    /// owns are round-tripped through its own `resetForTerminalRecovery(_:)`
+    /// — the exact production reset a test can exercise directly — rather
+    /// than assigned inline here, so this method and the tested seam can
+    /// never drift apart. `focusedField`/`selectedScreenshotItems` stay
+    /// directly assigned, matching their declaration's own reasoning above.
+    private func resetFormLocalPresentationState() {
+        var mountedState = RequestFoodMountedPresentationState(
+            validationPresentation: validationPresentation,
+            submissionError: submissionError,
+            showsLocalRejectionPointer: showsLocalRejectionPointer,
+            isShowingFailureSummary: isShowingFailureSummary,
+            isPresentingScreenshotPicker: isPresentingScreenshotPicker,
+            isPresentingExactTimePicker: isPresentingExactTimePicker,
+            isPresentingTimingInfo: isPresentingTimingInfo,
+            screenshotAfterglowFields: screenshotAfterglowFields,
+            screenshotChecked: screenshotChecked
+        )
+        // Retires any in-flight analysis and its notice for the previous
+        // selection, exactly like leaving the screen would — this replaces
+        // the form/draft without navigating away, so nothing else does this.
+        mountedState.resetForTerminalRecovery(screenshotProposalStore: screenshotProposalStore)
+        validationPresentation = mountedState.validationPresentation
+        submissionError = mountedState.submissionError
+        showsLocalRejectionPointer = mountedState.showsLocalRejectionPointer
+        isShowingFailureSummary = mountedState.isShowingFailureSummary
+        focusedField = nil
+        selectedScreenshotItems = []
+        isPresentingScreenshotPicker = mountedState.isPresentingScreenshotPicker
+        isPresentingExactTimePicker = mountedState.isPresentingExactTimePicker
+        isPresentingTimingInfo = mountedState.isPresentingTimingInfo
+        screenshotAfterglowFields = mountedState.screenshotAfterglowFields
+        screenshotChecked = mountedState.screenshotChecked
+    }
+
+    /// W4-D2 Path B: opens the ordinary empty Request Food form. Never
+    /// reconstructs, guesses, or content-matches the old request information
+    /// — the draft session is reset to its plain default, exactly like a
+    /// fresh entry into this screen.
     private func startNewRequest() {
         store.acknowledgeCreateNotPosted()
-        submissionError = nil
-        isShowingFailureSummary = false
+        draftSession.startEmptyAfterTerminalRecovery()
+        resetFormLocalPresentationState()
+        Task {
+            await store.refreshRequestCreationAvailability()
+        }
+    }
+
+    /// W4-D2 Path A: restores only the exact frozen `CreateRequestPayload`
+    /// behind the terminal NO-CREATE notice into the request form. FIX
+    /// 2026-09-18 (independent-review MUST FIX 1): the raw payload never
+    /// reaches this view — `consumeRecoverableDraftForReturnToRequest()`
+    /// consumes it store-side and hands back only the restored draft. Does
+    /// not submit, does not reconcile, and does not reuse the terminalized
+    /// operation identity — the next intentional Submit goes through the
+    /// ordinary `createRequest` path and mints a fresh one.
+    ///
+    /// FIX (rereview MUST FIX 2): a `nil` consume means Path A is no longer
+    /// current — already consumed, already acknowledged, or superseded by a
+    /// fresh submission since this action was offered — not that Path B is
+    /// now authoritative. It must never mutate the form, clear an
+    /// already-restored draft, or start an empty request; the store's own
+    /// current presentation, not this stale action, decides what the
+    /// requester sees next.
+    private func returnToRequest() {
+        guard let restoredDraft = store.consumeRecoverableDraftForReturnToRequest() else {
+            return
+        }
+        draftSession.replaceForTerminalRecovery(restoring: restoredDraft)
+        resetFormLocalPresentationState()
         Task {
             await store.refreshRequestCreationAvailability()
         }
@@ -1276,6 +1424,7 @@ struct RequestFoodView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+        .padding(.bottom, 60)
         .background(CommonPlateStyle.Color.baseCanvas)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("request-posting")
@@ -1352,14 +1501,23 @@ struct RequestFoodView: View {
     }
 
     static let goToHomeLabel = "Go to Home"
-    // W4-D2 recovery copy (Faith, 2026-09-16).
-    static let unresolvedCreateHeadline = "We couldn’t confirm your request yet."
-    static let unresolvedCreateBody = "Don’t submit another request until this one is resolved."
+    // W4-D2 recovery copy (Faith's final 2026-09-17 recovery-UX decision,
+    // superseding the 2026-09-16 copy below it replaced).
+    static let unresolvedCreateHeadline = "Your request may have posted"
+    static let unresolvedCreateBody = "CommonPlate couldn’t confirm whether your request posted."
     static let checkAgainLabel = "Check again"
+    /// The primary action's own loading label while `Check again`'s
+    /// reconciliation is in flight — never a separate screen.
+    static let checkingAgainLabel = "Checking…"
     static let identityUnavailableHeadline = "We can’t safely confirm what happened to this request."
     static let identityUnavailableBody = "To prevent a duplicate, CommonPlate won’t submit another request."
-    static let notPostedHeadline = "Your request wasn’t posted."
-    static let notPostedBody = "You can submit a new request."
+    static let notPostedHeadline = "Your request wasn’t posted"
+    /// Path A: the submitted request information is recoverable.
+    static let notPostedRecoverableBody =
+        "Your request details are still here. Return to your request to review them before submitting again."
+    static let returnToRequestLabel = "Return to request"
+    /// Path B: the submitted request information is genuinely unavailable.
+    static let notPostedUnavailableBody = "You’ll need to enter the request details again."
     static let startNewRequestLabel = "Start a new request"
     static let postingTitle = "Posting request…"
     static let definitiveFailureTitle = "Your request wasn’t posted"
@@ -1405,10 +1563,16 @@ struct RequestFoodView: View {
                 body: identityUnavailableBody,
                 actionLabel: nil
             )
-        case .notCreated:
+        case .notCreatedRecoverable:
             return RequestCreateRecoveryCopy(
                 headline: notPostedHeadline,
-                body: notPostedBody,
+                body: notPostedRecoverableBody,
+                actionLabel: returnToRequestLabel
+            )
+        case .notCreatedUnavailable:
+            return RequestCreateRecoveryCopy(
+                headline: notPostedHeadline,
+                body: notPostedUnavailableBody,
                 actionLabel: startNewRequestLabel
             )
         }
@@ -1463,8 +1627,9 @@ struct RequestFoodView: View {
             if createRecovery == .identityUnavailable {
                 return .createIdentityUnavailable
             }
-            // D1 reconciliation actively running (`isCreating`) reads
-            // "Checking your request" with progress; already-resolved
+            // D1 reconciliation actively running (`isCreating`) stays on this
+            // same unresolved screen with its primary action reading
+            // `Checking…` — never a separate screen; already-resolved
             // still-unresolved ambiguity reads the static warning with its
             // one `Go to Home` exit. Neither carries success/error semantics.
             return isCreating ? .checkingCreateAmbiguity : .blockedByUnresolvedCreateAmbiguity
@@ -1475,9 +1640,10 @@ struct RequestFoodView: View {
         }
 
         // W4-D2: the earlier operation authoritatively did not post. Said
-        // once, ahead of the form, until the requester chooses to start a new
-        // request.
-        if createRecovery == .notCreated && !isCreating {
+        // once, ahead of the form, until the requester chooses `Return to
+        // request` or `Start a new request`.
+        if createRecovery == .notCreatedRecoverable || createRecovery == .notCreatedUnavailable,
+           !isCreating {
             return .createNotPosted
         }
 
@@ -1549,51 +1715,52 @@ struct RequestFoodView: View {
         .padding()
     }
 
-    /// W4-R2: authoritative creation directly replaces the Posting
-    /// spinner/copy in the same centered locus with this state — no CTA. One
-    /// success haptic fires exactly once, at the moment this state is first
-    /// shown; VoiceOver receives its own announcement rather than relying on
-    /// the visual dwell. Held for `successDwellDuration`, then this screen
-    /// natively dismisses to Home itself — an explicit control would be a
-    /// second acknowledgement this contract does not call for.
-    private var successView: some View {
-        VStack(spacing: CommonPlateStyle.Spacing.l) {
-            statusIcon(systemName: "checkmark")
-
-            Text(Self.successMessage)
-                .font(.title3.weight(.bold))
-                .multilineTextAlignment(.center)
-                .accessibilityIdentifier("request-success-message")
-                .frame(maxWidth: CommonPlateStyle.Metrics.stateContentWidth)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
-        // The approved Figma group is optically centered about 30 points
-        // above the geometric viewport center.
-        .padding(.bottom, 60)
-        .background(CommonPlateStyle.Color.baseCanvas)
-        .accessibilityElement(children: .combine)
-        .task {
-            guard !hasAcknowledgedSuccess else { return }
-            hasAcknowledgedSuccess = true
-            CommonPlateHaptics.success()
-            UIAccessibility.post(
-                notification: .announcement,
-                argument: Self.successMessage
-            )
-            do {
-                try await Task.sleep(for: Self.successDwellDuration)
-            } catch {
-                return
+    /// W4-D2 Success→Home continuity handoff.
+    ///
+    /// The Success presentation itself — the actual created requester-owned
+    /// card rising from below, its restrained settle, `Request posted`, the
+    /// one success haptic, the one VoiceOver announcement, the Home reveal,
+    /// and the landing into Home's real first owned slot — is owned by
+    /// `RequestCreationContinuityView`, mounted above the navigation stack
+    /// (see that file for why a pushed screen structurally cannot perform
+    /// that landing). By the time this state is reachable, that overlay is
+    /// already covering the screen opaquely, so this state's only remaining
+    /// job is to remove this now-finished screen underneath it — the
+    /// requester never sees this happen, and Home is therefore already
+    /// mounted, laid out, and publishing its real first-slot geometry well
+    /// before the landing begins.
+    ///
+    /// It renders the plain canvas rather than any copy or icon because
+    /// nothing here is meant to be seen: a second `Request posted`, a
+    /// checkmark, or a second card underneath the overlay would be exactly
+    /// the duplicate-card defect this replaces.
+    ///
+    /// Fail-closed: this state is also reached when authoritative CREATED
+    /// produced no current-authority continuity to present — an authority
+    /// that changed mid-flight, which `applyConfirmed` already refuses to
+    /// resolve as this participant's own or to insert. No overlay exists in
+    /// that case, and none is fabricated: there is no `Request posted`
+    /// without a real card, and no stale earlier card is substituted. The
+    /// requester simply returns to Home, whose own authoritative state
+    /// governs what is shown there.
+    private var successHandoffView: some View {
+        CommonPlateStyle.Color.baseCanvas
+            .ignoresSafeArea()
+            .accessibilityHidden(true)
+            .task {
+                guard !hasAcknowledgedSuccess else { return }
+                hasAcknowledgedSuccess = true
+                onExit()
             }
-            onExit()
-        }
     }
 
-    static let successMessage = "Your request is posted"
-    /// Faith's final motion handoff: held for about 1.7 seconds before this
-    /// screen natively dismisses to Home.
-    static let successDwellDuration: Duration = .milliseconds(1600)
+    static let successMessage = RequestCreationContinuityView.successMessage
+    /// Faith's accepted total Success dwell, unchanged by W4-D2 and now owned
+    /// with the presentation itself — re-exported here so existing call sites
+    /// and proofs keep one source of truth rather than two.
+    static var successDwellDuration: Duration {
+        RequestCreationContinuityMotionPlan.successDwellDuration
+    }
 
     private var requestForm: some View {
         let now = Date()

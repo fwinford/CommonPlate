@@ -219,6 +219,34 @@ struct RequestFoodFormDraft: Equatable {
     static let mealExchangeDiningDollarsCeilingCents = 2_500
     /// `> $0.00` and `<= $50.00` when it is the whole request.
     static let diningDollarsOnlyCeilingCents = 5_000
+
+    /// W4-D2 Path A: restores exactly what the frozen `CreateRequestPayload`
+    /// itself carries — nothing reconstructed, guessed, or content-matched.
+    /// Only called when `RequestStore` has confirmed the payload behind a
+    /// terminal NO-CREATE was actually readable.
+    ///
+    /// `selectedDiningSpot.address` is `nil`: the payload carries only the
+    /// vendor name, matching `DiningSpot`'s existing "wire-sourced, address
+    /// unavailable" shape (see its declaration). `mealSwipes` falls back to
+    /// the picker's own first option when the payload's is `0` (the
+    /// Dining-Dollars-only path's submitted value), since the stored property
+    /// is only ever meaningful on the Meal Exchange path and must stay within
+    /// the picker's bounded set.
+    init(restoring payload: CreateRequestPayload) {
+        self.init(
+            selectedDiningSpot: DiningSpot(name: payload.vendor, address: nil),
+            menuPath: payload.menuPath.domainMenuPath,
+            timing: payload.timing == .scheduled ? .later : .asap,
+            preferredPickupTime: payload.windowStart ?? Date(),
+            mealSwipes: payload.mealSwipes > 0
+                ? payload.mealSwipes
+                : RequestFoodFormDraft.mealSwipeOptions.first!,
+            mealEntries: RequestFoodFormDraft.normalized(payload.mealItems),
+            orderDetails: payload.orderDetails ?? "",
+            diningDollarsText: payload.estimatedDiningDollarsCents
+                .map(DiningDollarsEntry.formatted(cents:)) ?? ""
+        )
+    }
 }
 
 enum RequestFoodFormError: Error, Equatable {

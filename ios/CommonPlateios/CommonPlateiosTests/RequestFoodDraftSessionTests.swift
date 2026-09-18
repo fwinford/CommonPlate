@@ -89,6 +89,86 @@ final class RequestFoodDraftSessionTests: XCTestCase {
         XCTAssertEqual(owner.screenshotProvenance, ScreenshotProposalAppliedFields())
     }
 
+    // MARK: - W4-D2 FIX 2026-09-18 (independent-review MUST FIX 2): terminal
+    // recovery must replace the whole session, never merely the draft.
+
+    /// Path A contaminated-session test: a session left dirty by an unrelated
+    /// draft/request must not let any of that contamination attach to the
+    /// trusted restored draft.
+    func testReplaceForTerminalRecoveryInstallsTrustedDraftAndDiscardsAllContamination() {
+        let owner = RequestFoodDraftSession()
+        // Deliberate contamination from an unrelated in-progress draft.
+        owner.draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Contaminated Spot", address: nil),
+            menuPath: .diningDollars,
+            timing: .later,
+            preferredPickupTime: Date(timeIntervalSince1970: 1_700_000_000),
+            mealSwipes: 5,
+            mealEntries: ["Stale 1", "Stale 2", "", "", ""],
+            orderDetails: "Stale order",
+            diningDollarsText: "9.99"
+        )
+        owner.screenshotManualEdits.hasManuallyEditedLocation = true
+        owner.screenshotManualEdits.hasManuallyEditedOrderDetails = true
+        owner.screenshotManualEdits.manuallyEditedMealEntries = [0, 1]
+        owner.screenshotProvenance.location = true
+        owner.screenshotProvenance.orderDetails = true
+        owner.screenshotProvenance.mealEntries = [0]
+
+        let trustedDraft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
+            menuPath: .mealExchange,
+            timing: .asap,
+            preferredPickupTime: Date(timeIntervalSince1970: 1_800_000_000),
+            mealSwipes: 1,
+            mealEntries: ["Trusted meal", "", "", "", ""],
+            orderDetails: "",
+            diningDollarsText: ""
+        )
+
+        owner.replaceForTerminalRecovery(restoring: trustedDraft)
+
+        XCTAssertEqual(owner.draft, trustedDraft)
+        XCTAssertEqual(owner.screenshotManualEdits, ScreenshotFieldManualEditState())
+        XCTAssertEqual(owner.screenshotProvenance, ScreenshotProposalAppliedFields())
+    }
+
+    /// Path B contaminated-session test: `Start a new request` must be
+    /// behaviorally equivalent to a genuinely fresh Request Food form, no
+    /// matter what an unrelated earlier draft/session left behind.
+    func testStartEmptyAfterTerminalRecoveryResetsAllContamination() {
+        let owner = RequestFoodDraftSession()
+        owner.draft = RequestFoodFormDraft(
+            selectedDiningSpot: DiningSpot(name: "Contaminated Spot", address: nil),
+            menuPath: .diningDollars,
+            timing: .later,
+            preferredPickupTime: Date(timeIntervalSince1970: 1_700_000_000),
+            mealSwipes: 5,
+            mealEntries: ["Stale 1", "Stale 2", "", "", ""],
+            orderDetails: "Stale order",
+            diningDollarsText: "9.99"
+        )
+        owner.screenshotManualEdits.hasManuallyEditedMealSwipes = true
+        owner.screenshotManualEdits.manuallyEditedMealEntries = [0, 1]
+        owner.screenshotProvenance.mealSwipes = true
+        owner.screenshotProvenance.mealEntries = [0, 1]
+
+        owner.startEmptyAfterTerminalRecovery()
+
+        // `RequestFoodFormDraft()`'s default `preferredPickupTime` is `Date()`
+        // at construction, so it is checked field-by-field rather than by
+        // whole-struct equality against a separately constructed default.
+        XCTAssertNil(owner.draft.selectedDiningSpot)
+        XCTAssertEqual(owner.draft.menuPath, .mealExchange)
+        XCTAssertEqual(owner.draft.timing, .asap)
+        XCTAssertEqual(owner.draft.mealSwipes, RequestFoodFormDraft.mealSwipeOptions.first)
+        XCTAssertEqual(owner.draft.mealEntries, RequestFoodFormDraft.emptyMealEntries)
+        XCTAssertEqual(owner.draft.orderDetails, "")
+        XCTAssertEqual(owner.draft.diningDollarsText, "")
+        XCTAssertEqual(owner.screenshotManualEdits, ScreenshotFieldManualEditState())
+        XCTAssertEqual(owner.screenshotProvenance, ScreenshotProposalAppliedFields())
+    }
+
     func testOwnerIsWiredAboveRouteWithoutDurableOrCreateAuthority() throws {
         let contentSource = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
         let entrySource = try fileSource("ios/CommonPlateios/CommonPlateios/Views/RequestFoodEntryView.swift")

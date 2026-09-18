@@ -191,11 +191,12 @@ final class MealSwipeQuantityTests: XCTestCase {
 
     // MARK: - End-to-end: create round-trips the quantity through RequestStore
 
-    /// W4-R2 2026-09-05 sync item 5: `RequestStore.createRequest` no longer
-    /// inserts into `store.requests` (H4's own authoritative fetch owns
-    /// that), so this round-trips the quantity through the same production
+    /// Round-trips the quantity through the same production
     /// `RequestService.createRequest` the store itself calls, which already
-    /// returns the decoded domain `FoodRequest` directly.
+    /// returns the decoded domain `FoodRequest` directly — independent of
+    /// `RequestStore`'s own insertion/ownership behavior, which is covered
+    /// elsewhere (`RequestCreateDurableOperationTests`,
+    /// `RequestOwnershipLifecycleTests`).
     func testCreateRequestRoundTripsTheQuantityIntoTheStoredDomainRequest() async throws {
         MealSwipeQuantityURLProtocol.reset(data: detailResponse(mealSwipes: 2))
 

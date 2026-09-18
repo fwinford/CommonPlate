@@ -63,9 +63,15 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         XCTAssertTrue(Self.looksLikeAValidOperationId(sentOperationId))
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity (narrowly supersedes the W4-R2
+        // 2026-09-05 sync item 5 behavior this replaces): a fresh create now
+        // inserts immediately, ownership-resolved `.own`, so the
+        // Success→Home continuity sequence has a real, correctly-slotted
+        // Home card to land on without waiting for H4's own authoritative
+        // fetch.
+        XCTAssertEqual(store.requests.map(\.id), ["64b0000000000000000000a1"])
+        XCTAssertTrue(store.requests[0].isOwnRequest)
+        XCTAssertEqual(store.createdRequestContinuity?.request.id, "64b0000000000000000000a1")
     }
 
     // MARK: - Ambiguous transport persists the exact operation and blocks a
@@ -199,9 +205,11 @@ final class RequestCreateDurableOperationTests: XCTestCase {
 
         XCTAssertFalse(storeAfterRelaunch.hasUnresolvedCreateAmbiguity)
         XCTAssertNil(sharedStorage.load())
-        // W4-R2 2026-09-05 sync item 5: a reconciled D1 create must not
-        // insert into `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(storeAfterRelaunch.requests.isEmpty)
+        // W4-D2 Success→Home continuity: a reconciled D1 create under the
+        // still-current authority now inserts immediately, ownership-
+        // resolved `.own`.
+        XCTAssertEqual(storeAfterRelaunch.requests.map(\.id), ["reconciled-request"])
+        XCTAssertEqual(storeAfterRelaunch.requests.first?.ownership, .own)
     }
 
     func testReconciliationWithNothingDurableIsANoOp() async {
@@ -315,9 +323,11 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             RequestFetchingURLProtocol.lastCapturedHeaders?[RequestService.operationIdentityHeader]
         )
         XCTAssertNotEqual(newOperationId, originalOperationId)
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity: a fresh create under the still-
+        // current authority now inserts immediately, ownership-resolved
+        // `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["fresh-after-expiry"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
     }
 
     // MARK: - Invalid operation identity (proof 13)
@@ -424,9 +434,12 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             ))
         ))
         try await storeForB.createRequest(asapPayload(food: "Belongs to participant B"))
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(storeForB.requests.isEmpty)
+        // W4-D2 Success→Home continuity: B's own fresh create, under B's
+        // still-current authority, now inserts immediately, ownership-
+        // resolved `.own` — distinct from A's untouched, unexposed operation
+        // above.
+        XCTAssertEqual(storeForB.requests.map(\.id), ["participant-b-request"])
+        XCTAssertEqual(storeForB.requests.first?.ownership, .own)
     }
 
     // MARK: - Ordinary pre-write rejections are also definitive non-create
@@ -466,9 +479,11 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             ))
         ))
         try await store.createRequest(asapPayload(food: "A different request"))
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity: a fresh create under the still-
+        // current authority now inserts immediately, ownership-resolved
+        // `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["after-quota-refusal"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
     }
 
     /// The same property for the remaining pre-write ordinary rejections
@@ -680,10 +695,11 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         XCTAssertTrue(didRecoverX)
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        // W4-R2 2026-09-05 sync item 5: a reconciled D1 create must not
-        // insert into `store.requests` ahead of H4's own authoritative fetch
-        // either.
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity: a reconciled D1 create under the
+        // still-current authority now inserts immediately, ownership-
+        // resolved `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["recovered-x"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
     }
 
     /// W4-D2: during relaunch reconciliation a quota refusal follows a
@@ -724,7 +740,25 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         )
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
+        // Path A: the replayed payload was known and readable throughout.
+        // The raw payload never leaves the store (independent-review MUST
+        // FIX 1) — presentation carries only the discriminator, and the
+        // store-owned consume operation is the sole way to see the exact
+        // restored content.
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedRecoverable)
+        // `RequestFoodFormDraft(restoring:)` falls back to `Date()` for this
+        // ASAP payload's `preferredPickupTime` (there is no frozen
+        // `windowStart`), so the two independent restorations below cannot be
+        // asserted equal on that one field; every other field is exact.
+        let restored = try XCTUnwrap(store.consumeRecoverableDraftForReturnToRequest())
+        let expected = RequestFoodFormDraft(restoring: asapPayload(food: "Will be over quota on relaunch"))
+        XCTAssertEqual(restored.selectedDiningSpot, expected.selectedDiningSpot)
+        XCTAssertEqual(restored.menuPath, expected.menuPath)
+        XCTAssertEqual(restored.timing, expected.timing)
+        XCTAssertEqual(restored.mealSwipes, expected.mealSwipes)
+        XCTAssertEqual(restored.activeMealEntries, expected.activeMealEntries)
+        XCTAssertEqual(restored.orderDetails, expected.orderDetails)
+        XCTAssertEqual(restored.diningDollarsText, expected.diningDollarsText)
     }
 
     // MARK: - Pre-transmission cancellation (independent-review MUST FIX 2)
@@ -769,9 +803,11 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             ))
         ))
         try await store.createRequest(asapPayload(food: "The real submission"))
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity: a fresh create under the still-
+        // current authority now inserts immediately, ownership-resolved
+        // `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["after-cancelled-attempt"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
     }
 
     /// Reconciliation's own cancellation handling is unchanged: a record that
@@ -894,7 +930,9 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         )
         XCTAssertNil(storage.load())
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
-        XCTAssertEqual(store.createRecoveryPresentation, .notCreated)
+        // Path B: the payload was structurally invalid, so it was never
+        // resent and is never restored.
+        XCTAssertEqual(store.createRecoveryPresentation, .notCreatedUnavailable)
     }
 
     // MARK: - Helpers

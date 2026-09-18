@@ -20,6 +20,15 @@ struct HomeExchangeView: View {
     @ObservedObject var alertSubscriptionStore: AlertSubscriptionStore
     @ObservedObject var pushSubscriptionStore: PushSubscriptionStore
     @ObservedObject var unsubscribeStore: ParticipantEmailUnsubscribeStore
+    /// W4-D2 crossfade handoff: relayed by `ContentView` from the continuity
+    /// overlay's own `RequestCreationContinuityHandoffKey` publication — see
+    /// `RequestCreationContinuityLayout.isHomeCardRevealed(phase:reduceMotion:hasLandingDestination:)`.
+    /// This is the *only* signal that fades this Home card in early. It is
+    /// set for Reduce Motion with a usable destination and for the
+    /// no-usable-target in-place crossfade; standard motion with a usable
+    /// destination never sets it, so that branch's existing instant swap is
+    /// unaffected.
+    let isRevealingLandingContinuityCard: Bool
     let onRequestMeal: () -> Void
 
     /// H2's Request Alerts quick entry (Section 12): a focused centered
@@ -320,9 +329,16 @@ struct HomeExchangeView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.l) {
                         header
+                        // W4-D2 physical-device FIX: `header` is the stable
+                        // chrome the continuity reveals immediately; every
+                        // other card-bearing zone is held back until the
+                        // travelling card has landed — see
+                        // `isDeferringContinuityHomeContent(hasLiveContinuity:reduceMotion:)`.
                         continueHelpingSection
+                            .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
                         ownRequestsSection
                         boardHeadingRow
+                            .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
                     }
                     // W4-H4 final reconciliation: the shared Home
                     // content-column authority (see
@@ -350,6 +366,7 @@ struct HomeExchangeView: View {
                     }
                     .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
                     .padding(.bottom, CommonPlateStyle.Spacing.l)
+                    .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(minHeight: geometry.size.height, alignment: .top)
@@ -489,22 +506,57 @@ struct HomeExchangeView: View {
         let needsHelp: [FoodRequest]
     }
 
+    /// W4-D2: `owned` is newest-created-first (`createdAt` descending),
+    /// independent of the board's own shared ASAP-then-scheduled order —
+    /// ASAP vs Later must never reorder the requester's own zone. `needsHelp`
+    /// is unchanged: still exactly the board's existing authoritative order,
+    /// which D2 does not own. `sorted(by:)` is stable, so a tie (identical
+    /// `createdAt`) preserves the incoming relative order rather than
+    /// reordering unpredictably.
     static func partitionByOwnership(_ requests: [FoodRequest]) -> BoardOwnershipPartition {
         BoardOwnershipPartition(
-            owned: requests.filter(\.isOwnRequest),
+            owned: requests.filter(\.isOwnRequest).sorted { $0.createdAt > $1.createdAt },
             needsHelp: requests.filter { !$0.isOwnRequest }
         )
     }
 
     /// The authoritative caller-relative open requests owned by this
-    /// participant, in the same order H2's board already carries them. Only
-    /// defined while the board itself is authoritatively populated;
-    /// Loading/Unavailable have no authoritative list to partition, and an
-    /// owned request being open necessarily makes `.populated` (never
-    /// `.empty`) reachable when one exists.
+    /// participant, in the same order H2's board already carries them, while
+    /// the board itself is authoritatively populated.
+    ///
+    /// W4-D2 2026-09-17 exact-created-request Home continuity contract sync:
+    /// while the broader board is still `.loading`/`.unavailable` — so there
+    /// is nothing yet to partition — the one exact, ownership-resolved
+    /// request this same D2 flow already produced (`store.
+    /// createdRequestContinuity`) MAY still render here. This is not a
+    /// general Home cache: the source is the live continuity's own trusted
+    /// `request`, keyed by that continuity's identity, never a broader/stale
+    /// requester, helper, or discovery list. `.empty` is an authoritative
+    /// "board fetched, zero requests" result and is deliberately excluded —
+    /// only Loading/Unavailable have no authoritative list to consult at all.
     private var ownRequests: [FoodRequest] {
-        guard case .populated(let requests) = displayedBoardState else { return [] }
-        return Self.partitionByOwnership(requests).owned
+        Self.ownRequests(
+            displayedBoardState: displayedBoardState,
+            createdRequestContinuity: store.createdRequestContinuity
+        )
+    }
+
+    /// Pure form of `ownRequests` above, directly testable without
+    /// instantiating a view — matching this file's existing testable-
+    /// `static-func` pattern (`partitionByOwnership`, `boardState`).
+    static func ownRequests(
+        displayedBoardState: BoardState,
+        createdRequestContinuity: RequestCreationContinuity?
+    ) -> [FoodRequest] {
+        switch displayedBoardState {
+        case .populated(let requests):
+            return partitionByOwnership(requests).owned
+        case .loading, .unavailable:
+            guard let continuity = createdRequestContinuity else { return [] }
+            return [continuity.request]
+        case .empty:
+            return []
+        }
     }
 
     /// W4-H4 revised ownership-preview contract: the Home-inline preview is
@@ -553,7 +605,7 @@ struct HomeExchangeView: View {
                     .accessibilityIdentifier("home-own-requests-heading")
 
                 VStack(spacing: CommonPlateStyle.Spacing.m) {
-                    ForEach(preview.cards) { request in
+                    ForEach(Array(preview.cards.enumerated()), id: \.element.id) { index, request in
                         NavigationLink(value: AppRoute.requestDetail(request)) {
                             // W4-R2: this section's own heading already
                             // establishes ownership, so the per-card `YOUR
@@ -561,6 +613,46 @@ struct HomeExchangeView: View {
                             RequestCardView(request: request, kind: .own, showsOwnershipEyebrow: false)
                         }
                         .buttonStyle(.plain)
+                        // W4-D2 Success→Home continuity: while the continuity
+                        // card for this exact request is still in flight above
+                        // the navigation stack, this slot renders its own card
+                        // invisibly rather than not at all — the layout, and
+                        // therefore every other card's position, is identical
+                        // before, during, and after the landing, so nothing
+                        // reflows and no empty slot opens up. With standard
+                        // motion and a usable destination, the in-flight card
+                        // lands into this exact geometry and is retired in the
+                        // same step this becomes visible; the crossfading
+                        // branches instead fade this in during the landing
+                        // (see `landingContinuityCardOpacity`).
+                        .opacity(landingContinuityCardOpacity(request))
+                        // W4-D2 physical-device FIX: every owned card that is
+                        // *not* the travelling card's own destination is held
+                        // back until the landing is over, keyed by identity so
+                        // the destination is never decided by position.
+                        .modifier(ContinuityDeferredReveal(
+                            isDeferring: !isLandingContinuityCard(request)
+                                && isDeferringContinuityHomeContent
+                        ))
+                        // W4-D2 crossfade handoff: only ever reacts to
+                        // `isRevealingLandingContinuityCard`, on the same
+                        // `handoffCrossfadeAnimation` the overlay card fades
+                        // out on. Standard motion with a usable destination
+                        // never sets that flag, so its existing instant,
+                        // unanimated swap (imperceptible because the overlay
+                        // card occupies this exact same slot at swap time) is
+                        // untouched.
+                        .animation(
+                            RequestCreationContinuityMotionPlan
+                                .plan(reduceMotion: reduceMotion)
+                                .handoffCrossfadeAnimation,
+                            value: isRevealingLandingContinuityCard
+                        )
+                        // Only the first slot publishes, and only its own
+                        // real frame: the continuity landing geometry is
+                        // measured here rather than reconstructed from
+                        // assumed insets or heading heights.
+                        .background(firstOwnedSlotFrameReporter(isFirstSlot: index == 0))
                         .accessibilityIdentifier("home-own-request-card-\(request.id)")
                     }
                 }
@@ -575,6 +667,7 @@ struct HomeExchangeView: View {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("home-own-requests-see-all")
                     .accessibilityLabel(Self.seeAllOwnRequestsTitle(count: seeAllCount))
+                    .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
                 }
             }
         }
@@ -582,6 +675,152 @@ struct HomeExchangeView: View {
 
     static func ownRequestsHeading(count: Int) -> String {
         count == 1 ? "Your request" : "Your requests"
+    }
+
+    /// The one shared Home content-column width rule: a card inside this
+    /// column spans the container minus `homeContentColumnInset` on each
+    /// side, exactly as `exchangeContent` applies it. Expressed once, here,
+    /// so any surface that must match Home's card width derives it from the
+    /// same rule rather than repeating the inset arithmetic — see
+    /// `RequestCreationContinuityLayout.cardWidth(containerWidth:homeSlot:)`,
+    /// whose fallback path is required to agree with this exactly.
+    static func contentCardWidth(containerWidth: CGFloat) -> CGFloat {
+        max(0, containerWidth - (CommonPlateStyle.Metrics.homeContentColumnInset * 2))
+    }
+
+    /// True while the W4-D2 continuity presentation is still carrying this
+    /// exact request's card above the navigation stack.
+    private func isLandingContinuityCard(_ request: FoodRequest) -> Bool {
+        store.createdRequestContinuity?.request.id == request.id
+    }
+
+    /// W4-D2 crossfade handoff: this card's own opacity while the continuity
+    /// overlay may still be presenting the same request above it. Delegates
+    /// to `landingContinuityCardOpacity(isContinuityCard:isRevealing:)`.
+    private func landingContinuityCardOpacity(_ request: FoodRequest) -> Double {
+        Self.landingContinuityCardOpacity(
+            isContinuityCard: isLandingContinuityCard(request),
+            isRevealing: isRevealingLandingContinuityCard
+        )
+    }
+
+    /// Pure form of the destination card's continuity opacity.
+    ///
+    /// Only the card whose request identity matches the live continuity is
+    /// ever affected; every other owned card is always 1 here (its own
+    /// progressive reveal is `ContinuityDeferredReveal`'s concern).
+    ///
+    /// Standard motion with a usable destination (`isRevealing` never true):
+    /// stays invisible for the whole presentation, then becomes visible the
+    /// instant the overlay retires — imperceptible because the overlay's own
+    /// card occupies this exact slot at that instant.
+    ///
+    /// Reduce Motion with a usable destination, and the no-usable-target
+    /// in-place crossfade: becomes visible the moment `isRevealing` turns
+    /// true — the same instant the overlay's own card begins fading out (see
+    /// `RequestCreationContinuityLayout.isHomeCardRevealed(phase:reduceMotion:hasLandingDestination:)`)
+    /// — and the matching `.animation(...)` above crossfades it in over the
+    /// identical animation the overlay fades out on, so there is no interval
+    /// where both are invisible and retirement is not its first appearance.
+    static func landingContinuityCardOpacity(isContinuityCard: Bool, isRevealing: Bool) -> Double {
+        guard isContinuityCard else { return 1 }
+        return isRevealing ? 1 : 0
+    }
+
+    // MARK: - W4-D2 physical-device FIX: progressive Home reveal
+
+    /// Whether Home is currently holding back everything except the stable
+    /// chrome and the continuity card's own destination slot.
+    ///
+    /// The defect this exists for: the continuity overlay reveals Home by
+    /// crossfading its own opaque canvas away at the *start* of the landing,
+    /// and Home's only continuity-aware slot was the destination slot. Every
+    /// other card — the requester's older owned cards, `See all N`, `Continue
+    /// helping`, and the whole `Needs help right now` board — therefore became
+    /// visible underneath a card that had not begun travelling yet. The
+    /// travelling card settles at roughly the canonical Figma's `y=309` and
+    /// lands at `y=164`, while the next owned card sits at `y=297`: the
+    /// reveal alone painted an existing request card directly beneath the
+    /// travelling one, and the travel then swept across it. Physical-device
+    /// acceptance caught exactly that overlap.
+    ///
+    /// Holding that content back is not a timing workaround; it is the
+    /// composition the approved canonical Figma already specifies. In
+    /// `Home reveal · card in flight` (node `684:2829`) the brand header,
+    /// `Your request(s)`, the destination area, and the persistent CTA are
+    /// revealed, while `Needs help right now` and the existing request card
+    /// are explicitly hidden; both landing frames (`684:2841`, `684:2853`)
+    /// then show the complete board. Because it is applied as opacity, Home's
+    /// layout — and therefore the published first-slot geometry the landing is
+    /// measured against — is byte-identical before, during, and after, so
+    /// nothing reflows, no slot collapses, and no scroll position moves.
+    ///
+    /// Reduce Motion is deliberately excluded. Its landing performs only the
+    /// bounded `reducedMotionMaximumLandingDisplacement` travel, so its card
+    /// never sweeps across the cards below it — there is no overlap for this
+    /// to prevent — and Faith verified that path on a physical device. Leaving
+    /// it on exactly its accepted composition keeps that evidence valid.
+    static func isDeferringContinuityHomeContent(
+        hasLiveContinuity: Bool,
+        reduceMotion: Bool
+    ) -> Bool {
+        hasLiveContinuity && !reduceMotion
+    }
+
+    static func continuityDeferredContentOpacity(
+        hasLiveContinuity: Bool,
+        reduceMotion: Bool
+    ) -> Double {
+        isDeferringContinuityHomeContent(
+            hasLiveContinuity: hasLiveContinuity,
+            reduceMotion: reduceMotion
+        ) ? 0 : 1
+    }
+
+    private var isDeferringContinuityHomeContent: Bool {
+        Self.isDeferringContinuityHomeContent(
+            hasLiveContinuity: store.createdRequestContinuity != nil,
+            reduceMotion: reduceMotion
+        )
+    }
+
+    /// Applies the progressive reveal above to one piece of Home content.
+    ///
+    /// `isDeferring` is passed per call site rather than read from the view so
+    /// the destination slot's own card can opt out by identity — see
+    /// `ownRequestsSection` — instead of by position.
+    private struct ContinuityDeferredReveal: ViewModifier {
+        let isDeferring: Bool
+
+        func body(content: Content) -> some View {
+            content
+                .opacity(isDeferring ? 0 : 1)
+                .animation(
+                    .easeInOut(duration: RequestCreationContinuityMotionPlan.homeContentRevealSeconds),
+                    value: isDeferring
+                )
+        }
+    }
+
+    @ViewBuilder
+    private func firstOwnedSlotFrameReporter(isFirstSlot: Bool) -> some View {
+        if isFirstSlot {
+            // W4-D2 coordinate-system FIX: `.global` is the one coordinate
+            // system this slot's frame and the continuity overlay's own card
+            // frame (`RequestCreationContinuityView`'s `ContinuityCardFrameKey`
+            // publication) are both actually measured in. A space named above
+            // this view — on the app root, outside `NavigationStack` — does
+            // not resolve across that hosting boundary, which silently
+            // produced two frames in two different origins.
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: HomeOwnedRequestSlotFrameKey.self,
+                    value: proxy.frame(in: .global)
+                )
+            }
+        } else {
+            Color.clear
+        }
     }
 
     static func seeAllOwnRequestsTitle(count: Int) -> String {

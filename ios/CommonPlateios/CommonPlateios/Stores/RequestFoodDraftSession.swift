@@ -31,4 +31,27 @@ final class RequestFoodDraftSession: ObservableObject {
         screenshotManualEdits = ScreenshotFieldManualEditState()
         screenshotProvenance = ScreenshotProposalAppliedFields()
     }
+
+    /// W4-D2 FIX 2026-09-18 (independent-review MUST FIX 2), Path A: installs
+    /// the trusted draft `RequestStore` restored from a terminal NO-CREATE's
+    /// recovered payload, and resets every other session-owned field —
+    /// `screenshotManualEdits`, `screenshotProvenance`, and anything else this
+    /// owner holds — so no manual-edit or provenance state left over from a
+    /// previous request/session can attach to it.
+    func replaceForTerminalRecovery(restoring draft: RequestFoodFormDraft) {
+        self.draft = draft
+        screenshotManualEdits = ScreenshotFieldManualEditState()
+        screenshotProvenance = ScreenshotProposalAppliedFields()
+    }
+
+    /// W4-D2 FIX 2026-09-18 (independent-review MUST FIX 2), Path B: opens a
+    /// new Request Food form after a terminal NO-CREATE whose payload was
+    /// unavailable. Behaviorally identical to `clearAfterAuthoritativeCreation()`
+    /// — a genuinely fresh session — kept as its own named operation so this
+    /// call site's intent (terminal recovery, not a successful creation)
+    /// stays legible and the two can be changed independently if they ever
+    /// need to diverge.
+    func startEmptyAfterTerminalRecovery() {
+        clearAfterAuthoritativeCreation()
+    }
 }

@@ -754,9 +754,11 @@ final class RequestFetchingTests: XCTestCase {
         try await firstCreate.value
 
         XCTAssertFalse(store.isCreating)
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch.
-        XCTAssertTrue(store.requests.isEmpty)
+        // W4-D2 Success→Home continuity: a fresh create under the still-
+        // current authority now inserts immediately, ownership-resolved
+        // `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["created-once"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
     }
 
     func testConfirmedCreateUpsertsCanonicalRequestByBackendID() async throws {
@@ -785,12 +787,13 @@ final class RequestFetchingTests: XCTestCase {
         )
     }
 
-    /// W4-R2 2026-09-05 sync item 5: a fresh create no longer inserts into
-    /// `store.requests` (H4's own authoritative fetch owns that), but the
-    /// collection-revision bump `createRequest` performs before that removed
-    /// insertion is unchanged, so an older in-flight fetch started before the
-    /// create must still be discarded as stale rather than clobbering
-    /// whatever state exists once it later completes.
+    /// W4-D2 Success→Home continuity: a fresh create under the still-current
+    /// authority now inserts immediately (superseding the W4-R2 2026-09-05
+    /// sync item 5 behavior this narrowly replaces), but the
+    /// collection-revision bump `createRequest` performs is unchanged, so an
+    /// older in-flight fetch started before the create must still be
+    /// discarded as stale rather than clobbering the newly-inserted request
+    /// once it later completes.
     func testConfirmedCreateInvalidatesOlderFetchSnapshot() async throws {
         let store = makeStore()
         RequestFetchingURLProtocol.enqueue(.response(data: listResponse([
@@ -814,13 +817,13 @@ final class RequestFetchingTests: XCTestCase {
         ))
         try await store.createRequest(makeCreatePayload())
 
-        XCTAssertEqual(store.requests.map(\.id), ["already-visible"])
+        XCTAssertEqual(store.requests.map(\.id), ["already-visible", "newly-created"])
         XCTAssertTrue(store.isRefreshingRequests)
 
         olderRefreshGate.open()
         await olderRefresh.value
 
-        XCTAssertEqual(store.requests.map(\.id), ["already-visible"])
+        XCTAssertEqual(store.requests.map(\.id), ["already-visible", "newly-created"])
         XCTAssertFalse(store.isRefreshingRequests)
         XCTAssertNil(store.refreshError)
     }
@@ -900,11 +903,12 @@ final class RequestFetchingTests: XCTestCase {
 
         try await store.createRequest(makeCreatePayload())
 
-        // W4-R2 2026-09-05 sync item 5: a fresh create must not insert into
-        // `store.requests` ahead of H4's own authoritative fetch — this
-        // proves the create itself still succeeds (no thrown error) without
-        // depending on that removed insertion.
-        XCTAssertTrue(store.requests.isEmpty)
+        // The create itself still succeeds (no thrown error) despite no
+        // email-delivery field in the response. W4-D2 Success→Home
+        // continuity: a fresh create under the still-current authority now
+        // inserts immediately, ownership-resolved `.own`.
+        XCTAssertEqual(store.requests.map(\.id), ["created-despite-email"])
+        XCTAssertEqual(store.requests.first?.ownership, .own)
         XCTAssertNil(store.createError)
     }
 
