@@ -212,6 +212,8 @@ struct RequestFoodMountedPresentationState: Equatable {
     var isPresentingTimingInfo = false
     var screenshotAfterglowFields = ScreenshotProposalAppliedFields()
     var screenshotChecked = false
+    var preservedEntryFeedback = ScreenshotPreservedEntryFeedbackState()
+    var expandedMealIndex: Int?
 
     /// The one production reset both Path A and Path B route through.
     /// Always converges on the same clean defaults regardless of what this
@@ -222,8 +224,69 @@ struct RequestFoodMountedPresentationState: Equatable {
     /// the same step, so no in-flight analysis for the replaced form can
     /// repopulate it afterward.
     mutating func resetForTerminalRecovery(screenshotProposalStore: ScreenshotProposalStore) {
+        var resetPreservedEntryFeedback = preservedEntryFeedback
+        resetPreservedEntryFeedback.resetForTerminalRecovery()
         self = RequestFoodMountedPresentationState()
+        // Retain the incremented timeout generation while resetting every
+        // visible field. A delayed cleanup from the retired form can never
+        // match a replacement form's feedback state.
+        self.preservedEntryFeedback = resetPreservedEntryFeedback
         screenshotProposalStore.invalidateCurrentSelection()
+    }
+}
+
+/// View-local lifecycle for the temporary preserved-entry acknowledgement.
+/// This is deliberately not Screenshot Assistance domain/status state: it
+/// only distinguishes the first completed analysis from a later completed
+/// rerun and fences the view's short-lived cleanup task.
+struct ScreenshotPreservedEntryFeedbackState: Equatable {
+    private(set) var hasCompletedScreenshotAssistanceRun = false
+    private(set) var isShowing = false
+    private(set) var timeoutGeneration = 0
+
+    /// A new picker selection retires any earlier acknowledgement timeout.
+    mutating func beginSelection() {
+        retire()
+    }
+
+    /// Hides any visible acknowledgement and fences its delayed cleanup. Used
+    /// on view disappearance and Screenshot Assistance disablement; it never
+    /// touches the completed-run flag.
+    mutating func retire() {
+        timeoutGeneration &+= 1
+        isShowing = false
+    }
+
+    /// Records the current completed analysis. Only a successful eligible
+    /// analysis counts as a completed run; ineligible outcomes establish
+    /// nothing, and failed/cancelled/nil outcomes never reach this method.
+    /// Only an eligible completion after an earlier eligible completion is a
+    /// genuine rerun eligible for this feedback.
+    mutating func completeAnalysis(
+        eligible: Bool,
+        applying applied: ScreenshotProposalAppliedFields
+    ) -> Int? {
+        guard eligible else { return nil }
+        let isGenuineRerun = hasCompletedScreenshotAssistanceRun
+        hasCompletedScreenshotAssistanceRun = true
+        guard isGenuineRerun, applied.didPreserveManualContent else { return nil }
+
+        timeoutGeneration &+= 1
+        isShowing = true
+        return timeoutGeneration
+    }
+
+    /// Path A/B replacement makes both the previous run and its delayed
+    /// cleanup irrelevant to the newly installed form.
+    mutating func resetForTerminalRecovery() {
+        timeoutGeneration &+= 1
+        isShowing = false
+        hasCompletedScreenshotAssistanceRun = false
+    }
+
+    mutating func clearAfterTimeout(ifCurrent timeoutGeneration: Int) {
+        guard self.timeoutGeneration == timeoutGeneration else { return }
+        isShowing = false
     }
 }
 
@@ -395,6 +458,22 @@ struct RequestFoodView: View {
     /// begins (`Change`/a fresh pick), so the compact result row only ever
     /// reflects the current selection's own outcome.
     @State private var screenshotChecked = false
+    /// A bounded, rerun-only acknowledgement. It is intentionally view-local:
+    /// it neither changes draft authority nor survives route recreation.
+    @State private var preservedEntryFeedback = ScreenshotPreservedEntryFeedbackState()
+    /// Expansion is pure, local editor presentation — never a save
+    /// transaction. At most one stable meal index may be open at a time.
+    @State private var expandedMealIndex: Int?
+    /// Raw measurements behind `Post request`'s placement. A reference type on
+    /// purpose: writing a measurement must not invalidate the form.
+    @State private var layoutMeasurements = RequesterFormMeasurementBox()
+    /// The published placement decision: `nil` until measured, then whether
+    /// `Post request` anchors to the bottom. Changes only when the answer does.
+    @State private var anchorsPostRequestDecision: Bool?
+    /// The menu path that was current when the focused field gained focus, so
+    /// a blur caused by the path switch itself is not validated against the
+    /// newly selected branch.
+    @State private var focusedFieldMenuPath: RequestMenuPath?
 
     /// Short aliases keep the existing field/submission code operating on the
     /// shared owner without introducing a second local copy.
@@ -643,6 +722,10 @@ struct RequestFoodView: View {
             // left could still be applied if this exact view instance were
             // ever reused.
             screenshotProposalStore.invalidateCurrentSelection()
+            preservedEntryFeedback.retire()
+        }
+        .onChange(of: screenshotProposalStore.isAIAssistanceEnabled) { _, isEnabled in
+            if !isEnabled { preservedEntryFeedback.retire() }
         }
         .onChange(of: selectedScreenshotItems) { _, newItems in
             guard !newItems.isEmpty else { return }
@@ -661,15 +744,20 @@ struct RequestFoodView: View {
             if !screenshotManualEdits.hasManuallyEditedLocation { screenshotProvenance.location = false }
             if !screenshotManualEdits.hasManuallyEditedMealSwipes { screenshotProvenance.mealSwipes = false }
             if !screenshotManualEdits.hasManuallyEditedOrderDetails { screenshotProvenance.orderDetails = false }
-            for index in 0..<RequestFoodFormDraft.maxMealSwipes
-            where !screenshotManualEdits.hasManuallyEditedMealEntry(index) {
-                screenshotProvenance.mealEntries.remove(index)
+            for index in 0..<RequestFoodFormDraft.maxMealSwipes {
+                if !screenshotManualEdits.hasManuallyEditedMealItemName(index) {
+                    screenshotProvenance.mealItemNames.remove(index)
+                }
+                if !screenshotManualEdits.hasManuallyEditedMealItemDetails(index) {
+                    screenshotProvenance.mealItemDetails.remove(index)
+                }
             }
             screenshotAfterglowFields = ScreenshotProposalAppliedFields()
             // A fresh selection starts its own result: the prior selection's
             // `✓ Screenshot checked` row must not keep describing this new,
             // not-yet-analyzed selection.
             screenshotChecked = false
+            preservedEntryFeedback.beginSelection()
             Task { await processSelectedScreenshots(newItems, token: token) }
         }
         // W4-R2 2026-09-01 round-2 sync: the disclosure is now the local
@@ -728,7 +816,7 @@ struct RequestFoodView: View {
                 } label: {
                     Text(Self.turnOnScreenshotAssistanceLabel)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(Color("AccentColor"))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, CommonPlateStyle.Spacing.m)
                         .background(
@@ -758,7 +846,7 @@ struct RequestFoodView: View {
                     } label: {
                         Text(Self.screenshotChangeLabel)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(Color("AccentColor"))
                     }
                     .accessibilityIdentifier("request-screenshot-change")
                 }
@@ -782,7 +870,7 @@ struct RequestFoodView: View {
                     HStack(spacing: CommonPlateStyle.Spacing.xs) {
                         if screenshotProposalStore.isApplying {
                             ProgressView()
-                                .tint(Color.accentColor)
+                                .tint(Color("AccentColor"))
                         }
                         Text(
                             screenshotProposalStore.isApplying
@@ -791,7 +879,7 @@ struct RequestFoodView: View {
                         )
                         .font(.subheadline.weight(.semibold))
                     }
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Color("AccentColor"))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, CommonPlateStyle.Spacing.m)
                     .background(
@@ -804,6 +892,7 @@ struct RequestFoodView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .tint(Color("AccentColor"))
                 .disabled(screenshotProposalStore.isApplying)
                 .accessibilityIdentifier("request-screenshot-picker")
             }
@@ -1033,13 +1122,29 @@ struct RequestFoodView: View {
         if applied.location { screenshotProvenance.location = true }
         if applied.mealSwipes { screenshotProvenance.mealSwipes = true }
         if applied.orderDetails { screenshotProvenance.orderDetails = true }
-        screenshotProvenance.mealEntries.formUnion(applied.mealEntries)
+        screenshotProvenance.mealItemNames.formUnion(applied.mealItemNames)
+        screenshotProvenance.mealItemDetails.formUnion(applied.mealItemDetails)
 
         // W4-R2 2026-08-31 sync: an ineligible screenshot keeps its existing
         // `unsupportedScreenshot` notice presentation untouched — only an
         // eligible completed analysis shows the compact result row.
         if outcome.eligible {
             screenshotChecked = true
+        }
+
+        if let feedbackTimeoutGeneration = preservedEntryFeedback.completeAnalysis(
+            eligible: outcome.eligible,
+            applying: applied
+        ) {
+            // Fenced only by the feedback's own generation: the store token
+            // goes stale on disappearance or disablement, and gating on it
+            // would strand the visible message.
+            Task {
+                try? await Task.sleep(for: Self.preservedEntryFeedbackDuration)
+                preservedEntryFeedback.clearAfterTimeout(
+                    ifCurrent: feedbackTimeoutGeneration
+                )
+            }
         }
 
         // W4-R2 motion: only the fields this exact call changed receive the
@@ -1059,6 +1164,11 @@ struct RequestFoodView: View {
     static let afterglowDuration: Duration = .milliseconds(900)
 
     static let filledFromScreenshotLabel = "Filled from screenshot"
+    static let preservedEntryFeedbackMessage =
+        "Screenshot checked. Your existing entries were kept."
+    /// Kept as a named seam so the temporary acknowledgement's intended
+    /// lifetime is inspectable without a fragile wall-clock test.
+    static let preservedEntryFeedbackDuration: Duration = .seconds(3)
 
     /// The only path that may set `screenshotManualEdits.hasManuallyEditedMealSwipes`
     /// — latches on genuine user interaction with the picker, including
@@ -1093,28 +1203,44 @@ struct RequestFoodView: View {
         )
     }
 
-    /// The only path that may mark a structured meal-detail entry manually
-    /// edited (W4-R4) — latches on a nonempty manual edit to that exact
-    /// entry. Clearing it back to empty (W4-R2 2026-08-31 sync: "a manually
-    /// cleared field becomes empty and eligible for future screenshot
-    /// suggestions again") unlatches it, rather than permanently locking out
-    /// a later AI proposal just because the requester once typed here.
-    ///
-    /// Per-entry rather than per-form: editing the second meal must not make
-    /// the first ineligible for a suggestion.
-    private func mealEntryBinding(_ index: Int) -> Binding<String> {
+    /// Name and Details each acquire authority only from their own current,
+    /// non-empty manual value. This is deliberately not a whole-meal latch.
+    private func mealItemNameBinding(_ index: Int) -> Binding<String> {
         Binding(
-            get: { draft.mealEntries[index] },
+            get: { draft.mealEntries[index].name },
             set: { newValue in
-                draft.mealEntries[index] = newValue
-                if newValue.isEmpty {
-                    screenshotManualEdits.manuallyEditedMealEntries.remove(index)
-                } else {
-                    screenshotManualEdits.manuallyEditedMealEntries.insert(index)
-                }
-                screenshotProvenance.mealEntries.remove(index)
+                draft.mealEntries[index].name = newValue
+                recordManualMealItemNameEdit(index, hasContent: !newValue.isEmpty)
             }
         )
+    }
+
+    private func mealItemDetailsBinding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: { draft.mealEntries[index].details ?? "" },
+            set: { newValue in
+                draft.mealEntries[index].details = newValue.isEmpty ? nil : newValue
+                recordManualMealItemDetailsEdit(index, hasContent: !newValue.isEmpty)
+            }
+        )
+    }
+
+    private func recordManualMealItemNameEdit(_ index: Int, hasContent: Bool) {
+        if hasContent {
+            screenshotManualEdits.manuallyEditedMealItemNames.insert(index)
+        } else {
+            screenshotManualEdits.manuallyEditedMealItemNames.remove(index)
+        }
+        screenshotProvenance.mealItemNames.remove(index)
+    }
+
+    private func recordManualMealItemDetailsEdit(_ index: Int, hasContent: Bool) {
+        if hasContent {
+            screenshotManualEdits.manuallyEditedMealItemDetails.insert(index)
+        } else {
+            screenshotManualEdits.manuallyEditedMealItemDetails.remove(index)
+        }
+        screenshotProvenance.mealItemDetails.remove(index)
     }
 
     /// The Dining-Dollars-only order-details field, under the same
@@ -1130,13 +1256,15 @@ struct RequestFoodView: View {
         )
     }
 
-    /// Dining Dollars carry no screenshot provenance at all: Screenshot
-    /// Assistance never proposes an amount, so there is no AI ownership for a
-    /// manual edit to override.
+    /// The narrowly supported current-cart estimate remains requester-owned:
+    /// any nonempty manual edit prevents a later proposal from replacing it.
     private var diningDollarsBinding: Binding<String> {
         Binding(
             get: { draft.diningDollarsText },
-            set: { draft.diningDollarsText = $0 }
+            set: {
+                draft.diningDollarsText = $0
+                screenshotManualEdits.hasManuallyEditedDiningDollars = !$0.isEmpty
+            }
         )
     }
 
@@ -1347,7 +1475,9 @@ struct RequestFoodView: View {
             isPresentingExactTimePicker: isPresentingExactTimePicker,
             isPresentingTimingInfo: isPresentingTimingInfo,
             screenshotAfterglowFields: screenshotAfterglowFields,
-            screenshotChecked: screenshotChecked
+            screenshotChecked: screenshotChecked,
+            preservedEntryFeedback: preservedEntryFeedback,
+            expandedMealIndex: expandedMealIndex
         )
         // Retires any in-flight analysis and its notice for the previous
         // selection, exactly like leaving the screen would — this replaces
@@ -1358,12 +1488,15 @@ struct RequestFoodView: View {
         showsLocalRejectionPointer = mountedState.showsLocalRejectionPointer
         isShowingFailureSummary = mountedState.isShowingFailureSummary
         focusedField = nil
+        focusedFieldMenuPath = nil
         selectedScreenshotItems = []
         isPresentingScreenshotPicker = mountedState.isPresentingScreenshotPicker
         isPresentingExactTimePicker = mountedState.isPresentingExactTimePicker
         isPresentingTimingInfo = mountedState.isPresentingTimingInfo
         screenshotAfterglowFields = mountedState.screenshotAfterglowFields
         screenshotChecked = mountedState.screenshotChecked
+        preservedEntryFeedback = mountedState.preservedEntryFeedback
+        expandedMealIndex = mountedState.expandedMealIndex
     }
 
     /// W4-D2 Path B: opens the ordinary empty Request Food form. Never
@@ -1418,7 +1551,7 @@ struct RequestFoodView: View {
                 // W4-R2: the one native indeterminate progress owner tinted
                 // CommonPlate purple — no custom progress/percentage/stages,
                 // no start haptic.
-                .tint(Color.accentColor)
+                .tint(Color("AccentColor"))
             Text(Self.postingTitle)
                 .font(.headline)
         }
@@ -1494,7 +1627,7 @@ struct RequestFoodView: View {
     private func statusIcon(systemName: String) -> some View {
         Image(systemName: systemName)
             .font(.title2.weight(.semibold))
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(Color("AccentColor"))
             .frame(width: 56, height: 56)
             .background(CommonPlateStyle.Color.warmSurface, in: Circle())
             .accessibilityHidden(true)
@@ -1770,313 +1903,282 @@ struct RequestFoodView: View {
         )
         let timingOptions = Self.availableTimingOptions(now: now, calendar: calendar)
         let quickScheduledTimes = Self.quickScheduledTimes(now: now, calendar: calendar)
-        // W4-R2 2026-09-02 physical-walkthrough sync (stable Timing
-        // footprint): the same gating the removed `if` used, now driving
-        // visibility/interactivity of an always-mounted view instead of its
-        // presence in the tree.
         let isLaterActive = draft.timing == .later && isScheduledTimingAvailable
         let errors = validationErrors(now: now)
         let visibleScheduleError = validationPresentation
             .visibleError(for: .pickupSchedule, from: errors)?
             .error
 
-        // W4-R2 2026-09-02 physical-walkthrough sync (final vertical
-        // composition — B-style baseline rhythm + restrained A-style
-        // adaptive spacing). Faith preferred the earlier fixed-spacing
-        // prototype's rhythm over a version that concentrated all spare
-        // viewport height into one dominant gap, but still wants `Post
-        // request` to land in the lower Home-like CTA zone when the form
-        // fits on screen. `GeometryReader` + `.frame(minHeight:
-        // geometry.size.height, alignment: .top)` is kept — it's still the
-        // only way to give a `ScrollView`'s content any spare height to
-        // negotiate at all (same technique `HomeExchangeView.exchangeContent`
-        // uses) — but the negotiation itself is now distributed across six
-        // `adaptiveMajorGap()` calls, one at each major inter-section
-        // relationship, instead of one capped spacer immediately above the
-        // button. Each stays close to its `.m` baseline and grows only a
-        // small bounded amount toward `.l`; six of them growing together on
-        // very short content still land `Post request` low, without any one
-        // gap reading as an exaggerated cavity. Unlike Home's `Request a
-        // Meal`, which lives entirely outside its `ScrollView` in a
-        // permanent `.safeAreaInset(edge: .bottom)`, `Post request` stays
-        // ordinary scroll content throughout: on tall content the minHeight
-        // is already satisfied and every gap collapses to its `.m` floor,
-        // and the button scrolls with the form exactly as before.
-        return GeometryReader { geometry in
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // Screenshot Assistance and the eyebrow above it are not one
-                // of the six adaptive relationships Faith named — this
-                // header-to-first-row gap stays the plain fixed `.m` rhythm
-                // it already had.
+        // W4-R4 (2026-09-26): a stable ScrollView/VStack skeleton with one
+        // canonical, fixed inter-section rhythm. Nothing here negotiates spare
+        // viewport height: expanding a meal or revealing Later controls
+        // changes only that local section, content below it moves naturally,
+        // and content above it stays where it is. The one adaptive decision is
+        // where `Post request` lives (see `RequesterFormLayoutMetrics`).
+        let anchorsPostRequest = anchorsPostRequestDecision ?? false
+        let isPlacementMeasured = anchorsPostRequestDecision != nil
+
+        return ScrollView {
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
                 VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                    Text(Self.yourOrderEyebrow)
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.secondary)
-                        .accessibilityAddTraits(.isHeader)
+                    // The content above the path selector is one fixed-flow
+                    // section. Its stable `.m` rhythm never changes when a later
+                    // Meal Exchange or Timing section grows.
+                    VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                            Text(Self.yourOrderEyebrow)
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.secondary)
+                                .accessibilityAddTraits(.isHeader)
 
-                    screenshotAssistanceRow
-                }
+                            screenshotAssistanceRow
+                        }
 
-                // Major relationship: Screenshot Assistance → Dining location.
-                adaptiveMajorGap()
+                        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                            RequesterFormFieldContainer(
+                                label: Self.diningLocationLabel,
+                                showsProvenance: screenshotProvenance.location,
+                                isGlowing: screenshotAfterglowFields.location,
+                                provenanceIdentifier: "request-dining-spot-provenance"
+                            ) {
+                                diningSpotControl
+                            }
 
-                // Each field keeps its own error/address text at the same
-                // fixed `.m` rhythm it already had — only the gap *between*
-                // logical field groups is adaptive, not a field's relation
-                // to its own inline error text.
-                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                    RequesterFormFieldContainer(
-                        label: Self.diningLocationLabel,
-                        showsProvenance: screenshotProvenance.location,
-                        isGlowing: screenshotAfterglowFields.location,
-                        provenanceIdentifier: "request-dining-spot-provenance"
-                    ) {
-                        diningSpotControl
-                    }
+                            fieldErrorText(
+                                .diningSpot,
+                                errors: errors,
+                                identifier: "request-dining-spot-error"
+                            )
 
-                    fieldErrorText(
-                        .diningSpot,
-                        errors: errors,
-                        identifier: "request-dining-spot-error"
-                    )
-
-                    if let address = draft.selectedDiningSpot?.address {
-                        Text(address)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                // Major relationship: Dining location → menu selection.
-                adaptiveMajorGap()
-
-                // W4-R4: which menu the requester is using decides which
-                // resource fields exist below it. Deliberately not wrapped in
-                // an extra grouping/background box — the menu-dependent
-                // fields use the same `RequesterFormFieldContainer` grammar
-                // and vertical rhythm as every other field on this form.
-                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                    Text(Self.menuPathLabel)
-                        .font(.subheadline.weight(.semibold))
-
-                    menuPathControl
-                }
-
-                // Major relationship: menu selection → its resource fields.
-                adaptiveMajorGap()
-
-                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                    switch draft.menuPath {
-                    case .mealExchange:
-                        mealExchangeFields(errors: errors)
-                    case .diningDollars:
-                        diningDollarsOnlyFields(errors: errors)
-                    }
-                }
-
-                // Major relationship: resource fields → Timing.
-                adaptiveMajorGap()
-
-                // W4-R2 2026-08-31 round-2 sync: every timing-related row
-                // below — label, control, ASAP's explanation, and every
-                // Later-only addition — is one single stack child, not five
-                // separate ones. Splitting them across multiple outer
-                // siblings was the actual source of the reported excessive
-                // ASAP spacing: each always-present wrapper VStack below
-                // (needed so `.animation(value:)` has a stable subtree to
-                // animate) still claimed its own full gap on both sides even
-                // while genuinely empty in ASAP mode, where nothing filled
-                // that reserved space. Grouping them here collapses those
-                // empty gaps down to the tighter `.xs` rhythm already used
-                // between this block's own rows, while Later's real content
-                // is unaffected. This whole block is the Timing side of the
-                // adjacent "resource fields → Timing" adaptive gap above — its
-                // own internal `.xs` rhythm is unrelated and untouched.
-                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
-                        // W4-R2 2026-09-02 physical-walkthrough sync: the
-                        // info affordance moves to the row's trailing edge —
-                        // the same leading-label/trailing-secondary-affordance
-                        // composition `screenshotAssistanceRow`'s header
-                        // already uses — so it no longer crowds `Timing`
-                        // itself.
-                        HStack(spacing: CommonPlateStyle.Spacing.xs) {
-                            Text(Self.timingLabel)
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            // W4-R2 2026-09-02 sync item 4: a quiet secondary
-                            // information affordance replacing the removed
-                            // persistent Timing subtitles below — on-demand,
-                            // not permanent form chrome.
-                            // W4-R2 2026-09-05 sync item 7: at least a 44×44
-                            // effective tap target around the visually quiet
-                            // glyph — only this control, not the surrounding
-                            // Timing header, becomes tappable.
-                            Button {
-                                isPresentingTimingInfo = true
-                            } label: {
-                                Image(systemName: "info.circle")
+                            if let address = draft.selectedDiningSpot?.address {
+                                Text(address)
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
-                            .accessibilityLabel(Self.timingInfoAccessibilityLabel)
-                            .accessibilityIdentifier("request-timing-info")
-                        }
-                        .alert(
-                            Self.timingInfoTitle,
-                            isPresented: $isPresentingTimingInfo
-                        ) {
-                            Button("OK", role: .cancel) {}
-                        } message: {
-                            Text(Self.timingInfoBody)
                         }
 
-                        // Only the timings that still have a selectable start
-                        // are offered, so "Later" cannot be selected when it
-                        // is impossible.
-                        timingControl(timingOptions: timingOptions)
-                            .onChange(of: draft.timing) { _, newTiming in
-                                guard newTiming == .later else {
-                                    return
+                        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                            Text(Self.menuPathLabel)
+                                .font(.subheadline.weight(.semibold))
+
+                            menuPathControl
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                        switch draft.menuPath {
+                        case .mealExchange:
+                            mealExchangeFields(errors: errors)
+                        case .diningDollars:
+                            diningDollarsOnlyFields(errors: errors)
+                        }
+                    }
+
+                    // Timing remains one local section. Later-only controls grow
+                    // this stack and push only following content down.
+                    VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
+                            // W4-R2 2026-09-02 physical-walkthrough sync: the
+                            // info affordance moves to the row's trailing edge —
+                            // the same leading-label/trailing-secondary-affordance
+                            // composition `screenshotAssistanceRow`'s header
+                            // already uses — so it no longer crowds `Timing`
+                            // itself.
+                            HStack(spacing: CommonPlateStyle.Spacing.xs) {
+                                Text(Self.timingLabel)
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                // W4-R2 2026-09-02 sync item 4: a quiet secondary
+                                // information affordance replacing the removed
+                                // persistent Timing subtitles below — on-demand,
+                                // not permanent form chrome.
+                                // W4-R2 2026-09-05 sync item 7: at least a 44×44
+                                // effective tap target around the visually quiet
+                                // glyph — only this control, not the surrounding
+                                // Timing header, becomes tappable.
+                                // W4-R4: the visible glyph sits flush against
+                                // the trailing edge of its 44×44 target, so
+                                // it aligns with the same right content edge
+                                // as `Optional` while the tap target keeps
+                                // its full size (extending leftward).
+                                Button {
+                                    isPresentingTimingInfo = true
+                                } label: {
+                                    Image(systemName: "info.circle")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
                                 }
-                                if !Self.isValidScheduledWindow(
-                                    startingAt: draft.preferredPickupTime,
-                                    now: now,
-                                    calendar: calendar
-                                ), let firstQuickTime = quickScheduledTimes.first {
-                                    draft.preferredPickupTime = firstQuickTime
-                                }
+                                .buttonStyle(.plain)
+                                .contentShape(Rectangle())
+                                .accessibilityLabel(Self.timingInfoAccessibilityLabel)
+                                .accessibilityIdentifier("request-timing-info")
+                            }
+                            .alert(
+                                Self.timingInfoTitle,
+                                isPresented: $isPresentingTimingInfo
+                            ) {
+                                Button("OK", role: .cancel) {}
+                            } message: {
+                                Text(Self.timingInfoBody)
                             }
 
-                        // Withheld once the lapsed-Later error is on screen:
-                        // that message already opens with this exact
-                        // sentence, and printing it twice would read as two
-                        // separate findings about the same closed window.
-                        if Self.showsScheduledUnavailableNotice(
-                            isScheduledTimingAvailable: isScheduledTimingAvailable,
-                            visibleScheduleError: visibleScheduleError
-                        ) {
-                            Text(Self.scheduledUnavailableNotice)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("scheduled-unavailable-notice")
+                            // Only the timings that still have a selectable start
+                            // are offered, so "Later" cannot be selected when it
+                            // is impossible.
+                            timingControl(timingOptions: timingOptions)
+                                .onChange(of: draft.timing) { _, newTiming in
+                                    guard newTiming == .later else {
+                                        return
+                                    }
+                                    if !Self.isValidScheduledWindow(
+                                        startingAt: draft.preferredPickupTime,
+                                        now: now,
+                                        calendar: calendar
+                                    ), let firstQuickTime = quickScheduledTimes.first {
+                                        draft.preferredPickupTime = firstQuickTime
+                                    }
+                                }
+
+                            // Withheld once the lapsed-Later error is on screen:
+                            // that message already opens with this exact
+                            // sentence, and printing it twice would read as two
+                            // separate findings about the same closed window.
+                            if Self.showsScheduledUnavailableNotice(
+                                isScheduledTimingAvailable: isScheduledTimingAvailable,
+                                visibleScheduleError: visibleScheduleError
+                            ) {
+                                Text(Self.scheduledUnavailableNotice)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("scheduled-unavailable-notice")
+                            }
+
+                            // W4-R4: Later controls are inserted locally. ASAP
+                            // reserves none of their footprint; they grow the
+                            // Timing section, content above it stays put, and
+                            // content below it moves with the restrained
+                            // `laterMotionAnimation` set where the selection
+                            // changes (`timingControl`).
+                            if isLaterActive {
+                                laterTimeChoices(quickTimes: quickScheduledTimes)
+                                    .padding(.top, CommonPlateStyle.Spacing.s)
+                                    .transition(.opacity)
+                            }
+
+                            // This one location is deliberately outside the
+                            // available-only DatePicker branch. If time passes
+                            // while "Later" is selected, a submitted scheduling
+                            // error stays visible beside the timing controls
+                            // rather than disappearing with the picker.
+                            fieldErrorText(
+                                .pickupSchedule,
+                                errors: errors,
+                                identifier: "request-pickup-schedule-error"
+                            )
+
                         }
+                }
+                .requesterMeasuringHeight(RequesterFormContentHeightKey.self)
 
-                        // W4-R2 2026-09-02 physical-walkthrough sync (stable
-                        // Timing footprint): always mounted, never
-                        // conditionally inserted/removed, so its natural
-                        // layout height is reserved identically whether ASAP
-                        // or Later is selected — this is what stops `Post
-                        // request` from visibly traveling when the requester
-                        // switches Timing (previously, removing this view
-                        // entirely in ASAP mode removed its height from the
-                        // layout too). Quiet Settle's reveal/hide is
-                        // reproduced directly via the same `.opacity`/
-                        // `.offset` values `QuietSettleModifier` already used
-                        // for insertion/removal, animated by `.animation(
-                        // value:)` instead of `.transition` — a transition
-                        // only fires on insertion/removal, which no longer
-                        // happens here, so the identical visual motion is
-                        // driven as an ordinary state-change animation
-                        // instead. This subtree deliberately still does not
-                        // share an ancestor with `timingControl` above, so
-                        // this reveal/hide continues to never bleed into an
-                        // authored segment-selection animation on the
-                        // ASAP/Later pill, which stays governed by no
-                        // animation modifier at all. When Later is not
-                        // active — ASAP, or Later while scheduling happens to
-                        // be unavailable — the reserved region is inert:
-                        // `.allowsHitTesting(false)` keeps its invisible
-                        // controls untappable and `.accessibilityHidden`
-                        // keeps VoiceOver from focusing them.
-                        laterTimeChoices(quickTimes: quickScheduledTimes)
-                            .padding(.top, CommonPlateStyle.Spacing.s)
-                            .opacity(isLaterActive ? 1 : 0)
-                            .offset(y: isLaterActive ? 0 : 8)
-                            .allowsHitTesting(isLaterActive)
-                            .accessibilityHidden(!isLaterActive)
-                            .animation(reduceMotion ? nil : Self.quietSettleAnimation, value: draft.timing)
-
-                        // This one location is deliberately outside the
-                        // available-only DatePicker branch. If time passes
-                        // while "Later" is selected, a submitted scheduling
-                        // error stays visible beside the timing controls
-                        // rather than disappearing with the picker.
-                        fieldErrorText(
-                            .pickupSchedule,
-                            errors: errors,
-                            identifier: "request-pickup-schedule-error"
-                        )
-
-                    }
-
-                // Major relationship: Timing → Post request.
-                adaptiveMajorGap()
-
-                VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
-                    // Only when the rejection had nowhere to move focus. A
-                    // backend failure owns this section through
-                    // `submissionError` and is never replaced or accompanied
-                    // by the pointer.
-                    if Self.showsLocalRejectionPointer(
-                        isPresenting: showsLocalRejectionPointer,
-                        submissionError: effectiveSubmissionError
-                    ) {
-                        Text(Self.localRejectionPointerNotice)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                            .accessibilityIdentifier("request-submission-pointer")
-                    }
-
-                    // W4-R2: a backend-authoritative outcome for
-                    // `effectiveSubmissionError` is never rendered inline
-                    // here — D1 ambiguity has its own dedicated
-                    // `blockedByAmbiguityView` and every other definitive
-                    // outcome has its own dedicated `definitiveFailureView`
-                    // (`isShowingFailureSummary`), both reached via
-                    // `presentation(...)` before this form ever re-renders.
-                    // This section remains reachable only through
-                    // `effectiveSubmissionError`'s continued use in
-                    // `isSubmissionEnabled` below, disabling Post request for
-                    // the same instant it takes to transition away.
-
-                    Button {
-                        Task {
-                            await submit()
-                        }
-                    } label: {
-                        Text(Self.postRequestLabel)
-                    }
-                    .commonPlatePrimaryAction()
-                    .disabled(!isSubmissionEnabled)
+                // Tall form: the action is ordinary scroll content and follows
+                // the form. It stays laid out but invisible until the three
+                // measurements exist, so a short form never flashes it here
+                // before it settles at the bottom.
+                if !anchorsPostRequest {
+                    postRequestSection
+                        .opacity(isPlacementMeasured ? 1 : 0)
+                        .allowsHitTesting(isPlacementMeasured)
+                        .accessibilityHidden(!isPlacementMeasured)
                 }
             }
             .padding(.horizontal, CommonPlateStyle.Spacing.l)
-            .padding(.top, CommonPlateStyle.Spacing.l)
-            // ScrollView already respects the device safe area. A second
-            // 20-point bottom inset produced an earlier walkthrough's
-            // oversized gap; this remains the only source of bottom
-            // clearance beyond the safe area itself, matching
-            // `requestMealButton`'s own reliance on `.safeAreaInset` alone.
-            .padding(.bottom, CommonPlateStyle.Spacing.xs)
-            // Forces this content to at least fill the available viewport so
-            // the six `adaptiveMajorGap()` calls above have height to
-            // distribute expansion into on short content; has no effect once
-            // content already exceeds `geometry.size.height`.
-            .frame(minHeight: geometry.size.height, alignment: .top)
+            .padding(.top, RequesterFormLayoutMetrics.contentTopPadding)
+            // ScrollView already respects the device safe area; this small
+            // inset is the only bottom clearance beyond it, and the anchored
+            // action below uses the same value so the two placements meet.
+            .padding(.bottom, RequesterFormLayoutMetrics.contentBottomPadding)
+        }
+        // Short form: the action occupies the same bottom safe-area position
+        // Home's `Request a Meal` uses, outside the scroll content.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if anchorsPostRequest {
+                postRequestSection
+                    .padding(.horizontal, CommonPlateStyle.Spacing.l)
+                    .padding(.bottom, RequesterFormLayoutMetrics.contentBottomPadding)
+                    .background(CommonPlateStyle.Color.baseCanvas)
+            }
+        }
+        // The whole region's height, taken outside the inset so it does not
+        // depend on where the action currently is, and outside the keyboard
+        // so raising the keyboard cannot flip the action's placement.
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: RequesterViewportHeightKey.self,
+                    value: proxy.size.height
+                )
+            }
+            .ignoresSafeArea(.keyboard)
+        )
+        .onPreferenceChange(RequesterViewportHeightKey.self) { value in
+            recordLayoutMeasurement { metrics in
+                if abs(metrics.viewportHeight - value) > 0.5 { metrics.viewportHeight = value }
+            }
+        }
+        .onPreferenceChange(RequesterFormContentHeightKey.self) { value in
+            recordLayoutMeasurement { metrics in
+                if abs(metrics.formContentHeight - value) > 0.5 { metrics.formContentHeight = value }
+            }
+        }
+        .onPreferenceChange(RequesterPostRequestHeightKey.self) { value in
+            recordLayoutMeasurement { metrics in
+                if abs(metrics.postRequestHeight - value) > 0.5 { metrics.postRequestHeight = value }
+            }
         }
         .background(CommonPlateStyle.Color.baseCanvas)
+        // Native requester controls use the named asset directly. The
+        // environment `Color.accentColor` can resolve to system blue on a
+        // mounted device despite the asset catalog's global-accent setting.
+        .tint(Color("AccentColor"))
         .scrollDismissesKeyboard(.interactively)
+        .overlay(alignment: .top) {
+            if preservedEntryFeedback.isShowing {
+                Text(Self.preservedEntryFeedbackMessage)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .padding(.vertical, CommonPlateStyle.Spacing.s)
+                    .padding(.horizontal, CommonPlateStyle.Spacing.m)
+                    .background(
+                        CommonPlateStyle.Color.warmSurface,
+                        in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                    )
+                    .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
+                    .padding(.top, CommonPlateStyle.Spacing.s)
+                    .accessibilityIdentifier("request-screenshot-preserved-feedback")
+                    .transition(.opacity)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: preservedEntryFeedback.isShowing)
         .onChange(of: focusedField) { previousField, currentField in
             let transitionNow = Date()
-            validationPresentation.handleFocusTransition(
-                from: previousField,
-                to: currentField,
-                errors: validationErrors(now: transitionNow)
-            )
+            if RequestFoodValidationPresentation.blurBelongsToCurrentMenuPath(
+                previousField: previousField,
+                menuPathAtFocus: focusedFieldMenuPath,
+                currentMenuPath: draft.menuPath
+            ) {
+                validationPresentation.handleFocusTransition(
+                    from: previousField,
+                    to: currentField,
+                    errors: validationErrors(now: transitionNow)
+                )
+            }
+            focusedFieldMenuPath = currentField == nil ? nil : draft.menuPath
+        }
+        // Meal Exchange ↔ Dining Dollars: the newly selected branch begins
+        // visually clean. Values are preserved; only presentation history for
+        // branch-specific fields is dropped.
+        .onChange(of: draft.menuPath) { _, _ in
+            validationPresentation.resetMenuPathSpecificPresentation()
         }
         // Any edit — including switching the timing to ASAP, which is the
         // correction the lapsed-Later message asks for — retires the pointer.
@@ -2084,7 +2186,60 @@ struct RequestFoodView: View {
         .onChange(of: draft) { _, _ in
             showsLocalRejectionPointer = false
         }
+    }
+
+    private func recordLayoutMeasurement(_ update: (inout RequesterFormLayoutMetrics) -> Void) {
+        update(&layoutMeasurements.metrics)
+        let decision = layoutMeasurements.placementDecision
+        if decision != anchorsPostRequestDecision {
+            anchorsPostRequestDecision = decision
         }
+    }
+
+    /// The `Post request` section: an optional local-rejection pointer above
+    /// the primary action. Measured wherever it is mounted, so the placement
+    /// decision uses its real height.
+    @ViewBuilder
+    private var postRequestSection: some View {
+        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+            // Only when the rejection had nowhere to move focus. A
+            // backend failure owns this section through
+            // `submissionError` and is never replaced or accompanied
+            // by the pointer.
+            if Self.showsLocalRejectionPointer(
+                isPresenting: showsLocalRejectionPointer,
+                submissionError: effectiveSubmissionError
+            ) {
+                Text(Self.localRejectionPointerNotice)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("request-submission-pointer")
+            }
+
+            // W4-R2: a backend-authoritative outcome for
+            // `effectiveSubmissionError` is never rendered inline
+            // here — D1 ambiguity has its own dedicated
+            // `blockedByAmbiguityView` and every other definitive
+            // outcome has its own dedicated `definitiveFailureView`
+            // (`isShowingFailureSummary`), both reached via
+            // `presentation(...)` before this form ever re-renders.
+            // This section remains reachable only through
+            // `effectiveSubmissionError`'s continued use in
+            // `isSubmissionEnabled` below, disabling Post request for
+            // the same instant it takes to transition away.
+
+            Button {
+                Task {
+                    await submit()
+                }
+            } label: {
+                Text(Self.postRequestLabel)
+            }
+            .commonPlatePrimaryAction()
+            .disabled(!isSubmissionEnabled)
+            .accessibilityIdentifier("request-post-request")
+        }
+        .requesterMeasuringHeight(RequesterPostRequestHeightKey.self)
     }
 
     // MARK: - W4-R2 approved `Requester / Form Field` controls
@@ -2119,6 +2274,7 @@ struct RequestFoodView: View {
             }
         }
         .accessibilityIdentifier("request-dining-spot-picker")
+        .tint(Color("AccentColor"))
         .accessibilityLabel(
             "\(Self.diningLocationLabel): \(draft.selectedDiningSpot?.name ?? Self.selectDiningLocationPlaceholder)"
         )
@@ -2178,85 +2334,272 @@ struct RequestFoodView: View {
             mealSwipesControl
         }
 
-        // One field per currently selected swipe. Fields above the count are
-        // simply not built — their draft contents are untouched and reappear
-        // unchanged if the requester raises the count again.
+        // One stable-position card per selected swipe. Fields above the count
+        // are not built and their draft contents remain untouched.
         ForEach(Array(draft.activeMealEntryIndices), id: \.self) { index in
-            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                RequesterFormFieldContainer(
-                    label: Self.mealDetailLabel(index: index),
-                    isMultiline: true,
-                    showsProvenance: screenshotProvenance.mealEntries.contains(index),
-                    isGlowing: screenshotAfterglowFields.mealEntries.contains(index),
-                    provenanceIdentifier: "request-meal-detail-provenance-\(index)"
-                ) {
-                    TextField(
-                        Self.mealDetailPlaceholder,
-                        text: mealEntryBinding(index),
-                        axis: .vertical
-                    )
-                    .font(.subheadline)
-                    .lineLimit(3, reservesSpace: true)
-                    .focused($focusedField, equals: .mealDetail(index: index))
-                    .accessibilityLabel(Self.mealDetailLabel(index: index))
-                    .accessibilityHint(
-                        Text(fieldError(.mealDetail(index: index), errors: errors) ?? "")
-                    )
-                    .accessibilityIdentifier("request-meal-detail-\(index)")
-                }
-
-                fieldErrorText(
-                    .mealDetail(index: index),
-                    errors: errors,
-                    identifier: "request-meal-detail-error-\(index)"
-                )
-            }
+            mealEditorCard(index: index, errors: errors)
         }
 
         diningDollarsField(
-            label: Self.diningDollarsOptionalLabel,
+            label: Self.diningDollarsLabel,
+            trailingLabel: Self.screenshotAssistanceOptionalLabel,
             placeholder: Self.diningDollarsPlaceholder,
-            note: Self.diningDollarsOptionalNote,
             errors: errors
         )
+    }
+
+    @ViewBuilder
+    private func mealEditorCard(index: Int, errors: [RequestFoodFieldError]) -> some View {
+        let meal = draft.mealEntries[index]
+        let isExpanded = expandedMealIndex == index
+        let hasVisibleValidationError = fieldError(.mealDetail(index: index), errors: errors) != nil
+        let isEmptyMealItem = meal.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // W4-R4 (2026-09-28 unified badge sync): the `Meal N` row shows
+        // exactly ONE right-aligned provenance indicator, in the identical
+        // position whether the Meal is collapsed or expanded, in place of
+        // any per-field caption beneath Meal item/Details in either state.
+        // Meal item and Details remain independent provenance units
+        // underneath — Faith authorized a union rule: the row badge appears
+        // whenever EITHER field is still screenshot-derived, not only when
+        // both are.
+        let showsMealSummaryProvenance = !isEmptyMealItem
+            && (screenshotProvenance.mealItemNames.contains(index) || screenshotProvenance.mealItemDetails.contains(index))
+        VStack(alignment: .leading, spacing: Self.mealLabelToControlSpacing) {
+            HStack {
+                Text(Self.mealDetailLabel(index: index))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !isExpanded && hasVisibleValidationError {
+                    requiredMealIndicator
+                } else if showsMealSummaryProvenance {
+                    screenshotFieldProvenance(
+                        "request-meal-summary-provenance-\(index)",
+                        isGlowing: screenshotAfterglowFields.mealEntries.contains(index)
+                    )
+                }
+            }
+            .frame(height: Self.mealLabelRowHeight)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("request-meal-label-row-\(index)")
+
+            // W4-R4 latency: BOTH presentations stay mounted for the card's
+            // lifetime so toggling expansion never constructs or destroys the
+            // multiline editor. Only the active one occupies height, draws,
+            // takes hits, or appears to accessibility (`mealPresentation`).
+            ZStack(alignment: .topLeading) {
+                mealExpandedEditor(
+                    index: index,
+                    hasVisibleValidationError: hasVisibleValidationError,
+                    errors: errors
+                )
+                .mealPresentation(isActive: isExpanded)
+
+                mealCollapsedSummary(
+                    index: index,
+                    meal: meal,
+                    hasVisibleValidationError: hasVisibleValidationError
+                )
+                .mealPresentation(isActive: !isExpanded)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mealExpandedEditor(
+        index: Int,
+        hasVisibleValidationError: Bool,
+        errors: [RequestFoodFieldError]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Meal item")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if hasVisibleValidationError {
+                    requiredMealIndicator
+                }
+            }
+            .frame(height: 15)
+
+            TextField("e.g. Chicken Wings", text: mealItemNameBinding(index), axis: .vertical)
+                .font(Self.mealEditorValueFont)
+                .lineLimit(2)
+                .focused($focusedField, equals: .mealDetail(index: index))
+                .accessibilityIdentifier("request-meal-item-\(index)")
+                .accessibilityHint(Text(fieldError(.mealDetail(index: index), errors: errors) ?? ""))
+                .padding(.top, CommonPlateStyle.Spacing.xs)
+
+            Divider()
+                .padding(.top, Self.mealEditorValueToDividerSpacing)
+
+            HStack {
+                Text("Details")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(Self.screenshotAssistanceOptionalLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(height: 15)
+            .padding(.top, Self.mealEditorDividerToDetailsSpacing)
+
+            TextField(Self.mealDetailsPlaceholder, text: mealItemDetailsBinding(index), axis: .vertical)
+                .font(Self.mealEditorValueFont)
+                .lineLimit(3)
+                .accessibilityIdentifier("request-meal-details-\(index)")
+                .padding(.top, CommonPlateStyle.Spacing.xs)
+            HStack {
+                Spacer()
+                Button("Done") { expandedMealIndex = nil }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color("AccentColor"))
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("request-meal-done-\(index)")
+            }
+            .frame(height: 18)
+            .padding(.top, Self.mealEditorDetailsToDoneSpacing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, Self.mealEditorTopInset)
+        .padding(.bottom, Self.mealEditorBottomInset)
+        .frame(maxWidth: .infinity, minHeight: Self.expandedMealControlHeight, alignment: .topLeading)
+        .background(
+            hasVisibleValidationError ? Color.red.opacity(0.07) : CommonPlateStyle.Color.baseCanvas,
+            in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                .strokeBorder(
+                    hasVisibleValidationError
+                        ? Color.red.opacity(0.72)
+                        : screenshotAfterglowFields.mealEntries.contains(index)
+                            ? Color("AccentColor").opacity(0.5)
+                            : CommonPlateStyle.Color.requestCardBorder,
+                    lineWidth: 1
+                )
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("request-meal-control-\(index)")
+    }
+
+    @ViewBuilder
+    private func mealCollapsedSummary(
+        index: Int,
+        meal: MealItem,
+        hasVisibleValidationError: Bool
+    ) -> some View {
+        let isEmptyMealItem = meal.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        Button {
+            expandedMealIndex = index
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(isEmptyMealItem ? Self.mealDetailPlaceholder : meal.name)
+                    .font(.subheadline)
+                    .foregroundStyle(isEmptyMealItem ? .secondary : .primary)
+                if let details = meal.details, !details.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // W4-R4 (2026-09-28): Details uses the SAME text size
+                    // as Meal item — it stays secondary through color
+                    // only, never a smaller font. The full stored value
+                    // wraps naturally; no line-limit cap or ellipsis. The
+                    // one unified provenance indicator (collapsed and
+                    // expanded) lives in the `Meal N` row above, not here.
+                    Text(details)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 11)
+            // Top-aligned, never vertically centered: the placeholder
+            // or entered name always starts at the same inset from
+            // the top of the control. The 76pt target governs only the
+            // EMPTY control; a FILLED summary is content-driven, with
+            // 44 only the ordinary HIG minimum tap target floor used
+            // elsewhere in the app (e.g. `SettingsView`), not a new
+            // populated-summary height (W4-R4 2026-09-27).
+            .frame(
+                maxWidth: .infinity,
+                minHeight: isEmptyMealItem ? Self.collapsedMealControlHeight : 44,
+                alignment: .topLeading
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("request-meal-collapsed-\(index)")
+        .background(
+            hasVisibleValidationError ? Color.red.opacity(0.07) : CommonPlateStyle.Color.baseCanvas,
+            in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                .strokeBorder(
+                    hasVisibleValidationError
+                        ? Color.red.opacity(0.72)
+                        : screenshotAfterglowFields.mealEntries.contains(index)
+                            ? Color("AccentColor").opacity(0.5)
+                            : CommonPlateStyle.Color.requestCardBorder,
+                    lineWidth: 1
+                )
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("request-meal-control-\(index)")
+    }
+
+    private var requiredMealIndicator: some View {
+        Text("Required")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.red)
+    }
+
+    /// The same accepted CommonPlate purple provenance treatment used by
+    /// `RequesterFormFieldContainer`'s trailing `Filled from screenshot`
+    /// label (W4-R4 2026-09-28 unified badge sync) — this must not render
+    /// gray/secondary while other requester provenance indicators are purple.
+    private func screenshotFieldProvenance(_ identifier: String, isGlowing: Bool = false) -> some View {
+        Text(Self.filledFromScreenshotLabel)
+            .font(.caption2)
+            .foregroundStyle(isGlowing ? Color("AccentColor") : Color("AccentColor").opacity(0.82))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.5), value: isGlowing)
+            .accessibilityIdentifier(identifier)
     }
 
     /// The Dining-Dollars-only resource fields: one required order-details
     /// value and a required estimate.
     @ViewBuilder
     private func diningDollarsOnlyFields(errors: [RequestFoodFieldError]) -> some View {
-        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-            RequesterFormFieldContainer(
-                label: Self.orderDetailsLabel,
-                isMultiline: true,
-                showsProvenance: screenshotProvenance.orderDetails,
-                isGlowing: screenshotAfterglowFields.orderDetails,
-                provenanceIdentifier: "request-order-details-provenance"
-            ) {
-                TextField(
-                    Self.orderDetailsPlaceholder,
-                    text: orderDetailsBinding,
-                    axis: .vertical
-                )
+        // W4-R4 (2026-09-27): the empty control matches the 76pt collapsed
+        // Meal Exchange ordering-control target, NOT the compact Dining
+        // Dollars amount-field height (supersedes the 2026-09-26 compact
+        // decision). Multiline/wrapping-capable; grows locally as entered
+        // content needs more lines. An empty value is incomplete rather than
+        // invalid, so no error text is ever attached to this field.
+        RequesterFormFieldContainer(
+            label: Self.orderDetailsLabel,
+            showsProvenance: screenshotProvenance.orderDetails,
+            isGlowing: screenshotAfterglowFields.orderDetails,
+            provenanceIdentifier: "request-order-details-provenance",
+            controlIdentifier: "request-order-details-control"
+        ) {
+            TextField(Self.orderDetailsPlaceholder, text: orderDetailsBinding, axis: .vertical)
                 .font(.subheadline)
-                .lineLimit(4, reservesSpace: true)
+                .lineLimit(1...)
                 .focused($focusedField, equals: .orderDetails)
                 .accessibilityLabel(Self.orderDetailsLabel)
-                .accessibilityHint(Text(fieldError(.orderDetails, errors: errors) ?? ""))
                 .accessibilityIdentifier("request-order-details")
-            }
-
-            fieldErrorText(
-                .orderDetails,
-                errors: errors,
-                identifier: "request-order-details-error"
-            )
+                // Top-aligned, not vertically centered, like the Meal entry
+                // control it targets. `orderDetailsEmptyContentHeight` is
+                // sized so the rendered control (this content plus the
+                // container's own 12pt top/bottom padding) reaches the same
+                // 76pt target as `collapsedMealControlHeight`.
+                .frame(maxWidth: .infinity, minHeight: Self.orderDetailsEmptyContentHeight, alignment: .topLeading)
         }
 
         diningDollarsField(
             label: Self.diningDollarsRequiredLabel,
             placeholder: Self.diningDollarsPlaceholder,
-            note: Self.diningDollarsEstimateNote,
             errors: errors
         )
     }
@@ -2264,18 +2607,23 @@ struct RequestFoodView: View {
     /// The shared Dining Dollar entry field. Ordinary dollar entry with a
     /// decimal keypad; the exact value is parsed to integer cents
     /// (`DiningDollarsEntry`) rather than through any floating-point step.
-    @ViewBuilder
     private func diningDollarsField(
         label: String,
+        trailingLabel: String? = nil,
         placeholder: String,
-        note: String,
         errors: [RequestFoodFieldError]
     ) -> some View {
+        // An EMPTY required estimate is incomplete, not invalid: it stays
+        // neutral (`RequestFoodFormError.isIncompleteEntry`) while `Post
+        // request` remains disabled. Only an entered out-of-range or
+        // malformed amount shows its message beneath the field.
         VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
             RequesterFormFieldContainer(
                 label: label,
+                trailingLabel: trailingLabel,
                 showsProvenance: false,
-                provenanceIdentifier: "request-dining-dollars-provenance"
+                provenanceIdentifier: "request-dining-dollars-provenance",
+                controlIdentifier: "request-dining-dollars-control"
             ) {
                 TextField(placeholder, text: diningDollarsBinding)
                     .font(.subheadline)
@@ -2285,10 +2633,6 @@ struct RequestFoodView: View {
                     .accessibilityHint(Text(fieldError(.diningDollars, errors: errors) ?? ""))
                     .accessibilityIdentifier("request-dining-dollars")
             }
-
-            Text(note)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
 
             fieldErrorText(
                 .diningDollars,
@@ -2326,12 +2670,9 @@ struct RequestFoodView: View {
             }
         }
         .accessibilityIdentifier("request-meal-swipes-picker")
+        .tint(Color("AccentColor"))
         .accessibilityLabel("\(Self.mealSwipesLabel): \(RequestCardView.mealSwipesText(draft.mealSwipes))")
     }
-
-    /// Fast and quiet, matching the sync's "interaction remains fast and
-    /// quiet" — not the bouncy/spring timing this sync explicitly excludes.
-    private static let quietSettleAnimation: Animation = .easeOut(duration: 0.22)
 
     /// Approved Figma `Requester / Timing` segmented control: same
     /// warm-surface/baseCanvas grammar as the request-card and form-field
@@ -2343,7 +2684,12 @@ struct RequestFoodView: View {
             ForEach(timingOptions) { option in
                 let isSelected = draft.timing == option
                 Button {
-                    draft.timing = option
+                    // The one place Later inserts or leaves. Animating the
+                    // change of this one value (not the form) means only what
+                    // the insertion actually moves is animated.
+                    withAnimation(Self.laterMotionAnimation(reduceMotion: reduceMotion)) {
+                        draft.timing = option
+                    }
                 } label: {
                     Text(option.rawValue)
                         .font(.subheadline.weight(.semibold))
@@ -2394,6 +2740,7 @@ struct RequestFoodView: View {
                 chooseTimeButton(isCustomTimeSelected: isCustomTimeSelected)
             }
         }
+        .tint(Color("AccentColor"))
         .accessibilityElement(children: .contain)
     }
 
@@ -2409,6 +2756,7 @@ struct RequestFoodView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+            .tint(Color("AccentColor"))
             .accessibilityAddTraits(.isSelected)
             .accessibilityIdentifier("request-choose-exact-time")
         } else {
@@ -2417,6 +2765,7 @@ struct RequestFoodView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .tint(Color("AccentColor"))
             .accessibilityIdentifier("request-choose-exact-time")
         }
     }
@@ -2429,6 +2778,7 @@ struct RequestFoodView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+            .tint(Color("AccentColor"))
             .accessibilityAddTraits(.isSelected)
         } else {
             Button(Self.timeLabel(for: time)) {
@@ -2436,22 +2786,8 @@ struct RequestFoodView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .tint(Color("AccentColor"))
         }
-    }
-
-    /// W4-R2 2026-09-02 physical-walkthrough sync (final vertical
-    /// composition): one instance of this is placed at each of the six major
-    /// inter-section relationships in `requestForm`. It is the sole flexible
-    /// element at each of those six positions — the `.frame(minHeight:
-    /// geometry.size.height, alignment: .top)` on `requestForm`'s outer
-    /// content is what gives any of them spare height to negotiate at all,
-    /// exactly as a single `Spacer` would; the only difference from a plain
-    /// `Spacer` is the shared `.frame(maxHeight:)` ceiling, so growth is
-    /// distributed in small, bounded amounts across all six rather than
-    /// concentrated in one dominant gap.
-    private func adaptiveMajorGap() -> some View {
-        Spacer(minLength: Self.majorGapMinimum)
-            .frame(maxHeight: Self.majorGapMaximum)
     }
 
     /// Native iOS wheel time selection, completed with the native Done
@@ -2490,8 +2826,10 @@ struct RequestFoodView: View {
     static let yourOrderEyebrow = "YOUR ORDER"
     static let diningLocationLabel = "Dining location"
     static let selectDiningLocationPlaceholder = "Choose dining location"
-    static let orderDetailsLabel = "Order details"
-    static let orderDetailsPlaceholder = "What would you like to order?"
+    static let orderDetailsLabel = "What are you ordering?"
+    /// Same example-text treatment as the Meal item ordering field
+    /// (2026-09-27 supersedes the 2026-09-26 "no placeholder" decision).
+    static let orderDetailsPlaceholder = "e.g. Chicken Wings"
     static let mealSwipesLabel = "Meal swipes"
     static let timingLabel = "Timing"
     static let chooseTimeLabel = "Choose time"
@@ -2517,18 +2855,42 @@ struct RequestFoodView: View {
         "Meal \(index + 1)"
     }
 
-    static let mealDetailPlaceholder = "What would you like for this meal swipe?"
-    static let diningDollarsOptionalLabel = "Estimated Dining Dollars (optional)"
-    static let diningDollarsRequiredLabel = "Estimated Dining Dollars"
+    static let mealDetailPlaceholder = "What are you ordering?"
+    /// Exact accepted copy for a meal's optional details field (2026-09-26).
+    static let mealDetailsPlaceholder = "e.g. Buffalo sauce, chips, fountain drink"
+
+    /// Later's restrained local reveal (~0.22s ease-out). Reduce Motion removes
+    /// the animation entirely, so the insertion is an immediate layout change.
+    static let laterMotionDuration: Double = 0.22
+    static func laterMotionAnimation(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .easeOut(duration: laterMotionDuration)
+    }
+    /// Figma masters `585:3813` and `730:3168`: the meal label stays outside
+    /// a 76pt collapsed or 131pt expanded rounded control.
+    static let mealLabelRowHeight: CGFloat = 18
+    static let mealLabelToControlSpacing: CGFloat = 7
+    static let collapsedMealControlHeight: CGFloat = 76
+    static let expandedMealControlHeight: CGFloat = 131
+    /// W4-R4 (2026-09-27): `RequesterFormFieldContainer` adds 12pt top/bottom
+    /// padding around its content, so the Dining-Dollars-only ordering
+    /// field's content must fill this much to reach the same 76pt rendered
+    /// control height as the collapsed Meal Exchange entry.
+    static let orderDetailsEmptyContentHeight: CGFloat = collapsedMealControlHeight - 24
+    /// Entered `Meal item` and entered `Details` share this one value style
+    /// (W4-R4 2026-09-26 equal-typography decision).
+    static let mealEditorValueFont: Font = .subheadline
+    /// Expanded-editor vertical rhythm from Figma master `730:3168`. With
+    /// the 15pt label rows, 20pt single-line values, and 18pt `Done` row,
+    /// these gaps land the default editor on the 131pt target with no
+    /// pooled slack under `Done`; taller content only grows the editor.
+    static let mealEditorTopInset: CGFloat = 10
+    static let mealEditorValueToDividerSpacing: CGFloat = 8
+    static let mealEditorDividerToDetailsSpacing: CGFloat = 9
+    static let mealEditorDetailsToDoneSpacing: CGFloat = 3
+    static let mealEditorBottomInset: CGFloat = 4
+    static let diningDollarsLabel = "Dining Dollars"
+    static let diningDollarsRequiredLabel = "Dining Dollars"
     static let diningDollarsPlaceholder = "$0.00"
-    /// States plainly that leaving the field empty is a real answer, so no
-    /// requester feels obliged to invent an amount they do not need.
-    static let diningDollarsOptionalNote =
-        "Leave empty if you don’t need any Dining Dollars. Up to $25.00."
-    /// The estimate is explicitly an estimate: CommonPlate does not process
-    /// payments and cannot promise the provider's final total.
-    static let diningDollarsEstimateNote =
-        "An estimate, not a guaranteed total. Up to $50.00."
     static let asapTimingNotice =
         "If no one places the order, it expires 3 hours after you post it."
     /// W4-R2 2026-09-02 sync item 4: exact on-demand explanation replacing
@@ -2538,24 +2900,6 @@ struct RequestFoodView: View {
     static let timingInfoBody =
         "ASAP starts now. Later starts at the time you choose. Requests stay open for 3 hours."
     static let timingInfoAccessibilityLabel = "Timing information"
-    /// W4-R2 2026-09-03 physical-walkthrough sync (CTA-visibility regression
-    /// fix): the shared baseline/ceiling every `adaptiveMajorGap()` uses.
-    /// A prior round bumped this to `.l`/`.xl` for a "roomier form" polish
-    /// pass; combined with the stable Timing footprint's fixed reserved
-    /// height (below) and a same-round typography bump, that made the
-    /// form's un-stretched natural content height taller than the viewport
-    /// on the tested device — `Post request` sat partially below the fold in
-    /// the ordinary ASAP state, which is a harder constraint than any
-    /// amount of roominess. Reverted to the earlier `.m`/`.l` bounds: the
-    /// same baseline used for every minor relationship elsewhere in this
-    /// form (Screenshot Assistance → its header, a field → its own error
-    /// text), so the six major relationships are coherent with the rest of
-    /// the form without adding extra fixed height on top of the footprint's
-    /// own cost. Six of them growing together still land `Post request` low
-    /// on short content without any one gap reading as exaggerated.
-    static let majorGapMinimum = CommonPlateStyle.Spacing.m
-    static let majorGapMaximum = CommonPlateStyle.Spacing.l
-
     @MainActor
     private func submit(draftSnapshot: RequestFoodFormDraft? = nil) async {
         submissionError = nil
@@ -2597,7 +2941,14 @@ struct RequestFoodView: View {
                 // paths never reach this branch.
                 draftSession.clearAfterAuthoritativeCreation()
             } else {
-                focusedField = result.firstInvalidTextField
+                // A collapsed Meal's editor is mounted but hidden, so it must
+                // not be handed focus (it would raise the keyboard for a
+                // field nobody can see). Rejection leaves focus alone there,
+                // exactly as when the collapsed card had no editor.
+                focusedField = Self.focusTargetAfterRejection(
+                    result.firstInvalidTextField,
+                    expandedMealIndex: expandedMealIndex
+                )
                 showsLocalRejectionPointer = Self.showsLocalRejectionPointer(for: result)
             }
         } catch {
@@ -2787,6 +3138,14 @@ struct RequestFoodView: View {
         !isScheduledTimingAvailable && visibleScheduleError != .scheduledTimingUnavailable
     }
 
+    static func focusTargetAfterRejection(
+        _ field: RequestFoodFormField?,
+        expandedMealIndex: Int?
+    ) -> RequestFoodFormField? {
+        if case .mealDetail(let index)? = field, expandedMealIndex != index { return nil }
+        return field
+    }
+
     /// A local rejection that moved focus has already answered the tap. One that
     /// could not — every remaining error belongs to a picker — needs a line the
     /// requester can see without hunting up a form they may be scrolled past.
@@ -2964,7 +3323,7 @@ struct RequestFoodView: View {
         }
 
         let menuPath: RequestMenuPathWire
-        let mealItems: [String]
+        let mealItems: [MealItem]
         let orderDetails: String?
         switch draft.menuPath {
         case .mealExchange:
@@ -3063,10 +3422,13 @@ struct RequestFoodView: View {
 /// interactive control.
 struct RequesterFormFieldContainer<Content: View>: View {
     let label: String
-    var isMultiline: Bool = false
+    var trailingLabel: String? = nil
     var showsProvenance: Bool = false
     var isGlowing: Bool = false
     var provenanceIdentifier: String?
+    /// Identifies the bordered control box itself (not only the text inside
+    /// it), so its rendered frame can be measured.
+    var controlIdentifier: String?
     @ViewBuilder let content: Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -3080,24 +3442,37 @@ struct RequesterFormFieldContainer<Content: View>: View {
                 HStack(alignment: .firstTextBaseline, spacing: CommonPlateStyle.Spacing.s) {
                     labelText
                     Spacer(minLength: CommonPlateStyle.Spacing.s)
-                    provenanceText
+                    trailingLabelText
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     labelText
-                    provenanceText
+                    trailingLabelText
                 }
             }
 
-            content
-                .padding(.horizontal, 13)
-                .padding(.vertical, isMultiline ? 11 : 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(CommonPlateStyle.Color.baseCanvas)
-                .overlay(
-                    RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
-                        .strokeBorder(CommonPlateStyle.Color.requestCardBorder)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous))
+            identifiedControlBox(
+                content
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(CommonPlateStyle.Color.baseCanvas)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                            .strokeBorder(CommonPlateStyle.Color.requestCardBorder)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous))
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func identifiedControlBox<Box: View>(_ box: Box) -> some View {
+        if let controlIdentifier {
+            box
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(controlIdentifier)
+        } else {
+            box
         }
     }
 
@@ -3108,11 +3483,15 @@ struct RequesterFormFieldContainer<Content: View>: View {
     }
 
     @ViewBuilder
-    private var provenanceText: some View {
-        if showsProvenance {
+    private var trailingLabelText: some View {
+        if let trailingLabel {
+            Text(trailingLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if showsProvenance {
             Text(RequestFoodView.filledFromScreenshotLabel)
                 .font(.caption2)
-                .foregroundStyle(isGlowing ? Color.accentColor : Color.accentColor.opacity(0.82))
+                .foregroundStyle(isGlowing ? Color("AccentColor") : Color("AccentColor").opacity(0.82))
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.5), value: isGlowing)
                 .accessibilityIdentifier(provenanceIdentifier ?? "")
         }

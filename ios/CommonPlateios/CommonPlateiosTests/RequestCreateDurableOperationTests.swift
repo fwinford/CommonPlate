@@ -195,8 +195,14 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         // original attempt submitted — every meal entry, in order — and
         // neither the removed `pickupName` nor a client-composed `food`.
         XCTAssertEqual(json["menuPath"] as? String, "meal-exchange")
+        // W4-R4 sends structured `{ name, details }` objects on the wire, not
+        // bare strings.
+        let mealItemsJSON = try XCTUnwrap(json["mealItems"] as? [[String: Any]])
+        let decodedMealItems = try mealItemsJSON.map { entry -> MealItem in
+            MealItem(name: try XCTUnwrap(entry["name"] as? String), details: entry["details"] as? String)
+        }
         XCTAssertEqual(
-            json["mealItems"] as? [String],
+            decodedMealItems,
             ["Later distinct food", "Additional meal 1", "Additional meal 2",
              "Additional meal 3", "Additional meal 4"]
         )
@@ -591,7 +597,7 @@ final class RequestCreateDurableOperationTests: XCTestCase {
                     // One entry per swipe, so the payload is replayable and
                     // this exercises the replay classification itself.
                     mealSwipes: 1,
-                    mealItems: ["Previously unresolved \(label)"],
+                    mealItems: [MealItem(name: "Previously unresolved \(label)")],
                     orderDetails: nil,
                     estimatedDiningDollarsCents: nil
                 )
@@ -1073,7 +1079,14 @@ final class RequestCreateDurableOperationTests: XCTestCase {
         )
         XCTAssertEqual(json["menuPath"] as? String, "meal-exchange")
         XCTAssertEqual(json["mealSwipes"] as? Int, 5)
-        XCTAssertEqual(json["mealItems"] as? [String], fiveMealPayload().mealItems)
+        // W4-R4 sends structured `{ name, details }` objects on the wire, not
+        // bare strings — decode the same way the backend does before
+        // comparing to the canonical payload's `mealItems`.
+        let mealItemsJSON = try XCTUnwrap(json["mealItems"] as? [[String: Any]])
+        let decodedMealItems = try mealItemsJSON.map { entry -> MealItem in
+            MealItem(name: try XCTUnwrap(entry["name"] as? String), details: entry["details"] as? String)
+        }
+        XCTAssertEqual(decodedMealItems, fiveMealPayload().mealItems)
         XCTAssertEqual(json["estimatedDiningDollarsCents"] as? Int, 1_337)
         // The credential is re-attached from the live provider, not restored
         // from disk.
@@ -1245,8 +1258,8 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             mealSwipes: mealSwipes,
             // W4-R4 requires exactly one structured entry per selected swipe;
             // the first carries the distinguishing text each case asserts on.
-            mealItems: [food]
-                + (1..<mealSwipes).map { "Additional meal \($0)" },
+            mealItems: [MealItem(name: food)]
+                + (1..<mealSwipes).map { MealItem(name: "Additional meal \($0)") },
             orderDetails: nil,
             estimatedDiningDollarsCents: nil
         )
@@ -1265,8 +1278,8 @@ final class RequestCreateDurableOperationTests: XCTestCase {
             mealSwipes: mealSwipes,
             // W4-R4 requires exactly one structured entry per selected swipe;
             // the first carries the distinguishing text each case asserts on.
-            mealItems: [food]
-                + (1..<mealSwipes).map { "Additional meal \($0)" },
+            mealItems: [MealItem(name: food)]
+                + (1..<mealSwipes).map { MealItem(name: "Additional meal \($0)") },
             orderDetails: nil,
             estimatedDiningDollarsCents: nil
         )

@@ -70,7 +70,7 @@ describe("validateProviderOutput", () => {
     );
     expect(result).toEqual({
       ok: true,
-      proposal: { mealItems: ["1 Create Your Own Bowl"] },
+      proposal: { mealItems: [{ name: "1 Create Your Own Bowl" }] },
     });
   });
 
@@ -90,8 +90,8 @@ describe("validateProviderOutput", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.proposal.mealItems).toEqual([
-        "1 Create Your Own Bowl (No Cilantro)",
-        "2 Soda",
+        { name: "1 Create Your Own Bowl", details: "No Cilantro" },
+        { name: "2 Soda" },
       ]);
     }
   });
@@ -115,7 +115,7 @@ describe("validateProviderOutput", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.proposal.mealItems).toEqual([
-        "1 Burger (No Side, No Bag, Yes Bag)",
+        { name: "1 Burger", details: "No Side, No Bag, Yes Bag" },
       ]);
     }
   });
@@ -155,6 +155,86 @@ describe("validateProviderOutput", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.proposal.mealSwipes).toBeUndefined();
+    }
+  });
+
+  it("keeps mealSwipes when one explicit aggregate M total matches", () => {
+    const result = validateProviderOutput(
+      { visibleVenueText: null, foodItems: [], mealSwipes: 3 },
+      `${cartEvidenceText} 3M + $2.00`,
+      1
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.proposal.mealSwipes).toBe(3);
+  });
+
+  it("proposes the current-cart order-level Dining Dollars estimate with a corroborated aggregate", () => {
+    const result = validateProviderOutput(
+      { visibleVenueText: null, foodItems: [], mealSwipes: 3 },
+      `${cartEvidenceText} 3M + $2.00`,
+      1
+    );
+    expect(result).toEqual({
+      ok: true,
+      proposal: { mealSwipes: 3, estimatedDiningDollarsCents: 200 },
+    });
+  });
+
+  it.each([
+    ["item-level modifier price", `${cartEvidenceText} Burger add bacon +$2.00 3M`],
+    ["ambiguous money", `${cartEvidenceText} 3M + $2.00 3M + $3.00`],
+    ["past order", `Order history Completed order 3M + $2.00`],
+  ])("fails closed for %s", (_label, evidence) => {
+    const result = validateProviderOutput(
+      { visibleVenueText: null, foodItems: [], mealSwipes: 3 },
+      evidence,
+      1
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.proposal.estimatedDiningDollarsCents).toBeUndefined();
+    }
+  });
+
+  it("treats repeated identical aggregate totals as overlap rather than addition", () => {
+    const result = validateProviderOutput(
+      { visibleVenueText: null, foodItems: [], mealSwipes: 3 },
+      `${cartEvidenceText} 3M + $2.00\n${cartEvidenceText} 3 M + $2.00`,
+      2
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.proposal.mealSwipes).toBe(3);
+  });
+
+  it("drops mealSwipes when explicit aggregate totals conflict", () => {
+    const result = validateProviderOutput(
+      { visibleVenueText: null, foodItems: [], mealSwipes: 3 },
+      `${cartEvidenceText} 2M\n${cartEvidenceText} 3M`,
+      2
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.proposal.mealSwipes).toBeUndefined();
+  });
+
+  it("drops rather than replacing a provider value that mismatches the explicit total", () => {
+    const result = validateProviderOutput(
+      { visibleVenueText: null, foodItems: [], mealSwipes: 2 },
+      `${cartEvidenceText} 3M`,
+      1
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.proposal.mealSwipes).toBeUndefined();
+  });
+
+  it("does not corroborate from out-of-bounds or malformed M notation", () => {
+    for (const evidence of ["6M", "0M", "3.0M", "M3", "3MM"]) {
+      const result = validateProviderOutput(
+        { visibleVenueText: null, foodItems: [], mealSwipes: 3 },
+        `${cartEvidenceText} ${evidence}`,
+        1
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.proposal.mealSwipes, evidence).toBeUndefined();
     }
   });
 
@@ -246,7 +326,7 @@ describe("validateProviderOutput", () => {
     if (result.ok) {
       expect(result.proposal.selectedDiningSpot).toBeUndefined();
       // Other safe fields still survive independently.
-      expect(result.proposal.mealItems).toEqual(["1 Smoothie"]);
+      expect(result.proposal.mealItems).toEqual([{ name: "1 Smoothie" }]);
     }
   });
 
@@ -357,7 +437,7 @@ describe("validateProviderOutput", () => {
           name: "Palladium",
           address: "Palladium Hall, 140 E 14th St",
         },
-        mealItems: ["1 Burger (No Bag)", "1 Fries", "1 burger (no  bag)"],
+        mealItems: [{ name: "1 Burger", details: "No Bag" }, { name: "1 Fries" }, { name: "1 burger", details: "no  bag" }],
         mealSwipes: 3,
       },
     });
@@ -403,10 +483,10 @@ describe("validateProviderOutput", () => {
       ok: true,
       proposal: {
         mealItems: [
-          "1 Burger (No Bag)",
-          "2 Burger (No Bag)",
-          "1 Burger (No Side)",
-          "Burger (No Bag)",
+          { name: "1 Burger", details: "No Bag" },
+          { name: "2 Burger", details: "No Bag" },
+          { name: "1 Burger", details: "No Side" },
+          { name: "Burger", details: "No Bag" },
         ],
         mealSwipes: 2,
       },

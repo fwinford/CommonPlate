@@ -394,7 +394,13 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         )
         XCTAssertEqual(RequestFetchingURLProtocol.capturedOperationLedgerReadCount, 1)
         let json = try sentJSON()
-        XCTAssertEqual(json["mealItems"] as? [String], ["ROW1-CREATED meal"])
+        // W4-R4 sends structured `{ name, details }` objects on the wire, not
+        // bare strings.
+        let mealItemsJSON = try XCTUnwrap(json["mealItems"] as? [[String: Any]])
+        let decodedMealItems = try mealItemsJSON.map { entry -> MealItem in
+            MealItem(name: try XCTUnwrap(entry["name"] as? String), details: entry["details"] as? String)
+        }
+        XCTAssertEqual(decodedMealItems, ["ROW1-CREATED meal"])
         XCTAssertNil(storage.load())
         XCTAssertEqual(store.createRecoveryPresentation, .none)
         XCTAssertFalse(store.hasUnresolvedCreateAmbiguity)
@@ -1197,11 +1203,25 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
     /// UI-test target (`docs/testing.md`); this is the seam that stands in
     /// for mounting `RequestFoodView` and exercising Path A/B end to end.
     func testMountedPresentationStateResetProducesCleanStateAndInvalidatesScreenshotSelection() {
+        let preservedManualContent = ScreenshotProposalAppliedFields(
+            preservedManualFieldCount: 1
+        )
+        var feedback = ScreenshotPreservedEntryFeedbackState()
+        feedback.beginSelection()
+        XCTAssertNil(feedback.completeAnalysis(eligible: true, applying: preservedManualContent))
+        feedback.beginSelection()
+        let staleFeedbackTimeout = feedback.completeAnalysis(eligible: true, applying: preservedManualContent)
+        XCTAssertTrue(feedback.isShowing)
+        let feedbackGenerationBeforeReset = feedback.timeoutGeneration
+
         var contaminated = RequestFoodMountedPresentationState(
             validationPresentation: {
                 var presentation = RequestFoodValidationPresentation()
                 presentation.presentAll([
-                    RequestFoodFieldError(field: .orderDetails, error: .missingOrderDetails),
+                    RequestFoodFieldError(
+                        field: .diningDollars,
+                        error: .invalidDiningDollars(ceilingCents: 5_000)
+                    ),
                 ])
                 return presentation
             }(),
@@ -1214,10 +1234,13 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
             screenshotAfterglowFields: ScreenshotProposalAppliedFields(
                 location: true,
                 mealSwipes: true,
-                mealEntries: [0, 1],
+                mealItemNames: [0, 1],
+                mealItemDetails: [0, 1],
                 orderDetails: true
             ),
-            screenshotChecked: true
+            screenshotChecked: true,
+            preservedEntryFeedback: feedback,
+            expandedMealIndex: 1
         )
         XCTAssertNotEqual(contaminated, RequestFoodMountedPresentationState())
 
@@ -1231,7 +1254,29 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
 
         contaminated.resetForTerminalRecovery(screenshotProposalStore: screenshotProposalStore)
 
-        XCTAssertEqual(contaminated, RequestFoodMountedPresentationState())
+        XCTAssertEqual(contaminated.validationPresentation, RequestFoodValidationPresentation())
+        XCTAssertNil(contaminated.submissionError)
+        XCTAssertFalse(contaminated.showsLocalRejectionPointer)
+        XCTAssertFalse(contaminated.isShowingFailureSummary)
+        XCTAssertFalse(contaminated.isPresentingScreenshotPicker)
+        XCTAssertFalse(contaminated.isPresentingExactTimePicker)
+        XCTAssertFalse(contaminated.isPresentingTimingInfo)
+        XCTAssertEqual(contaminated.screenshotAfterglowFields, ScreenshotProposalAppliedFields())
+        XCTAssertFalse(contaminated.screenshotChecked)
+        XCTAssertFalse(contaminated.preservedEntryFeedback.isShowing)
+        XCTAssertFalse(contaminated.preservedEntryFeedback.hasCompletedScreenshotAssistanceRun)
+        XCTAssertNil(contaminated.expandedMealIndex)
+        XCTAssertGreaterThan(
+            contaminated.preservedEntryFeedback.timeoutGeneration,
+            feedbackGenerationBeforeReset
+        )
+        contaminated.preservedEntryFeedback.clearAfterTimeout(
+            ifCurrent: try! XCTUnwrap(staleFeedbackTimeout)
+        )
+        XCTAssertFalse(
+            contaminated.preservedEntryFeedback.isShowing,
+            "a stale preserved-entry timeout cannot resurrect feedback on the replacement form"
+        )
         XCTAssertFalse(
             screenshotProposalStore.isCurrent(staleSelectionToken),
             "the previous selection's in-flight work must stop mattering, exactly as leaving the screen would"
@@ -1517,7 +1562,7 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
             windowStart: nil,
             menuPath: .mealExchange,
             mealSwipes: 1,
-            mealItems: [meal],
+            mealItems: [MealItem(name: meal)],
             orderDetails: nil,
             estimatedDiningDollarsCents: nil
         )

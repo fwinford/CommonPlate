@@ -58,11 +58,9 @@ export const FORBIDDEN_PROVIDER_FIELDS = [
   "submit",
   "reasoning",
   "explanation",
-  // W4-R4: which menu path a request uses, and how many Dining Dollars it
-  // needs, are requester product decisions. Screenshot Assistance proposes
-  // values; it does not decide them. Listing these here means a provider
-  // attempting to select a path or invent a dollar amount is refused before
-  // schema validation even runs, exactly like an attempted `submit`.
+  // Screenshot Assistance never chooses a menu path or accepts a provider's
+  // money claim. Current-cart Dining Dollars are derived only from bounded
+  // independent OCR evidence below, never provider output.
   "menuPath",
   "orderDetails",
   "diningDollars",
@@ -71,19 +69,20 @@ export const FORBIDDEN_PROVIDER_FIELDS = [
 ] as const;
 
 /**
- * The allowlisted proposal shape: location, literal food, meal swipes only.
+ * The allowlisted proposal shape: location, structured literal food, meal
+ * swipes, and a deterministic current-cart Dining Dollars estimate.
  *
  * W4-R4 replaces the single `foodRequest` string with `mealItems` — one
  * entry per distinct observed item — so a proposal can populate the
  * structured per-swipe meal-detail fields instead of one flat blob. The
- * allowlist itself is unchanged in kind: still location, literal food, and
- * meal swipes, and still nothing that decides menu path, Dining Dollars,
- * timing, or submission.
+ * The money field is not provider authority: it is populated only by the
+ * independent, order-level OCR rule in `screenshotProposalValidation.ts`.
  */
 export interface ScreenshotProposal {
   selectedDiningSpot?: { name: string; address: string };
-  mealItems?: string[];
+  mealItems?: Array<{ name: string; details?: string }>;
   mealSwipes?: number;
+  estimatedDiningDollarsCents?: number;
 }
 
 export interface ScreenshotProposalResponseBody {

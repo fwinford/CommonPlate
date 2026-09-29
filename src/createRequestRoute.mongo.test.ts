@@ -98,7 +98,7 @@ function canonicalAsapPayload(overrides: Record<string, unknown> = {}) {
     // `pickupName` no longer exists, so neither is sent.
     menuPath: "meal-exchange",
     mealSwipes: 2,
-    mealItems: ["Vegetable rice bowl", "Side salad"],
+    mealItems: [{ name: "Vegetable rice bowl" }, { name: "Side salad" }],
     ...overrides,
   };
 }
@@ -305,7 +305,7 @@ describeMongo("real MongoDB durable create-operation identity (W3-D1)", () => {
         pickupWindowText: "ASAP",
         menuPath: "meal-exchange",
         mealSwipes: 1,
-        mealItems: ["Prior request"],
+        mealItems: [{ name: "Prior request" }],
         email: requesterAPrincipal,
         requesterParticipantId: requesterAId,
         status: "open",
@@ -344,7 +344,7 @@ describeMongo("real MongoDB durable create-operation identity (W3-D1)", () => {
         pickupWindowText: "ASAP",
         menuPath: "meal-exchange",
         mealSwipes: 1,
-        mealItems: ["Additional request"],
+        mealItems: [{ name: "Additional request" }],
         email: requesterAPrincipal,
         requesterParticipantId: requesterAId,
         status: "open",
@@ -522,11 +522,11 @@ describeMongo("real MongoDB durable create-operation identity (W3-D1)", () => {
       menuPath: "meal-exchange",
       mealSwipes: 5,
       mealItems: [
-        "Chicken over rice, no onions",
-        "Falafel wrap with extra tahini",
-        "Large iced coffee",
-        "Side of plantains",
-        "Bottled water",
+        { name: "Chicken over rice, no onions" },
+        { name: "Falafel wrap with extra tahini" },
+        { name: "Large iced coffee" },
+        { name: "Side of plantains" },
+        { name: "Bottled water" },
       ],
       estimatedDiningDollarsCents: 1_337,
     };

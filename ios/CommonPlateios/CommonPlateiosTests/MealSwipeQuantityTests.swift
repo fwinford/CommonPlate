@@ -245,7 +245,7 @@ final class MealSwipeQuantityTests: XCTestCase {
             windowStart: nil,
             menuPath: .mealExchange,
             mealSwipes: mealSwipes,
-            mealItems: (0..<mealSwipes).map { "Meal \($0 + 1)" },
+            mealItems: (0..<mealSwipes).map { MealItem(name: "Meal \($0 + 1)") },
             orderDetails: nil,
             estimatedDiningDollarsCents: nil
         )
@@ -261,7 +261,7 @@ final class MealSwipeQuantityTests: XCTestCase {
     ) -> RequestFoodFormDraft {
         var entries = RequestFoodFormDraft.emptyMealEntries
         for index in 0..<mealSwipes {
-            entries[index] = "Chicken bowl \(index + 1)"
+            entries[index] = MealItem(name: "Chicken bowl \(index + 1)")
         }
         return RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),

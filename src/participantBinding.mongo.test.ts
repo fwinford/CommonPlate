@@ -150,7 +150,7 @@ describeMongo("durable participant bindings", () => {
         timing: "asap",
         menuPath: "meal-exchange",
         mealSwipes: 2,
-        mealItems: ["Rice bowl", "Side salad"],
+        mealItems: [{ name: "Rice bowl" }, { name: "Side salad" }],
       },
     });
     await createRequest(creation.req, creation.res);

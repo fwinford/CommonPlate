@@ -1901,7 +1901,7 @@ final class RequestStore: ObservableObject {
         case .mealExchange:
             guard (1...RequestFoodFormDraft.maxMealSwipes).contains(payload.mealSwipes),
                   payload.mealItems.count == payload.mealSwipes,
-                  payload.mealItems.allSatisfy({ !$0.isEmpty }),
+                  payload.mealItems.allSatisfy({ !$0.name.isEmpty }),
                   payload.orderDetails == nil else {
                 return false
             }

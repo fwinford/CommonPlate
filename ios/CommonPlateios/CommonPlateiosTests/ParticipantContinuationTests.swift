@@ -58,8 +58,13 @@ final class ParticipantContinuationTests: XCTestCase {
         let body = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         // W4-R4: the resumed draft submits its exact structured entries;
-        // `food` is derived by the backend and never sent.
-        XCTAssertEqual(json["mealItems"] as? [String], ["The exact saved bowl"])
+        // `food` is derived by the backend and never sent. The wire shape is
+        // structured `{ name, details }` objects, not bare strings.
+        let mealItemsJSON = try XCTUnwrap(json["mealItems"] as? [[String: Any]])
+        let decodedMealItems = try mealItemsJSON.map { entry -> MealItem in
+            MealItem(name: try XCTUnwrap(entry["name"] as? String), details: entry["details"] as? String)
+        }
+        XCTAssertEqual(decodedMealItems, ["The exact saved bowl"])
         XCTAssertNil(json["food"])
         // The duplicate publication callback used by the view has nothing to
         // consume and cannot enqueue a second create.

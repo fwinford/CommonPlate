@@ -135,22 +135,31 @@ final class RequestCreationViewTests: XCTestCase {
                 menuPath: .mealExchange,
                 timing: .later,
                 mealSwipes: 1,
-                mealEntries: ["", "", "", "", ""]
+                mealEntries: ["", "", "", "", ""],
+                diningDollarsText: "26.00"
             ),
             isScheduledWindowValid: false,
             isScheduledTimingAvailable: true
         )
         var presentation = RequestFoodValidationPresentation()
 
+        // The empty Meal item is incomplete, not invalid: leaving it reveals
+        // nothing. The entered out-of-bounds amount is invalid: leaving it does.
         presentation.handleFocusTransition(
             from: .mealDetail(index: 0),
             to: .diningDollars,
             errors: errors
         )
+        XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
 
+        presentation.handleFocusTransition(
+            from: .diningDollars,
+            to: nil,
+            errors: errors
+        )
         XCTAssertEqual(
             presentation.visibleErrors(from: errors).map(\.field),
-            [.mealDetail(index: 0)]
+            [.diningDollars]
         )
     }
 
@@ -189,77 +198,55 @@ final class RequestCreationViewTests: XCTestCase {
 
         XCTAssertEqual(submissionCount, 0)
         XCTAssertFalse(result.didSubmit)
+        // The empty Meal item still blocks submission and still receives
+        // focus, but it is incomplete rather than invalid, so it is not shown.
         XCTAssertEqual(
             visible.map(\.field),
-            [.diningSpot, .mealDetail(index: 0), .pickupSchedule]
+            [.diningSpot, .pickupSchedule]
         )
         XCTAssertEqual(result.firstInvalidTextField, .mealDetail(index: 0))
     }
 
     func testPresentedRequestErrorUpdatesLiveWhileNeverPresentedFieldsStayQuiet() {
-        let initial = RequestFoodFormValidator.validate(
-            draft: RequestFoodFormDraft(
-                selectedDiningSpot: nil,
-                menuPath: .mealExchange,
-                timing: .asap,
-                mealSwipes: 1,
-                mealEntries: ["", "", "", "", ""]
-            ),
-            isScheduledWindowValid: true,
-            isScheduledTimingAvailable: true
-        )
+        func errors(diningDollars: String) -> [RequestFoodFieldError] {
+            RequestFoodFormValidator.validate(
+                draft: RequestFoodFormDraft(
+                    selectedDiningSpot: nil,
+                    menuPath: .diningDollars,
+                    timing: .asap,
+                    mealSwipes: 1,
+                    orderDetails: "Fries",
+                    diningDollarsText: diningDollars
+                ),
+                isScheduledWindowValid: true,
+                isScheduledTimingAvailable: true
+            )
+        }
+        let initial = errors(diningDollars: "50.01")
         var presentation = RequestFoodValidationPresentation()
         presentation.handleFocusTransition(
-            from: .mealDetail(index: 0),
+            from: .diningDollars,
             to: nil,
             errors: initial
         )
 
-        let corrected = RequestFoodFormValidator.validate(
-            draft: RequestFoodFormDraft(
-                selectedDiningSpot: nil,
-                menuPath: .mealExchange,
-                timing: .asap,
-                mealSwipes: 1,
-                mealEntries: ["Chicken bowl", "", "", "", ""]
-            ),
-            isScheduledWindowValid: true,
-            isScheduledTimingAvailable: true
-        )
-        XCTAssertTrue(presentation.visibleErrors(from: corrected).isEmpty)
+        XCTAssertTrue(presentation.visibleErrors(from: errors(diningDollars: "10.00")).isEmpty)
 
-        let invalidAgain = RequestFoodFormValidator.validate(
-            draft: RequestFoodFormDraft(
-                selectedDiningSpot: nil,
-                menuPath: .mealExchange,
-                timing: .asap,
-                mealSwipes: 1,
-                mealEntries: ["", "", "", "", ""]
-            ),
-            isScheduledWindowValid: true,
-            isScheduledTimingAvailable: true
-        )
+        let invalidAgain = errors(diningDollars: "60")
         XCTAssertEqual(
             presentation.visibleErrors(from: invalidAgain).map(\.field),
-            [.mealDetail(index: 0)],
+            [.diningDollars],
             "Dining spot never presented an error, so it must stay quiet"
         )
 
-        let emptied = RequestFoodFormValidator.validate(
-            draft: RequestFoodFormDraft(
-                selectedDiningSpot: nil,
-                menuPath: .mealExchange,
-                timing: .asap,
-                mealSwipes: 1,
-                mealEntries: ["", "", "", "", ""]
-            ),
-            isScheduledWindowValid: true,
-            isScheduledTimingAvailable: true
-        )
+        // Clearing a previously presented invalid amount back to empty returns
+        // it to neutral: empty is incomplete, and incomplete is never shown.
+        let emptied = errors(diningDollars: "")
         XCTAssertEqual(
-            presentation.visibleError(for: .mealDetail(index: 0), from: emptied)?.message,
-            "Tell us what this meal swipe is for."
+            emptied.first { $0.field == .diningDollars }?.error,
+            .missingDiningDollars
         )
+        XCTAssertNil(presentation.visibleError(for: .diningDollars, from: emptied))
     }
 
     func testPresentedDiningPickerErrorClearsAndReappearsWithSelection() {
@@ -742,7 +729,8 @@ final class RequestCreationViewTests: XCTestCase {
                 menuPath: .mealExchange,
                 timing: .asap,
                 mealSwipes: 1,
-                mealEntries: ["", "", "", "", ""]
+                mealEntries: ["Chicken bowl", "", "", "", ""],
+                diningDollarsText: "26.00"
             ),
             isScheduledWindowValid: true,
             isScheduledTimingAvailable: true
@@ -750,11 +738,11 @@ final class RequestCreationViewTests: XCTestCase {
         var presentation = RequestFoodValidationPresentation()
         let submissionCount = 0
 
-        presentation.handleFocusTransition(from: nil, to: .mealDetail(index: 0), errors: errors)
+        presentation.handleFocusTransition(from: nil, to: .diningDollars, errors: errors)
         XCTAssertTrue(presentation.visibleErrors(from: errors).isEmpty)
 
-        presentation.handleFocusTransition(from: .mealDetail(index: 0), to: nil, errors: errors)
-        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.mealDetail(index: 0)])
+        presentation.handleFocusTransition(from: .diningDollars, to: nil, errors: errors)
+        XCTAssertEqual(presentation.visibleErrors(from: errors).map(\.field), [.diningDollars])
         XCTAssertEqual(submissionCount, 0)
     }
 
@@ -982,7 +970,7 @@ final class RequestCreationViewTests: XCTestCase {
 
         XCTAssertEqual(
             validationPresentation.visibleErrors(from: errors).map(\.field),
-            [.diningSpot, .mealDetail(index: 0), .pickupSchedule]
+            [.diningSpot, .pickupSchedule]
         )
         XCTAssertNil(RequestFoodView.submissionSectionPresentation(for: nil))
     }
@@ -1169,6 +1157,159 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(requestFormSource.contains("placed under"))
     }
 
+    func testDiningDollarsFieldsUseAcceptedPresentation() throws {
+        // 2026-09-20 HQ decision superseded the per-field placeholder with
+        // the collapsed-container's own empty-state label.
+        XCTAssertEqual(RequestFoodView.mealDetailPlaceholder, "What are you ordering?")
+        XCTAssertEqual(RequestFoodView.diningDollarsLabel, "Dining Dollars")
+        XCTAssertEqual(RequestFoodView.diningDollarsRequiredLabel, "Dining Dollars")
+        XCTAssertEqual(RequestFoodView.screenshotAssistanceOptionalLabel, "Optional")
+
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains("trailingLabel: Self.screenshotAssistanceOptionalLabel"))
+        XCTAssertFalse(source.contains("Dining Dollars (optional)"))
+        XCTAssertFalse(source.contains("What would you like for this meal swipe?"))
+        XCTAssertFalse(source.contains("Leave empty if you don’t need any Dining Dollars."))
+        XCTAssertFalse(source.contains("An estimate, not a guaranteed total."))
+    }
+
+    func testMealEditorUsesCanonicalSeparateLabelAndControlHierarchy() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("e.g. Chicken Wings"))
+        XCTAssertTrue(source.contains("e.g. Buffalo sauce, chips, fountain drink"))
+        XCTAssertTrue(source.contains("screenshotProvenance.mealItemNames.contains(index)"))
+        XCTAssertTrue(source.contains("screenshotProvenance.mealItemDetails.contains(index)"))
+        XCTAssertFalse(source.contains("screenshotProvenance.mealEntries.contains(index)"))
+        XCTAssertFalse(source.contains("Tell us what this meal swipe is for."))
+        XCTAssertFalse(source.contains("fieldErrorText(\n                    .mealDetail"))
+        XCTAssertTrue(source.contains("Text(\"Required\")"))
+        XCTAssertTrue(source.contains("hasVisibleValidationError ? Color.red.opacity(0.07)"))
+        XCTAssertTrue(source.contains("Text(\"Meal item\")"))
+        XCTAssertTrue(source.contains("Text(Self.screenshotAssistanceOptionalLabel)"))
+        XCTAssertTrue(source.contains("Button(\"Done\") { expandedMealIndex = nil }"))
+        XCTAssertTrue(source.contains(".font(.subheadline.weight(.semibold))"))
+        XCTAssertTrue(source.contains(".foregroundStyle(Color(\"AccentColor\"))"))
+        XCTAssertFalse(source.contains("Button(\"Cancel\")"))
+        XCTAssertFalse(source.contains("Text(\"Edited\")"))
+
+        let mealEditorStart = try XCTUnwrap(source.range(of: "private func mealEditorCard"))
+        let mealEditorEnd = try XCTUnwrap(source.range(of: "private var requiredMealIndicator"))
+        let mealEditor = String(source[mealEditorStart.lowerBound..<mealEditorEnd.lowerBound])
+        XCTAssertTrue(mealEditor.contains("VStack(alignment: .leading, spacing: Self.mealLabelToControlSpacing)"))
+        XCTAssertTrue(mealEditor.contains(".frame(height: Self.mealLabelRowHeight)"))
+        // W4-R4 (2026-09-27): the 76pt target now governs only the EMPTY
+        // collapsed control; a FILLED summary is content-driven (44 is only
+        // the HIG minimum tap target).
+        XCTAssertTrue(mealEditor.contains("isEmptyMealItem ? Self.collapsedMealControlHeight : 44"))
+        XCTAssertTrue(mealEditor.contains("minHeight: Self.expandedMealControlHeight"))
+        XCTAssertEqual(RequestFoodView.mealLabelRowHeight, 18)
+        XCTAssertEqual(RequestFoodView.mealLabelToControlSpacing, 7)
+        XCTAssertEqual(RequestFoodView.collapsedMealControlHeight, 76)
+        XCTAssertEqual(RequestFoodView.expandedMealControlHeight, 131)
+        // Each rounded surface belongs to its expanded or collapsed control;
+        // the outer VStack has only the unfilled Meal N label and a control.
+        XCTAssertEqual(mealEditor.components(separatedBy: ".background(").count - 1, 2)
+        XCTAssertFalse(mealEditor.contains(".padding(CommonPlateStyle.Spacing.m)"))
+    }
+
+    func testPreservedEntryFeedbackIsRerunOnlyAndDoesNotReplacePersistentCheckedState() throws {
+        XCTAssertEqual(
+            RequestFoodView.preservedEntryFeedbackMessage,
+            "Screenshot checked. Your existing entries were kept."
+        )
+        XCTAssertEqual(RequestFoodView.preservedEntryFeedbackDuration, .seconds(3))
+
+        let preservedManualContent = ScreenshotProposalAppliedFields(
+            preservedManualFieldCount: 1
+        )
+        let noPreservedManualContent = ScreenshotProposalAppliedFields()
+        var state = ScreenshotPreservedEntryFeedbackState()
+
+        // First completed Screenshot Assistance run: retained requester
+        // content alone is insufficient to present rerun-only feedback.
+        state.beginSelection()
+        XCTAssertNil(state.completeAnalysis(eligible: true, applying: preservedManualContent))
+        XCTAssertFalse(state.isShowing)
+
+        // A later completed selection is a genuine rerun. It shows one
+        // bounded acknowledgement only when it actually preserves manual
+        // content.
+        state.beginSelection()
+        let rerunTimeout = state.completeAnalysis(eligible: true, applying: preservedManualContent)
+        XCTAssertNotNil(rerunTimeout)
+        XCTAssertTrue(state.isShowing)
+
+        state.beginSelection()
+        XCTAssertNil(state.completeAnalysis(eligible: true, applying: noPreservedManualContent))
+        XCTAssertFalse(state.isShowing)
+    }
+
+    func testPreservedEntryFeedbackSelectionGenerationFencesStaleTimeout() {
+        let preservedManualContent = ScreenshotProposalAppliedFields(
+            preservedManualFieldCount: 1
+        )
+        var state = ScreenshotPreservedEntryFeedbackState()
+
+        state.beginSelection()
+        XCTAssertNil(state.completeAnalysis(eligible: true, applying: preservedManualContent))
+        state.beginSelection()
+        let staleTimeout = state.completeAnalysis(eligible: true, applying: preservedManualContent)
+        XCTAssertTrue(state.isShowing)
+
+        // A third picker selection is a new generation before the old
+        // delayed cleanup can fire. Its stale timeout cannot alter this
+        // selection's presentation.
+        state.beginSelection()
+        XCTAssertFalse(state.isShowing)
+        state.clearAfterTimeout(ifCurrent: try! XCTUnwrap(staleTimeout))
+        XCTAssertFalse(state.isShowing)
+    }
+
+    func testRequesterFormUsesCanonicalFixedRhythmAndDirectAccentAssetTint() throws {
+        let source = try String(
+            contentsOf: repositoryFile(
+                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
+            ),
+            encoding: .utf8
+        )
+        let formStart = try XCTUnwrap(source.range(of: "private var requestForm: some View {"))
+        let formEnd = try XCTUnwrap(source.range(of: "// MARK: - W4-R2 approved `Requester / Form Field` controls"))
+        let form = String(source[formStart.lowerBound..<formEnd.lowerBound])
+        XCTAssertTrue(form.contains("VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m)"))
+        // W4-R4: the superseded resting-composition system stays gone. The
+        // only `GeometryReader` left measures a height for `Post request`'s
+        // placement; it never sizes content or feeds a minHeight/Spacer.
+        XCTAssertEqual(form.components(separatedBy: "GeometryReader").count - 1, 1)
+        XCTAssertTrue(form.contains("RequesterViewportHeightKey"))
+        XCTAssertFalse(form.contains("minHeight: geometry"))
+        // The one remaining `Spacer()` is the Timing header's label/info row.
+        XCTAssertFalse(form.contains("Spacer(minLength"))
+        XCTAssertEqual(form.components(separatedBy: "Spacer()").count - 1, 1)
+        XCTAssertFalse(form.contains("adaptiveMajorGap"))
+        XCTAssertFalse(form.contains("majorGap"))
+        XCTAssertTrue(form.contains(".tint(Color(\"AccentColor\"))"))
+        XCTAssertTrue(source.contains("private var diningSpotControl"))
+        XCTAssertTrue(source.contains("private var mealSwipesControl"))
+        XCTAssertTrue(source.contains("private func laterTimeChoices"))
+
+        for control in ["private var diningSpotControl", "private var mealSwipesControl", "private func laterTimeChoices"] {
+            let controlStart = try XCTUnwrap(source.range(of: control))
+            let controlTail = String(source[controlStart.lowerBound...].prefix(1_500))
+            XCTAssertTrue(controlTail.contains(".tint(Color(\"AccentColor\"))"))
+        }
+    }
+
     /// W4-R2 2026-09-02 sync item 2: the persistent ASAP/Later educational
     /// subtitles are superseded by the on-demand `ⓘ` explanation; the
     /// distinct lapsed-Later-window/unavailability messaging is unaffected.
@@ -1265,7 +1406,10 @@ final class RequestCreationViewTests: XCTestCase {
             ),
             encoding: .utf8
         )
-        XCTAssertTrue(source.contains(".padding(.bottom, CommonPlateStyle.Spacing.xs)"))
+        // W4-R4: both placements of `Post request` (anchored and in-flow)
+        // share this one small value beyond the safe area.
+        XCTAssertEqual(RequesterFormLayoutMetrics.contentBottomPadding, CommonPlateStyle.Spacing.xs)
+        XCTAssertTrue(source.contains(".padding(.bottom, RequesterFormLayoutMetrics.contentBottomPadding)"))
         XCTAssertFalse(source.contains(".padding(.bottom, CommonPlateStyle.Spacing.l)"))
     }
 
@@ -1717,11 +1861,10 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertTrue(source.contains("request-screenshot-change"))
     }
 
-    /// W4-R2 2026-08-31 sync "manual clear": manually clearing a food-request
-    /// or location field back to empty must unlatch its manual-edit flag —
-    /// not leave it permanently requester-owned-empty — so a later screenshot
-    /// suggestion is eligible to fill it again.
-    func testManuallyClearingAFieldUnlatchesItForFutureScreenshotSuggestions() throws {
+    /// W4-R4: a structured meal's Name and Details are independent current
+    /// authority/provenance units; neither helper may inspect or latch the
+    /// sibling field.
+    func testMealSubfieldBindingsUseIndependentCurrentAuthorityAndProvenance() throws {
         let source = try String(
             contentsOf: repositoryFile(
                 "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
@@ -1729,25 +1872,42 @@ final class RequestCreationViewTests: XCTestCase {
             encoding: .utf8
         )
 
-        // W4-R4: the single flat food field became one structured entry per
-        // swipe, so the unlatching rule is now per entry — clearing meal 2
-        // must not leave meal 2 permanently requester-owned-empty, and must
-        // not affect meal 1 either way.
-        guard let mealRange = source.range(
-            of: "private func mealEntryBinding(_ index: Int) -> Binding<String> {"
-        ) else {
-            XCTFail("expected to find mealEntryBinding")
-            return
+        for (binding, call, helperSignature, ownedSet, provenanceSet) in [
+            (
+                "private func mealItemNameBinding(_ index: Int) -> Binding<String> {",
+                "recordManualMealItemNameEdit(index, hasContent: !newValue.isEmpty)",
+                "private func recordManualMealItemNameEdit(_ index: Int, hasContent: Bool) {",
+                "manuallyEditedMealItemNames",
+                "mealItemNames"
+            ),
+            (
+                "private func mealItemDetailsBinding(_ index: Int) -> Binding<String> {",
+                "recordManualMealItemDetailsEdit(index, hasContent: !newValue.isEmpty)",
+                "private func recordManualMealItemDetailsEdit(_ index: Int, hasContent: Bool) {",
+                "manuallyEditedMealItemDetails",
+                "mealItemDetails"
+            ),
+        ] {
+            guard let range = source.range(of: binding) else {
+                XCTFail("expected to find \(binding)")
+                return
+            }
+            let tail = String(source[range.upperBound...].prefix(420))
+            XCTAssertTrue(tail.contains(call))
+            XCTAssertFalse(tail.contains("recordManualMealEdit"))
+
+            guard let helperRange = source.range(of: helperSignature) else {
+                // The specific source checks below make a missing helper
+                // diagnostic straightforward without relying on UI tests.
+                XCTFail("expected independent meal-subfield helper")
+                return
+            }
+            let helperTail = String(source[helperRange.upperBound...].prefix(320))
+            XCTAssertTrue(helperTail.contains("\(ownedSet).remove(index)"))
+            XCTAssertTrue(helperTail.contains("\(ownedSet).insert(index)"))
+            XCTAssertTrue(helperTail.contains("screenshotProvenance.\(provenanceSet).remove(index)"))
         }
-        let mealTail = String(source[mealRange.upperBound...].prefix(400))
-        XCTAssertTrue(
-            mealTail.contains("manuallyEditedMealEntries.remove(index)"),
-            "clearing a meal entry back to \"\" must unlatch, not permanently latch, manual ownership"
-        )
-        XCTAssertTrue(
-            mealTail.contains("manuallyEditedMealEntries.insert(index)"),
-            "a nonempty manual edit must latch ownership of that exact entry"
-        )
+        XCTAssertFalse(source.contains("manuallyEditedMealEntries"))
 
         guard let orderDetailsRange = source.range(
             of: "private var orderDetailsBinding: Binding<String> {"
@@ -1820,12 +1980,11 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertTrue(source.contains(walkthroughCallSite))
     }
 
-    /// W4-R2 2026-08-31 sync "Quiet Settle": the Later-controls reveal/hide
-    /// animation lives in its own subtree, never sharing an `.animation`
-    /// modifier with `timingControl`'s segment selection — so the segment
-    /// pill itself remains unanimated, matching the existing "no authored
-    /// segment-selection animation" contract.
-    func testQuietSettleAnimationNeverScopesOverTheTimingSegmentControl() throws {
+    /// W4-R4 (2026-09-26): the segment pill itself carries no animation
+    /// modifier, while Later's local insertion uses the restrained
+    /// `laterMotionAnimation` set where the selection changes. The old
+    /// always-mounted QuietSettle mechanism stays gone.
+    func testTimingSegmentIsUnanimatedAndLaterInsertionUsesTheRestrainedLocalMotion() throws {
         let source = try String(
             contentsOf: repositoryFile(
                 "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
@@ -1837,25 +1996,22 @@ final class RequestCreationViewTests: XCTestCase {
             XCTFail("expected to find timingControl")
             return
         }
-        let controlBody = String(source[controlRange.upperBound...].prefix(900))
+        let controlBody = String(source[controlRange.upperBound...].prefix(1_100))
         XCTAssertFalse(
             controlBody.contains(".animation("),
             "the segment pill itself must remain governed by no animation modifier"
         )
+        XCTAssertTrue(controlBody.contains("withAnimation(Self.laterMotionAnimation(reduceMotion: reduceMotion))"))
 
-        XCTAssertTrue(source.contains("quietSettleAnimation"))
-        XCTAssertTrue(source.contains("reduceMotion ? nil : Self.quietSettleAnimation, value: draft.timing"))
+        XCTAssertFalse(source.contains("quietSettleAnimation"))
+        XCTAssertFalse(source.contains(".allowsHitTesting(isLaterActive)"))
+        XCTAssertFalse(source.contains(".offset(y: isLaterActive"))
     }
 
-    /// W4-R2 2026-09-02 physical-walkthrough sync (stable Timing footprint):
-    /// the Later-controls reveal is now always mounted — never conditionally
-    /// inserted/removed via `if draft.timing == .later` — so its layout
-    /// height is reserved identically in ASAP and Later and `Post request`
-    /// no longer travels between them. Quiet Settle's visual motion is
-    /// reproduced with the same values `QuietSettleModifier` used, driven as
-    /// an ordinary `.opacity`/`.offset` state change instead of a
-    /// `.transition`, since transitions only fire on insertion/removal.
-    func testTimingFootprintIsStableAcrossASAPAndLater() throws {
+    /// W4-R4 (2026-09-26): Later controls are inserted locally (ASAP reserves
+    /// no footprint), and `Post request` placement is adaptive without any
+    /// spare-height redistribution between sections.
+    func testTimingPostRequestUsesLocalInsertionAndMeasuredPlacementWithoutAdaptiveGaps() throws {
         let source = try String(
             contentsOf: repositoryFile(
                 "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
@@ -1864,15 +2020,25 @@ final class RequestCreationViewTests: XCTestCase {
         )
 
         XCTAssertTrue(source.contains("let isLaterActive = draft.timing == .later && isScheduledTimingAvailable"))
-        XCTAssertTrue(source.contains(".opacity(isLaterActive ? 1 : 0)"))
-        XCTAssertTrue(source.contains(".offset(y: isLaterActive ? 0 : 8)"))
-        XCTAssertTrue(source.contains(".allowsHitTesting(isLaterActive)"))
-        XCTAssertTrue(source.contains(".accessibilityHidden(!isLaterActive)"))
+        XCTAssertTrue(source.contains("if isLaterActive {"))
+        XCTAssertTrue(source.contains(".transition(.opacity)"))
 
-        // The reveal is no longer gated behind an `if` that would remove it
-        // (and its reserved height) from the tree in ASAP mode.
-        XCTAssertFalse(source.contains("if draft.timing == .later && isScheduledTimingAvailable {"))
-        XCTAssertFalse(source.contains("quietSettleTransition"))
+        guard let requestFormRange = source.range(of: "private var requestForm: some View {") else {
+            XCTFail("expected to find requestForm")
+            return
+        }
+        guard let timingButtonRange = source.range(of: "private func chooseTimeButton", range: requestFormRange.upperBound..<source.endIndex) else {
+            XCTFail("expected to find the end of requestForm")
+            return
+        }
+        let requestFormSource = String(source[requestFormRange.lowerBound..<timingButtonRange.lowerBound])
+
+        XCTAssertTrue(requestFormSource.contains(".safeAreaInset(edge: .bottom, spacing: 0)"))
+        XCTAssertTrue(requestFormSource.contains("anchorsPostRequestDecision"))
+        XCTAssertFalse(requestFormSource.contains("minHeight: geometry"))
+        XCTAssertFalse(requestFormSource.contains("Spacer(minLength"))
+        XCTAssertFalse(requestFormSource.contains("adaptiveMajorGap"))
+        XCTAssertFalse(requestFormSource.contains("majorGap"))
     }
 
     /// W4-R2 final walkthrough sync: Screenshot Help must actually read as

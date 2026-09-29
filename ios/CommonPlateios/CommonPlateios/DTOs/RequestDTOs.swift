@@ -86,7 +86,7 @@ struct RequestResponseDTO: Decodable {
     let menuPath: RequestMenuPathWire
     /// One entry per selected swipe on the Meal Exchange path; empty on a
     /// Dining-Dollars-only request.
-    let mealItems: [String]
+    let mealItems: [MealItem]
     /// The single structured order-details value on a Dining-Dollars-only
     /// request; `nil` on a Meal Exchange one.
     let orderDetails: String?
@@ -187,7 +187,7 @@ struct CreateRequestPayload: Codable, Equatable {
     /// A meal field hidden by lowering the swipe count is excluded here by
     /// construction (`RequestFoodView.makePayload`), never sent and then
     /// filtered server-side.
-    let mealItems: [String]
+    let mealItems: [MealItem]
     /// Required on the Dining-Dollars-only path, absent on Meal Exchange.
     let orderDetails: String?
     /// Exact cents, never a `Double`: optional on Meal Exchange (absent means

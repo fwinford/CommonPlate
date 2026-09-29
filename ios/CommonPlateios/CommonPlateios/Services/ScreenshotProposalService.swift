@@ -59,8 +59,9 @@ private struct ScreenshotProposalFieldsDTO: Decodable {
     let selectedDiningSpot: ScreenshotProposalLocationDTO?
     /// W4-R4: one entry per distinct observed item, already deduplicated
     /// across overlapping screenshots by the backend.
-    let mealItems: [String]?
+    let mealItems: [MealItem]?
     let mealSwipes: Int?
+    let estimatedDiningDollarsCents: Int?
 }
 
 private struct ScreenshotProposalResponseDTO: Decodable {
@@ -134,7 +135,8 @@ struct ScreenshotProposalService {
         return ScreenshotProposal(
             selectedDiningSpot: spot,
             mealItems: dto.mealItems,
-            mealSwipes: dto.mealSwipes
+            mealSwipes: dto.mealSwipes,
+            estimatedDiningDollarsCents: dto.estimatedDiningDollarsCents
         )
     }
 

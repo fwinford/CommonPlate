@@ -604,6 +604,94 @@ The accepted "fresh data on Home return" physical result is recorded above as
 Faith observed it; it is not documented as a background-to-foreground refresh
 guarantee. See the open question raised at H4 closeout.
 
+### W4-R4 Structured Meal Requests & Multi-Screenshot Evidence acceptance
+
+**W4-R4 is accepted (not yet COMMITTED).** Faith explicitly accepted W4-R4 on
+2026-09-29 on the basis of the complete implementation, automated
+verification, independent review, and the physical R4 verification recorded
+below. This subsection records the accepted verification state; see the
+current weekly spec's W4-R4 card for the full lifecycle and contract history.
+
+**Structured request / Screenshot Assistance automated proof.** Current
+focused coverage spans: structured Meal Exchange / Dining Dollars
+representation and validation (`src/structuredRequest.ts`,
+`src/structuredRequest.test.ts`, `src/createRequestRoute.test.ts`,
+`src/createRequestRoute.mongo.test.ts`); multi-screenshot analysis and
+deterministic proposal validation (`src/screenshotEligibility.ts`/`.test.ts`,
+`src/screenshotProposalValidation.ts`/`.test.ts`,
+`src/screenshotProposalRoute.test.ts`, `src/screenshotProposalTypes.ts`);
+manual authority and field-level provenance, incomplete-vs-invalid
+presentation, and menu-path reset (`RequestFoodFormValidation.swift`,
+`RequestFoodView.swift`, `RequestIncompleteVsInvalidValidationTests.swift`,
+`RequesterIncompleteVsInvalidHostedTests.swift`); requester rendered
+geometry, the DD ordering control, and populated/expanded Meal geometry
+(`RequesterFormLayout.swift`, `RequesterFormLayoutBehaviorTests.swift`,
+`RequesterFormHostedFidelityTests.swift`, `RequesterFormHostedHarness.swift`,
+`RequesterMealPresentationHostedTests.swift`); mounted Meal
+presentation/focus/accessibility behavior, preserved-entry rerun
+qualification/lifecycle, and the unified Meal provenance OR presentation
+(`ScreenshotProposalStore.swift`, `ScreenshotProposalStoreTests.swift`,
+`ScreenshotPreservedEntryFeedbackLifecycleTests.swift`); and the durable
+request-create operation surfaces R4's structured payload flows through
+(`RequestCreateDurableOperationTests.swift`,
+`RequestCreatePendingOperationScopeTests.swift`,
+`RequestCreateTerminalReconciliationTests.swift`,
+`RequestCreationViewTests.swift`, `RequestFoodDraftSessionTests.swift`,
+`MealSwipeQuantityTests.swift`, `ParticipantContinuationTests.swift`,
+`RemoveEmailTests.swift`).
+
+**Accepted complete iOS target.** The latest complete `CommonPlateiosTests`
+target in this worktree: **1,483 passed, 0 failed, TEST SUCCEEDED**. A final
+focused provenance/badge-unification implementation pass measured **225
+tests, 0 failures**. Per this document's convention, this result becomes the
+current accepted baseline (section 13 below) now that R4 is accepted.
+`git diff --check` was clean after the final implementation;
+nothing has been committed for this correction — COMMITTED requires Faith's
+separate approval of the final staging set and an actual commit.
+
+**Physical-device proof.** Distinct from the automated/simulator proof above,
+Faith completed a physical-iPhone requester and Screenshot Assistance
+walkthrough. Requester presentation/interaction confirmed: incomplete
+required fields stay neutral and keep `Post request` disabled; DD
+ordering-field geometry/copy; adaptive `Post request` placement; collapsed/
+expanded Meal presentation; full `Details` wrapping without ellipsis; equal
+Meal item/Details hierarchy; materially improved Meal expand/collapse
+latency; and the unified Meal provenance presentation. Screenshot Assistance
+confirmed: real `PhotosPicker` multi-image selection/analysis; a correct
+eligible multi-screenshot structured proposal (three Meal Exchange meals, a
+strongly-supported `$2.00` Dining Dollars proposal); no auto-submit; manual
+Meal-item and Details authority preserved independently across an eligible
+rerun; an untouched screenshot-derived value remaining eligible to update;
+provenance clearing/restoration through a later valid reproposal; the exact
+qualifying preserved-entry message `Screenshot checked. Your existing entries
+were kept.`; its correct absence on a non-qualifying eligible rerun; feedback
+cleanup on view disappearance and on Screenshot Assistance disablement; and
+the nonqualifying-prior-outcome behavior Faith exercised. Faith did not
+record a detailed device transcript for every individual
+unsupported/failed/cancelled/nil subcase; no physical proof is claimed for a
+subcase not individually observed, and the automated F1+F2 focused proof
+(`RequestCreateTerminalReconciliationTests`/`ScreenshotProposalStoreTests`
+state-machine coverage) is the record for those exact cases instead. This
+physical proof does not establish Release/Archive/TestFlight signing or any
+provider environment beyond the observed Screenshot Assistance run.
+
+**Hosted-test methodology notes.** As with W4-D2's
+`RequestCreationContinuityHostedGeometryTests` technique above, R4's hosted
+requester fidelity tests (`RequesterFormHostedFidelityTests.swift`,
+`RequesterFormHostedHarness.swift`,
+`RequesterIncompleteVsInvalidHostedTests.swift`,
+`RequesterMealPresentationHostedTests.swift`) mount the real production
+SwiftUI view in a `UIWindow` and inspect rendered geometry/accessibility
+rather than source strings; source-string checks do not substitute for
+rendered-geometry proof. Some hosted runs can stall when the Mac idles;
+`caffeinate -i` was required for reliable execution during this slice. This is
+an incidental test-run/environment note, not a product limitation.
+
+**Accessibility limitation.** Hardware-keyboard Tab traversal into the
+mounted hidden Meal editor was not physically established. No failure is
+known; this is deferred, unperformed physical evidence owned by W4-A1, not a
+demonstrated defect (see the current weekly spec's W4-A1 card).
+
 ## 10. Test-file organization
 
 Add new Week 3 iOS tests in new focused files where practical. Do not keep extending `ClaimFlowTests.swift` merely because it already contains related tests. Preserve existing test files rather than splitting them during unrelated feature work, and keep one endpoint and one user-flow slice per test change. This does not prescribe a new test framework or UI-test target.
@@ -643,7 +731,7 @@ These results are reference evidence, not a substitute for rerunning affected ch
 | `npm test` | Passed at W4-Q1 acceptance: 1,537 passed, 335 Mongo-gated skipped |
 | `npm run test:mongo` | Passed at W4-Q1 acceptance: 335 passed across 24 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build), at the W4-H2 final ownership rereview — not independently rerun for Q1; see the Q1 coverage subsection above for the checks that were |
-| `CommonPlateiosTests` | At W4-R2 acceptance: **1,104 passed, 0 failed**. At W4-H4 acceptance, measured in isolated worktrees: **1,009 passed, 0 failed, TEST SUCCEEDED** for the clean W4-Q1 commit plus exactly the W4-H4 commit set — the figure the target reported once H4 landed. The same clean Q1 commit alone measures 976, and the full H4 working tree including then-in-progress R2/S1 work measured 1,032. See the W4-H4 subsection in section 9 for the attribution table and for the flagged 1,001-versus-976 discrepancy in the Q1 record |
+| `CommonPlateiosTests` | At W4-R2 acceptance: **1,104 passed, 0 failed**. At W4-H4 acceptance, measured in isolated worktrees: **1,009 passed, 0 failed, TEST SUCCEEDED** for the clean W4-Q1 commit plus exactly the W4-H4 commit set — the figure the target reported once H4 landed. The same clean Q1 commit alone measures 976, and the full H4 working tree including then-in-progress R2/S1 work measured 1,032. See the W4-H4 subsection in section 9 for the attribution table and for the flagged 1,001-versus-976 discrepancy in the Q1 record. At W4-R4 acceptance (current accepted baseline): **1,483 passed, 0 failed, TEST SUCCEEDED**; a final focused provenance/badge-unification pass separately measured 225 tests, 0 failures |
 | `npm run build:client` | Passed; no tracked bundle diff (no browser-client source changed in N2, D1, H2, N0, or Q1) |
 | `git diff --check` | Passed |
 
@@ -674,5 +762,7 @@ W4-H4 acceptance evidence (the count-sensitive Home ownership preview and `See a
 W4-R2 acceptance evidence (the pushed Request Food navigation, the Q1-consuming early eligibility boundary and its distinct retryable/exhausted presentations, in-memory draft-session continuity, Timing's quick-time/native-picker presentation, the Screenshot Assistance completion acknowledgement, the first-use consent/disclosure gate and its Off-state re-entry path, Screenshot Help's centered-overlay presentation, Posting/Success timing and haptics, D1's continued haptic-free distinctness from definitive failure, no R2-authored Home insertion, and the zone-scoped `YOUR REQUEST` eyebrow suppression) is recorded above (W4-R2 Requester Journey Integration acceptance) and in `docs/system-contract.md` section 13, section 1.4, and section 3.1. Faith's physical-device walkthroughs are the authority for the rendered navigation, consent/Off-state, Screenshot Help, motion/haptic, and Remove Email presentation observations; no automated check drives them. It does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document). The new-request push notification's title/body composition remains W4-N1's future work, not R2's, per the carve-out recorded in the W3-C1 coverage subsection above.
 
 W3-H2 durable one-successful-participation enforcement, marketplace/detail privacy isolation, and fulfillment re-entry evidence is recorded above and in `docs/system-contract.md` section 5.1. **W3-H2 was accepted without an iOS UI-test target**, so the literal SwiftUI stale-detail render/tap scheduling sequence was not driven end-to-end through UI automation or physical-device interaction; production predicate/action logic and wiring are covered by unit/source-level tests and the full iOS target instead. That remaining limitation is accepted, not a failed or pending check, and must not be described as UI-test or physical-device proof; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
+
+W4-R4 acceptance evidence (structured Meal Exchange/Dining Dollars representation, multi-screenshot Assistance proposal validation, per-field manual authority/provenance, incomplete-vs-invalid presentation, requester hosted-geometry fidelity, and the unified Meal-row provenance badge correction) is recorded above (W4-R4 Structured Meal Requests & Multi-Screenshot Evidence acceptance) and in the current weekly spec's W4-R4 card. **Faith explicitly accepted W4-R4 on 2026-09-29.** Its complete `CommonPlateiosTests` result (1,483 passed, 0 failed, TEST SUCCEEDED) is now the current accepted baseline recorded in the table above. Hardware-keyboard Tab traversal into the mounted hidden Meal editor remains deferred to W4-A1 and is not an R4 acceptance blocker. This evidence does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document). R4 is ACCEPTED, not yet COMMITTED.
 
 W3-I1 physical/environmental verification remains unperformed for real NYU verification-email receipt and real-code redemption; uninstall/reinstall and new-device reverification; remaining Keychain lifecycle behavior; backup/device-migration exclusion where practical; and a real-address Change Email flow. The accepted W3-H1 flow has physically established same-install authority retention through terminate/relaunch continuation; neither that result nor source/simulator inspection proves the remaining outcomes.

@@ -196,7 +196,13 @@ final class RequestCreatePendingOperationScopeTests: XCTestCase {
         )
         let sent = try XCTUnwrap(RequestFetchingURLProtocol.lastCapturedBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: sent) as? [String: Any])
-        XCTAssertEqual(json["mealItems"] as? [String], ["A-PENDING meal"], "A's exact payload, never merged")
+        // W4-R4 sends structured `{ name, details }` objects on the wire, not
+        // bare strings.
+        let mealItemsJSON = try XCTUnwrap(json["mealItems"] as? [[String: Any]])
+        let decodedMealItems = try mealItemsJSON.map { entry -> MealItem in
+            MealItem(name: try XCTUnwrap(entry["name"] as? String), details: entry["details"] as? String)
+        }
+        XCTAssertEqual(decodedMealItems, ["A-PENDING meal"], "A's exact payload, never merged")
         XCTAssertTrue(storage.loadAll().isEmpty)
     }
 
@@ -617,7 +623,7 @@ final class RequestCreatePendingOperationScopeTests: XCTestCase {
             windowStart: nil,
             menuPath: .mealExchange,
             mealSwipes: 1,
-            mealItems: [meal],
+            mealItems: [MealItem(name: meal)],
             orderDetails: nil,
             estimatedDiningDollarsCents: nil
         )

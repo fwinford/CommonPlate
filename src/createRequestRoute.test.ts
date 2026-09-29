@@ -114,7 +114,7 @@ function canonicalAsap(overrides: Record<string, unknown> = {}) {
     timing: "asap",
     menuPath: "meal-exchange",
     mealSwipes: 2,
-    mealItems: ["  Vegetable rice bowl  ", "  Side salad  "],
+    mealItems: [{ name: "  Vegetable rice bowl  " }, { name: "  Side salad  " }],
     ...overrides,
   };
 }
@@ -127,15 +127,15 @@ function canonicalScheduled(overrides: Record<string, unknown> = {}) {
     windowStart: "2026-07-28T17:00:00.000Z",
     menuPath: "meal-exchange",
     mealSwipes: 2,
-    mealItems: ["Vegetable rice bowl", "Side salad"],
+    mealItems: [{ name: "Vegetable rice bowl" }, { name: "Side salad" }],
     ...overrides,
   };
 }
 
 /** Exactly `count` distinct structured meal-detail entries — one per selected
  * swipe, which is what W4-R4 Meal Exchange validation requires. */
-function mealEntries(count: number): string[] {
-  return Array.from({ length: count }, (_, index) => `Meal detail ${index + 1}`);
+function mealEntries(count: number): Array<{ name: string }> {
+  return Array.from({ length: count }, (_, index) => ({ name: `Meal detail ${index + 1}` }));
 }
 
 /** The W4-R4 Dining-Dollars-only shape: zero swipes, one required structured
@@ -247,7 +247,7 @@ describe("POST /api/request validation and persistence", () => {
       food: "Vegetable rice bowl; Side salad",
       menuPath: "meal-exchange",
       mealSwipes: 2,
-      mealItems: ["Vegetable rice bowl", "Side salad"],
+      mealItems: [{ name: "Vegetable rice bowl" }, { name: "Side salad" }],
       // Both written from the verified participant, never from the payload.
       email: participantPrincipal,
       requesterParticipantId: participantId.toString(),
@@ -459,7 +459,7 @@ describe("POST /api/request validation and persistence", () => {
       pickupWindowText: "Jul 28, 1:00 PM – 4:00 PM",
       mealSwipes: 2,
       menuPath: "meal-exchange",
-      mealItems: ["Vegetable rice bowl", "Side salad"],
+      mealItems: [{ name: "Vegetable rice bowl" }, { name: "Side salad" }],
       orderDetails: null,
       estimatedDiningDollarsCents: null,
       windowStart: "2026-07-28T17:00:00.000Z",
@@ -3376,7 +3376,7 @@ describe("W4-R4 structured request representation", () => {
     ],
     [
       "a Meal Exchange request with a blank entry",
-      () => canonicalAsap({ mealSwipes: 2, mealItems: ["Rice bowl", "   "] }),
+      () => canonicalAsap({ mealSwipes: 2, mealItems: [{ name: "Rice bowl" }, { name: "   " }] }),
     ],
     [
       "a Meal Exchange request with an estimate above $25.00",
@@ -3427,7 +3427,7 @@ describe("W4-R4 structured request representation", () => {
     expect(longText.length).toBeGreaterThan(500);
 
     for (const body of [
-      canonicalAsap({ mealSwipes: 1, mealItems: [longText] }),
+      canonicalAsap({ mealSwipes: 1, mealItems: [{ name: longText }]}),
       diningDollarsOnly({ orderDetails: longText }),
     ]) {
       createDocument.mockClear();
@@ -3437,10 +3437,10 @@ describe("W4-R4 structured request representation", () => {
 
       expect(context.status).toHaveBeenCalledWith(201);
       const persisted = createDocument.mock.calls[0][0] as {
-        mealItems: string[];
+        mealItems: Array<{ name: string }>;
         orderDetails?: string;
       };
-      expect([...persisted.mealItems, persisted.orderDetails]).toContain(longText);
+      expect([...persisted.mealItems.map(({ name }) => name), persisted.orderDetails]).toContain(longText);
     }
   });
 
@@ -3451,7 +3451,7 @@ describe("W4-R4 structured request representation", () => {
     const context = routeContext(
       canonicalAsap({
         mealSwipes: 1,
-        mealItems: ["Rice bowl", "Hidden second-swipe content"],
+        mealItems: [{ name: "Rice bowl" }, { name: "Hidden second-swipe content" }],
       })
     );
 

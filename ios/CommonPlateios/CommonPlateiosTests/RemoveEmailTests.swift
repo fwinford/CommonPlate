@@ -764,7 +764,7 @@ final class RemoveEmailTests: XCTestCase {
             windowStart: nil,
             menuPath: .mealExchange,
             mealSwipes: 2,
-            mealItems: [food, "Side salad"],
+            mealItems: [MealItem(name: food), MealItem(name: "Side salad")],
             orderDetails: nil,
             estimatedDiningDollarsCents: nil
         )

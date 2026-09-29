@@ -44,14 +44,14 @@ final class RequestFoodDraftSessionTests: XCTestCase {
         owner.draft.selectedDiningSpot = DiningSpot(name: "Palladium", address: nil)
         owner.draft.mealEntries[0] = "Manual edit after proposal"
         owner.draft.mealSwipes = 2
-        owner.screenshotManualEdits.manuallyEditedMealEntries = [0]
+        owner.screenshotManualEdits.manuallyEditedMealItemNames = [0]
         owner.screenshotProvenance.location = true
         owner.screenshotProvenance.mealSwipes = true
 
         let reenteredOwner = owner
 
         XCTAssertEqual(reenteredOwner.draft.mealEntries[0], "Manual edit after proposal")
-        XCTAssertTrue(reenteredOwner.screenshotManualEdits.hasManuallyEditedMealEntry(0))
+        XCTAssertTrue(reenteredOwner.screenshotManualEdits.hasManuallyEditedMealItemName(0))
         XCTAssertTrue(reenteredOwner.screenshotProvenance.location)
         XCTAssertFalse(reenteredOwner.screenshotProvenance.mealEntries.contains(0))
         XCTAssertTrue(reenteredOwner.screenshotProvenance.mealSwipes)
@@ -70,7 +70,7 @@ final class RequestFoodDraftSessionTests: XCTestCase {
             diningDollarsText: "12.34"
         )
         owner.screenshotManualEdits.hasManuallyEditedLocation = true
-        owner.screenshotManualEdits.manuallyEditedMealEntries = [0]
+        owner.screenshotManualEdits.manuallyEditedMealItemNames = [0]
         owner.screenshotManualEdits.hasManuallyEditedMealSwipes = true
         owner.screenshotProvenance.location = true
 
@@ -110,10 +110,11 @@ final class RequestFoodDraftSessionTests: XCTestCase {
         )
         owner.screenshotManualEdits.hasManuallyEditedLocation = true
         owner.screenshotManualEdits.hasManuallyEditedOrderDetails = true
-        owner.screenshotManualEdits.manuallyEditedMealEntries = [0, 1]
+        owner.screenshotManualEdits.manuallyEditedMealItemNames = [0, 1]
+        owner.screenshotManualEdits.manuallyEditedMealItemDetails = [0, 1]
         owner.screenshotProvenance.location = true
         owner.screenshotProvenance.orderDetails = true
-        owner.screenshotProvenance.mealEntries = [0]
+        owner.screenshotProvenance.mealItemNames = [0]
 
         let trustedDraft = RequestFoodFormDraft(
             selectedDiningSpot: DiningSpot(name: "Palladium", address: nil),
@@ -149,9 +150,11 @@ final class RequestFoodDraftSessionTests: XCTestCase {
             diningDollarsText: "9.99"
         )
         owner.screenshotManualEdits.hasManuallyEditedMealSwipes = true
-        owner.screenshotManualEdits.manuallyEditedMealEntries = [0, 1]
+        owner.screenshotManualEdits.manuallyEditedMealItemNames = [0, 1]
+        owner.screenshotManualEdits.manuallyEditedMealItemDetails = [0, 1]
         owner.screenshotProvenance.mealSwipes = true
-        owner.screenshotProvenance.mealEntries = [0, 1]
+        owner.screenshotProvenance.mealItemNames = [0, 1]
+        owner.screenshotProvenance.mealItemDetails = [0, 1]
 
         owner.startEmptyAfterTerminalRecovery()
 

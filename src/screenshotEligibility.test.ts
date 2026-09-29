@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  corroboratedMealSwipeCount,
   countMealSwipeMarkers,
   evaluateEligibility,
 } from "./screenshotEligibility.js";
@@ -114,5 +115,41 @@ describe("countMealSwipeMarkers", () => {
 
   it("does not count a numeric distractor that isn't the exact marker", () => {
     expect(countMealSwipeMarkers("Order #1234, 15 items")).toBe(0);
+  });
+});
+
+describe("corroboratedMealSwipeCount", () => {
+  it.each([
+    ["1M", 1],
+    ["2M", 2],
+    ["3M + $2.00", 3],
+    ["4M", 4],
+    ["5 M", 5],
+  ])("recognizes explicit bounded M notation in %s", (evidence, expected) => {
+    expect(corroboratedMealSwipeCount(evidence)).toBe(expected);
+  });
+
+  it("keeps the accepted per-item 1M marker-count behavior", () => {
+    expect(corroboratedMealSwipeCount("1M 1 M 1M")).toBe(3);
+  });
+
+  it("deduplicates repeated identical aggregate totals from overlap", () => {
+    expect(corroboratedMealSwipeCount("3M + $2.00\n3 M + $2.00")).toBe(3);
+  });
+
+  it("fails closed for conflicting aggregate totals", () => {
+    expect(corroboratedMealSwipeCount("2M\n3M")).toBeNull();
+  });
+
+  it("fails closed for an out-of-bounds explicit total", () => {
+    expect(corroboratedMealSwipeCount("6M")).toBeNull();
+    expect(corroboratedMealSwipeCount("3M 6M")).toBeNull();
+    expect(corroboratedMealSwipeCount("0M")).toBeNull();
+  });
+
+  it("does not infer from malformed or non-M notation", () => {
+    for (const evidence of ["M3", "3MM", "3.0M", "three M", "$2.00"]) {
+      expect(corroboratedMealSwipeCount(evidence), evidence).toBeNull();
+    }
   });
 });

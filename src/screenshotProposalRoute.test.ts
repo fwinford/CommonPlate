@@ -305,7 +305,7 @@ describe("handleScreenshotProposal", () => {
           name: "Palladium",
           address: "Palladium Hall, 140 E 14th St",
         },
-        mealItems: ["1 Fries"],
+        mealItems: [{ name: "1 Fries" }],
       },
     });
   });
@@ -1253,7 +1253,7 @@ describe("W4-R4 multi-screenshot evidence for one logical order", () => {
       { eligible: boolean; proposal: { mealItems?: string[] } },
     ];
     expect(body.eligible).toBe(true);
-    expect(body.proposal.mealItems).toEqual(["1 Burger (No Bag)", "1 Fries"]);
+    expect(body.proposal.mealItems).toEqual([{ name: "1 Burger", details: "No Bag" }, { name: "1 Fries" }]);
   });
 
   it("does not duplicate or collapse an identical line repeated across several screenshots", async () => {
@@ -1332,8 +1332,8 @@ describe("W4-R4 multi-screenshot evidence for one logical order", () => {
       { proposal: { mealItems?: string[]; mealSwipes?: number } },
     ];
     expect(body.proposal.mealItems).toEqual([
-      "1 Burger (No Bag)",
-      "1 Burger (No Bag)",
+      { name: "1 Burger", details: "No Bag" },
+      { name: "1 Burger", details: "No Bag" },
     ]);
     expect(body.proposal.mealSwipes).toBe(2);
   });
@@ -1365,9 +1365,9 @@ describe("W4-R4 multi-screenshot evidence for one logical order", () => {
     // different modifier is a different item, and collapsing them would be a
     // guess about what the requester meant.
     expect(body.proposal.mealItems).toEqual([
-      "1 Burger (No Bag)",
-      "2 Burger (No Bag)",
-      "1 Burger (No Side)",
+      { name: "1 Burger", details: "No Bag" },
+      { name: "2 Burger", details: "No Bag" },
+      { name: "1 Burger", details: "No Side" },
     ]);
   });
 
@@ -1400,7 +1400,85 @@ describe("W4-R4 multi-screenshot evidence for one logical order", () => {
     // chooses the count rather than receiving a guessed one.
     expect(body.proposal.mealSwipes).toBeUndefined();
     // The safe part of the proposal still survives independently.
-    expect(body.proposal.mealItems).toEqual(["1 Burger"]);
+    expect(body.proposal.mealItems).toEqual([{ name: "1 Burger" }]);
+  });
+
+  it("retains the real three-meal proposal when overlapping evidence repeats the same 3M total", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: {
+        visibleVenueText: "Crave NYU - Meal Exchange",
+        foodItems: [
+          {
+            name: "Chicken Wings",
+            quantity: 1,
+            modifiers: [
+              "Buffalo Sauce",
+              "Blue Cheese Dressing",
+              "Chips",
+              "Fountain Beverage",
+            ],
+          },
+          {
+            name: "Happy Cobb Salad",
+            quantity: 1,
+            modifiers: [
+              "No Cabbage",
+              "No Mixed Greens",
+              "No Roasted Mushrooms",
+              "No Roasted Sunburst Tomato",
+              "Chips",
+              "Fountain Beverage",
+            ],
+          },
+          {
+            name: "Caesar Salad",
+            quantity: 1,
+            modifiers: [
+              "Fire Braised Chicken (Served Cold) (+ $2.00)",
+              "No Romaine Lettuce",
+              "Apple",
+              "Fountain Beverage",
+            ],
+          },
+        ],
+        mealSwipes: 3,
+      },
+    });
+    const overlappingTotalEvidence =
+      `${cartEvidenceText} Crave NYU - Meal Exchange 3M + $2.00`;
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: overlappingTotalEvidence },
+        { localEvidenceText: overlappingTotalEvidence },
+      ])
+    );
+
+    await handleScreenshotProposal(context.req, context.res);
+
+    const [options] = callScreenshotProvider.mock.calls[0] as [
+      { images: unknown[] },
+    ];
+    expect(options.images).toHaveLength(2);
+    const [body] = context.json.mock.calls[0] as [
+      {
+        eligible: boolean;
+        proposal: Record<string, unknown> & {
+          mealItems?: string[];
+          mealSwipes?: number;
+        };
+      },
+    ];
+    expect(body.eligible).toBe(true);
+    expect(body.proposal.mealSwipes).toBe(3);
+    expect(body.proposal.mealItems).toEqual([
+      { name: "1 Chicken Wings", details: "Buffalo Sauce, Blue Cheese Dressing, Chips, Fountain Beverage" },
+      { name: "1 Happy Cobb Salad", details: "No Cabbage, No Mixed Greens, No Roasted Mushrooms, No Roasted Sunburst Tomato, Chips, Fountain Beverage" },
+      { name: "1 Caesar Salad", details: "Fire Braised Chicken (Served Cold) (+ $2.00), No Romaine Lettuce, Apple, Fountain Beverage" },
+    ]);
+    expect(body.proposal).toHaveProperty("estimatedDiningDollarsCents", 200);
+    expect(body.proposal).not.toHaveProperty("diningDollars");
   });
 
   it("omits location when screenshots ground conflicting venues", async () => {

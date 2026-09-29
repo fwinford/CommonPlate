@@ -96,7 +96,7 @@ function payload(overrides: Record<string, unknown> = {}) {
     timing: "asap",
     menuPath: "meal-exchange",
     mealSwipes: 1,
-    mealItems: ["Private meal detail that must never reach the ledger"],
+    mealItems: [{ name: "Private meal detail that must never reach the ledger" }],
     ...overrides,
   };
 }

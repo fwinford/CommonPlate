@@ -12,17 +12,14 @@ import Foundation
 /// Every field is independently optional — partial and empty proposals are
 /// both ordinary outcomes, never a failure.
 ///
-/// W4-R4 replaces the single `foodRequest` string with `mealItems`, one entry
-/// per distinct observed item, so a proposal can populate the structured
-/// per-swipe meal-detail fields. The allowlist is unchanged in kind: still
-/// location, literal food, and meal swipes. There is deliberately no menu
-/// path and no Dining Dollar amount — those are requester product decisions,
-/// and the backend refuses provider output that tries to carry them
-/// (`FORBIDDEN_PROVIDER_FIELDS`, `src/screenshotProposalTypes.ts`).
+/// W4-R4 proposals use the same `MealItem` shape as manual entry.  A current
+/// cart's order-level amount may also be proposed as an estimate, but never
+/// selects the requester-owned menu path or submits anything.
 struct ScreenshotProposal: Equatable {
     var selectedDiningSpot: DiningSpot?
-    var mealItems: [String]?
+    var mealItems: [MealItem]?
     var mealSwipes: Int?
+    var estimatedDiningDollarsCents: Int?
 
     static let empty = ScreenshotProposal()
 }
@@ -39,5 +36,6 @@ struct ScreenshotProposalOutcome: Equatable {
         proposal.selectedDiningSpot == nil
             && (proposal.mealItems?.isEmpty ?? true)
             && proposal.mealSwipes == nil
+            && proposal.estimatedDiningDollarsCents == nil
     }
 }

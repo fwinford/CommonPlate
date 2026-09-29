@@ -254,7 +254,7 @@ export interface IRequest extends Document {
    * before submission and refused by validation if sent anyway, so this array
    * always describes exactly the swipes the request actually needs.
    */
-  mealItems?: string[];
+  mealItems?: Array<{ name: string; details?: string }>;
   /** The single structured order-details value a Dining-Dollars-only request
    * requires (W4-R4). Absent on a Meal Exchange request. */
   orderDetails?: string;
@@ -315,7 +315,20 @@ const RequestSchema = new Schema<IRequest>({
       message: "mealSwipes must be an integer",
     },
   },
-  mealItems: { type: [String], default: undefined },
+  mealItems: {
+    // `_id: false`: each entry is `{ name, details }` only — Mongoose's
+    // default per-subdocument `_id` is an internal artifact never part of
+    // the accepted structured representation, and must not leak into any
+    // projection.
+    type: [
+      {
+        name: { type: String, required: true, trim: true },
+        details: { type: String, trim: true },
+        _id: false,
+      },
+    ],
+    default: undefined,
+  },
   orderDetails: { type: String, trim: true },
   estimatedDiningDollarsCents: {
     type: Number,

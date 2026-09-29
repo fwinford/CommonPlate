@@ -220,7 +220,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         draft.mealEntries[0] = "my own words"
         var manualEdits = ScreenshotFieldManualEditState()
-        manualEdits.manuallyEditedMealEntries = [0]
+        manualEdits.manuallyEditedMealItemNames = [0]
 
         let outcome = ScreenshotProposalOutcome(
             eligible: true,
@@ -291,7 +291,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
             )
         )
         var manualEdits = ScreenshotFieldManualEditState()
-        manualEdits.manuallyEditedMealEntries = [0]
+        manualEdits.manuallyEditedMealItemNames = [0]
 
         let applied = store.apply(outcome, manualEdits: manualEdits, to: &draft)
 
@@ -317,24 +317,20 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         XCTAssertEqual(store.notice, .noUsefulExtraction)
     }
 
-    // MARK: - Finding 4 regression: type-then-clear / reconverge / manual-nil
+    // MARK: - Current-content manual authority
 
-    /// The exact bug scenario: the requester types into the food field
-    /// (manual edit), then clears it back to empty while a proposal is
-    /// still pending. Under old value-equality inference this looked
-    /// identical to "never touched." It must not.
-    func testTypeThenClearWhileProviderPendingStillBlocksAI() {
+    func testTypeThenClearReopensAFieldForAValidProposal() {
         let store = makeStore()
         var draft = RequestFoodFormDraft()
         var manualEdits = ScreenshotFieldManualEditState()
 
-        // Simulates the food TextField's binding: any keystroke latches the
-        // flag, regardless of the resulting value.
+        // The actual binding removes authority when the current value is
+        // empty; a previous edit is not historical protection.
         draft.mealEntries[0] = "partial"
-        manualEdits.manuallyEditedMealEntries = [0]
+        manualEdits.manuallyEditedMealItemNames = [0]
         draft.mealEntries[0] = ""
-        // Flag stays latched even though the value is empty again.
-        XCTAssertTrue(manualEdits.hasManuallyEditedMealEntry(0))
+        manualEdits.manuallyEditedMealItemNames.remove(0)
+        XCTAssertFalse(manualEdits.hasManuallyEditedMealItemName(0))
 
         let outcome = ScreenshotProposalOutcome(
             eligible: true,
@@ -342,7 +338,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         )
         store.apply(outcome, manualEdits: manualEdits, to: &draft)
 
-        XCTAssertEqual(draft.mealEntries[0], "", "a manually-touched field must stay exactly as the requester left it")
+        XCTAssertEqual(draft.mealEntries[0], "1 Create Your Own Bowl")
     }
 
     /// AI proposes X (programmatic write) → requester manually picks Y →
@@ -956,11 +952,25 @@ extension ScreenshotProposalStoreTests {
         }
     }
 
-    private func eligibleStub(mealItems: [String]) -> ScreenshotProposalURLProtocol.Stub {
-        let body: [String: Any] = [
-            "eligible": true,
-            "proposal": ["mealItems": mealItems],
+    /// Encodes each `MealItem` the way the real backend does
+    /// (`src/screenshotProposalTypes.ts`: `Array<{ name: string; details?:
+    /// string }>`), so this stub exercises the current structured decode path
+    /// rather than `MealItem`'s bare-string read-compatibility fallback.
+    private func eligibleStub(
+        mealItems: [MealItem],
+        mealSwipes: Int? = nil
+    ) -> ScreenshotProposalURLProtocol.Stub {
+        var proposal: [String: Any] = [
+            "mealItems": mealItems.map { item -> [String: Any] in
+                var encoded: [String: Any] = ["name": item.name]
+                if let details = item.details { encoded["details"] = details }
+                return encoded
+            },
         ]
+        if let mealSwipes {
+            proposal["mealSwipes"] = mealSwipes
+        }
+        let body: [String: Any] = ["eligible": true, "proposal": proposal]
         return .response(data: try! JSONSerialization.data(withJSONObject: body))
     }
 
@@ -1049,6 +1059,52 @@ extension ScreenshotProposalStoreTests {
         XCTAssertEqual(applied.mealEntries, [0, 1, 2])
     }
 
+    func testDecodedThreeSwipeThreeItemProposalActivatesAndFillsAllThreeMealFields() async throws {
+        ScreenshotProposalURLProtocol.reset()
+        // The backend sends structured `{ name, details }` items
+        // (`src/screenshotProposalTypes.ts`), so the modifier clause each
+        // item already carried is expressed as `details` here rather than
+        // left embedded in `name` — this decodes through `MealItem`'s
+        // ordinary keyed path, not its bare-string compatibility fallback.
+        let mealItems = [
+            MealItem(
+                name: "1 Chicken Wings",
+                details: "Buffalo Sauce, Blue Cheese Dressing, Chips, Fountain Beverage"
+            ),
+            MealItem(
+                name: "1 Happy Cobb Salad",
+                details: "No Cabbage, No Mixed Greens, No Roasted Mushrooms, No Roasted Sunburst Tomato, Chips, Fountain Beverage"
+            ),
+            MealItem(
+                name: "1 Caesar Salad",
+                details: "Fire Braised Chicken (Served Cold) (+ $2.00), No Romaine Lettuce, Apple, Fountain Beverage"
+            ),
+        ]
+        ScreenshotProposalURLProtocol.enqueue(
+            eligibleStub(mealItems: mealItems, mealSwipes: 3)
+        )
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft()
+        let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
+
+        let receivedOutcome = await store.analyzeScreenshot(
+            images: analysisInputs(2),
+            participantAuthority: "an-authority",
+            token: token
+        )
+        let outcome = try XCTUnwrap(receivedOutcome)
+        let applied = store.apply(outcome, manualEdits: noManualEdits, to: &draft)
+
+        XCTAssertEqual(outcome.proposal.mealSwipes, 3)
+        XCTAssertEqual(outcome.proposal.mealItems, mealItems)
+        XCTAssertEqual(draft.mealSwipes, 3)
+        XCTAssertEqual(Array(draft.activeMealEntryIndices), [0, 1, 2])
+        XCTAssertEqual(draft.activeMealEntries, mealItems)
+        XCTAssertEqual(applied.mealEntries, [0, 1, 2])
+        XCTAssertTrue(applied.mealSwipes)
+        XCTAssertEqual(draft.diningDollarsText, "")
+    }
+
     func testProposedItemsNeverFillAFieldHiddenByALoweredSwipeCount() {
         let store = makeMultiStore()
         var draft = RequestFoodFormDraft(menuPath: .mealExchange, mealSwipes: 2)
@@ -1079,7 +1135,7 @@ extension ScreenshotProposalStoreTests {
             mealEntries: ["", "Requester typed this", "", "", ""]
         )
         var manualEdits = ScreenshotFieldManualEditState()
-        manualEdits.manuallyEditedMealEntries = [1]
+        manualEdits.manuallyEditedMealItemNames = [1]
 
         let applied = store.apply(
             ScreenshotProposalOutcome(
@@ -1176,7 +1232,7 @@ extension ScreenshotProposalStoreTests {
             orderDetails: "AI filled order"
         )
         var manualEdits = ScreenshotFieldManualEditState()
-        manualEdits.manuallyEditedMealEntries = [1]
+        manualEdits.manuallyEditedMealItemNames = [1]
 
         _ = store.beginSelection(clearing: &draft, manualEdits: manualEdits)
 
@@ -1206,5 +1262,114 @@ extension ScreenshotProposalStoreTests {
         // Both sides enforce the same number independently; this pins them
         // together so one cannot drift without the other.
         XCTAssertEqual(ScreenshotProposalStore.maxScreenshotSelection, 5)
+    }
+
+    // MARK: - W4-R4 per-field structured-meal authority and provenance
+
+    func testManualMealNamePreservesOnlyNameWhileEmptyDetailsAcceptsProposal() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(mealEntries: [MealItem(name: "Requester wings"), MealItem(name: ""), MealItem(name: ""), MealItem(name: ""), MealItem(name: "")])
+        var manualEdits = ScreenshotFieldManualEditState()
+        manualEdits.manuallyEditedMealItemNames = [0]
+
+        let applied = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: [MealItem(name: "AI bowl", details: "Buffalo sauce")])
+            ),
+            manualEdits: manualEdits,
+            to: &draft
+        )
+
+        XCTAssertEqual(draft.mealEntries[0], MealItem(name: "Requester wings", details: "Buffalo sauce"))
+        XCTAssertFalse(applied.mealItemNames.contains(0))
+        XCTAssertTrue(applied.mealItemDetails.contains(0))
+        XCTAssertEqual(applied.preservedManualFieldCount, 1)
+    }
+
+    func testManualMealDetailsPreservesOnlyDetailsWhileEmptyNameAcceptsProposal() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(mealEntries: [MealItem(name: "", details: "No onions"), MealItem(name: ""), MealItem(name: ""), MealItem(name: ""), MealItem(name: "")])
+        var manualEdits = ScreenshotFieldManualEditState()
+        manualEdits.manuallyEditedMealItemDetails = [0]
+
+        let applied = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: [MealItem(name: "AI bowl", details: "AI sauce")])
+            ),
+            manualEdits: manualEdits,
+            to: &draft
+        )
+
+        XCTAssertEqual(draft.mealEntries[0], MealItem(name: "AI bowl", details: "No onions"))
+        XCTAssertTrue(applied.mealItemNames.contains(0))
+        XCTAssertFalse(applied.mealItemDetails.contains(0))
+        XCTAssertEqual(applied.preservedManualFieldCount, 1)
+    }
+
+    func testClearingEitherMealSubfieldReopensOnlyThatSubfieldForReproposal() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(mealEntries: [MealItem(name: "", details: "Manual details"), MealItem(name: ""), MealItem(name: ""), MealItem(name: ""), MealItem(name: "")])
+        var manualEdits = ScreenshotFieldManualEditState()
+        // Name was manually cleared, while Details remains requester-owned.
+        manualEdits.manuallyEditedMealItemDetails = [0]
+
+        let first = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: [MealItem(name: "Reproposed name", details: "AI details")])
+            ),
+            manualEdits: manualEdits,
+            to: &draft
+        )
+        XCTAssertEqual(draft.mealEntries[0], MealItem(name: "Reproposed name", details: "Manual details"))
+        XCTAssertTrue(first.mealItemNames.contains(0))
+        XCTAssertFalse(first.mealItemDetails.contains(0))
+
+        // Clearing Details removes only Details authority. The later proposal
+        // establishes fresh provenance for that newly filled current value.
+        draft.mealEntries[0].details = nil
+        manualEdits.manuallyEditedMealItemDetails.remove(0)
+        let second = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: [MealItem(name: "Updated name", details: "Reproposed details")])
+            ),
+            manualEdits: manualEdits,
+            to: &draft
+        )
+        XCTAssertEqual(draft.mealEntries[0], MealItem(name: "Updated name", details: "Reproposed details"))
+        XCTAssertTrue(second.mealItemNames.contains(0))
+        XCTAssertTrue(second.mealItemDetails.contains(0))
+    }
+
+    func testProposalApplicationReportsManualPreservationOnlyWhenWarranted() {
+        let store = makeMultiStore()
+        var draft = RequestFoodFormDraft(mealEntries: [MealItem(name: "Manual name", details: "Manual details"), MealItem(name: ""), MealItem(name: ""), MealItem(name: ""), MealItem(name: "")])
+        var manualEdits = ScreenshotFieldManualEditState()
+        manualEdits.manuallyEditedMealItemNames = [0]
+        manualEdits.manuallyEditedMealItemDetails = [0]
+
+        let preserved = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: [MealItem(name: "AI name", details: "AI details")])
+            ),
+            manualEdits: manualEdits,
+            to: &draft
+        )
+        XCTAssertEqual(preserved.preservedManualFieldCount, 2)
+
+        var emptyDraft = RequestFoodFormDraft()
+        let replaced = store.apply(
+            ScreenshotProposalOutcome(
+                eligible: true,
+                proposal: ScreenshotProposal(mealItems: [MealItem(name: "AI name", details: "AI details")])
+            ),
+            manualEdits: ScreenshotFieldManualEditState(),
+            to: &emptyDraft
+        )
+        XCTAssertEqual(replaced.preservedManualFieldCount, 0)
     }
 }

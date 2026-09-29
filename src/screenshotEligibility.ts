@@ -107,6 +107,53 @@ export function evaluateEligibility(evidenceText: string): EligibilityResult {
  */
 const MEAL_SWIPE_MARKER_PATTERN = /\b1\s?M\b/g;
 
+/**
+ * Explicit aggregate Grubhub resource notation. The leading guard prevents a
+ * suffix of a decimal (for example `3.0M`) or a longer word/number from being
+ * treated as a valid total. Uppercase `M` is intentional: this recognizes the
+ * literal provider notation already covered by the contract, not arbitrary
+ * prose containing the letter m.
+ */
+const EXPLICIT_MEAL_SWIPE_TOTAL_PATTERN = /(?<![\w.])(\d{1,2})\s?M\b/g;
+const MIN_MEAL_SWIPE_TOTAL = 1;
+const MAX_MEAL_SWIPE_TOTAL = 5;
+
 export function countMealSwipeMarkers(evidenceText: string): number {
   return (evidenceText.match(MEAL_SWIPE_MARKER_PATTERN) || []).length;
+}
+
+/**
+ * Resolves independent OCR evidence to one explicit meal-swipe count without
+ * manufacturing a proposal. Literal `1M` markers retain the accepted S1
+ * behavior: in the absence of an aggregate total, each marker represents one
+ * swipe and the markers are counted. Numeric values above one are explicit
+ * aggregate totals (`2M` ... `5M`): repeated observations of the same total
+ * are overlap, not addition.
+ *
+ * Conflicting aggregate totals, or any explicit numeric M observation outside
+ * the accepted 1...5 Meal Exchange bounds, fail closed. Per-item `1M` markers
+ * may coexist with an aggregate total; the explicit aggregate is authoritative
+ * evidence for the count rather than a value derived from those markers.
+ */
+export function corroboratedMealSwipeCount(evidenceText: string): number | null {
+  const observedValues = Array.from(
+    evidenceText.matchAll(EXPLICIT_MEAL_SWIPE_TOTAL_PATTERN),
+    (match) => Number(match[1])
+  );
+
+  if (observedValues.length === 0) return null;
+  if (
+    observedValues.some(
+      (value) => value < MIN_MEAL_SWIPE_TOTAL || value > MAX_MEAL_SWIPE_TOTAL
+    )
+  ) {
+    return null;
+  }
+
+  const aggregateTotals = new Set(observedValues.filter((value) => value > 1));
+  if (aggregateTotals.size > 1) return null;
+  if (aggregateTotals.size === 1) return aggregateTotals.values().next().value ?? null;
+
+  const markerCount = observedValues.length;
+  return markerCount <= MAX_MEAL_SWIPE_TOTAL ? markerCount : null;
 }

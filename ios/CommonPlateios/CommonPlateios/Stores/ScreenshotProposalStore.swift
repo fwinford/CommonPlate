@@ -74,29 +74,30 @@ enum ScreenshotProposalNotice: Equatable {
 /// bindings). A store-applied proposal write never sets it — that is what
 /// keeps a programmatic AI write from ever being mistaken for a manual edit.
 ///
-/// A flag set by a nonempty manual value remains set for this logical draft,
-/// including route recreation, until an authoritatively successful creation
-/// clears the completed draft. It is the one exception (W4-R2 2026-08-31
-/// sync, "manual clear"): manually clearing a field back to empty — typing
-/// text back to `""`, or picking `nil` ("Select a spot") for location —
-/// unlatches the flag. The empty field is not permanently requester-owned;
-/// it is eligible for a future screenshot suggestion again, exactly like a
-/// field that was never touched.
+/// A flag represents current, non-empty requester content — never edit
+/// history. Clearing a field removes only that field's protection. Structured
+/// meal names and details therefore use separate sets: an edit to one is
+/// never authority over the other.
 struct ScreenshotFieldManualEditState: Equatable {
     var hasManuallyEditedLocation = false
     var hasManuallyEditedMealSwipes = false
-    /// W4-R4: manual ownership is tracked per structured meal-detail entry
-    /// rather than for one combined food field, so editing the second meal
-    /// does not lock the first out of a future suggestion. Indices are draft
-    /// positions, so an entry hidden by a lowered swipe count keeps its
-    /// ownership if the requester raises the count again.
-    var manuallyEditedMealEntries: Set<Int> = []
+    /// Indices are fixed draft positions, so a temporarily hidden meal keeps
+    /// the authority belonging to each of its current subfields.
+    var manuallyEditedMealItemNames: Set<Int> = []
+    var manuallyEditedMealItemDetails: Set<Int> = []
     /// The Dining-Dollars-only order-details field, which the same
     /// manual-precedence rule covers.
     var hasManuallyEditedOrderDetails = false
+    /// A current-cart estimate is still only a proposal. Once the requester
+    /// edits it, later screenshot selections cannot overwrite that value.
+    var hasManuallyEditedDiningDollars = false
 
-    func hasManuallyEditedMealEntry(_ index: Int) -> Bool {
-        manuallyEditedMealEntries.contains(index)
+    func hasManuallyEditedMealItemName(_ index: Int) -> Bool {
+        manuallyEditedMealItemNames.contains(index)
+    }
+
+    func hasManuallyEditedMealItemDetails(_ index: Int) -> Bool {
+        manuallyEditedMealItemDetails.contains(index)
     }
 }
 
@@ -110,12 +111,30 @@ struct ScreenshotFieldManualEditState: Equatable {
 struct ScreenshotProposalAppliedFields: Equatable {
     var location = false
     var mealSwipes = false
-    /// Exactly the structured meal-detail entries this call wrote.
-    var mealEntries: Set<Int> = []
+    /// Exactly the structured meal subfields this call wrote. These are also
+    /// the independent presentation-provenance units.
+    var mealItemNames: Set<Int> = []
+    var mealItemDetails: Set<Int> = []
     var orderDetails = false
+    var diningDollars = false
+    /// A proposal contained at least one field that was kept because it
+    /// currently held requester-owned non-empty content. This is deliberately
+    /// aggregate: the UI displays one temporary message per rerun.
+    var preservedManualFieldCount = 0
+
+    var didPreserveManualContent: Bool {
+        preservedManualFieldCount > 0
+    }
+
+    /// Compatibility/readability helper for effects that operate on an entire
+    /// meal card, not authority or provenance. Never use this to decide
+    /// whether either subfield may be changed.
+    var mealEntries: Set<Int> {
+        mealItemNames.union(mealItemDetails)
+    }
 
     var isEmpty: Bool {
-        !location && !mealSwipes && mealEntries.isEmpty && !orderDetails
+        !location && !mealSwipes && mealItemNames.isEmpty && mealItemDetails.isEmpty && !orderDetails && !diningDollars
     }
 }
 
@@ -279,10 +298,9 @@ final class ScreenshotProposalStore: ObservableObject {
     /// gone by the time any of that could fail, not left in place until a
     /// later analysis call "wins."
     ///
-    /// A field the requester has manually edited (`manualEdits`) is never
-    /// cleared here, regardless of its current value — manual ownership is
-    /// permanent for this logical draft, never merely "until the value
-    /// happens to match an old AI value again."
+    /// A field with current requester-owned non-empty content is never cleared
+    /// here. Screenshot-derived values remain eligible to be replaced by a
+    /// newer proposal, while each structured meal subfield is handled alone.
     func beginSelection(
         clearing draft: inout RequestFoodFormDraft,
         manualEdits: ScreenshotFieldManualEditState
@@ -295,9 +313,13 @@ final class ScreenshotProposalStore: ObservableObject {
         if !manualEdits.hasManuallyEditedLocation {
             draft.selectedDiningSpot = nil
         }
-        for index in 0..<RequestFoodFormDraft.maxMealSwipes
-        where !manualEdits.hasManuallyEditedMealEntry(index) {
-            draft.mealEntries[index] = ""
+        for index in 0..<RequestFoodFormDraft.maxMealSwipes {
+            if !manualEdits.hasManuallyEditedMealItemName(index) {
+                draft.mealEntries[index].name = ""
+            }
+            if !manualEdits.hasManuallyEditedMealItemDetails(index) {
+                draft.mealEntries[index].details = nil
+            }
         }
         if !manualEdits.hasManuallyEditedOrderDetails {
             draft.orderDetails = ""
@@ -417,8 +439,10 @@ final class ScreenshotProposalStore: ObservableObject {
     /// may have gone stale during the gap between `analyzeScreenshot`
     /// returning and this being called back on the main actor).
     ///
-    /// A field the requester has manually edited never receives a proposed
-    /// value here, regardless of its current value.
+    /// A field with current requester-owned non-empty content never receives a
+    /// proposed value here. `preservedManualFieldCount` records only values a
+    /// proposal actually tried to replace, so it can drive the bounded rerun
+    /// feedback without treating every successful run as preservation.
     @discardableResult
     func apply(
         _ outcome: ScreenshotProposalOutcome,
@@ -426,41 +450,85 @@ final class ScreenshotProposalStore: ObservableObject {
         to draft: inout RequestFoodFormDraft
     ) -> ScreenshotProposalAppliedFields {
         var applied = ScreenshotProposalAppliedFields()
-        if let spot = outcome.proposal.selectedDiningSpot, !manualEdits.hasManuallyEditedLocation {
-            draft.selectedDiningSpot = spot
-            applied.location = true
+        if let spot = outcome.proposal.selectedDiningSpot {
+            if manualEdits.hasManuallyEditedLocation {
+                applied.preservedManualFieldCount += 1
+            } else {
+                draft.selectedDiningSpot = spot
+                applied.location = true
+            }
         }
         // Meal swipes first, so the entry fill below writes into the count
         // this same proposal just established rather than the previous one.
-        if let mealSwipes = outcome.proposal.mealSwipes, !manualEdits.hasManuallyEditedMealSwipes {
-            draft.mealSwipes = mealSwipes
-            applied.mealSwipes = true
+        if let mealSwipes = outcome.proposal.mealSwipes {
+            if manualEdits.hasManuallyEditedMealSwipes {
+                applied.preservedManualFieldCount += 1
+            } else {
+                draft.mealSwipes = mealSwipes
+                applied.mealSwipes = true
+            }
         }
 
         if let mealItems = outcome.proposal.mealItems, !mealItems.isEmpty {
             switch draft.menuPath {
             case .mealExchange:
-                // One proposed item per active meal field, in order. Only
-                // currently active fields are filled: writing into a field
-                // the requester has hidden would put AI content somewhere
-                // they cannot see it, and only fields they have not edited
-                // are touched, so manual precedence holds per entry.
+                // One proposed item per active meal field, in order. A name
+                // and its optional details are independent manual-authority
+                // and provenance units; writing one never authorizes writing
+                // the other.
                 for index in draft.activeMealEntryIndices
-                where index < mealItems.count
-                    && !manualEdits.hasManuallyEditedMealEntry(index) {
-                    draft.mealEntries[index] = mealItems[index]
-                    applied.mealEntries.insert(index)
+                where index < mealItems.count {
+                    let proposal = mealItems[index]
+                    if manualEdits.hasManuallyEditedMealItemName(index) {
+                        applied.preservedManualFieldCount += 1
+                    } else {
+                        draft.mealEntries[index].name = proposal.name
+                        applied.mealItemNames.insert(index)
+                    }
+                    // `nil` means this partial proposal did not offer a
+                    // Details value. It must not manufacture an update by
+                    // clearing a sibling field; the next selection's normal
+                    // AI-owned clearing remains the generation boundary.
+                    if let details = proposal.details {
+                        if manualEdits.hasManuallyEditedMealItemDetails(index) {
+                            applied.preservedManualFieldCount += 1
+                        } else {
+                            draft.mealEntries[index].details = details
+                            applied.mealItemDetails.insert(index)
+                        }
+                    }
                 }
             case .diningDollars:
                 // The Dining-Dollars-only path has one order-details field
                 // rather than per-swipe entries, so the observed items are
                 // joined into it — the same values, in the same order, in the
-                // one field this path actually has.
+                // one field this path actually has. Matches the backend's
+                // `deriveFoodSummary` item-to-text convention
+                // (`src/structuredRequest.ts`): "name (details)" when details
+                // are present, else just "name".
                 if !manualEdits.hasManuallyEditedOrderDetails {
-                    draft.orderDetails = mealItems.joined(separator: "; ")
+                    draft.orderDetails = mealItems
+                        .map { item in item.details.map { "\(item.name) (\($0))" } ?? item.name }
+                        .joined(separator: "; ")
                     applied.orderDetails = true
+                } else {
+                    applied.preservedManualFieldCount += 1
                 }
             }
+        }
+
+        // This narrow R4 authority is populated only by the backend's
+        // independent current-cart/order-level OCR rule. It remains a draft
+        // value the requester can edit; it never selects a menu path or
+        // submits a request.
+        if let cents = outcome.proposal.estimatedDiningDollarsCents,
+           draft.menuPath == .mealExchange,
+           !manualEdits.hasManuallyEditedDiningDollars {
+            draft.diningDollarsText = DiningDollarsEntry.formatted(cents: cents)
+            applied.diningDollars = true
+        } else if outcome.proposal.estimatedDiningDollarsCents != nil,
+                  draft.menuPath == .mealExchange {
+            applied.preservedManualFieldCount += 1
         }
 
         if !outcome.eligible {

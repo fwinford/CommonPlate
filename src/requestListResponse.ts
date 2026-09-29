@@ -29,7 +29,9 @@ export interface PublicRequestDocument {
    * present the structure directly instead of parsing the summary string.
    */
   menuPath: string;
-  mealItems?: string[] | null;
+  /** Legacy strings may be read from disposable pre-final-R4 rows, but are
+   * normalized to objects before any projection leaves this module. */
+  mealItems?: Array<{ name: string; details?: string }> | string[] | null;
   orderDetails?: string | null;
   estimatedDiningDollarsCents?: number | null;
   windowStart?: RequestResponseDate | null;
@@ -70,7 +72,7 @@ export interface PublicRequestResponse<Status extends string = string> {
   mealSwipes: number;
   /** W4-R4 structured representation; see `PublicRequestDocument`. */
   menuPath: string;
-  mealItems: string[];
+  mealItems: Array<{ name: string; details?: string }> | string[];
   orderDetails: string | null;
   estimatedDiningDollarsCents: number | null;
   windowStart: RequestResponseDate | null;
@@ -151,6 +153,27 @@ function dateValue(value: RequestResponseDate | null | undefined): number {
   return value == null ? Number.NaN : new Date(value).getTime();
 }
 
+/**
+ * A legacy bare-string array (disposable pre-final-R4 rows) passes through
+ * exactly as read — unchanged, existing read behavior this projection does
+ * not alter. A structured array is rebuilt as plain `{ name, details? }`
+ * objects rather than spread through as-is, which is what actually
+ * guarantees no internal field (an embedded subdocument's own `_id`, or any
+ * other Mongoose bookkeeping a live, non-`.lean()` document may carry)
+ * reaches the wire.
+ */
+function normalizeMealItems(
+  mealItems: Array<{ name: string; details?: string }> | string[] | null | undefined
+): Array<{ name: string; details?: string }> | string[] {
+  if (!mealItems) return [];
+  if (mealItems.every((item): item is string => typeof item === "string")) {
+    return mealItems;
+  }
+  return (mealItems as Array<{ name: string; details?: string }>).map((item) =>
+    item.details !== undefined ? { name: item.name, details: item.details } : { name: item.name }
+  );
+}
+
 function isAvailable(
   document: RequestListDocument,
   serverNow: Date
@@ -175,7 +198,10 @@ export function mapPublicRequestFields<Status extends string>(
     // nulls — so no client has to distinguish "absent" from "none". The
     // allowlist itself is unchanged in kind: every value here is
     // requester-entered request content, and no private field is added.
-    mealItems: document.mealItems ?? [],
+    // New writes are structured objects. This preserves only read behavior
+    // for disposable legacy documents that remain in broad route fixtures;
+    // no create schema accepts the flat form.
+    mealItems: normalizeMealItems(document.mealItems),
     orderDetails: document.orderDetails ?? null,
     estimatedDiningDollarsCents: document.estimatedDiningDollarsCents ?? null,
     windowStart: document.windowStart ?? null,

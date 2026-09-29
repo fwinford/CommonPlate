@@ -45,6 +45,18 @@ export const MAX_DINING_DOLLARS_ONLY_CENTS = 5_000;
  * the shared 100 KB JSON body limit (`app.ts`) still bounds the payload. */
 const structuredText = z.string().trim().min(1);
 
+/** One requester-authored Meal Exchange line.  The two fields deliberately
+ * remain separate all the way to persistence: `details` is not markup or a
+ * suffix hidden inside `name`, and its absence is meaningful. */
+export const structuredMealItem = z
+  .object({
+    name: structuredText,
+    details: structuredText.optional(),
+  })
+  .strict();
+
+export type StructuredMealItem = z.infer<typeof structuredMealItem>;
+
 /**
  * An exact positive integer count of cents. `.int()` refuses a fractional
  * value outright rather than rounding it, so a client cannot submit
@@ -65,7 +77,7 @@ const diningDollarsCents = z.number().int().positive();
 export const structuredRequestFields = {
   menuPath: z.enum([MEAL_EXCHANGE_PATH, DINING_DOLLARS_PATH]),
   mealSwipes: z.number().int().min(0).max(MAX_MEAL_SWIPES),
-  mealItems: z.array(structuredText).max(MAX_MEAL_SWIPES).optional(),
+  mealItems: z.array(structuredMealItem).max(MAX_MEAL_SWIPES).optional(),
   orderDetails: structuredText.optional(),
   estimatedDiningDollarsCents: diningDollarsCents.optional(),
 };
@@ -74,7 +86,7 @@ export const structuredRequestFields = {
 export interface StructuredRequestInput {
   menuPath: MenuPath;
   mealSwipes: number;
-  mealItems?: string[];
+  mealItems?: StructuredMealItem[];
   orderDetails?: string;
   estimatedDiningDollarsCents?: number;
 }
@@ -217,6 +229,8 @@ export function deriveFoodSummary(structured: StructuredRequestInput): string {
     return `${structured.orderDetails} (${estimate} Dining Dollars)`;
   }
 
-  const items = (structured.mealItems ?? []).join("; ");
+  const items = (structured.mealItems ?? [])
+    .map((item) => (item.details ? `${item.name} (${item.details})` : item.name))
+    .join("; ");
   return estimate ? `${items} + ${estimate} Dining Dollars` : items;
 }

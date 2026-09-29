@@ -56,6 +56,35 @@ enum RequestMenuPath: Hashable {
     case diningDollars
 }
 
+/// The one canonical meal representation used by manual entry, Screenshot
+/// Assistance, request payloads, and responses.  Details are intentionally a
+/// separate optional field — never text formatting embedded in the name.
+struct MealItem: Hashable, Codable, ExpressibleByStringLiteral {
+    var name: String
+    var details: String?
+
+    init(name: String, details: String? = nil) {
+        self.name = name
+        self.details = details
+    }
+
+    init(stringLiteral value: String) {
+        self.init(name: value)
+    }
+
+    init(from decoder: Decoder) throws {
+        if let container = try? decoder.container(keyedBy: CodingKeys.self) {
+            name = try container.decode(String.self, forKey: .name)
+            details = try container.decodeIfPresent(String.self, forKey: .details)
+        } else {
+            // Read compatibility for disposable pre-final-R4 response rows;
+            // all new payloads encode the structured object below.
+            name = try decoder.singleValueContainer().decode(String.self)
+            details = nil
+        }
+    }
+}
+
 /// The W4-R4 structured representation of what a request actually needs,
 /// carried alongside `FoodRequest.foodDescription` — which remains the
 /// backend-derived single-line summary every currently accepted helper
@@ -69,7 +98,7 @@ struct RequestResource: Hashable {
     let menuPath: RequestMenuPath
     /// One entry per selected swipe on the Meal Exchange path; empty on a
     /// Dining-Dollars-only request.
-    let mealItems: [String]
+    let mealItems: [MealItem]
     /// The single structured order-details value on a Dining-Dollars-only
     /// request; `nil` on a Meal Exchange one.
     let orderDetails: String?

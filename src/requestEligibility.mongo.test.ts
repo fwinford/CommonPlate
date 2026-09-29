@@ -67,7 +67,7 @@ function makeRequest(overrides: Record<string, unknown> = {}) {
     email: "eligibility-mongo@nyu.edu",
     menuPath: "meal-exchange",
     mealSwipes: 1,
-    mealItems: ["Test food"],
+    mealItems: [{ name: "Test food" }],
     pickupWindowText: "ASAP",
     status: "open",
     visibleFrom: new Date(),
@@ -98,7 +98,7 @@ function canonicalAsapPayload() {
     timing: "asap",
     menuPath: "meal-exchange",
     mealSwipes: 2,
-    mealItems: ["Vegetable rice bowl", "Side salad"],
+    mealItems: [{ name: "Vegetable rice bowl" }, { name: "Side salad" }],
   };
 }
 

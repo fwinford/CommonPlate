@@ -24,7 +24,7 @@ function mealExchange(overrides: Record<string, unknown> = {}) {
   return {
     menuPath: "meal-exchange",
     mealSwipes: 2,
-    mealItems: ["Rice bowl", "Side salad"],
+    mealItems: [{ name: "Rice bowl" }, { name: "Side salad" }],
     ...overrides,
   };
 }
@@ -48,7 +48,7 @@ describe("W4-R4 structured text length", () => {
       const text = "x".repeat(length);
 
       expect(
-        structuredSchema.safeParse(mealExchange({ mealSwipes: 1, mealItems: [text] }))
+        structuredSchema.safeParse(mealExchange({ mealSwipes: 1, mealItems: [{ name: text }] }))
           .success
       ).toBe(true);
       expect(
@@ -65,7 +65,7 @@ describe("W4-R4 Meal Exchange validation", () => {
       const result = structuredSchema.safeParse(
         mealExchange({
           mealSwipes,
-          mealItems: Array.from({ length: mealSwipes }, (_, i) => `Item ${i + 1}`),
+          mealItems: Array.from({ length: mealSwipes }, (_, i) => ({ name: `Item ${i + 1}` })),
         })
       );
 
@@ -75,7 +75,7 @@ describe("W4-R4 Meal Exchange validation", () => {
 
   it.each([0, -1, 6, 1.5])("refuses the swipe count %j", (mealSwipes) => {
     const result = structuredSchema.safeParse(
-      mealExchange({ mealSwipes, mealItems: ["Rice bowl"] })
+      mealExchange({ mealSwipes, mealItems: [{ name: "Rice bowl" }] })
     );
 
     expect(result.success).toBe(false);
@@ -83,7 +83,7 @@ describe("W4-R4 Meal Exchange validation", () => {
 
   it("refuses a request with fewer meal details than selected swipes", () => {
     const result = structuredSchema.safeParse(
-      mealExchange({ mealSwipes: 3, mealItems: ["Rice bowl", "Side salad"] })
+      mealExchange({ mealSwipes: 3, mealItems: [{ name: "Rice bowl" }, { name: "Side salad" }] })
     );
 
     expect(result.success).toBe(false);
@@ -96,7 +96,7 @@ describe("W4-R4 Meal Exchange validation", () => {
     const result = structuredSchema.safeParse(
       mealExchange({
         mealSwipes: 1,
-        mealItems: ["Rice bowl", "Hidden fourth-swipe content"],
+        mealItems: [{ name: "Rice bowl" }, { name: "Hidden fourth-swipe content" }],
       })
     );
 
@@ -107,7 +107,7 @@ describe("W4-R4 Meal Exchange validation", () => {
     "refuses a blank meal detail (%j) rather than accepting an empty swipe",
     (blank) => {
       const result = structuredSchema.safeParse(
-        mealExchange({ mealSwipes: 2, mealItems: ["Rice bowl", blank] })
+        mealExchange({ mealSwipes: 2, mealItems: [{ name: "Rice bowl" }, { name: blank }]} )
       );
 
       expect(result.success).toBe(false);
@@ -230,7 +230,7 @@ describe("W4-R4 Dining-Dollars-only validation", () => {
 
   it("refuses meal details on the Dining-Dollars-only path", () => {
     const result = structuredSchema.safeParse(
-      diningDollars({ mealItems: ["Rice bowl"] })
+      diningDollars({ mealItems: [{ name: "Rice bowl" }] })
     );
 
     expect(result.success).toBe(false);
@@ -313,11 +313,11 @@ describe("derived food summary", () => {
     const structured: StructuredRequestInput = {
       menuPath: "meal-exchange",
       mealSwipes: 3,
-      mealItems: ["Rice bowl", "Side salad", "Iced tea"],
+      mealItems: [{ name: "Rice bowl" }, { name: "Side salad", details: "No onions" }, { name: "Iced tea" }],
     };
 
     expect(deriveFoodSummary(structured)).toBe(
-      "Rice bowl; Side salad; Iced tea"
+      "Rice bowl; Side salad (No onions); Iced tea"
     );
   });
 
@@ -326,7 +326,7 @@ describe("derived food summary", () => {
       deriveFoodSummary({
         menuPath: "meal-exchange",
         mealSwipes: 1,
-        mealItems: ["Rice bowl"],
+        mealItems: [{ name: "Rice bowl" }],
         estimatedDiningDollarsCents: 1_250,
       })
     ).toBe("Rice bowl + $12.50 Dining Dollars");
@@ -336,7 +336,7 @@ describe("derived food summary", () => {
     const summary = deriveFoodSummary({
       menuPath: "meal-exchange",
       mealSwipes: 1,
-      mealItems: ["Rice bowl"],
+      mealItems: [{ name: "Rice bowl" }],
     });
 
     expect(summary).toBe("Rice bowl");
@@ -363,7 +363,7 @@ describe("derived food summary", () => {
     const summary = deriveFoodSummary({
       menuPath: "meal-exchange",
       mealSwipes: 2,
-      mealItems: ["Rice bowl", "Side salad"],
+      mealItems: [{ name: "Rice bowl" }, { name: "Side salad" }],
     });
 
     expect(summary.replace(/[;\s]/g, "")).toBe("RicebowlSidesalad");

@@ -132,7 +132,7 @@ struct RequestFoodFormDraft: Equatable {
     ///
     /// Entries above the active count are excluded from the submitted request
     /// by `activeMealEntries` regardless of what they contain.
-    var mealEntries: [String]
+    var mealEntries: [MealItem]
 
     /// The single structured order-details value a Dining-Dollars-only
     /// request requires. Preserved across a path switch for the same reason
@@ -151,7 +151,7 @@ struct RequestFoodFormDraft: Equatable {
         timing: RequestTiming = .asap,
         preferredPickupTime: Date = Date(),
         mealSwipes: Int = RequestFoodFormDraft.mealSwipeOptions.first!,
-        mealEntries: [String] = RequestFoodFormDraft.emptyMealEntries,
+        mealEntries: [MealItem] = RequestFoodFormDraft.emptyMealEntries,
         orderDetails: String = "",
         diningDollarsText: String = ""
     ) {
@@ -168,18 +168,43 @@ struct RequestFoodFormDraft: Equatable {
         self.diningDollarsText = diningDollarsText
     }
 
+    /// Test/support convenience for the former flat draft callers. It
+    /// normalizes immediately into the canonical `MealItem` storage; no
+    /// second draft representation is retained or sent on the wire.
+    init(
+        selectedDiningSpot: DiningSpot? = nil,
+        menuPath: RequestMenuPath = .mealExchange,
+        timing: RequestTiming = .asap,
+        preferredPickupTime: Date = Date(),
+        mealSwipes: Int = RequestFoodFormDraft.mealSwipeOptions.first!,
+        mealEntries: [String],
+        orderDetails: String = "",
+        diningDollarsText: String = ""
+    ) {
+        self.init(
+            selectedDiningSpot: selectedDiningSpot,
+            menuPath: menuPath,
+            timing: timing,
+            preferredPickupTime: preferredPickupTime,
+            mealSwipes: mealSwipes,
+            mealEntries: mealEntries.map { MealItem(name: $0) },
+            orderDetails: orderDetails,
+            diningDollarsText: diningDollarsText
+        )
+    }
+
     /// The exact bounded set the picker may offer and the backend accepts on
     /// the Meal Exchange path.
     static let mealSwipeOptions = Array(1...5)
 
     static let maxMealSwipes = 5
 
-    static let emptyMealEntries = Array(repeating: "", count: maxMealSwipes)
+    static let emptyMealEntries = Array(repeating: MealItem(name: ""), count: maxMealSwipes)
 
-    static func normalized(_ entries: [String]) -> [String] {
+    static func normalized(_ entries: [MealItem]) -> [MealItem] {
         if entries.count == maxMealSwipes { return entries }
         if entries.count > maxMealSwipes { return Array(entries.prefix(maxMealSwipes)) }
-        return entries + Array(repeating: "", count: maxMealSwipes - entries.count)
+        return entries + Array(repeating: MealItem(name: ""), count: maxMealSwipes - entries.count)
     }
 
     /// The swipe count this draft actually submits: the requester's choice on
@@ -196,9 +221,13 @@ struct RequestFoodFormDraft: Equatable {
     /// Exactly the entries this draft submits, trimmed. Entries above the
     /// active count — the ones a lowered swipe count hid — are excluded here,
     /// which is the single place that exclusion happens.
-    var activeMealEntries: [String] {
+    var activeMealEntries: [MealItem] {
         activeMealEntryIndices.map {
-            mealEntries[$0].trimmingCharacters(in: .whitespacesAndNewlines)
+            MealItem(
+                name: mealEntries[$0].name.trimmingCharacters(in: .whitespacesAndNewlines),
+                details: mealEntries[$0].details?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            )
         }
     }
 
@@ -265,6 +294,20 @@ enum RequestFoodFormError: Error, Equatable {
     /// pickup time left to choose today, only ASAP.
     case scheduledTimingUnavailable
 
+    /// A required entry value that has simply not been entered yet. It blocks
+    /// posting (`validate` still reports it and `hasRequiredInput` still fails)
+    /// but is never *presented* as an error: emptiness is incomplete, not
+    /// invalid. Only an entered-but-wrong value earns visible feedback.
+    var isIncompleteEntry: Bool {
+        switch self {
+        case .missingMealDetail, .missingOrderDetails, .missingDiningDollars:
+            return true
+        case .missingDiningSpot, .invalidDiningDollars, .invalidScheduledTime,
+             .scheduledTimingUnavailable:
+            return false
+        }
+    }
+
     var message: String {
         switch self {
         case .missingDiningSpot:
@@ -318,6 +361,18 @@ enum RequestFoodFormField: Hashable, CaseIterable {
             return false
         }
     }
+
+    /// Fields whose rules and presentation belong to the selected menu path
+    /// (Meal Exchange or Dining Dollars). Dining location and scheduling are
+    /// the same on both, so a path switch never touches them.
+    var isMenuPathSpecific: Bool {
+        switch self {
+        case .mealDetail, .orderDetails, .diningDollars:
+            return true
+        case .diningSpot, .pickupSchedule:
+            return false
+        }
+    }
 }
 
 struct RequestFoodFieldError: Equatable, Identifiable {
@@ -346,7 +401,7 @@ enum RequestFoodFormValidator {
         case .mealExchange:
             // Every currently active meal-detail entry is required. A hidden
             // entry's content is irrelevant either way.
-            guard draft.activeMealEntries.allSatisfy({ !$0.isEmpty }) else {
+            guard draft.activeMealEntries.allSatisfy({ !$0.name.isEmpty }) else {
                 return false
             }
             // Optional here: empty is complete, and means none are needed.
@@ -398,7 +453,7 @@ enum RequestFoodFormValidator {
             // failure no matter what it holds, because it is not part of this
             // request — which is the same reason it is not submitted.
             for index in draft.activeMealEntryIndices
-            where draft.mealEntries[index]
+            where draft.mealEntries[index].name
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 errors.append(RequestFoodFieldError(
                     field: .mealDetail(index: index),
@@ -474,6 +529,10 @@ enum RequestFoodFormValidator {
 /// View-local presentation history. A field joins this set only after its own
 /// error has actually been shown, so another field's failure cannot make an
 /// untouched field validate during its first keystrokes.
+///
+/// Incomplete entries (`RequestFoodFormError.isIncompleteEntry`) never join it
+/// and are never visible, even for a field that earlier presented a real
+/// invalid value: clearing a field back to empty returns it to neutral.
 struct RequestFoodValidationPresentation: Equatable {
     private(set) var presentedFields: Set<RequestFoodFormField> = []
 
@@ -481,12 +540,16 @@ struct RequestFoodValidationPresentation: Equatable {
         _ field: RequestFoodFormField,
         from errors: [RequestFoodFieldError]
     ) {
-        guard errors.contains(where: { $0.field == field }) else { return }
+        guard errors.contains(where: { $0.field == field && !$0.error.isIncompleteEntry }) else {
+            return
+        }
         presentedFields.insert(field)
     }
 
     mutating func presentAll(_ errors: [RequestFoodFieldError]) {
-        presentedFields.formUnion(errors.map(\.field))
+        presentedFields.formUnion(
+            errors.filter { !$0.error.isIncompleteEntry }.map(\.field)
+        )
     }
 
     /// The exact focus transition used by `RequestFoodView`. Only the invalid
@@ -505,8 +568,32 @@ struct RequestFoodValidationPresentation: Equatable {
         presentInvalidField(previousField, from: errors)
     }
 
+    /// Switching menu path starts the newly selected branch visually clean:
+    /// only the branch-specific fields' presentation history is forgotten.
+    /// Values are untouched, and the branch presents errors again through its
+    /// ordinary blur/submit rules.
+    mutating func resetMenuPathSpecificPresentation() {
+        presentedFields = presentedFields.filter { !$0.isMenuPathSpecific }
+    }
+
+    /// A blur caused by the path switch itself (the focused field belonged to
+    /// the branch just left) must not validate against the newly selected
+    /// branch. `nil` means no focus-time path was recorded, which is an
+    /// ordinary blur.
+    static func blurBelongsToCurrentMenuPath(
+        previousField: RequestFoodFormField?,
+        menuPathAtFocus: RequestMenuPath?,
+        currentMenuPath: RequestMenuPath
+    ) -> Bool {
+        guard let previousField, previousField.isMenuPathSpecific,
+              let menuPathAtFocus else {
+            return true
+        }
+        return menuPathAtFocus == currentMenuPath
+    }
+
     func visibleErrors(from errors: [RequestFoodFieldError]) -> [RequestFoodFieldError] {
-        errors.filter { presentedFields.contains($0.field) }
+        errors.filter { presentedFields.contains($0.field) && !$0.error.isIncompleteEntry }
     }
 
     func visibleError(

@@ -1,5 +1,5 @@
 import { SUPPORTED_VENDORS, type SupportedVendor } from "./supportedVendors.js";
-import { countMealSwipeMarkers } from "./screenshotEligibility.js";
+import { corroboratedMealSwipeCount } from "./screenshotEligibility.js";
 import {
   FORBIDDEN_PROVIDER_FIELDS,
   ScreenshotProviderOutputSchema,
@@ -38,15 +38,13 @@ function sanitizeModifiers(
   }));
 }
 
-function formatFoodItem(item: ScreenshotFoodItem): string | null {
+function structuredFoodItem(item: ScreenshotFoodItem): { name: string; details?: string } | null {
   const name = item.name.trim();
   if (!name) return null;
   const quantityPrefix =
     item.quantity !== null && item.quantity > 0 ? `${item.quantity} ` : "";
-  const modifierSuffix = item.modifiers.length
-    ? ` (${item.modifiers.join(", ")})`
-    : "";
-  return `${quantityPrefix}${name}${modifierSuffix}`;
+  const details = item.modifiers.length ? item.modifiers.join(", ") : undefined;
+  return { name: `${quantityPrefix}${name}`, ...(details ? { details } : {}) };
 }
 
 function itemIdentity(item: ScreenshotFoodItem): string {
@@ -83,12 +81,12 @@ function itemIdentity(item: ScreenshotFoodItem): string {
 function proposedMealItems(
   foodItems: ScreenshotFoodItem[],
   evidenceImageCount: number
-): string[] | null {
+): Array<{ name: string; details?: string }> | null {
   const seen = new Set<string>();
-  const lines: string[] = [];
+  const lines: Array<{ name: string; details?: string }> = [];
 
   for (const item of foodItems) {
-    const line = formatFoodItem(item);
+    const line = structuredFoodItem(item);
     if (line === null) continue;
     const identity = itemIdentity(item);
     if (seen.has(identity) && evidenceImageCount > 1) return null;
@@ -97,6 +95,34 @@ function proposedMealItems(
   }
 
   return lines;
+}
+
+/**
+ * A deliberately narrow current-cart/order-level amount recognizer.  It
+ * requires cart chrome and a literal aggregate resource expression on the
+ * same evidence line: `3M + $2.00`.  Item-level price labels cannot satisfy
+ * the order-level guard, and past-order language fails closed.
+ */
+const CURRENT_CART_MARKERS = /\b(?:your\s+(?:pickup\s+)?order|cart|checkout|continue\s+to\s+checkout)\b/i;
+const PAST_ORDER_MARKERS = /\b(?:past\s+order|order\s+history|receipt|delivered|completed)\b/i;
+const CART_DOLLAR_PATTERN = /(?<![\w.])(\d{1,2})\s?M\s*\+\s*\$(\d{1,2})(?:\.(\d{2}))?(?!\d)/g;
+
+function currentCartDiningDollarsCents(evidenceText: string): number | null {
+  if (!CURRENT_CART_MARKERS.test(evidenceText) || PAST_ORDER_MARKERS.test(evidenceText)) {
+    return null;
+  }
+  const candidates = Array.from(evidenceText.matchAll(CART_DOLLAR_PATTERN), (match) => ({
+    swipes: Number(match[1]),
+    cents: Number(match[2]) * 100 + Number(match[3] ?? "0"),
+  }));
+  if (candidates.length === 0) return null;
+  const distinct = new Set(candidates.map(({ swipes, cents }) => `${swipes}:${cents}`));
+  if (distinct.size !== 1) return null;
+  const candidate = candidates[0]!;
+  if (candidate.swipes < 1 || candidate.swipes > 5 || candidate.cents <= 0 || candidate.cents > 2_500) {
+    return null;
+  }
+  return candidate.cents;
 }
 
 function normalizeVenueText(text: string): string {
@@ -196,22 +222,24 @@ function buildProposal(
   }
 
   if (mealItems !== null && mealSwipes !== null && mealSwipes >= 1 && mealSwipes <= 5) {
-    // Independent corroboration (accepted "1M" signal): the candidate
-    // survives only when the literal marker count in `evidenceText` — the
-    // on-device Apple Vision OCR text this provider never saw or produced —
-    // matches it exactly. A mismatch drops the value rather than coercing
+    // Independent corroboration (accepted numeric M-style signal): the
+    // candidate survives only when the explicit count in `evidenceText` —
+    // the on-device Apple Vision OCR text this provider never saw or produced
+    // — matches it exactly. A mismatch drops the value rather than coercing
     // it. This is never evaluated against anything the provider returned.
     //
     // W4-R4 multi-image consequence, and an intended one: `evidenceText` is
     // the combined evidence of every eligible screenshot, so an item visible
-    // in two overlapping screenshots contributes its `1M` marker twice and
-    // the count no longer matches. The candidate is dropped and the
-    // requester chooses the quantity themselves. Ambiguous cross-screenshot
-    // evidence stays ambiguous: deduplicating markers here would be a guess
-    // about which markers describe the same swipe, and a wrong guess sets a
-    // quantity the requester never chose.
-    if (countMealSwipeMarkers(evidenceText) === mealSwipes) {
+    // in two overlapping screenshots still makes repeated per-item `1M`
+    // evidence ambiguous. Explicit aggregate totals such as `3M`, however,
+    // are values rather than additive markers: repeated identical totals are
+    // overlap, while conflicting totals fail closed.
+    if (corroboratedMealSwipeCount(evidenceText) === mealSwipes) {
       proposal.mealSwipes = mealSwipes;
+      const estimatedDiningDollarsCents = currentCartDiningDollarsCents(evidenceText);
+      if (estimatedDiningDollarsCents !== null) {
+        proposal.estimatedDiningDollarsCents = estimatedDiningDollarsCents;
+      }
     }
   }
 
