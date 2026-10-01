@@ -471,23 +471,29 @@ struct SettingsView: View {
     /// W4-S1: a single app-level kill switch, independent of Request Alerts'
     /// Email/Push toggles above — it shares no state with them. Off disables
     /// `RequestFoodView`'s picker, retires the current screenshot selection
-    /// in `ScreenshotProposalStore`, and cancels whatever transfer task that
-    /// selection had (`ScreenshotProposalStore.setAIAssistanceEnabled`): work
-    /// that has not yet started transfer is prevented from ever starting it.
-    /// A transfer that had already genuinely begun before Off cannot be
+    /// in `ScreenshotProposalStore` (including any pending external-AI popup
+    /// and its held screenshots), and cancels whatever task that selection
+    /// had (`ScreenshotProposalStore.setAIAssistanceEnabled`): work that has
+    /// not yet started an external transfer is prevented from ever starting
+    /// one. A transfer that had already genuinely begun before Off cannot be
     /// recalled — bytes already sent stay sent — but generation/cancellation
     /// fencing guarantees its response, whenever it arrives, can never be
-    /// applied to the draft. It does not by itself grant or revoke the
-    /// separate first-use third-party disclosure recorded the first time a
-    /// screenshot is actually sent.
+    /// applied to the draft.
+    ///
+    /// W4-S3: On enables Screenshot Assistance and may allow the external-AI
+    /// popup to be offered when its conditions occur, but it never itself
+    /// authorizes sending screenshots externally — only the requester's
+    /// per-attempt `Use external AI` action does. There is no separate
+    /// remote-AI setting.
     private var aiAssistanceSection: some View {
         VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
             sectionHeading("AI FEATURES")
 
             // W4-R2: one named toggle, no permanent explanatory paragraph
-            // (superseded `aiAssistanceExplanation`). The required first-use
-            // third-party disclosure (`ScreenshotProposalDisclosureView`) is
-            // unchanged and still shown at the actual invocation flow.
+            // (superseded `aiAssistanceExplanation`). W4-S3: the only
+            // off-device offer is the external-AI popup
+            // (`ScreenshotExternalAIFallbackView`), shown at the moment it
+            // applies.
             requestAlertsToggleRow(
                 title: "Screenshot Assistance",
                 isOn: aiAssistanceToggleBinding,

@@ -1446,206 +1446,113 @@ final class RequestCreationViewTests: XCTestCase {
         return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 
-    /// Extracts `cancelScreenshotDisclosure()`'s own source text, matching
+    /// Extracts one `RequestFoodView` function's own source text, bounded by
+    /// `startMarker` and the next `endMarker`, matching
     /// `successViewDeclarationSource()`'s bounded-extraction pattern.
-    private func cancelScreenshotDisclosureSource() throws -> String {
+    private func requestFoodViewSource(from startMarker: String, to endMarker: String) throws -> String {
         let source = try String(
             contentsOf: repositoryFile(
                 "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
             ),
             encoding: .utf8
         )
-
-        let startMarker = "private func cancelScreenshotDisclosure() {"
-        let endMarker = "@MainActor\n    private func beginScreenshotAnalysis("
-
         guard let startRange = source.range(of: startMarker) else {
             XCTFail("expected to find \(startMarker)")
             return ""
         }
         guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
-            XCTFail("expected to find \(endMarker) after cancelScreenshotDisclosure")
+            XCTFail("expected to find \(endMarker) after \(startMarker)")
             return ""
         }
-
         return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 
-    /// W4-R2 item 19 final first-use consent/toggle coupling: Decline must
-    /// turn Screenshot Assistance Off (superseding the earlier statement that
-    /// Decline leaves the setting unchanged), record no consent, and start no
-    /// analysis — never mutate `draft`, which would leave manual Request Food
-    /// unusable.
-    func testDecliningTheFirstUseDisclosureTurnsScreenshotAssistanceOff() throws {
-        let source = try cancelScreenshotDisclosureSource()
+    /// W4-S3 (supersedes the pre-S3 disclosure/consent coupling): `Continue
+    /// manually` sends nothing off-device, dismisses the popup, and — unlike the
+    /// pre-S3 `Not now` — does NOT turn Screenshot Assistance Off. It never
+    /// touches `draft`, so manual Request Food stays usable.
+    func testContinueManuallyDismissesWithoutTurningScreenshotAssistanceOff() throws {
+        let source = try requestFoodViewSource(
+            from: "private func continueScreenshotManually() {",
+            to: "/// Applies one validated outcome"
+        )
 
-        XCTAssertTrue(source.contains("screenshotProposalStore.setAIAssistanceEnabled(false)"))
-        XCTAssertFalse(source.contains("recordThirdPartyConsent"))
-        XCTAssertFalse(source.contains("beginScreenshotAnalysis"))
+        XCTAssertTrue(source.contains("screenshotProposalStore.continueManually()"))
+        XCTAssertFalse(source.contains("setAIAssistanceEnabled"))
+        XCTAssertFalse(source.contains("useExternalAI"))
         XCTAssertFalse(source.contains("draft ="))
-        // W4-R2 2026-09-01 sync item 3: Decline must not open Screenshot
-        // Help or the photo picker either — disclosure now gates before both.
         XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
         XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
     }
 
-    /// Extracts `beginScreenshotAssistanceFlow()`'s own source text.
-    private func beginScreenshotAssistanceFlowSource() throws -> String {
-        let source = try String(
-            contentsOf: repositoryFile(
-                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
-            ),
-            encoding: .utf8
+    /// W4-S3 flow ordering: `Choose Grubhub screenshot` / `Change` →
+    /// Screenshot Help (if unseen) → picker. There is no third-party-AI
+    /// disclosure or consent step before photo selection.
+    func testScreenshotAssistanceFlowIsHelpThenPickerWithNoDisclosureOrConsent() throws {
+        let source = try requestFoodViewSource(
+            from: "private func beginScreenshotAssistanceFlow() {",
+            to: "private func proceedToScreenshotSelection() {"
         )
 
-        let startMarker = "private func beginScreenshotAssistanceFlow() {"
-        let endMarker = "private func proceedAfterConsent() {"
-
-        guard let startRange = source.range(of: startMarker) else {
-            XCTFail("expected to find \(startMarker)")
-            return ""
-        }
-        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
-            XCTFail("expected to find \(endMarker) after beginScreenshotAssistanceFlow")
-            return ""
-        }
-
-        return String(source[startRange.lowerBound..<endRange.lowerBound])
-    }
-
-    /// W4-R2 2026-09-01 sync item 3, "First-use remote route ordering":
-    /// `Choose Grubhub screenshot` / `Change` must run the required
-    /// disclosure gate before anything else — the photo picker/Screenshot
-    /// Help never open directly from this function when consent is absent.
-    func testScreenshotAssistanceFlowGatesOnConsentBeforeAnythingElse() throws {
-        let source = try beginScreenshotAssistanceFlowSource()
-
-        XCTAssertTrue(source.contains("guard screenshotProposalStore.hasRecordedThirdPartyConsent else {"))
-        XCTAssertTrue(source.contains("isPresentingScreenshotDisclosure = true"))
-        XCTAssertTrue(source.contains("proceedAfterConsent()"))
+        XCTAssertTrue(source.contains("guard screenshotProposalStore.isAIAssistanceEnabled, !screenshotProposalStore.isApplying else {"))
+        XCTAssertTrue(source.contains("proceedToScreenshotSelection()"))
+        XCTAssertFalse(source.lowercased().contains("consent"))
+        XCTAssertFalse(source.lowercased().contains("disclosure"))
         XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
         XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
     }
 
-    /// Extracts `proceedAfterConsent()`'s own source text.
-    private func proceedAfterConsentSource() throws -> String {
-        let source = try String(
-            contentsOf: repositoryFile(
-                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
-            ),
-            encoding: .utf8
+    /// Screenshot Help gates the picker only while Help-completion is
+    /// independently false — completion semantics (`Got it`) are unchanged.
+    func testProceedToScreenshotSelectionGatesOnIndependentHelpCompletionState() throws {
+        let source = try requestFoodViewSource(
+            from: "private func proceedToScreenshotSelection() {",
+            to: "/// Shared image preparation"
         )
-
-        let startMarker = "private func proceedAfterConsent() {"
-        let endMarker = "/// Local normalization"
-
-        guard let startRange = source.range(of: startMarker) else {
-            XCTFail("expected to find \(startMarker)")
-            return ""
-        }
-        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
-            XCTFail("expected to find \(endMarker) after proceedAfterConsent")
-            return ""
-        }
-
-        return String(source[startRange.lowerBound..<endRange.lowerBound])
-    }
-
-    /// W4-R2 2026-09-01 sync items 4-5: once consent exists, Screenshot Help
-    /// gates the picker only while Help-completion is independently false —
-    /// never coupled to or inferred from consent.
-    func testProceedAfterConsentGatesOnIndependentHelpCompletionState() throws {
-        let source = try proceedAfterConsentSource()
 
         XCTAssertTrue(source.contains("if screenshotProposalStore.hasCompletedScreenshotHelp {"))
         XCTAssertTrue(source.contains("isPresentingScreenshotPicker = true"))
         XCTAssertTrue(source.contains("isPresentingScreenshotHelp = true"))
     }
 
-    /// Extracts `acceptScreenshotDisclosure()`'s own source text.
-    private func acceptScreenshotDisclosureSource() throws -> String {
-        let source = try String(
-            contentsOf: repositoryFile(
-                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
-            ),
+    /// W4-S3: the pre-S3 requester-side disclosure and remembered consent are
+    /// gone — nothing in the view (or the store it drives) presents a
+    /// third-party-AI disclosure before the picker, records consent, or
+    /// consults recorded consent.
+    func testRequesterViewHasNoPreS3DisclosureOrConsentSurface() throws {
+        let view = try String(
+            contentsOf: repositoryFile("ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"),
             encoding: .utf8
         )
-
-        let startMarker = "private func acceptScreenshotDisclosure() {"
-        let endMarker = "/// W4-R2 item 19, final first-use consent/toggle coupling"
-
-        guard let startRange = source.range(of: startMarker) else {
-            XCTFail("expected to find \(startMarker)")
-            return ""
-        }
-        guard let endRange = source.range(of: endMarker, range: startRange.upperBound..<source.endIndex) else {
-            XCTFail("expected to find \(endMarker) after acceptScreenshotDisclosure")
-            return ""
-        }
-
-        return String(source[startRange.lowerBound..<endRange.lowerBound])
-    }
-
-    /// Accept records consent, then defers to the same shared
-    /// Help/picker continuation `beginScreenshotAssistanceFlow()` uses when
-    /// consent already existed — so "prior consent + unseen Help" and
-    /// "disclosure just accepted + unseen Help" behave identically.
-    func testAcceptingDisclosureRecordsConsentThenDefersToSharedContinuation() throws {
-        let source = try acceptScreenshotDisclosureSource()
-
-        XCTAssertTrue(source.contains("screenshotProposalStore.recordThirdPartyConsent()"))
-        XCTAssertTrue(source.contains("proceedAfterConsent()"))
-        XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
-        XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
-    }
-
-    /// W4-R2 2026-09-01 round-2 sync item 2: `Continue` must turn Screenshot
-    /// Assistance on, not merely record consent — this is what lets the
-    /// Off-state `Turn on Screenshot Assistance` entry point actually leave
-    /// Screenshot Assistance On once the requester accepts.
-    func testAcceptingDisclosureTurnsScreenshotAssistanceOn() throws {
-        let source = try acceptScreenshotDisclosureSource()
-
-        XCTAssertTrue(source.contains("screenshotProposalStore.setAIAssistanceEnabled(true)"))
-    }
-
-    /// Extracts `beginTurnOnScreenshotAssistanceFlow()`'s own source text.
-    private func beginTurnOnScreenshotAssistanceFlowSource() throws -> String {
-        let source = try String(
-            contentsOf: repositoryFile(
-                "ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"
-            ),
+        let entry = try String(
+            contentsOf: repositoryFile("ios/CommonPlateios/CommonPlateios/Views/RequestFoodEntryView.swift"),
             encoding: .utf8
         )
-
-        let startMarker = "private func beginTurnOnScreenshotAssistanceFlow() {"
-        guard let startRange = source.range(of: startMarker) else {
-            XCTFail("expected to find \(startMarker)")
-            return ""
+        for source in [view, entry] {
+            XCTAssertFalse(source.contains("ScreenshotProposalDisclosureView"))
+            XCTAssertFalse(source.contains("isPresentingScreenshotDisclosure"))
+            XCTAssertFalse(source.contains("recordThirdPartyConsent"))
+            XCTAssertFalse(source.contains("hasRecordedThirdPartyConsent"))
+            XCTAssertFalse(source.contains("acceptScreenshotDisclosure"))
+            XCTAssertFalse(source.contains("cancelScreenshotDisclosure"))
         }
-        guard let endRange = source.range(of: "\n    }", range: startRange.upperBound..<source.endIndex) else {
-            XCTFail("expected to find the end of beginTurnOnScreenshotAssistanceFlow")
-            return ""
-        }
-
-        return String(source[startRange.lowerBound..<endRange.upperBound])
+        XCTAssertFalse(view.contains("Use Screenshot Assistance?"))
     }
 
-    /// W4-R2 2026-09-01 round-2 sync item 2: `Turn on Screenshot Assistance`
-    /// is a second entry point into the same disclosure/consent gate
-    /// `beginScreenshotAssistanceFlow()` already uses — consent absent shows
-    /// the disclosure; consent already recorded turns Screenshot Assistance
-    /// on directly and defers to the same shared continuation, without
-    /// requiring `isAIAssistanceEnabled` to already be true first (unlike
-    /// `beginScreenshotAssistanceFlow()`, this is the Off-originating entry
-    /// point).
-    func testTurnOnFlowGatesOnConsentAndTurnsAssistanceOnWhenAlreadyConsented() throws {
-        let source = try beginTurnOnScreenshotAssistanceFlowSource()
+    /// W4-S3: `Turn on Screenshot Assistance` is a plain On action with no
+    /// disclosure and no consent, continuing into the same Help/picker step as
+    /// `Choose Grubhub screenshot`. Turning On authorizes nothing external.
+    func testTurnOnFlowIsAPlainOnActionWithNoDisclosureOrConsent() throws {
+        let source = try requestFoodViewSource(
+            from: "private func beginTurnOnScreenshotAssistanceFlow() {",
+            to: "@MainActor\n    private func beginScreenshotAnalysis("
+        )
 
-        XCTAssertTrue(source.contains("guard screenshotProposalStore.hasRecordedThirdPartyConsent else {"))
-        XCTAssertTrue(source.contains("isPresentingScreenshotDisclosure = true"))
         XCTAssertTrue(source.contains("screenshotProposalStore.setAIAssistanceEnabled(true)"))
-        XCTAssertTrue(source.contains("proceedAfterConsent()"))
+        XCTAssertTrue(source.contains("proceedToScreenshotSelection()"))
+        XCTAssertFalse(source.lowercased().contains("consent"))
+        XCTAssertFalse(source.lowercased().contains("disclosure"))
+        XCTAssertFalse(source.contains("useExternalAI"))
         XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
         XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
     }
@@ -1773,7 +1680,7 @@ final class RequestCreationViewTests: XCTestCase {
     }
 
     /// Extracts `beginScreenshotAnalysis(...)`'s own source text, matching
-    /// `cancelScreenshotDisclosureSource()`'s bounded-extraction pattern.
+    /// `requestFoodViewSource(from:to:)`'s bounded-extraction pattern.
     private func beginScreenshotAnalysisSource() throws -> String {
         let source = try String(
             contentsOf: repositoryFile(

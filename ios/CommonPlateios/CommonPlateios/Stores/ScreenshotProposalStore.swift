@@ -138,19 +138,31 @@ struct ScreenshotProposalAppliedFields: Equatable {
     }
 }
 
-/// A specific screenshot selection's identity, minted synchronously by
-/// `beginSelection(...)` at the moment the requester picks an image — before
-/// any local normalization, OCR, disclosure wait, or network transfer for it
-/// has started. Every later async stage re-checks `isCurrent(_:)` against
-/// this exact token before proceeding to the next stage or mutating shared
-/// state, so the newest selection always wins regardless of how long an
-/// older selection's own preprocessing takes ("last selection wins from the
-/// moment the requester chooses it" — an inversion where an earlier
-/// selection's work finishes after a later one's is otherwise possible).
-/// Only this file can mint one, so no caller can fabricate a token that
-/// reads as current.
-struct ScreenshotSelectionToken: Equatable {
-    fileprivate let generation: Int
+/// Why the external-AI popup is (or would have been) offered: the two
+/// requester-visible local fallback outcomes. Each maps to an existing
+/// requester treatment when external AI cannot be offered.
+enum ScreenshotExternalFallbackReason: Equatable {
+    /// Local model unavailable, combination not qualified, or attempt failed →
+    /// the existing `.unavailable` notice.
+    case localUnavailable
+    /// Local attempt completed with zero usable valid fields → the existing
+    /// `.noUsefulExtraction` treatment.
+    case noUsefulExtraction
+}
+
+/// The screenshots of one selection whose local attempt ended in an
+/// external-AI-eligible outcome, held only in process memory by the owning
+/// store while the requester decides. Never persisted; released on
+/// `Continue manually`, replacement, Settings OFF, screen disappearance, or
+/// once the external attempt starts.
+private struct PendingExternalFallback {
+    let token: ScreenshotSelectionToken
+    /// The Requester workflow's evaluation of the selection: the eligible
+    /// screenshots (never an ineligible one) and their on-device evidence.
+    let evaluation: ScreenshotAssistanceRuntime<RequesterOrderWorkflow>.Evaluation
+    /// The local outcome that made external AI the fallback, kept so that the
+    /// same outcome can be presented if the popup can no longer be offered.
+    let reason: ScreenshotExternalFallbackReason
 }
 
 @MainActor
@@ -163,11 +175,9 @@ final class ScreenshotProposalStore: ObservableObject {
 
     @Published private(set) var notice: ScreenshotProposalNotice?
     @Published private(set) var isAIAssistanceEnabled: Bool
-    @Published private(set) var hasRecordedThirdPartyConsent: Bool
     /// W4-R2 2026-09-01 sync: independent local Screenshot Help
     /// education-completion state — never inferred from or coupled to
-    /// `hasRecordedThirdPartyConsent`/`isAIAssistanceEnabled`. See
-    /// `recordScreenshotHelpCompleted()`.
+    /// `isAIAssistanceEnabled`. See `recordScreenshotHelpCompleted()`.
     @Published private(set) var hasCompletedScreenshotHelp: Bool
     /// Generations with analysis work currently in flight. A set, not a
     /// single flag (review finding: one shared boolean can be cleared by
@@ -177,100 +187,79 @@ final class ScreenshotProposalStore: ObservableObject {
     /// generation finishing (and removing itself) can never clear busy state
     /// a newer generation still owns.
     @Published private var inFlightGenerations: Set<Int> = []
-    private var currentGeneration = 0
-
-    /// The real, cancellable unit of work behind each generation's network
-    /// transfer. This is the actual enforceable handoff between
-    /// authorization and transfer initiation (review finding: a plain
-    /// boolean re-check ahead of an `await` still leaves a suspension
-    /// window). This project builds with `SWIFT_DEFAULT_ACTOR_ISOLATION =
-    /// MainActor`, so `ScreenshotProposalService`/`APIClient` are themselves
-    /// main-actor-isolated too — the risk here was never an actor hop
-    /// between this store and them. It is the `await` on real I/O inside
-    /// `URLSession.data(for:)` itself: any `await` suspends this store's own
-    /// execution and frees the main actor to run other queued main-actor
-    /// work — including a Settings toggle's handler — while the network call
-    /// is genuinely in flight. A plain boolean re-checked only once, just
-    /// before making that call, cannot react to a state change that happens
-    /// *during* that suspension; nothing would be watching. `Task.cancel()`
-    /// closes exactly that gap: it sets the task's cancellation flag
-    /// synchronously and immediately, independent of when or where the
-    /// task's body happens to be running — including before it has started
-    /// running at all — and `APIClient.execute`/`ScreenshotProposalService`
-    /// already translate both a pre-start and a mid-flight cancellation into
-    /// `CancellationError`, including cancelling the underlying
-    /// `URLSessionTask` if the network call had already begun. Cancelling
-    /// here is therefore a real "stop mattering right now" instruction,
-    /// cooperatively observed by the async call chain itself — not a hint a
-    /// race can still slip past.
-    private var inFlightTasks: [Int: Task<Result<ScreenshotProposalOutcome, Error>, Never>] = [:]
+    /// W4-S3: non-nil exactly while the external-AI fallback popup is offered.
+    @Published private var pendingExternalFallback: PendingExternalFallback?
 
     private let service: ScreenshotProposalService
+    /// The shared runtime, parameterized with the Requester workflow adapter.
+    private let runtime: ScreenshotAssistanceRuntime<RequesterOrderWorkflow>
+    /// W4-S3: generation identity, cancellation, and stale-result fencing are
+    /// the shared runtime's mechanism (`ScreenshotAttemptFence`), and the fence
+    /// is the RUNTIME's own — every token it mints identifies it, so the
+    /// runtime can itself refuse an external permission for a stale attempt.
+    /// This store keeps the Requester policy on top of it. Cancelling a tracked
+    /// task is a real "stop mattering right now" instruction, cooperatively
+    /// observed by the async call chain itself — not a hint a race can still
+    /// slip past.
+    private var fence: ScreenshotAttemptFence { runtime.fence }
     private let preferences: ScreenshotProposalPreferencesStoring
 
     /// Whether analysis for the current selection is in flight. `false` for
     /// a superseded generation's still-finishing work, even while that work
     /// is technically still running.
     var isApplying: Bool {
-        inFlightGenerations.contains(currentGeneration)
+        inFlightGenerations.contains(fence.currentGeneration)
+    }
+
+    /// W4-S3: whether the centered `Couldn’t analyze these on your device`
+    /// popup is being offered for the current selection.
+    var isAwaitingExternalAIPermission: Bool {
+        pendingExternalFallback != nil
+    }
+
+    /// The local fallback reason retained by the pending popup, readable for
+    /// proof only.
+    var pendingExternalFallbackReason: ScreenshotExternalFallbackReason? {
+        pendingExternalFallback?.reason
     }
 
     init(
         service: ScreenshotProposalService,
-        preferences: ScreenshotProposalPreferencesStoring
+        preferences: ScreenshotProposalPreferencesStoring,
+        runtime: ScreenshotAssistanceRuntime<RequesterOrderWorkflow>? = nil
     ) {
         self.service = service
         self.preferences = preferences
+        self.runtime = runtime ?? RequesterScreenshotAssistanceProduction.makeRuntime(service: service)
         self.isAIAssistanceEnabled = preferences.isAIAssistanceEnabled
-        self.hasRecordedThirdPartyConsent = preferences.hasRecordedThirdPartyConsent
         self.hasCompletedScreenshotHelp = preferences.hasCompletedScreenshotHelp
-    }
-
-    /// Cancels every currently tracked transfer task. Called whenever
-    /// something must stop mattering *right now*, synchronously, rather than
-    /// merely "the next time someone happens to check a flag."
-    private func cancelAllInFlightTasks() {
-        for task in inFlightTasks.values {
-            task.cancel()
-        }
-        inFlightTasks.removeAll()
     }
 
     /// Off must retire the current generation, not just cancel its task
     /// (review finding: "turning it back On cannot allow an old analysis
-    /// outcome to become current"). Bumping `currentGeneration` here means
-    /// `isCurrent(_:)` becomes `false` for every token minted before this
-    /// call, deterministically, regardless of the cancellation's own timing
-    /// — so even in the (already-prevented) case where a cancelled task's
-    /// result somehow still reached `analyzeScreenshot`'s post-await check,
-    /// that check would fail for an independent reason. Turning AI
-    /// Assistance back On does not itself revive anything: a later analysis
-    /// only ever starts from a fresh `beginSelection(...)` token.
+    /// outcome to become current"). Retiring makes `isCurrent(_:)` `false`
+    /// for every token minted before this call, deterministically, regardless
+    /// of the cancellation's own timing. W4-S3: Off also retires a pending
+    /// external-AI popup and its in-memory screenshots, so no transfer can be
+    /// prevented from starting OR applied late. Turning Screenshot Assistance
+    /// back On does not itself revive anything, and authorizes nothing
+    /// external: a later analysis only ever starts from a fresh
+    /// `beginSelection(...)` token, and any external transfer needs its own
+    /// `Use external AI` action.
     func setAIAssistanceEnabled(_ enabled: Bool) {
         preferences.isAIAssistanceEnabled = enabled
         isAIAssistanceEnabled = enabled
         if !enabled {
-            currentGeneration += 1
-            notice = nil
-            cancelAllInFlightTasks()
+            retireCurrentSelection()
         }
-    }
-
-    /// First-use third-party (OpenAI) transfer disclosure acceptance.
-    /// Recorded once; normal repeat use relies on this without
-    /// re-disclosing.
-    func recordThirdPartyConsent() {
-        preferences.hasRecordedThirdPartyConsent = true
-        hasRecordedThirdPartyConsent = true
     }
 
     /// W4-R2 2026-09-01 sync: records Screenshot Help education completion.
     /// Callers must invoke this only when the requester actually completes
     /// Screenshot Help through `Got it` — never merely because Screenshot
     /// Help was presented or a detail state was opened. Independent of
-    /// `recordThirdPartyConsent()`/`setAIAssistanceEnabled(_:)`: neither
-    /// consent nor the AI-enabled toggle infers or is inferred from this
-    /// state.
+    /// `setAIAssistanceEnabled(_:)`: the AI-enabled toggle neither infers nor
+    /// is inferred from this state.
     func recordScreenshotHelpCompleted() {
         preferences.hasCompletedScreenshotHelp = true
         hasCompletedScreenshotHelp = true
@@ -281,13 +270,13 @@ final class ScreenshotProposalStore: ObservableObject {
     }
 
     /// Whether `token` is still the current selection. Every async stage in
-    /// `RequestFoodView`'s screenshot pipeline (image load, OCR, disclosure
-    /// wait, immediately before network transfer, and after it returns)
-    /// checks this before proceeding or mutating shared state; a `false`
-    /// result means abort silently — the work belongs to a selection the
-    /// requester has since replaced or left.
+    /// `RequestFoodView`'s screenshot pipeline (image load, OCR, local
+    /// analysis, immediately before any external transfer, and after it
+    /// returns) checks this before proceeding or mutating shared state; a
+    /// `false` result means abort silently — the work belongs to a selection
+    /// the requester has since replaced or left.
     func isCurrent(_ token: ScreenshotSelectionToken) -> Bool {
-        token.generation == currentGeneration
+        fence.isCurrent(token)
     }
 
     /// Mints a new selection identity and immediately clears whatever is
@@ -301,14 +290,18 @@ final class ScreenshotProposalStore: ObservableObject {
     /// A field with current requester-owned non-empty content is never cleared
     /// here. Screenshot-derived values remain eligible to be replaced by a
     /// newer proposal, while each structured meal subfield is handled alone.
+    ///
+    /// A new selection retires any previous external-AI popup and its
+    /// permission state: permission is per selected screenshot set and can
+    /// never carry over to this one.
     func beginSelection(
         clearing draft: inout RequestFoodFormDraft,
         manualEdits: ScreenshotFieldManualEditState
     ) -> ScreenshotSelectionToken {
         // A newer selection immediately retires and cancels whatever the
-        // previous one was doing, synchronously — see `cancelAllInFlightTasks`.
-        cancelAllInFlightTasks()
-        currentGeneration += 1
+        // previous one was doing, synchronously — see `ScreenshotAttemptFence`.
+        discardPendingExternalFallback()
+        let token = fence.beginAttempt()
         notice = nil
         if !manualEdits.hasManuallyEditedLocation {
             draft.selectedDiningSpot = nil
@@ -331,108 +324,313 @@ final class ScreenshotProposalStore: ObservableObject {
         // and everywhere else in this store: Screenshot Assistance proposes
         // values, it does not decide which menu the requester is using or how
         // many Dining Dollars they need.
-        return ScreenshotSelectionToken(generation: currentGeneration)
+        return token
     }
 
     /// Invalidates the current selection without touching any draft — for
     /// screen disappearance (review finding: "invalidate old work on
     /// relevant dismissal/disappearance"), where there is no longer a live
     /// `RequestFoodFormDraft` to clear stale values from, but any in-flight
-    /// work for this screen must still stop mattering: `isCurrent(_:)` will
-    /// report `false` for whatever token it was still carrying.
+    /// work or pending external-AI popup for this screen must still stop
+    /// mattering: `isCurrent(_:)` will report `false` for whatever token it
+    /// was still carrying.
     func invalidateCurrentSelection() {
-        cancelAllInFlightTasks()
-        currentGeneration += 1
+        retireCurrentSelection()
+    }
+
+    private func retireCurrentSelection() {
+        discardPendingExternalFallback()
+        fence.retire()
         notice = nil
     }
 
-    /// Analyzes exactly one already-normalized screenshot for `token`.
+    /// Releases the pending external-AI popup state and its in-memory
+    /// screenshots.
+    private func discardPendingExternalFallback() {
+        guard pendingExternalFallback != nil else { return }
+        pendingExternalFallback = nil
+    }
+
+    /// Analyzes the already-prepared screenshots of one selection, local-first.
     ///
-    /// The actual network transfer runs inside a `Task` this store creates,
-    /// tracks by generation, and can cancel synchronously from
-    /// `setAIAssistanceEnabled(false)`, `beginSelection(...)`, or
-    /// `invalidateCurrentSelection()` — this is the real enforceable handoff
-    /// the review required: `Task.cancel()` takes effect immediately and is
-    /// observed by `Task.checkCancellation()`/`URLSession`'s
-    /// cancellation-aware async APIs even if the cancellation happens before
-    /// the task's body has started running at all. The suspension this
-    /// closes is `URLSession.data(for:)`'s own `await` on real I/O — see
-    /// `inFlightTasks`'s declaration for why a plain boolean re-check cannot
-    /// close it even though this project's default main-actor isolation
-    /// means no actor hop is involved. A cancellation that arrives *after*
-    /// the underlying `URLSessionTask` has genuinely begun cannot
-    /// retroactively un-send bytes already in flight; what it guarantees is
-    /// that this store never treats that transfer's response, once it
-    /// returns, as usable.
+    /// 1. The Requester workflow's deterministic on-device eligibility gate
+    ///    runs first (it derives its own on-device OCR evidence from the
+    ///    ordered selection). A wholly ineligible selection returns an
+    ///    ineligible outcome (existing `unsupportedScreenshot` treatment) and
+    ///    NEVER reaches any provider or the external-AI popup.
+    /// 2. One local attempt runs. A useful result (at least one valid proposal
+    ///    field, even partial) is returned to be applied.
+    /// 3. Only when the local attempt was unavailable/unqualified, failed, or
+    ///    completed with zero usable fields is the external-AI popup offered
+    ///    (`isAwaitingExternalAIPermission`) — with nothing sent. This method
+    ///    returns `nil` in that case, and for cancelled/stale/superseded work.
+    ///    Without current participant authority the popup is not offered and
+    ///    the same local outcome is presented as the ordinary requester
+    ///    treatment instead (`.unavailable` notice, or the empty eligible
+    ///    outcome, which `apply` turns into `.noUsefulExtraction`).
+    ///
+    /// This method can never cause an external transfer; only
+    /// `useExternalAI(participantAuthority:)` can, and only after the
+    /// requester's explicit `Use external AI` action.
     ///
     /// Nothing here mutates `draft`; the caller applies the result
     /// synchronously afterward via `apply(_:manualEdits:to:)`, since a
     /// SwiftUI `@State` draft cannot be passed `inout` across an `await`
     /// suspension point.
     /// W4-R4: `images` is the complete set of normalized screenshots for one
-    /// logical order (1 to 5). They are analyzed together in one call rather
-    /// than one at a time, so overlapping evidence describes one order
-    /// instead of several.
+    /// logical order (1 to 5), analyzed together rather than one at a time, so
+    /// overlapping evidence describes one order instead of several.
+    ///
+    /// `participantAuthority` supplies the requester's CURRENT participant
+    /// authority (`nil` once it was lost after this already-admitted form
+    /// mounted). It is evaluated ONLY at the moment the external-AI popup would
+    /// be offered — after evidence derivation and the local attempt have
+    /// finished — never earlier, so authority lost while those ran can never
+    /// still yield the offer. Local analysis and its ordinary outcome notice are
+    /// unaffected by it, and its value is not retained.
     func analyzeScreenshot(
-        images: [ScreenshotAnalysisInput],
-        participantAuthority: String?,
+        images: [ScreenshotPreparedImage],
+        participantAuthority: @MainActor () -> String?,
         token: ScreenshotSelectionToken
     ) async -> ScreenshotProposalOutcome? {
         guard !images.isEmpty,
-              images.count <= ScreenshotProposalStore.maxScreenshotSelection else {
+              images.count <= ScreenshotProposalStore.maxScreenshotSelection,
+              let selection = ScreenshotSelection(images: images) else {
             return nil
         }
         guard isCurrent(token) else { return nil }
         guard isAIAssistanceEnabled else { return nil }
-        guard let participantAuthority else {
-            notice = .verificationRequired
-            return nil
+
+        // The Requester workflow's eligibility gate and OCR evidence
+        // derivation. Tracked by the fence so a retired selection stops
+        // recognizing immediately, but deliberately NOT counted as in flight:
+        // `isApplying` keeps covering exactly the provider attempt, as it did
+        // when this preparation ran in the view before the store was called.
+        let evaluationTask = Task<ScreenshotAssistanceRuntime<RequesterOrderWorkflow>.Evaluation?, Never> { [runtime] in
+            await runtime.evaluate(selection, for: token)
+        }
+        fence.track(evaluationTask, for: token)
+        let derived = await evaluationTask.value
+        fence.untrack(token)
+        guard isCurrent(token) else { return nil }
+
+        guard let evaluation = derived else {
+            return ScreenshotProposalOutcome(eligible: false, proposal: .empty)
         }
 
-        let task = Task<Result<ScreenshotProposalOutcome, Error>, Never> { [service] in
-            do {
-                // Observed even if this task was cancelled before its body
-                // ever started running — the transfer below is never
-                // reached in that case.
-                try Task.checkCancellation()
-                let outcome = try await service.requestProposal(
-                    images: images,
-                    authority: participantAuthority
-                )
-                return .success(outcome)
-            } catch {
-                return .failure(error)
-            }
+        let task = Task<ScreenshotAnalysisAttemptResult<ScreenshotProposalOutcome>, Never> { [runtime] in
+            await runtime.runLocal(evaluation)
         }
-        inFlightTasks[token.generation] = task
+        fence.track(task, for: token)
         inFlightGenerations.insert(token.generation)
         defer {
             inFlightGenerations.remove(token.generation)
-            inFlightTasks.removeValue(forKey: token.generation)
+            fence.untrack(token)
         }
 
         let result = await task.value
 
         // `isAIAssistanceEnabled` is not re-checked separately here: Off
-        // already retired this generation (`setAIAssistanceEnabled`), so a
-        // stale `token` already fails `isCurrent` below in that case.
+        // already retired this generation, so a stale `token` already fails
+        // `isCurrent` below in that case.
+        guard isCurrent(token) else { return nil }
+
+        switch result {
+        case .completed(let analysis):
+            // Requester does not surface provider-cited evidence; whatever the
+            // runtime returned beside the outcome is released here.
+            let outcome = analysis.outcome
+            guard outcome.eligible else { return outcome }
+            if outcome.isEmpty {
+                return resolveExternalFallback(
+                    .noUsefulExtraction,
+                    evaluation: evaluation,
+                    participantAuthority: participantAuthority,
+                    token: token
+                )
+            }
+            return outcome
+        case .localUnavailable, .failed:
+            return resolveExternalFallback(
+                .localUnavailable,
+                evaluation: evaluation,
+                participantAuthority: participantAuthority,
+                token: token
+            )
+        case .cancelled:
+            // Leaving mid-analysis, or being cancelled by a newer
+            // selection/AI-Off, is not a reportable failure.
+            return nil
+        }
+    }
+
+    /// A local fallback outcome (`reason`) either holds the external-AI popup
+    /// or, when current participant authority is missing, is presented as the
+    /// ordinary requester outcome it always was. Only the offer depends on
+    /// authority; no verification prompt is ever launched from here.
+    ///
+    /// `participantAuthority` is evaluated here, at the offer decision, and
+    /// nowhere else on the analysis path.
+    ///
+    /// Returns what the caller should apply: `nil` when the popup is now
+    /// pending or the reason has only a notice, otherwise the ordinary empty
+    /// outcome.
+    private func resolveExternalFallback(
+        _ reason: ScreenshotExternalFallbackReason,
+        evaluation: ScreenshotAssistanceRuntime<RequesterOrderWorkflow>.Evaluation,
+        participantAuthority: @MainActor () -> String?,
+        token: ScreenshotSelectionToken
+    ) -> ScreenshotProposalOutcome? {
+        guard participantAuthority() != nil else {
+            return presentLocalOutcome(for: reason)
+        }
+        pendingExternalFallback = PendingExternalFallback(
+            token: token,
+            evaluation: evaluation,
+            reason: reason
+        )
+        return nil
+    }
+
+    /// The existing requester treatment for a local fallback outcome:
+    /// `.unavailable` is a notice (nothing to apply); zero usable fields is the
+    /// ordinary eligible-but-empty outcome, which `apply` turns into the
+    /// existing `.noUsefulExtraction` treatment.
+    private func presentLocalOutcome(for reason: ScreenshotExternalFallbackReason) -> ScreenshotProposalOutcome? {
+        switch reason {
+        case .localUnavailable:
+            notice = .unavailable
+            return nil
+        case .noUsefulExtraction:
+            return ScreenshotProposalOutcome(eligible: true, proposal: .empty)
+        }
+    }
+
+    /// Participant authority was lost while the popup was pending: the
+    /// external action is no longer usable, so it is retired (its held
+    /// screenshots released, nothing sent, no verification prompt) and the
+    /// local outcome that originally caused it is presented instead. Returns
+    /// the outcome the caller must apply (with its token), or `nil` when
+    /// nothing is pending, the selection is no longer current, or the
+    /// treatment is notice-only.
+    func retireExternalFallbackForLostAuthority() -> (token: ScreenshotSelectionToken, outcome: ScreenshotProposalOutcome)? {
+        guard let pending = pendingExternalFallback else { return nil }
+        discardPendingExternalFallback()
+        guard isCurrent(pending.token), isAIAssistanceEnabled,
+              let outcome = presentLocalOutcome(for: pending.reason) else {
+            return nil
+        }
+        return (pending.token, outcome)
+    }
+
+    /// `Continue manually`: sends nothing off-device, dismisses the popup,
+    /// releases the held screenshots, and leaves manual entry (and Screenshot
+    /// Assistance itself, still On) exactly as they were.
+    func continueManually() {
+        discardPendingExternalFallback()
+    }
+
+    /// `Use external AI`: the requester's explicit permission to send the
+    /// CURRENTLY SELECTED screenshots, through CommonPlate, to OpenAI for this
+    /// one external attempt. There is no second confirmation, and the
+    /// permission is consumed here: it is not persisted, remembered, or reusable.
+    ///
+    /// This is one terminal attempt for the selection. Whatever it produces —
+    /// a useful proposal, nothing useful, or a failure — ends with the existing
+    /// requester treatment; it never offers the popup again for the same
+    /// selection (the requester may `Change` the selection).
+    ///
+    /// Returns the outcome to apply, with the token it belongs to, or `nil` for
+    /// stale/cancelled/superseded/failed work (a failure sets `notice`).
+    func useExternalAI(
+        participantAuthority: @escaping @MainActor () -> String?
+    ) async -> (token: ScreenshotSelectionToken, outcome: ScreenshotProposalOutcome)? {
+        guard let pending = pendingExternalFallback,
+              isCurrent(pending.token),
+              isAIAssistanceEnabled else {
+            // A retired popup's permission can never be used.
+            discardPendingExternalFallback()
+            return nil
+        }
+        // Consumed: the popup is gone and the held screenshots are now owned
+        // solely by this one attempt. A second tap finds nothing pending.
+        pendingExternalFallback = nil
+        let token = pending.token
+
+        // Authority lost between the popup being offered and this tap (the view
+        // normally retires the popup first): send nothing, surface no
+        // verification prompt from Screenshot Assistance, and present the
+        // local outcome that originally caused the popup. Manual entry stays
+        // available. This tap-time check is not sufficient by itself: the
+        // runtime reads authority again at the transfer boundary.
+        guard participantAuthority() != nil else {
+            return presentLocalOutcome(for: pending.reason).map { (token, $0) }
+        }
+
+        // The runtime mints the permission for exactly this token and this
+        // evaluation, and only while the token is current and is the attempt the
+        // evaluation was produced for. A refusal means the selection was
+        // retired: nothing is resumed and no resource exists.
+        guard let permission = runtime.authorizeExternalTransfer(for: token, evaluation: pending.evaluation) else {
+            return nil
+        }
+
+        let task = Task<Result<ScreenshotProposalOutcome, Error>, Never> { [runtime] in
+            do {
+                // Observed even if this task was cancelled before its body
+                // ever started running — the transfer is never reached in
+                // that case.
+                try Task.checkCancellation()
+                let analysis = try await runtime.runExternal(
+                    authority: participantAuthority,
+                    permission: permission
+                )
+                return .success(analysis.outcome)
+            } catch {
+                return .failure(error)
+            }
+        }
+        fence.track(task, for: token)
+        inFlightGenerations.insert(token.generation)
+        defer {
+            inFlightGenerations.remove(token.generation)
+            fence.untrack(token)
+        }
+
+        let result = await task.value
+
+        if case .failure(let error) = result,
+           let failure = error as? ScreenshotAnalysisFailure {
+            // Refused by the runtime's own gates, before any provider work: no
+            // provider call. A retired selection presents nothing; authority
+            // that disappeared after the tap presents the local outcome that
+            // caused the popup, exactly as the tap-time check does.
+            switch failure {
+            case .authorityUnavailable:
+                guard isCurrent(token), isAIAssistanceEnabled else { return nil }
+                return presentLocalOutcome(for: pending.reason).map { (token, $0) }
+            case .permissionUnavailable:
+                return nil
+            default:
+                break
+            }
+        }
+
+        // A transfer that already began cannot be recalled, but its result is
+        // never treated as usable once this selection has been retired.
         guard isCurrent(token) else { return nil }
 
         switch result {
         case .success(let outcome):
-            return outcome
+            return (token, outcome)
         case .failure(let error):
-            if error is CancellationError {
-                // Leaving mid-analysis, or being cancelled by a newer
-                // selection/AI-Off, is not a reportable failure.
-                return nil
-            }
+            if error is CancellationError { return nil }
             notice = ScreenshotProposalNotice.map(error)
             return nil
         }
     }
 
-    /// Applies an outcome `analyzeScreenshot` returned. Synchronous and
+    /// Applies an outcome `analyzeScreenshot` (or `useExternalAI`) returned. Synchronous and
     /// side-effect-bounded to `draft`/`notice` only — safe to call with an
     /// `inout` `@State` draft because it never suspends. Callers must check
     /// `isCurrent(token)` again immediately before calling this (the result

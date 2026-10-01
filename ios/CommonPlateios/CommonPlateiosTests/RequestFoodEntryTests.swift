@@ -893,23 +893,24 @@ final class RequestFoodEntryTests: XCTestCase {
 
         XCTAssertTrue(source.contains("@State private var isPresentingScreenshotHelp = false"))
         XCTAssertTrue(source.contains("isPresentingScreenshotHelp: $isPresentingScreenshotHelp"))
-        // W4-R2 2026-09-01 round-2 sync: the disclosure now presents as the
-        // same kind of local centered overlay as Screenshot Help (not a
-        // `.sheet`), so it needs the same toolbar Back suppression for the
-        // same competing-Back-control reason.
+        // W4-S3: the external-AI fallback popup is the same kind of local
+        // centered overlay as Screenshot Help (not a `.sheet`), so it needs
+        // the same toolbar Back suppression for the same competing-Back-control
+        // reason; its presentation truth is the store's
+        // `isAwaitingExternalAIPermission`.
         guard let range = source.range(
-            of: "if !isPresentingScreenshotHelp && !isPresentingScreenshotDisclosure && !isSuppressingBackNavigation {\n                        backToolbarItem\n                    }"
+            of: "if !isPresentingScreenshotHelp && !screenshotProposalStore.isAwaitingExternalAIPermission && !isSuppressingBackNavigation {\n                        backToolbarItem\n                    }"
         ) else {
-            XCTFail("expected backToolbarItem to be conditionally included only while neither Screenshot Help nor the disclosure is showing")
+            XCTFail("expected backToolbarItem to be conditionally included only while neither Screenshot Help nor the external-AI popup is showing")
             return
         }
         _ = range
     }
 
-    /// W4-R2 2026-09-01 round-2 sync item 4: the disclosure's toolbar
-    /// suppression mirrors Screenshot Help's own — the same local-overlay,
-    /// same-competing-Back-control reasoning applies to both.
-    func testBackToolbarItemIsRemovedWhileScreenshotDisclosureIsShowing() throws {
+    /// W4-S3: the external-AI popup's toolbar suppression mirrors Screenshot
+    /// Help's own, driven by the store's single presentation truth rather than a
+    /// duplicate local flag.
+    func testBackToolbarItemIsRemovedWhileExternalAIPopupIsShowing() throws {
         let source = try String(
             contentsOf: repositoryFile(
                 "ios/CommonPlateios/CommonPlateios/Views/RequestFoodEntryView.swift"
@@ -917,8 +918,8 @@ final class RequestFoodEntryTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(source.contains("@State private var isPresentingScreenshotDisclosure = false"))
-        XCTAssertTrue(source.contains("isPresentingScreenshotDisclosure: $isPresentingScreenshotDisclosure"))
+        XCTAssertTrue(source.contains("screenshotProposalStore.isAwaitingExternalAIPermission"))
+        XCTAssertFalse(source.contains("isPresentingScreenshotDisclosure"))
     }
 
     /// W4-R2 2026-08-31 round-2 sync: the Posting/Success transient

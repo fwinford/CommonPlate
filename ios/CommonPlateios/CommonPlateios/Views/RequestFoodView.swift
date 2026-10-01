@@ -8,15 +8,8 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-/// One locally-prepared screenshot ready for analysis: the normalized image
-/// bytes plus the independent on-device Vision OCR text
-/// (`ScreenshotLocalTextRecognizer`) that gates and corroborates whatever
-/// the OpenAI provider later returns for it.
-struct ScreenshotAnalysisInput {
-    let data: Data
-    let mimeType: String
-    let localEvidenceText: String
-}
+// W4-S3: a prepared screenshot (`ScreenshotPreparedImage`) now lives with the
+// shared Screenshot Assistance runtime (`Services/ScreenshotAssistance/`).
 
 /// W4-R2 2026-08-31 device/prototype sync: whether the newest completed
 /// screenshot analysis was eligible, shown as the compact `✓ Screenshot
@@ -406,25 +399,21 @@ struct RequestFoodView: View {
     /// the selection at the source; `ScreenshotProposalStore` and the backend
     /// each re-check the same bound independently.
     @State private var selectedScreenshotItems: [PhotosPickerItem] = []
-    /// W4-R2 2026-09-01 sync: the required remote-AI disclosure now gates
-    /// *before* photo selection, not after — see `beginScreenshotAssistanceFlow()`.
-    /// There is therefore no pending-selection-awaiting-consent state to hold
-    /// anymore: nothing has been picked yet at the point disclosure shows.
-    /// W4-R2 2026-09-01 round-2 sync: owned as a `Binding` (not local
-    /// `@State`), matching `isPresentingScreenshotHelp` below, so
-    /// `RequestFoodEntryView` can also suppress its toolbar Back button while
-    /// this centered overlay owns input — the same competing-Back-control
-    /// concern that binding's declaration already explains.
-    @Binding var isPresentingScreenshotDisclosure: Bool
+    /// W4-S3: there is no third-party-AI disclosure before photo selection —
+    /// choosing and locally analyzing screenshots sends nothing off-device.
+    /// The only off-device offer is the centered external-AI fallback popup,
+    /// presented exactly while `screenshotProposalStore.isAwaitingExternalAIPermission`
+    /// (store-owned, so the held screenshots and the permission state share one
+    /// owner and one lifetime).
     /// W4-R2 2026-09-01 sync: presents the system photo picker only once
-    /// disclosure (if needed) and Screenshot Help (if needed) are satisfied —
-    /// `beginScreenshotAssistanceFlow()` is the only place that sets this
+    /// Screenshot Help (if needed) is satisfied — `beginScreenshotAssistanceFlow()`
+    /// and Screenshot Help's `Got it` are the only places that set this
     /// `true`. Programmatic (`.photosPicker(isPresented:)`), not a direct
     /// `PhotosPicker` link, so the row's tap can run that gating decision
     /// first.
     @State private var isPresentingScreenshotPicker = false
     /// W4-R2 Screenshot Help (`What should I screenshot?`): one local
-    /// centered overlay, independent of the disclosure/consent sheet above.
+    /// centered overlay, independent of the external-AI fallback popup.
     /// Owned as a `Binding` (not local `@State`) so `RequestFoodEntryView`
     /// can suppress its own toolbar Back button while this overlay owns
     /// input — a competing, still-functional underlying Back control was the
@@ -568,7 +557,7 @@ struct RequestFoodView: View {
                     }
                 }
             }
-            .accessibilityHidden(isPresentingScreenshotHelp || isPresentingScreenshotDisclosure)
+            .accessibilityHidden(isPresentingScreenshotHelp || screenshotProposalStore.isAwaitingExternalAIPermission)
 
             if isPresentingScreenshotHelp {
                 // W4-R2 final walkthrough sync: both layers share one
@@ -614,19 +603,19 @@ struct RequestFoodView: View {
                 .ignoresSafeArea()
             }
 
-            if isPresentingScreenshotDisclosure {
-                // W4-R2 2026-09-01 round-2 sync item 4: the same centered
-                // modal shell as Screenshot Help above — same outer
-                // white-card width/height/position/corner radius and dimmed
-                // background treatment — replacing the previous `.sheet`
-                // bottom-sheet presentation.
+            if screenshotProposalStore.isAwaitingExternalAIPermission {
+                // W4-S3: the external-AI fallback popup — the same centered
+                // modal shell as Screenshot Help above (same outer white-card
+                // width/height/position/corner radius and dimmed background
+                // treatment), a small overlay rather than an embedded form
+                // state or a new navigation screen.
                 ZStack {
                     Color.black.opacity(0.34)
                         .accessibilityHidden(true)
 
-                    ScreenshotProposalDisclosureView(
-                        onContinue: acceptScreenshotDisclosure,
-                        onCancel: cancelScreenshotDisclosure
+                    ScreenshotExternalAIFallbackView(
+                        onUseExternalAI: useExternalScreenshotAI,
+                        onContinueManually: continueScreenshotManually
                     )
                     .frame(width: 314)
                     .frame(maxHeight: dynamicTypeSize.isAccessibilitySize ? 480 : nil)
@@ -637,7 +626,7 @@ struct RequestFoodView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     .shadow(color: Color.black.opacity(0.12), radius: 18, y: 8)
                     .padding(.horizontal, CommonPlateStyle.Spacing.l)
-                    .accessibilityIdentifier("request-screenshot-disclosure-modal")
+                    .accessibilityIdentifier("request-screenshot-external-ai-modal")
                     .accessibilityAddTraits(.isModal)
                 }
                 .ignoresSafeArea()
@@ -698,6 +687,14 @@ struct RequestFoodView: View {
             }
         }
         .onChange(of: identityStore.identity) { previous, current in
+            // W4-S3: an already-admitted form stays mounted when participant
+            // authority is lost, but a pending external-AI popup is no longer
+            // usable; retire it without any verification prompt and present
+            // the local outcome that originally caused it.
+            if identityStore.currentAuthority() == nil,
+               let restored = screenshotProposalStore.retireExternalFallbackForLostAuthority() {
+                applyScreenshotOutcome(restored.outcome, token: restored.token)
+            }
             guard case .requestCreation(let submittedDraft)? =
                     verificationCoordinator.requesterIdentityDidChange(
                         from: previous,
@@ -760,14 +757,10 @@ struct RequestFoodView: View {
             preservedEntryFeedback.beginSelection()
             Task { await processSelectedScreenshots(newItems, token: token) }
         }
-        // W4-R2 2026-09-01 round-2 sync: the disclosure is now the local
-        // centered-modal overlay above, not a `.sheet` — see
-        // `isPresentingScreenshotDisclosure`'s declaration.
         // W4-R2 2026-09-01 sync: programmatic presentation so
-        // `beginScreenshotAssistanceFlow()` can run the
-        // disclosure/Help gating decision before the system picker ever
-        // opens, rather than a direct `PhotosPicker` link opening it
-        // immediately on tap.
+        // `beginScreenshotAssistanceFlow()` can run the Screenshot Help
+        // gating decision before the system picker ever opens, rather than a
+        // direct `PhotosPicker` link opening it immediately on tap.
         .photosPicker(
             isPresented: $isPresentingScreenshotPicker,
             selection: $selectedScreenshotItems,
@@ -940,39 +933,32 @@ struct RequestFoodView: View {
     static let screenshotAnalyzingLabel = "Analyzing screenshot…"
     static let turnOnScreenshotAssistanceLabel = "Turn on Screenshot Assistance"
 
-    /// W4-R2 2026-09-01 sync item 3, "First-use remote route ordering": the
-    /// only entry point for `Choose Grubhub screenshot` / `Change`. Runs the
-    /// required disclosure/Help gating decision *before* the system photo
-    /// picker ever opens:
+    /// W4-S3 requester flow ordering (supersedes the pre-S3
+    /// disclosure-before-picker ordering): the only entry point for
+    /// `Choose Grubhub screenshot` / `Change`.
     ///
     /// ```
     /// Choose Grubhub screenshot
-    ///   → required remote-AI disclosure/permission (if no consent yet)
-    ///     → Accept → Screenshot Help (if unseen) → photo picker
-    ///     → Decline → stop: no Help, no picker, no provider bytes
-    ///   → Screenshot Help (if consent already granted but Help unseen)
-    ///     → photo picker
-    ///   → photo picker directly (if both already satisfied)
+    ///   → Screenshot Help (if not yet completed) → photo picker
+    ///   → photo picker directly (if Help already completed)
+    ///   → on-device analysis attempt
+    ///   → normal success / ineligible behavior
+    ///     OR the external-AI fallback popup
     /// ```
     ///
-    /// Consent (`hasRecordedThirdPartyConsent`) and Help-completion
-    /// (`hasCompletedScreenshotHelp`) are independent booleans (item 4): this
-    /// reads them independently and never infers one from the other.
+    /// There is no third-party-AI disclosure or consent before photo
+    /// selection: choosing and locally analyzing screenshots sends nothing
+    /// off-device. Screenshot Help completion is independent of every other
+    /// state.
     private func beginScreenshotAssistanceFlow() {
         guard screenshotProposalStore.isAIAssistanceEnabled, !screenshotProposalStore.isApplying else {
             return
         }
-        guard screenshotProposalStore.hasRecordedThirdPartyConsent else {
-            isPresentingScreenshotDisclosure = true
-            return
-        }
-        proceedAfterConsent()
+        proceedToScreenshotSelection()
     }
 
-    /// Shared continuation once third-party consent is known to already
-    /// exist (either it already did, or `acceptScreenshotDisclosure()` just
-    /// recorded it): Screenshot Help first-use education, then the picker.
-    private func proceedAfterConsent() {
+    /// Screenshot Help first-use education, then the picker.
+    private func proceedToScreenshotSelection() {
         if screenshotProposalStore.hasCompletedScreenshotHelp {
             isPresentingScreenshotPicker = true
         } else {
@@ -980,25 +966,23 @@ struct RequestFoodView: View {
         }
     }
 
-    /// Local normalization (resize/compress) plus independent on-device
-    /// Vision OCR — no network call yet. OCR runs against the original
-    /// selected image (before compression) for the best recognition
-    /// fidelity; the evidence text is what actually gates and corroborates
-    /// analysis, not the image bytes. By the time a selection reaches this
-    /// screen, disclosure/Help gating has already run in
-    /// `beginScreenshotAssistanceFlow()` — the picker only ever opens once
-    /// consent exists — so this proceeds straight to analysis.
+    /// Shared image preparation (`ScreenshotInputPreparer`: decode and bounded
+    /// normalization — pixels only) — no network call, and nothing leaves the
+    /// device. The Requester workflow derives its own independent on-device
+    /// Vision OCR evidence from the ordered selection inside
+    /// `ScreenshotProposalStore.analyzeScreenshot`. By the time a selection
+    /// reaches this screen, Screenshot Help gating has already run in
+    /// `beginScreenshotAssistanceFlow()`.
     ///
-    /// Every stage below re-checks `screenshotProposalStore.isCurrent(token)`
-    /// and `.isAIAssistanceEnabled` before proceeding: a newer selection or
-    /// AI Assistance being turned Off at any point must stop this exact
-    /// attempt from reaching the next stage, and in particular must make
-    /// network transfer for it impossible.
+    /// Every stage re-checks `screenshotProposalStore.isCurrent(token)` and
+    /// `.isAIAssistanceEnabled` before proceeding: a newer selection or AI
+    /// Assistance being turned Off at any point must stop this exact attempt
+    /// from reaching the next stage, and in particular must make any external
+    /// transfer for it impossible.
     /// W4-R4: every selected screenshot is prepared, then all of them are
     /// analyzed together as evidence for one logical order. Preparing them
     /// sequentially keeps the existing per-stage staleness checks meaningful
-    /// — a newer selection retires this whole set partway through rather than
-    /// letting some of its images reach the provider.
+    /// — a newer selection retires this whole set partway through.
     ///
     /// A single image that fails to load, decode, or normalize abandons the
     /// whole attempt rather than silently analyzing a subset: the requester
@@ -1016,95 +1000,49 @@ struct RequestFoodView: View {
         let bounded = Array(items.prefix(ScreenshotProposalStore.maxScreenshotSelection))
         guard bounded.count == items.count else { return }
 
-        var inputs: [ScreenshotAnalysisInput] = []
+        var inputs: [ScreenshotPreparedImage] = []
         for item in bounded {
             guard let data = try? await item.loadTransferable(type: Data.self) else { return }
             guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
                 return
             }
 
-            guard let uiImage = UIImage(data: data),
-                  let normalized = ScreenshotImageNormalizer.normalize(uiImage) else {
+            guard let input = ScreenshotInputPreparer.prepare(
+                imageData: data,
+                isStillCurrent: {
+                    screenshotProposalStore.isCurrent(token) && screenshotProposalStore.isAIAssistanceEnabled
+                }
+            ) else {
                 return
             }
-            guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
-                return
-            }
-
-            let evidenceText = await ScreenshotLocalTextRecognizer.recognizeText(in: uiImage)
-            guard screenshotProposalStore.isCurrent(token), screenshotProposalStore.isAIAssistanceEnabled else {
-                return
-            }
-
-            inputs.append(
-                ScreenshotAnalysisInput(
-                    data: normalized.data,
-                    mimeType: normalized.mimeType,
-                    localEvidenceText: evidenceText
-                )
-            )
+            inputs.append(input)
         }
 
         guard !inputs.isEmpty else { return }
         await beginScreenshotAnalysis(inputs, token: token)
     }
 
-    /// W4-R2 2026-09-01 round-2 sync item 2: `Continue` turns Screenshot
-    /// Assistance on unconditionally — a no-op when it was already on (the
-    /// existing `beginScreenshotAssistanceFlow()` entry point), and the
-    /// actual Off → On transition when reached from
-    /// `beginTurnOnScreenshotAssistanceFlow()` — so both entry points share
-    /// this one accept handler rather than each needing its own.
-    private func acceptScreenshotDisclosure() {
-        isPresentingScreenshotDisclosure = false
-        screenshotProposalStore.setAIAssistanceEnabled(true)
-        screenshotProposalStore.recordThirdPartyConsent()
-        proceedAfterConsent()
-    }
-
-    /// W4-R2 item 19, final first-use consent/toggle coupling: Decline sends
-    /// nothing to OpenAI, shows no Screenshot Help, opens no photo picker,
-    /// records no consent, and turns Screenshot Assistance Off —
-    /// `setAIAssistanceEnabled(false)` also cancels any other in-flight
-    /// analysis and retires every token this generation minted, matching
-    /// "Off prevents transfer". Manual Request Food remains fully usable: this
-    /// only touches AI assistance state, never `draft`. A later deliberate
-    /// re-enable is a plain toggle action, not consent — it does not call
-    /// `recordThirdPartyConsent()`, so the next invoked analysis presents this
-    /// same disclosure again.
-    private func cancelScreenshotDisclosure() {
-        isPresentingScreenshotDisclosure = false
-        screenshotProposalStore.setAIAssistanceEnabled(false)
-    }
-
-    /// W4-R2 2026-09-01 round-2 sync item 2: `Turn on Screenshot Assistance`
-    /// is a second entry point into the exact same disclosure/consent gate
-    /// `beginScreenshotAssistanceFlow()` already uses, not a second
-    /// disclosure design — this only differs from that function in that it
-    /// runs while Screenshot Assistance starts Off (so it has no existing
-    /// `isAIAssistanceEnabled` guard to pass first). Consent already
-    /// recorded (e.g. previously granted, then later turned Off) turns
-    /// Screenshot Assistance back on directly and defers to the same shared
-    /// `proceedAfterConsent()` continuation; consent absent shows the same
-    /// disclosure, whose `Continue` action (`acceptScreenshotDisclosure()`)
-    /// turns Screenshot Assistance on. `Not now` leaves it Off, as above.
+    /// W4-S3: `Turn on Screenshot Assistance` is a plain On action — no
+    /// disclosure, no consent recorded or consulted — that continues into the
+    /// same Screenshot Help / picker step as `Choose Grubhub screenshot`
+    /// (unchanged Off-state re-entry behavior). Turning On authorizes nothing
+    /// external.
     private func beginTurnOnScreenshotAssistanceFlow() {
-        guard screenshotProposalStore.hasRecordedThirdPartyConsent else {
-            isPresentingScreenshotDisclosure = true
-            return
-        }
         screenshotProposalStore.setAIAssistanceEnabled(true)
-        proceedAfterConsent()
+        proceedToScreenshotSelection()
     }
 
     @MainActor
     private func beginScreenshotAnalysis(
-        _ inputs: [ScreenshotAnalysisInput],
+        _ inputs: [ScreenshotPreparedImage],
         token: ScreenshotSelectionToken
     ) async {
+        // W4-S3: authority is supplied as a provider, read by the store only at
+        // the moment the external-AI popup would be offered (after OCR and the
+        // local attempt), never captured here at the start.
         let outcome = await screenshotProposalStore.analyzeScreenshot(
             images: inputs,
-            participantAuthority: identityStore.currentAuthority(),
+            participantAuthority: { identityStore.currentAuthority() },
             token: token
         )
         // Applied synchronously, after the suspension point above: a
@@ -1112,8 +1050,47 @@ struct RequestFoodView: View {
         // outcome returns here and is applied in one non-suspending step.
         // Re-checked again here (not just inside `analyzeScreenshot`): the
         // gap between that call returning and this line running is itself a
-        // point where a newer selection could have started.
+        // point where a newer selection could have started. A `nil` outcome
+        // with `isAwaitingExternalAIPermission` set is the fallback popup, not
+        // a result.
         guard let outcome, screenshotProposalStore.isCurrent(token) else { return }
+        applyScreenshotOutcome(outcome, token: token)
+    }
+
+    /// W4-S3: `Use external AI` — the requester's explicit per-attempt
+    /// permission. The store consumes it and runs the one terminal external
+    /// attempt for the current selection.
+    private func useExternalScreenshotAI() {
+        Task { await runExternalScreenshotAnalysis() }
+    }
+
+    @MainActor
+    private func runExternalScreenshotAnalysis() async {
+        // Authority is a provider: the store reads it at the tap AND again at
+        // the moment the external transfer is about to begin.
+        guard let resolved = await screenshotProposalStore.useExternalAI(
+            participantAuthority: { identityStore.currentAuthority() }
+        ) else {
+            return
+        }
+        guard screenshotProposalStore.isCurrent(resolved.token) else { return }
+        applyScreenshotOutcome(resolved.outcome, token: resolved.token)
+    }
+
+    /// W4-S3: `Continue manually` sends nothing, dismisses the popup, and
+    /// leaves manual entry usable. It does not change Screenshot Assistance's
+    /// On/Off setting.
+    private func continueScreenshotManually() {
+        screenshotProposalStore.continueManually()
+    }
+
+    /// Applies one validated outcome — local or external, identically — and
+    /// drives the existing compact result presentation.
+    @MainActor
+    private func applyScreenshotOutcome(
+        _ outcome: ScreenshotProposalOutcome,
+        token: ScreenshotSelectionToken
+    ) {
         let applied = screenshotProposalStore.apply(
             outcome,
             manualEdits: screenshotManualEdits,

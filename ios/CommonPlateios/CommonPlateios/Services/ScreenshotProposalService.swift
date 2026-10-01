@@ -31,6 +31,17 @@ enum ScreenshotProposalServiceError: Error {
     case unavailable(underlying: Error)
 }
 
+/// One screenshot of a Requester proposal request, exactly as the backend
+/// route's contract takes it: normalized bytes plus that same image's own
+/// independent on-device Vision OCR text (the backend's eligibility and
+/// corroboration evidence). Assembled by the Requester external provider from
+/// the shared ordered selection and the Requester workflow's derived evidence.
+struct ScreenshotProposalImage {
+    let data: Data
+    let mimeType: String
+    let localEvidenceText: String
+}
+
 /// One selected screenshot and its own independent on-device evidence.
 private struct ScreenshotImagePayload: Encodable {
     let imageBase64: String
@@ -90,7 +101,7 @@ struct ScreenshotProposalService {
     /// transformation. Nothing here retries: a failed attempt is reported as
     /// such, never silently resent.
     func requestProposal(
-        images: [ScreenshotAnalysisInput],
+        images: [ScreenshotProposalImage],
         authority: String
     ) async throws -> ScreenshotProposalOutcome {
         try Task.checkCancellation()

@@ -6,7 +6,9 @@
 // manual-edit provenance (not value equality), selection-identity/generation
 // concurrency (last-selection-wins, AI-Off mid-flight, busy-state
 // generation-safety), ineligible/no-useful-extraction notices, and
-// AI-disabled/consent gating.
+// AI-disabled gating. W4-S3: the network-facing cases go through the
+// local-first flow and the explicit `Use external AI` action
+// (`analyzeThroughExternalFallback`).
 import Foundation
 import XCTest
 @testable import CommonPlateios
@@ -121,7 +123,6 @@ final class ScreenshotProposalURLProtocol: URLProtocol {
 
 final class InMemoryScreenshotProposalPreferencesStorage: ScreenshotProposalPreferencesStoring {
     var isAIAssistanceEnabled: Bool = true
-    var hasRecordedThirdPartyConsent: Bool = false
     var hasCompletedScreenshotHelp: Bool = false
 }
 
@@ -142,7 +143,10 @@ final class ScreenshotProposalStoreTests: XCTestCase {
             configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
             session: session
         )
-        return ScreenshotProposalStore(
+        // Production Requester wiring (empty local qualification, real
+        // network-backed external provider); only Vision is swapped for the
+        // synthetic recognizer, since the tests' screenshots are synthetic.
+        return makeProductionWiredRequesterStore(
             service: ScreenshotProposalService(client: client),
             preferences: preferences
         )
@@ -177,23 +181,28 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
     // MARK: - No credential
 
-    func testNoCredentialReportsVerificationRequiredWithoutSendingAnything() async {
+    /// Participant-authority-loss decision: without a credential the external-AI
+    /// popup is not offered and Screenshot Assistance shows no verification
+    /// notice, but the ordinary local-outcome notice (here: the local model is
+    /// unavailable in this environment) is still presented.
+    func testNoCredentialOffersNoExternalAIAndShowsNoVerificationNoticeWithoutSendingAnything() async {
         let store = makeStore()
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
-        let outcome = await store.analyzeScreenshot(
+        let outcome = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data((ScreenshotTestEvidence.eligibleCart).utf8),
                     data: Data([0x01]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "irrelevant"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: nil,
             token: token
         )
         XCTAssertNil(outcome)
-        XCTAssertEqual(store.notice, .verificationRequired)
+        XCTAssertEqual(store.notice, .unavailable)
+        XCTAssertFalse(store.isAwaitingExternalAIPermission)
         XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0)
     }
 
@@ -459,12 +468,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let tokenA = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let taskA = Task {
-            await store.analyzeScreenshot(
+            await analyzeThroughExternalFallback(store: store,
                 images: [
-                    ScreenshotAnalysisInput(
+                    ScreenshotPreparedImage(
+                        sourceData: Data(("View order Order information 1 Bowl").utf8),
                         data: Data([0x01]),
-                        mimeType: "image/jpeg",
-                        localEvidenceText: "View order Order information 1 Bowl"
+                        mimeType: "image/jpeg"
                     )
                 ],
                 participantAuthority: "authority-1",
@@ -479,12 +488,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
             responseBody(eligible: true, locationName: "Cafe 370", delay: 0)
         )
         let tokenB = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
-        let outcomeB = await store.analyzeScreenshot(
+        let outcomeB = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data(("View order Order information 1 Bowl").utf8),
                     data: Data([0x02]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "View order Order information 1 Bowl"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: "authority-1",
@@ -509,12 +518,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let tokenA = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let taskA = Task {
-            await store.analyzeScreenshot(
+            await analyzeThroughExternalFallback(store: store,
                 images: [
-                    ScreenshotAnalysisInput(
+                    ScreenshotPreparedImage(
+                        sourceData: Data((ScreenshotTestEvidence.eligibleCart).utf8),
                         data: Data([0x01]),
-                        mimeType: "image/jpeg",
-                        localEvidenceText: "irrelevant"
+                        mimeType: "image/jpeg"
                     )
                 ],
                 participantAuthority: "authority-1",
@@ -525,12 +534,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         let tokenB = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let taskB = Task {
-            await store.analyzeScreenshot(
+            await analyzeThroughExternalFallback(store: store,
                 images: [
-                    ScreenshotAnalysisInput(
+                    ScreenshotPreparedImage(
+                        sourceData: Data((ScreenshotTestEvidence.eligibleCart).utf8),
                         data: Data([0x02]),
-                        mimeType: "image/jpeg",
-                        localEvidenceText: "irrelevant"
+                        mimeType: "image/jpeg"
                     )
                 ],
                 participantAuthority: "authority-1",
@@ -563,12 +572,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         // have started, but before transfer.
         store.setAIAssistanceEnabled(false)
 
-        let outcome = await store.analyzeScreenshot(
+        let outcome = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data((ScreenshotTestEvidence.eligibleCart).utf8),
                     data: Data([0x01]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "irrelevant"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: "an-authority",
@@ -588,12 +597,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let task = Task {
-            await store.analyzeScreenshot(
+            await analyzeThroughExternalFallback(store: store,
                 images: [
-                    ScreenshotAnalysisInput(
+                    ScreenshotPreparedImage(
+                        sourceData: Data(("View order Order information 1 Bowl").utf8),
                         data: Data([0x01]),
-                        mimeType: "image/jpeg",
-                        localEvidenceText: "View order Order information 1 Bowl"
+                        mimeType: "image/jpeg"
                     )
                 ],
                 participantAuthority: "an-authority",
@@ -621,12 +630,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         store.invalidateCurrentSelection()
 
         XCTAssertFalse(store.isCurrent(token))
-        let outcome = await store.analyzeScreenshot(
+        let outcome = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data((ScreenshotTestEvidence.eligibleCart).utf8),
                     data: Data([0x01]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "irrelevant"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: "an-authority",
@@ -652,12 +661,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let task = Task {
-            await store.analyzeScreenshot(
+            await analyzeThroughExternalFallback(store: store,
                 images: [
-                    ScreenshotAnalysisInput(
+                    ScreenshotPreparedImage(
+                        sourceData: Data(("View order Order information 1 Bowl").utf8),
                         data: Data([0x01]),
-                        mimeType: "image/jpeg",
-                        localEvidenceText: "View order Order information 1 Bowl"
+                        mimeType: "image/jpeg"
                     )
                 ],
                 participantAuthority: "an-authority",
@@ -690,12 +699,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         let task = Task {
-            await store.analyzeScreenshot(
+            await analyzeThroughExternalFallback(store: store,
                 images: [
-                    ScreenshotAnalysisInput(
+                    ScreenshotPreparedImage(
+                        sourceData: Data(("View order Order information 1 Bowl").utf8),
                         data: Data([0x01]),
-                        mimeType: "image/jpeg",
-                        localEvidenceText: "View order Order information 1 Bowl"
+                        mimeType: "image/jpeg"
                     )
                 ],
                 participantAuthority: "an-authority",
@@ -754,12 +763,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         store.setAIAssistanceEnabled(true)
 
         XCTAssertFalse(store.isCurrent(token), "On restores availability for a new selection, not the retired one")
-        let outcome = await store.analyzeScreenshot(
+        let outcome = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data(("View order Order information 1 Bowl").utf8),
                     data: Data([0x01]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "View order Order information 1 Bowl"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: "an-authority",
@@ -778,12 +787,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
-        let outcome = await store.analyzeScreenshot(
+        let outcome = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data(("View order Order information 1 Bowl").utf8),
                     data: Data([0x01]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "View order Order information 1 Bowl"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: "an-authority",
@@ -801,12 +810,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
-        _ = await store.analyzeScreenshot(
+        _ = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data(("View order Order information 1 Bowl").utf8),
                     data: Data([0x01]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "View order Order information 1 Bowl"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: "a-stale-authority",
@@ -831,12 +840,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
-        _ = await store.analyzeScreenshot(
+        _ = await analyzeThroughExternalFallback(store: store,
             images: [
-                ScreenshotAnalysisInput(
+                ScreenshotPreparedImage(
+                    sourceData: Data(("Your Pickup Order a very specific literal independent evidence phrase").utf8),
                     data: Data([0x01, 0x02]),
-                    mimeType: "image/jpeg",
-                    localEvidenceText: "a very specific literal independent evidence phrase"
+                    mimeType: "image/jpeg"
                 )
             ],
             participantAuthority: "an-authority",
@@ -854,7 +863,7 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         XCTAssertEqual(images.count, 1)
         XCTAssertEqual(
             images.first?["localEvidenceText"] as? String,
-            "a very specific literal independent evidence phrase"
+            "Your Pickup Order a very specific literal independent evidence phrase"
         )
         XCTAssertNil(json["localEvidenceText"])
     }
@@ -870,17 +879,6 @@ final class ScreenshotProposalStoreTests: XCTestCase {
 
         XCTAssertFalse(store.isAIAssistanceEnabled)
         XCTAssertFalse(preferences.isAIAssistanceEnabled)
-    }
-
-    func testRecordThirdPartyConsentPersistsThroughStorage() {
-        let preferences = InMemoryScreenshotProposalPreferencesStorage()
-        let store = makeStore(preferences: preferences)
-        XCTAssertFalse(store.hasRecordedThirdPartyConsent)
-
-        store.recordThirdPartyConsent()
-
-        XCTAssertTrue(store.hasRecordedThirdPartyConsent)
-        XCTAssertTrue(preferences.hasRecordedThirdPartyConsent)
     }
 
     // MARK: - W4-R2 2026-09-01 sync: independent Screenshot Help
@@ -904,22 +902,17 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         XCTAssertTrue(preferences.hasCompletedScreenshotHelp)
     }
 
-    /// Item 4 of the sync: education state and consent/AI-enabled state are
-    /// independent — recording one must never mutate the other, in either
-    /// direction.
-    func testScreenshotHelpCompletionIsIndependentOfConsentAndAIEnabledState() {
+    /// Education state and the AI-enabled state are independent — recording
+    /// one must never mutate the other, in either direction.
+    func testScreenshotHelpCompletionIsIndependentOfAIEnabledState() {
         let preferences = InMemoryScreenshotProposalPreferencesStorage()
         let store = makeStore(preferences: preferences)
 
         store.recordScreenshotHelpCompleted()
-        XCTAssertFalse(store.hasRecordedThirdPartyConsent)
         XCTAssertTrue(store.isAIAssistanceEnabled)
 
         let otherPreferences = InMemoryScreenshotProposalPreferencesStorage()
         let otherStore = makeStore(preferences: otherPreferences)
-        otherStore.recordThirdPartyConsent()
-        XCTAssertFalse(otherStore.hasCompletedScreenshotHelp)
-
         otherStore.setAIAssistanceEnabled(false)
         XCTAssertFalse(otherStore.hasCompletedScreenshotHelp)
     }
@@ -936,18 +929,18 @@ extension ScreenshotProposalStoreTests {
             configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
             session: session
         )
-        return ScreenshotProposalStore(
+        return makeProductionWiredRequesterStore(
             service: ScreenshotProposalService(client: client),
             preferences: InMemoryScreenshotProposalPreferencesStorage()
         )
     }
 
-    private func analysisInputs(_ count: Int) -> [ScreenshotAnalysisInput] {
+    private func analysisInputs(_ count: Int) -> [ScreenshotPreparedImage] {
         (0..<count).map { index in
-            ScreenshotAnalysisInput(
+            ScreenshotPreparedImage(
+                sourceData: Data(("Your Pickup Order evidence for screenshot \(index + 1)").utf8),
                 data: Data([UInt8(index + 1)]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "evidence for screenshot \(index + 1)"
+                mimeType: "image/jpeg"
             )
         }
     }
@@ -982,7 +975,7 @@ extension ScreenshotProposalStoreTests {
             var draft = RequestFoodFormDraft()
             let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
 
-            let outcome = await store.analyzeScreenshot(
+            let outcome = await analyzeThroughExternalFallback(store: store,
                 images: analysisInputs(count),
                 participantAuthority: "an-authority",
                 token: token
@@ -1002,7 +995,7 @@ extension ScreenshotProposalStoreTests {
             // Each screenshot carries its own independent evidence.
             XCTAssertEqual(
                 images.compactMap { $0["localEvidenceText"] as? String },
-                (0..<count).map { "evidence for screenshot \($0 + 1)" }
+                (0..<count).map { "Your Pickup Order evidence for screenshot \($0 + 1)" }
             )
         }
     }
@@ -1013,7 +1006,7 @@ extension ScreenshotProposalStoreTests {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
 
-        let outcome = await store.analyzeScreenshot(
+        let outcome = await analyzeThroughExternalFallback(store: store,
             images: analysisInputs(6),
             participantAuthority: "an-authority",
             token: token
@@ -1030,7 +1023,7 @@ extension ScreenshotProposalStoreTests {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
 
-        let outcome = await store.analyzeScreenshot(
+        let outcome = await analyzeThroughExternalFallback(store: store,
             images: [],
             participantAuthority: "an-authority",
             token: token
@@ -1087,8 +1080,14 @@ extension ScreenshotProposalStoreTests {
         var draft = RequestFoodFormDraft()
         let token = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
 
-        let receivedOutcome = await store.analyzeScreenshot(
-            images: analysisInputs(2),
+        // The external result is re-validated on device against independent
+        // OCR evidence, so the three-swipe claim must be corroborated by an
+        // explicit `3M` in that evidence to survive.
+        let receivedOutcome = await analyzeThroughExternalFallback(store: store,
+            images: [
+                ScreenshotTestEvidence.input("Your Pickup Order 3M\nContinue to Checkout"),
+                ScreenshotTestEvidence.input("Your Pickup Order 3M\nContinue to Checkout", byte: 2),
+            ],
             participantAuthority: "an-authority",
             token: token
         )

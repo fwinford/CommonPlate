@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5C0A1F032FFB0001008E06A4 /* ScreenshotQualificationFingerprint.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C0A1F022FFB0001008E06A4 /* ScreenshotQualificationFingerprint.generated.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		A1B2C3072FFAE669008E06A4 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -17,6 +21,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		5C0A1F022FFB0001008E06A4 /* ScreenshotQualificationFingerprint.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotQualificationFingerprint.generated.swift; sourceTree = DERIVED_FILE_DIR; };
 		A1B2C3012FFAE669008E06A4 /* CommonPlateiosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CommonPlateiosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DCF2C9022FFAE669008E06A4 /* CommonPlateios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CommonPlateios.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -65,11 +70,20 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		5C0A1F042FFB0001008E06A4 /* Derived */ = {
+			isa = PBXGroup;
+			children = (
+				5C0A1F022FFB0001008E06A4 /* ScreenshotQualificationFingerprint.generated.swift */,
+			);
+			name = Derived;
+			sourceTree = "<group>";
+		};
 		DCF2C8F92FFAE669008E06A4 = {
 			isa = PBXGroup;
 			children = (
 				DCF2C9042FFAE669008E06A4 /* CommonPlateios */,
 				A1B2C3022FFAE669008E06A4 /* CommonPlateiosTests */,
+				5C0A1F042FFB0001008E06A4 /* Derived */,
 				DCF2C9032FFAE669008E06A4 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -113,6 +127,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = DCF2C90D2FFAE66A008E06A4 /* Build configuration list for PBXNativeTarget "CommonPlateios" */;
 			buildPhases = (
+				5C0A1F012FFB0001008E06A4 /* Derive Screenshot Qualification Fingerprint */,
 				DCF2C8FE2FFAE669008E06A4 /* Sources */,
 				DCF2C8FF2FFAE669008E06A4 /* Frameworks */,
 				DCF2C9002FFAE669008E06A4 /* Resources */,
@@ -192,6 +207,36 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		5C0A1F012FFB0001008E06A4 /* Derive Screenshot Qualification Fingerprint */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/CommonPlateios/Services/ScreenshotAssistance",
+				"$(SRCROOT)/CommonPlateios/Services/ScreenshotImageNormalizer.swift",
+				"$(SRCROOT)/CommonPlateios/Services/ScreenshotLocalTextRecognizer.swift",
+				"$(SRCROOT)/CommonPlateios/Models/SupportedVendorCatalog.swift",
+				"$(SRCROOT)/CommonPlateios/Models/ScreenshotProposal.swift",
+				"$(SRCROOT)/CommonPlateios/Models/CommonPlateModels.swift",
+				"$(SRCROOT)/../../shared/vendors.json",
+			);
+			name = "Derive Screenshot Qualification Fingerprint";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/ScreenshotQualificationFingerprint.generated.swift",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "# W4-S3 D2: derive the screenshot-qualification implementation fingerprint.\n#\n# Hashes every declared input (this phase's Input Files: a file, or a directory\n# expanded recursively to all of its regular files) so ANY change to the\n# qualification-relevant implementation yields a different fingerprint with no\n# human step, and a NEW file under a declared directory participates without\n# anyone registering it. The listing is one \"<sha256 of file>  <path relative to\n# the repository root>\" line per file, sorted bytewise by path and de-duplicated,\n# under a fixed version header; the fingerprint is the SHA-256 of that listing.\n# A path is an OPAQUE byte string end to end: it travels NUL-terminated through\n# enumeration, sorting and de-duplication, so spaces and tabs in a name can never\n# split, merge, or drop an entry (a name containing a newline is rejected: it\n# could forge a second listing line). The same source tree gives the same value\n# in Debug and Release. A missing or unreadable input fails the build.\n# (User-script sandboxing is off for this target: with it on, Xcode lets a\n# script list a declared directory but not read the files inside it.)\nset -euo pipefail\nexport LC_ALL=C\nout=\"${SCRIPT_OUTPUT_FILE_0}\"\nrepo=\"$(cd \"${SRCROOT}/../..\" && pwd -P)\"\ncount=\"${SCRIPT_INPUT_FILE_COUNT}\"\nif [ \"${count}\" -lt 1 ]; then\n  echo \"error: screenshot qualification fingerprint has no declared inputs\" >&2\n  exit 1\nfi\n\n# Prints one file's canonical repository-relative path, NUL-terminated.\nemit_relative_path() {\n  local file=\"$1\" dir\n  case \"${file}\" in\n    *$'\\n'*)\n      echo \"error: screenshot qualification fingerprint input path contains a newline: ${file}\" >&2\n      return 1\n      ;;\n  esac\n  dir=\"$(cd \"$(dirname -- \"${file}\")\" && pwd -P)\" || return 1\n  printf '%s\\0' \"${dir#\"${repo}\"/}/$(basename -- \"${file}\")\"\n}\n\n# Prints, NUL-terminated, every regular file every declared input denotes.\nemit_all_paths() {\n  local i=0 input file\n  while [ \"${i}\" -lt \"${count}\" ]; do\n    eval \"input=\\${SCRIPT_INPUT_FILE_${i}}\"\n    i=$((i + 1))\n    case \"${input}\" in\n      \"${TARGET_TEMP_DIR}\"/*)\n        # Xcode appends this phase's own generated script as an input; it is\n        # not a declared qualification input.\n        continue\n        ;;\n    esac\n    if [ -d \"${input}\" ]; then\n      if [ \"$(find \"${input}\" -type f ! -name .DS_Store -print0 | tr -cd '\\0' | wc -c | tr -d ' ')\" -eq 0 ]; then\n        echo \"error: screenshot qualification fingerprint input directory has no files: ${input}\" >&2\n        return 1\n      fi\n      find \"${input}\" -type f ! -name .DS_Store -print0 | while IFS= read -r -d '' file; do\n        emit_relative_path \"${file}\" || exit 1\n      done || return 1\n    elif [ -f \"${input}\" ]; then\n      emit_relative_path \"${input}\" || return 1\n    else\n      echo \"error: screenshot qualification fingerprint input is missing: ${input}\" >&2\n      return 1\n    fi\n  done\n}\n\nlisting=\"$(emit_all_paths | sort -z -u | while IFS= read -r -d '' rel; do\n  digest=\"$(shasum -a 256 < \"${repo}/${rel}\")\" || { echo \"error: screenshot qualification fingerprint input is unreadable: ${rel}\" >&2; exit 1; }\n  printf '%s  %s\\n' \"${digest%% *}\" \"${rel}\"\ndone)\"\nif [ -z \"${listing}\" ]; then\n  echo \"error: screenshot qualification fingerprint hashed no files\" >&2\n  exit 1\nfi\nfingerprint=\"$(printf 'screenshot-qualification-fingerprint-v1\\n%s\\n' \"${listing}\" | shasum -a 256)\"\nfingerprint=\"${fingerprint%% *}\"\ncontent=\"// Generated by the \\\"Derive Screenshot Qualification Fingerprint\\\" build phase. Do not edit.\n// SHA-256 over the declared qualification-relevant source inputs; see ScreenshotQualification.swift.\nenum ScreenshotQualificationFingerprint {\n    nonisolated static let current = \\\"${fingerprint}\\\"\n}\"\nif [ -f \"${out}\" ] && [ \"$(cat \"${out}\")\" = \"${content}\" ]; then\n  exit 0\nfi\nprintf '%s\\n' \"${content}\" > \"${out}\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		A1B2C3042FFAE669008E06A4 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -204,6 +249,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5C0A1F032FFB0001008E06A4 /* ScreenshotQualificationFingerprint.generated.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -387,6 +433,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 59HP2WV2CC;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = CommonPlateios/Info.plist;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "CommonPlate connects to the local development server on your Wi-Fi network during testing.";
@@ -423,6 +470,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 59HP2WV2CC;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

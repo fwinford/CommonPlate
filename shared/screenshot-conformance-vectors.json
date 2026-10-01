@@ -1,0 +1,1912 @@
+{
+  "version": 1,
+  "note": "Synthetic conformance vectors shared by src/screenshotConformanceVectors.test.ts (backend) and ScreenshotConformanceVectorTests.swift (iOS on-device validator). Expected values are the backend implementation's own output and must be edited deliberately in both suites' favor, never regenerated silently. No real screenshot or OCR content.",
+  "eligibility": [
+    {
+      "id": "near-empty",
+      "evidenceText": "hi",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "cart-chrome-basic",
+      "evidenceText": "Your Pickup Order Order Instructions Cilantro on the side Continue to Checkout",
+      "expected": {
+        "eligible": true,
+        "category": "cart"
+      }
+    },
+    {
+      "id": "cart-delivery-order",
+      "evidenceText": "Your Delivery Order\nAdd more items\nSubtotal",
+      "expected": {
+        "eligible": true,
+        "category": "cart"
+      }
+    },
+    {
+      "id": "checkout-review-pickup-excluded",
+      "evidenceText": "Review your pickup order please confirm this order today",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "checkout-place-delivery-excluded",
+      "evidenceText": "Place your delivery order now to complete checkout process",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "checkout-place-pickup-excluded",
+      "evidenceText": "Place your pickup order now to complete checkout process",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "checkout-context-plus-other-cart-phrase",
+      "evidenceText": "Review your pickup order\nOrder instructions\nAdd more items",
+      "expected": {
+        "eligible": true,
+        "category": "cart"
+      }
+    },
+    {
+      "id": "historical-basic",
+      "evidenceText": "View order\nOrder information\n2 x Chicken Bowl\nSubtotal 12.00",
+      "expected": {
+        "eligible": true,
+        "category": "historical"
+      }
+    },
+    {
+      "id": "historical-x-suffix-quantity",
+      "evidenceText": "View order\nOrder information\n2x Chicken Bowl with rice",
+      "expected": {
+        "eligible": true,
+        "category": "historical"
+      }
+    },
+    {
+      "id": "historical-view-order-details-negated",
+      "evidenceText": "View order details\nOrder information\n2 x Chicken Bowl\nSubtotal 12.00",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "historical-missing-order-information",
+      "evidenceText": "View order\nDelivery details\n2 x Chicken Bowl\nSubtotal 12.00",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "historical-missing-quantity-prefix",
+      "evidenceText": "View order\nOrder information\nChicken Bowl\nSubtotal 12.00 total",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "historical-three-digit-quantity-rejected",
+      "evidenceText": "View order\nOrder information\n123 chicken bowl\nSubtotal total",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "historical-view-order-inside-longer-word",
+      "evidenceText": "Preview order\nOrder information\n2 x Chicken Bowl\nSubtotal 12.00",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "historical-non-ascii-before-view-order",
+      "evidenceText": "éview order\norder information\n2 chicken bowl\nsubtotal 12.00",
+      "expected": {
+        "eligible": true,
+        "category": "historical"
+      }
+    },
+    {
+      "id": "historical-order-information-suffix-word",
+      "evidenceText": "View order\nOrder informations\n2 x Chicken Bowl\nSubtotal 12.00",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "items-subtotal-only",
+      "evidenceText": "Items subtotal 12.00 tax fee tip total",
+      "expected": {
+        "eligible": true,
+        "category": "cart"
+      }
+    },
+    {
+      "id": "nbsp-collapses-in-phrase",
+      "evidenceText": "Your pickup order and more text here",
+      "expected": {
+        "eligible": true,
+        "category": "cart"
+      }
+    },
+    {
+      "id": "legibility-boundary-19-nonwhitespace",
+      "evidenceText": "empty bag abcdefghijk",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "legibility-boundary-20-nonwhitespace",
+      "evidenceText": "empty bag abcdefghijkl",
+      "expected": {
+        "eligible": true,
+        "category": "cart"
+      }
+    },
+    {
+      "id": "legibility-whitespace-not-counted",
+      "evidenceText": "empty   \n\n  bag   x  ",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "bom-whitespace-not-counted",
+      "evidenceText": "empty﻿bag﻿﻿abcdefghi",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "unsupported-menu-screen",
+      "evidenceText": "Menu browse popular items reviews rating delivery fee 3.99",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    },
+    {
+      "id": "empty-string",
+      "evidenceText": "",
+      "expected": {
+        "eligible": false,
+        "category": null
+      }
+    }
+  ],
+  "mealSwipeCorroboration": [
+    {
+      "id": "no-marker",
+      "evidenceText": "Your pickup order chicken bowl",
+      "expected": null
+    },
+    {
+      "id": "two-item-markers",
+      "evidenceText": "Bowl 1M\nWrap 1M",
+      "expected": 2
+    },
+    {
+      "id": "aggregate-3M",
+      "evidenceText": "Your pickup order 3M",
+      "expected": 3
+    },
+    {
+      "id": "aggregate-repeated-same",
+      "evidenceText": "3M summary\n3M total",
+      "expected": 3
+    },
+    {
+      "id": "aggregate-conflicting",
+      "evidenceText": "3M summary\n4M total",
+      "expected": null
+    },
+    {
+      "id": "aggregate-out-of-range-6",
+      "evidenceText": "6M total",
+      "expected": null
+    },
+    {
+      "id": "aggregate-out-of-range-zero",
+      "evidenceText": "0M total",
+      "expected": null
+    },
+    {
+      "id": "six-item-markers",
+      "evidenceText": "1M 1M 1M 1M 1M 1M",
+      "expected": null
+    },
+    {
+      "id": "five-item-markers",
+      "evidenceText": "1M 1M 1M 1M 1M",
+      "expected": 5
+    },
+    {
+      "id": "decimal-suffix-guard",
+      "evidenceText": "3.0M total",
+      "expected": null
+    },
+    {
+      "id": "two-digit-out-of-range",
+      "evidenceText": "13M total",
+      "expected": null
+    },
+    {
+      "id": "word-prefix-guard",
+      "evidenceText": "x3M total",
+      "expected": null
+    },
+    {
+      "id": "space-before-M",
+      "evidenceText": "3 M total",
+      "expected": 3
+    },
+    {
+      "id": "nbsp-before-M",
+      "evidenceText": "3 M total",
+      "expected": 3
+    },
+    {
+      "id": "lowercase-m-not-marker",
+      "evidenceText": "3m total",
+      "expected": null
+    },
+    {
+      "id": "item-markers-with-aggregate",
+      "evidenceText": "Bowl 1M\nWrap 1M\nTotal 3M",
+      "expected": 3
+    },
+    {
+      "id": "two-distinct-aggregates",
+      "evidenceText": "2M and 3M",
+      "expected": null
+    },
+    {
+      "id": "adjacent-markers-no-boundary",
+      "evidenceText": "1M1M",
+      "expected": null
+    },
+    {
+      "id": "marker-followed-by-letter",
+      "evidenceText": "3Mx total",
+      "expected": null
+    },
+    {
+      "id": "marker-with-plus-dollars",
+      "evidenceText": "Cost 3M+$2.00",
+      "expected": 3
+    },
+    {
+      "id": "non-ascii-before-marker",
+      "evidenceText": "é3M total",
+      "expected": 3
+    },
+    {
+      "id": "non-ascii-after-marker",
+      "evidenceText": "3Mé total",
+      "expected": 3
+    }
+  ],
+  "providerOutput": [
+    {
+      "id": "valid-full-proposal",
+      "raw": {
+        "visibleVenueText": "Palladium",
+        "foodItems": [
+          {
+            "name": "Create Your Own Bowl",
+            "quantity": 1,
+            "modifiers": [
+              "Chicken",
+              "No Side"
+            ]
+          }
+        ],
+        "mealSwipes": 1
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nPalladium\nBowl 1M",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "selectedDiningSpot": {
+            "name": "Palladium",
+            "address": "Palladium Hall, 140 E 14th St"
+          },
+          "mealItems": [
+            {
+              "name": "1 Create Your Own Bowl",
+              "details": "Chicken, No Side"
+            }
+          ],
+          "mealSwipes": 1
+        }
+      }
+    },
+    {
+      "id": "valid-provider-venue-null",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Wrap",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nPalladium",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "selectedDiningSpot": {
+            "name": "Palladium",
+            "address": "Palladium Hall, 140 E 14th St"
+          },
+          "mealItems": [
+            {
+              "name": "Wrap"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "forbidden-pickupName",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null,
+        "pickupName": "Sam"
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "forbidden_fields"
+      }
+    },
+    {
+      "id": "forbidden-timing",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null,
+        "timing": "ASAP"
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "forbidden_fields"
+      }
+    },
+    {
+      "id": "forbidden-menuPath",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null,
+        "menuPath": "diningDollars"
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "forbidden_fields"
+      }
+    },
+    {
+      "id": "forbidden-estimatedDiningDollarsCents",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null,
+        "estimatedDiningDollarsCents": 200
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "forbidden_fields"
+      }
+    },
+    {
+      "id": "forbidden-action-and-invalid-shape-reports-forbidden",
+      "raw": {
+        "action": "submit",
+        "foodItems": "nope"
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "forbidden_fields"
+      }
+    },
+    {
+      "id": "forbidden-reasoning",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null,
+        "reasoning": "because"
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "forbidden_fields"
+      }
+    },
+    {
+      "id": "schema-missing-mealSwipes-key",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": []
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-missing-visibleVenueText-key",
+      "raw": {
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-unknown-top-level-key",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null,
+        "extra": 1
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-mealSwipes-string",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": "3"
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-mealSwipes-fractional",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": 2.5
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-mealSwipes-boolean",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": true
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-item-unknown-key",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "x",
+            "quantity": null,
+            "modifiers": [],
+            "note": "hi"
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-item-quantity-string",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "x",
+            "quantity": "2",
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-item-missing-modifiers",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "x",
+            "quantity": null
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-item-modifier-not-string",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "x",
+            "quantity": null,
+            "modifiers": [
+              1
+            ]
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-venue-number",
+      "raw": {
+        "visibleVenueText": 5,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-raw-array",
+      "raw": [],
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-raw-null",
+      "raw": null,
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "schema-raw-string",
+      "raw": "hello",
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": false,
+        "reason": "schema_invalid"
+      }
+    },
+    {
+      "id": "modifier-bare-yes-no-sanitized",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": [
+              "Yes",
+              " NO ",
+              "No Side",
+              "Yes Bag"
+            ]
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl",
+              "details": "No Side, Yes Bag"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "modifier-only-bare-tokens-leaves-no-details",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": [
+              "yes",
+              "no"
+            ]
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "modifier-empty-string-yields-no-details",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": [
+              ""
+            ]
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "item-blank-name-skipped",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "   ",
+            "quantity": null,
+            "modifiers": []
+          },
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "item-name-trims-nbsp-and-bom",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": " ﻿Bowl﻿ ",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "item-quantity-prefix-positive",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": 2,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "2 Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "item-quantity-zero-and-negative-no-prefix",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": 0,
+            "modifiers": []
+          },
+          {
+            "name": "Wrap",
+            "quantity": -1,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            },
+            {
+              "name": "Wrap"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "duplicate-lines-single-image-kept",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": 1,
+            "modifiers": []
+          },
+          {
+            "name": "bowl ",
+            "quantity": 1,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "1 Bowl"
+            },
+            {
+              "name": "1 bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "duplicate-lines-multi-image-ambiguous",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": 1,
+            "modifiers": []
+          },
+          {
+            "name": "bowl ",
+            "quantity": 1,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 2
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\n1M 1M",
+      "evidenceImageCount": 2,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "duplicate-lines-multi-image-differ-by-modifier-kept",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": 1,
+            "modifiers": [
+              "Rice"
+            ]
+          },
+          {
+            "name": "Bowl",
+            "quantity": 1,
+            "modifiers": [
+              "Beans"
+            ]
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 3,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "1 Bowl",
+              "details": "Rice"
+            },
+            {
+              "name": "1 Bowl",
+              "details": "Beans"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "duplicate-identity-modifier-order-insensitive",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": 1,
+            "modifiers": [
+              "A",
+              "B"
+            ]
+          },
+          {
+            "name": "Bowl",
+            "quantity": 1,
+            "modifiers": [
+              "b",
+              "a"
+            ]
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 2,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "duplicate-blank-names-do-not-count-as-duplicates",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "",
+            "quantity": null,
+            "modifiers": []
+          },
+          {
+            "name": " ",
+            "quantity": null,
+            "modifiers": []
+          },
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 2,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "swipes-corroborated-by-markers",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          },
+          {
+            "name": "Wrap",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 2
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nBowl 1M\nWrap 1M",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            },
+            {
+              "name": "Wrap"
+            }
+          ],
+          "mealSwipes": 2
+        }
+      }
+    },
+    {
+      "id": "swipes-mismatch-dropped",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nBowl 1M",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "swipes-out-of-range-6-dropped",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 6
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\n6M",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "swipes-zero-dropped",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 0
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\n0M",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "swipes-aggregate-total-corroborates",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nBowl 1M\nTotal 3M",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "swipes-no-evidence-marker-dropped",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 2
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "swipes-negative-dropped",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": -1
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "vendor-grounded-only-by-evidence",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nCafe 370",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "selectedDiningSpot": {
+            "name": "Cafe 370",
+            "address": "BROOKLYN - 370 Jay St"
+          }
+        }
+      }
+    },
+    {
+      "id": "vendor-provider-text-alone-never-selects",
+      "raw": {
+        "visibleVenueText": "Palladium",
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "vendor-provider-disagrees-with-evidence",
+      "raw": {
+        "visibleVenueText": "Palladium",
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nCafe 370",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "vendor-provider-agrees-with-evidence",
+      "raw": {
+        "visibleVenueText": "palladium hall dining",
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nPALLADIUM",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "selectedDiningSpot": {
+            "name": "Palladium",
+            "address": "Palladium Hall, 140 E 14th St"
+          }
+        }
+      }
+    },
+    {
+      "id": "vendor-provider-unresolvable-text-does-not-block",
+      "raw": {
+        "visibleVenueText": "Burger",
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nPalladium",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "selectedDiningSpot": {
+            "name": "Palladium",
+            "address": "Palladium Hall, 140 E 14th St"
+          }
+        }
+      }
+    },
+    {
+      "id": "vendor-evidence-names-two-vendors",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nPalladium\nCafe 370",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "vendor-bare-upstein-ambiguous",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nUpstein",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "vendor-full-upstein-name-resolves",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nUpstein - Vedge Craft & Smoothie Lab",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "selectedDiningSpot": {
+            "name": "Upstein - Vedge Craft & Smoothie Lab",
+            "address": "Weinstein Hall, 5 University Pl #11"
+          }
+        }
+      }
+    },
+    {
+      "id": "vendor-both-full-upstein-names-ambiguous",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nUpstein - Vedge Craft & Smoothie Lab\nUpstein - Shareables, Cluckstein, Slidestein & Taqueria",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "vendor-fragment-does-not-match",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nCoffee Cafe Burger",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "vendor-whitespace-and-case-normalized",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\nDUNKIN'  at\n U-Hall",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "selectedDiningSpot": {
+            "name": "Dunkin' at U-Hall",
+            "address": "U-Hall, 108 E 14th St"
+          }
+        }
+      }
+    },
+    {
+      "id": "dollars-current-cart-marker",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 200
+        }
+      }
+    },
+    {
+      "id": "dollars-whole-dollar-no-cents",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3M + $2",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 200
+        }
+      }
+    },
+    {
+      "id": "dollars-requires-swipes-corroboration",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 2
+      },
+      "evidenceText": "Your pickup order\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "dollars-past-order-marker-fails-closed",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order receipt\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "dollars-conflicting-amounts-fail-closed",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3M + $2.00\n3M + $3.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "dollars-repeated-identical-amount-ok",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3M + $2.00\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 200
+        }
+      }
+    },
+    {
+      "id": "dollars-over-cap-fails-closed",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3M + $25.01",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "dollars-at-cap-allowed",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3M + $25.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 2500
+        }
+      }
+    },
+    {
+      "id": "dollars-zero-fails-closed",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3M + $0.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "dollars-uppercase-marker-case-insensitive",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "YOUR PICKUP ORDER\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 200
+        }
+      }
+    },
+    {
+      "id": "dollars-no-cart-marker-fails-closed",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Items subtotal\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "dollars-checkout-word-marker",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Items subtotal checkout\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 200
+        }
+      }
+    },
+    {
+      "id": "dollars-cart-word-inside-longer-word-not-marker",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Items subtotal cartel\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "dollars-decimal-guard-before-swipes",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n1.3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "dollars-whitespace-variants",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order\n3 M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 200
+        }
+      }
+    },
+    {
+      "id": "dollars-received-word-not-past-marker",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order received\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3,
+          "estimatedDiningDollarsCents": 200
+        }
+      }
+    },
+    {
+      "id": "dollars-delivered-past-marker",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [
+          {
+            "name": "Bowl",
+            "quantity": null,
+            "modifiers": []
+          }
+        ],
+        "mealSwipes": 3
+      },
+      "evidenceText": "Your pickup order delivered\n3M + $2.00",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealItems": [
+            {
+              "name": "Bowl"
+            }
+          ],
+          "mealSwipes": 3
+        }
+      }
+    },
+    {
+      "id": "empty-foodItems-yields-empty-proposal",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": null
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {}
+      }
+    },
+    {
+      "id": "empty-foodItems-with-swipes-corroborated",
+      "raw": {
+        "visibleVenueText": null,
+        "foodItems": [],
+        "mealSwipes": 2
+      },
+      "evidenceText": "Your Pickup Order\nContinue to Checkout\n2M",
+      "evidenceImageCount": 1,
+      "expected": {
+        "ok": true,
+        "proposal": {
+          "mealSwipes": 2
+        }
+      }
+    }
+  ]
+}

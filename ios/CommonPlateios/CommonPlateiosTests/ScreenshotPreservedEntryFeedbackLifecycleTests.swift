@@ -54,6 +54,7 @@ final class ScreenshotPreservedEntryFeedbackLifecycleTests: XCTestCase {
         mutating func runAnalysis(
             stub: ScreenshotProposalURLProtocol.Stub?,
             authority: String? = "an-authority",
+            evidence: String = ScreenshotTestEvidence.eligibleCart,
             invalidateWhileInFlight: Bool = false
         ) async -> Result {
             if let stub { ScreenshotProposalURLProtocol.enqueue(stub) }
@@ -62,13 +63,10 @@ final class ScreenshotPreservedEntryFeedbackLifecycleTests: XCTestCase {
             screenshotChecked = false
 
             let store = self.store
-            let inputs = [ScreenshotAnalysisInput(
-                data: Data([0x01]),
-                mimeType: "image/jpeg",
-                localEvidenceText: "evidence"
-            )]
+            let inputs = [ScreenshotTestEvidence.input(evidence)]
             let task = Task { @MainActor in
-                await store.analyzeScreenshot(
+                await analyzeThroughExternalFallback(
+                    store: store,
                     images: inputs,
                     participantAuthority: authority,
                     token: token
@@ -98,7 +96,7 @@ final class ScreenshotPreservedEntryFeedbackLifecycleTests: XCTestCase {
             configuration: APIConfiguration(baseURL: URL(string: "https://commonplate.test")!),
             session: URLSession(configuration: configuration)
         )
-        let store = ScreenshotProposalStore(
+        let store = makeProductionWiredRequesterStore(
             service: ScreenshotProposalService(client: client),
             preferences: InMemoryScreenshotProposalPreferencesStorage()
         )
@@ -110,11 +108,6 @@ final class ScreenshotPreservedEntryFeedbackLifecycleTests: XCTestCase {
             "eligible": true,
             "proposal": ["selectedDiningSpot": ["name": locationName, "address": "irrelevant"]],
         ]
-        return .response(data: try! JSONSerialization.data(withJSONObject: body))
-    }
-
-    private func ineligibleStub() -> ScreenshotProposalURLProtocol.Stub {
-        let body: [String: Any] = ["eligible": false, "proposal": [String: Any]()]
         return .response(data: try! JSONSerialization.data(withJSONObject: body))
     }
 
@@ -154,7 +147,7 @@ final class ScreenshotPreservedEntryFeedbackLifecycleTests: XCTestCase {
         var form = makeForm()
         form.requesterEditsLocation()
 
-        let first = await form.runAnalysis(stub: ineligibleStub())
+        let first = await form.runAnalysis(stub: nil, evidence: ScreenshotTestEvidence.ineligible)
         assertNoFeedback(first, form)
         XCTAssertFalse(form.feedback.hasCompletedScreenshotAssistanceRun)
         XCTAssertFalse(form.screenshotChecked)
@@ -201,7 +194,7 @@ final class ScreenshotPreservedEntryFeedbackLifecycleTests: XCTestCase {
 
         let first = await form.runAnalysis(stub: nil, authority: nil)
         guard case .noOutcome = first else { return XCTFail("a nil outcome must not reach apply") }
-        XCTAssertEqual(form.store.notice, .verificationRequired)
+        XCTAssertEqual(form.store.notice, .unavailable, "the ordinary local-outcome notice, not a verification notice")
         XCTAssertFalse(form.feedback.hasCompletedScreenshotAssistanceRun)
 
         let second = await form.runAnalysis(stub: eligibleStub())

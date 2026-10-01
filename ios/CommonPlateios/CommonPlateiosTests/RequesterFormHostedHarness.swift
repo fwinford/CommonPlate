@@ -94,7 +94,6 @@ final class RequesterFormHost {
             verificationCoordinator: coordinator,
             path: .constant([]),
             onExit: {},
-            isPresentingScreenshotDisclosure: .constant(false),
             isPresentingScreenshotHelp: .constant(false),
             isSuppressingBackNavigation: .constant(false)
         )
