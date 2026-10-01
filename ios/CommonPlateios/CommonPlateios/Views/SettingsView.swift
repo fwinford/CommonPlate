@@ -45,6 +45,15 @@ struct SettingsView: View {
     /// entry.
     @State private var isPresentingRequestAlerts = false
 
+    /// W4-S3 consent-authority revision: the `Turn on Screenshot Assistance?`
+    /// disclosure, presented from the Screenshot Assistance toggle's Off → On
+    /// attempt before the setting becomes effective.
+    @State private var isPresentingScreenshotAssistanceDisclosure = false
+    /// Same reason `ScreenshotAssistanceDisclosureView`'s own call sites read
+    /// this: the shell's accessibility-size height cap must match the
+    /// content's own internal `ScrollView` fallback threshold.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
         ZStack {
             ScrollView {
@@ -92,6 +101,35 @@ struct SettingsView: View {
                 )
                 .transition(.opacity)
                 .zIndex(1)
+            }
+
+            if isPresentingScreenshotAssistanceDisclosure {
+                // Same centered-modal shell `RequestFoodView` uses for this
+                // identical disclosure and for Screenshot Help: a small
+                // overlay rather than an embedded state or a new navigation
+                // screen.
+                ZStack {
+                    Color.black.opacity(0.34)
+                        .accessibilityHidden(true)
+
+                    ScreenshotAssistanceDisclosureView(
+                        onTurnOn: confirmTurnOnScreenshotAssistance,
+                        onNotNow: dismissScreenshotAssistanceDisclosure
+                    )
+                    .frame(width: 314)
+                    .frame(maxHeight: dynamicTypeSize.isAccessibilitySize ? 480 : nil)
+                    .background(
+                        CommonPlateStyle.Color.baseCanvas,
+                        in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .shadow(color: Color.black.opacity(0.12), radius: 18, y: 8)
+                    .padding(.horizontal, CommonPlateStyle.Spacing.l)
+                    .accessibilityIdentifier("settings-screenshot-assistance-disclosure-modal")
+                    .accessibilityAddTraits(.isModal)
+                }
+                .ignoresSafeArea()
+                .zIndex(2)
             }
         }
         .animation(.easeInOut(duration: 0.18), value: isPresentingRequestAlerts)
@@ -468,11 +506,12 @@ struct SettingsView: View {
 
     // MARK: - AI Assistance
 
-    /// W4-S1: a single app-level kill switch, independent of Request Alerts'
-    /// Email/Push toggles above — it shares no state with them. Off disables
-    /// `RequestFoodView`'s picker, retires the current screenshot selection
-    /// in `ScreenshotProposalStore` (including any pending external-AI popup
-    /// and its held screenshots), and cancels whatever task that selection
+    /// W4-S3 consent-authority revision (2026-10-01 HQ sync): this one
+    /// app-level toggle IS Screenshot Assistance's external-transfer consent
+    /// authority, not merely a kill switch layered over a separate consent
+    /// record. Off disables `RequestFoodView`'s picker, revokes standing
+    /// consent, retires the current screenshot selection in
+    /// `ScreenshotProposalStore`, and cancels whatever task that selection
     /// had (`ScreenshotProposalStore.setAIAssistanceEnabled`): work that has
     /// not yet started an external transfer is prevented from ever starting
     /// one. A transfer that had already genuinely begun before Off cannot be
@@ -480,20 +519,20 @@ struct SettingsView: View {
     /// fencing guarantees its response, whenever it arrives, can never be
     /// applied to the draft.
     ///
-    /// W4-S3: On enables Screenshot Assistance and may allow the external-AI
-    /// popup to be offered when its conditions occur, but it never itself
-    /// authorizes sending screenshots externally — only the requester's
-    /// per-attempt `Use external AI` action does. There is no separate
-    /// remote-AI setting.
+    /// On requires the `Turn on Screenshot Assistance?` disclosure first —
+    /// the toggle's own `set` only presents it, never flips the setting
+    /// directly — and only `Turn On` there establishes consent. Once On,
+    /// consent persists: no further per-attempt disclosure, here or in
+    /// `RequestFoodView`.
     private var aiAssistanceSection: some View {
         VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
             sectionHeading("AI FEATURES")
 
             // W4-R2: one named toggle, no permanent explanatory paragraph
-            // (superseded `aiAssistanceExplanation`). W4-S3: the only
-            // off-device offer is the external-AI popup
-            // (`ScreenshotExternalAIFallbackView`), shown at the moment it
-            // applies.
+            // (superseded `aiAssistanceExplanation`). W4-S3 consent-authority
+            // revision: the only off-device-transfer disclosure is
+            // `ScreenshotAssistanceDisclosureView`, shown once before Off →
+            // On becomes effective — never per attempt.
             requestAlertsToggleRow(
                 title: "Screenshot Assistance",
                 isOn: aiAssistanceToggleBinding,
@@ -507,9 +546,26 @@ struct SettingsView: View {
         Binding(
             get: { screenshotProposalStore.isAIAssistanceEnabled },
             set: { newValue in
-                screenshotProposalStore.setAIAssistanceEnabled(newValue)
+                if newValue {
+                    isPresentingScreenshotAssistanceDisclosure = true
+                } else {
+                    screenshotProposalStore.setAIAssistanceEnabled(false)
+                }
             }
         )
+    }
+
+    /// `Turn On`: establishes Screenshot Assistance's standing
+    /// external-transfer consent and enables the feature.
+    private func confirmTurnOnScreenshotAssistance() {
+        isPresentingScreenshotAssistanceDisclosure = false
+        screenshotProposalStore.setAIAssistanceEnabled(true)
+    }
+
+    /// `Not Now`: dismisses the disclosure, records no consent, and leaves
+    /// Screenshot Assistance Off.
+    private func dismissScreenshotAssistanceDisclosure() {
+        isPresentingScreenshotAssistanceDisclosure = false
     }
 
     // MARK: - About & Help

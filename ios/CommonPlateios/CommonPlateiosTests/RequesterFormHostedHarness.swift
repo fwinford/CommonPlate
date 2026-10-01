@@ -95,6 +95,7 @@ final class RequesterFormHost {
             path: .constant([]),
             onExit: {},
             isPresentingScreenshotHelp: .constant(false),
+            isPresentingScreenshotAssistanceDisclosure: .constant(false),
             isSuppressingBackNavigation: .constant(false)
         )
 

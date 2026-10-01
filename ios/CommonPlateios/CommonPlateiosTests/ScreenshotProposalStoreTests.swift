@@ -121,9 +121,23 @@ final class ScreenshotProposalURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+/// W4-S3 consent-authority revision: defaults to a VALID consent record
+/// already granted, so existing tests that want Screenshot Assistance On by
+/// default (the pre-revision behavior) do not all need to call `grant...`
+/// themselves. Tests of the fail-closed legacy-reset behavior construct their
+/// own storage instead (`UserDefaultsScreenshotProposalPreferencesStorage`
+/// directly, or a purpose-built in-memory double).
 final class InMemoryScreenshotProposalPreferencesStorage: ScreenshotProposalPreferencesStoring {
-    var isAIAssistanceEnabled: Bool = true
+    var hasValidScreenshotAssistanceConsent: Bool = true
     var hasCompletedScreenshotHelp: Bool = false
+
+    func grantScreenshotAssistanceConsent() {
+        hasValidScreenshotAssistanceConsent = true
+    }
+
+    func revokeScreenshotAssistanceConsent() {
+        hasValidScreenshotAssistanceConsent = false
+    }
 }
 
 @MainActor
@@ -202,7 +216,6 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         )
         XCTAssertNil(outcome)
         XCTAssertEqual(store.notice, .unavailable)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
         XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0)
     }
 
@@ -878,7 +891,12 @@ final class ScreenshotProposalStoreTests: XCTestCase {
         store.setAIAssistanceEnabled(false)
 
         XCTAssertFalse(store.isAIAssistanceEnabled)
-        XCTAssertFalse(preferences.isAIAssistanceEnabled)
+        XCTAssertFalse(preferences.hasValidScreenshotAssistanceConsent)
+
+        store.setAIAssistanceEnabled(true)
+
+        XCTAssertTrue(store.isAIAssistanceEnabled)
+        XCTAssertTrue(preferences.hasValidScreenshotAssistanceConsent)
     }
 
     // MARK: - W4-R2 2026-09-01 sync: independent Screenshot Help

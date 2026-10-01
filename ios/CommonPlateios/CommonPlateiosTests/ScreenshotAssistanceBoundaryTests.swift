@@ -265,19 +265,21 @@ final class ScreenshotAssistanceBoundaryTests: XCTestCase {
                 XCTAssertFalse(code.contains(token), "\(file) must not reach the external transfer (`\(token)`)")
             }
         }
-        // In the store, both live only inside `useExternalAI`, after the
-        // pending-popup guard and the participant-authority guard.
+        // In the store, both live only inside `attemptExternalFallback`, after
+        // the participant-authority guard (W4-S3 consent-authority revision:
+        // there is no separate pending-popup guard any more — standing
+        // consent, checked earlier via `isAIAssistanceEnabled`, is what used
+        // to gate presenting that popup at all).
         let store = try XCTUnwrap(app["Stores/ScreenshotProposalStore.swift"])
-        // Everything below is searched inside `useExternalAI`'s own body, so an
-        // earlier method with a similar guard cannot satisfy the ordering.
-        let useExternalStart = try XCTUnwrap(store.range(of: "func useExternalAI("))
-        let afterUseExternal = String(store[useExternalStart.lowerBound...])
-        let body = String(afterUseExternal[..<(afterUseExternal.range(of: "\n    /// Applies an outcome")?.lowerBound ?? afterUseExternal.endIndex)])
-        let pendingGuard = try XCTUnwrap(body.range(of: "guard let pending = pendingExternalFallback"))
+        // Everything below is searched inside `attemptExternalFallback`'s own
+        // body, so an earlier method with a similar guard cannot satisfy the
+        // ordering.
+        let fallbackStart = try XCTUnwrap(store.range(of: "private func attemptExternalFallback("))
+        let afterFallback = String(store[fallbackStart.lowerBound...])
+        let body = String(afterFallback[..<(afterFallback.range(of: "\n    /// The existing requester treatment")?.lowerBound ?? afterFallback.endIndex)])
         let authorityGuard = try XCTUnwrap(body.range(of: "guard participantAuthority() != nil else"))
         let mint = try XCTUnwrap(body.range(of: "runtime.authorizeExternalTransfer("))
         let run = try XCTUnwrap(body.range(of: "runtime.runExternal("))
-        XCTAssertLessThan(pendingGuard.lowerBound, authorityGuard.lowerBound)
         XCTAssertLessThan(authorityGuard.lowerBound, mint.lowerBound)
         XCTAssertLessThan(mint.lowerBound, run.lowerBound)
         // And these are the only sites in the whole store.

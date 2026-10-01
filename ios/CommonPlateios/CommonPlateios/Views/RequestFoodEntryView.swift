@@ -70,11 +70,12 @@ struct RequestFoodEntryView: View {
     /// showing — see `RequestFoodView.isPresentingScreenshotHelp`'s
     /// declaration for why disabling in place is not enough.
     @State private var isPresentingScreenshotHelp = false
-    // W4-S3: the external-AI fallback popup is a local centered overlay like
-    // Screenshot Help, so it needs the same toolbar Back suppression for the
-    // same competing-Back-control reason. Its presentation truth lives in
-    // `ScreenshotProposalStore.isAwaitingExternalAIPermission` (this view
-    // already observes the store), so there is no duplicate flag here.
+    /// W4-S3 consent-authority revision: the `Turn on Screenshot Assistance?`
+    /// disclosure is a local centered overlay like Screenshot Help, so it
+    /// needs the same toolbar Back suppression for the same
+    /// competing-Back-control reason — see `isPresentingScreenshotHelp`'s
+    /// declaration above.
+    @State private var isPresentingScreenshotAssistanceDisclosure = false
     /// W4-R2 2026-08-31 round-2 sync: true exactly while `RequestFoodView`'s
     /// internal presentation is the transient Posting/Success submission
     /// sequence, so `backToolbarItem` can be removed from the toolbar
@@ -162,11 +163,12 @@ struct RequestFoodEntryView: View {
                     path: $path,
                     onExit: beginExit,
                     isPresentingScreenshotHelp: $isPresentingScreenshotHelp,
+                    isPresentingScreenshotAssistanceDisclosure: $isPresentingScreenshotAssistanceDisclosure,
                     isSuppressingBackNavigation: $isSuppressingBackNavigation
                 )
                 .navigationBarBackButtonHidden(true)
                 .toolbar {
-                    if !isPresentingScreenshotHelp && !screenshotProposalStore.isAwaitingExternalAIPermission && !isSuppressingBackNavigation {
+                    if !isPresentingScreenshotHelp && !isPresentingScreenshotAssistanceDisclosure && !isSuppressingBackNavigation {
                         backToolbarItem
                     }
                 }

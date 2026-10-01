@@ -138,9 +138,10 @@ struct ScreenshotProposalAppliedFields: Equatable {
     }
 }
 
-/// Why the external-AI popup is (or would have been) offered: the two
-/// requester-visible local fallback outcomes. Each maps to an existing
-/// requester treatment when external AI cannot be offered.
+/// Why a local outcome falls through to the external attempt: the two
+/// requester-visible local fallback classes. Each maps to an existing
+/// requester treatment when the external attempt also cannot run or also
+/// yields nothing.
 enum ScreenshotExternalFallbackReason: Equatable {
     /// Local model unavailable, combination not qualified, or attempt failed →
     /// the existing `.unavailable` notice.
@@ -148,21 +149,6 @@ enum ScreenshotExternalFallbackReason: Equatable {
     /// Local attempt completed with zero usable valid fields → the existing
     /// `.noUsefulExtraction` treatment.
     case noUsefulExtraction
-}
-
-/// The screenshots of one selection whose local attempt ended in an
-/// external-AI-eligible outcome, held only in process memory by the owning
-/// store while the requester decides. Never persisted; released on
-/// `Continue manually`, replacement, Settings OFF, screen disappearance, or
-/// once the external attempt starts.
-private struct PendingExternalFallback {
-    let token: ScreenshotSelectionToken
-    /// The Requester workflow's evaluation of the selection: the eligible
-    /// screenshots (never an ineligible one) and their on-device evidence.
-    let evaluation: ScreenshotAssistanceRuntime<RequesterOrderWorkflow>.Evaluation
-    /// The local outcome that made external AI the fallback, kept so that the
-    /// same outcome can be presented if the popup can no longer be offered.
-    let reason: ScreenshotExternalFallbackReason
 }
 
 @MainActor
@@ -187,8 +173,6 @@ final class ScreenshotProposalStore: ObservableObject {
     /// generation finishing (and removing itself) can never clear busy state
     /// a newer generation still owns.
     @Published private var inFlightGenerations: Set<Int> = []
-    /// W4-S3: non-nil exactly while the external-AI fallback popup is offered.
-    @Published private var pendingExternalFallback: PendingExternalFallback?
 
     private let service: ScreenshotProposalService
     /// The shared runtime, parameterized with the Requester workflow adapter.
@@ -211,18 +195,6 @@ final class ScreenshotProposalStore: ObservableObject {
         inFlightGenerations.contains(fence.currentGeneration)
     }
 
-    /// W4-S3: whether the centered `Couldn’t analyze these on your device`
-    /// popup is being offered for the current selection.
-    var isAwaitingExternalAIPermission: Bool {
-        pendingExternalFallback != nil
-    }
-
-    /// The local fallback reason retained by the pending popup, readable for
-    /// proof only.
-    var pendingExternalFallbackReason: ScreenshotExternalFallbackReason? {
-        pendingExternalFallback?.reason
-    }
-
     init(
         service: ScreenshotProposalService,
         preferences: ScreenshotProposalPreferencesStoring,
@@ -231,23 +203,32 @@ final class ScreenshotProposalStore: ObservableObject {
         self.service = service
         self.preferences = preferences
         self.runtime = runtime ?? RequesterScreenshotAssistanceProduction.makeRuntime(service: service)
-        self.isAIAssistanceEnabled = preferences.isAIAssistanceEnabled
+        self.isAIAssistanceEnabled = preferences.hasValidScreenshotAssistanceConsent
         self.hasCompletedScreenshotHelp = preferences.hasCompletedScreenshotHelp
     }
 
-    /// Off must retire the current generation, not just cancel its task
-    /// (review finding: "turning it back On cannot allow an old analysis
-    /// outcome to become current"). Retiring makes `isCurrent(_:)` `false`
-    /// for every token minted before this call, deterministically, regardless
-    /// of the cancellation's own timing. W4-S3: Off also retires a pending
-    /// external-AI popup and its in-memory screenshots, so no transfer can be
-    /// prevented from starting OR applied late. Turning Screenshot Assistance
-    /// back On does not itself revive anything, and authorizes nothing
-    /// external: a later analysis only ever starts from a fresh
-    /// `beginSelection(...)` token, and any external transfer needs its own
-    /// `Use external AI` action.
+    /// W4-S3 consent-authority revision: the one toggle IS the consent
+    /// record. `enabled == true` is the `Turn On` action's effect — the only
+    /// path that may establish a valid consent record — and callers must
+    /// reach it only after the requester has seen and confirmed the
+    /// disclosure (`RequestFoodView`/`SettingsView` own presenting it; this
+    /// store never presents UI). `enabled == false` is Off: it revokes the
+    /// consent record and must retire the current generation, not just
+    /// cancel its task (review finding carried over from the pre-revision
+    /// popup model: "turning it back On cannot allow an old analysis outcome
+    /// to become current"). Retiring makes `isCurrent(_:)` `false` for every
+    /// token minted before this call, deterministically, regardless of the
+    /// cancellation's own timing, and fences any in-flight local or automatic
+    /// external attempt so no transfer already in flight can be applied late
+    /// and no new one can start. Turning Screenshot Assistance back On does
+    /// not itself revive anything: a later analysis only ever starts from a
+    /// fresh `beginSelection(...)` token, under its own fresh `Turn On`.
     func setAIAssistanceEnabled(_ enabled: Bool) {
-        preferences.isAIAssistanceEnabled = enabled
+        if enabled {
+            preferences.grantScreenshotAssistanceConsent()
+        } else {
+            preferences.revokeScreenshotAssistanceConsent()
+        }
         isAIAssistanceEnabled = enabled
         if !enabled {
             retireCurrentSelection()
@@ -291,16 +272,15 @@ final class ScreenshotProposalStore: ObservableObject {
     /// here. Screenshot-derived values remain eligible to be replaced by a
     /// newer proposal, while each structured meal subfield is handled alone.
     ///
-    /// A new selection retires any previous external-AI popup and its
-    /// permission state: permission is per selected screenshot set and can
-    /// never carry over to this one.
+    /// A new selection retires whatever the previous one was doing: any
+    /// in-flight local or automatic-external attempt for it is fenced, so a
+    /// late result can never be applied to this one.
     func beginSelection(
         clearing draft: inout RequestFoodFormDraft,
         manualEdits: ScreenshotFieldManualEditState
     ) -> ScreenshotSelectionToken {
         // A newer selection immediately retires and cancels whatever the
         // previous one was doing, synchronously — see `ScreenshotAttemptFence`.
-        discardPendingExternalFallback()
         let token = fence.beginAttempt()
         notice = nil
         if !manualEdits.hasManuallyEditedLocation {
@@ -331,47 +311,41 @@ final class ScreenshotProposalStore: ObservableObject {
     /// screen disappearance (review finding: "invalidate old work on
     /// relevant dismissal/disappearance"), where there is no longer a live
     /// `RequestFoodFormDraft` to clear stale values from, but any in-flight
-    /// work or pending external-AI popup for this screen must still stop
-    /// mattering: `isCurrent(_:)` will report `false` for whatever token it
-    /// was still carrying.
+    /// work for this screen must still stop mattering: `isCurrent(_:)` will
+    /// report `false` for whatever token it was still carrying.
     func invalidateCurrentSelection() {
         retireCurrentSelection()
     }
 
     private func retireCurrentSelection() {
-        discardPendingExternalFallback()
         fence.retire()
         notice = nil
     }
 
-    /// Releases the pending external-AI popup state and its in-memory
-    /// screenshots.
-    private func discardPendingExternalFallback() {
-        guard pendingExternalFallback != nil else { return }
-        pendingExternalFallback = nil
-    }
-
-    /// Analyzes the already-prepared screenshots of one selection, local-first.
+    /// Analyzes the already-prepared screenshots of one selection, local-first,
+    /// falling through to one automatic external attempt when consent to do so
+    /// is already standing.
     ///
     /// 1. The Requester workflow's deterministic on-device eligibility gate
     ///    runs first (it derives its own on-device OCR evidence from the
     ///    ordered selection). A wholly ineligible selection returns an
     ///    ineligible outcome (existing `unsupportedScreenshot` treatment) and
-    ///    NEVER reaches any provider or the external-AI popup.
+    ///    NEVER reaches any provider.
     /// 2. One local attempt runs. A useful result (at least one valid proposal
     ///    field, even partial) is returned to be applied.
     /// 3. Only when the local attempt was unavailable/unqualified, failed, or
-    ///    completed with zero usable fields is the external-AI popup offered
-    ///    (`isAwaitingExternalAIPermission`) — with nothing sent. This method
-    ///    returns `nil` in that case, and for cancelled/stale/superseded work.
-    ///    Without current participant authority the popup is not offered and
-    ///    the same local outcome is presented as the ordinary requester
-    ///    treatment instead (`.unavailable` notice, or the empty eligible
-    ///    outcome, which `apply` turns into `.noUsefulExtraction`).
-    ///
-    /// This method can never cause an external transfer; only
-    /// `useExternalAI(participantAuthority:)` can, and only after the
-    /// requester's explicit `Use external AI` action.
+    ///    completed with zero usable fields does `attemptExternalFallback`
+    ///    run. W4-S3 consent-authority revision: Screenshot Assistance being
+    ///    On IS valid standing consent (`setAIAssistanceEnabled(_:)`'s only
+    ///    documentation) — there is no separate per-attempt
+    ///    external-transfer permission dialog any more, so a qualified local
+    ///    path and the accepted external path both proceed under the one
+    ///    standing consent, with no new prompt. Without current participant
+    ///    authority (a session/identity fact, independent of AI consent) the
+    ///    external attempt does not run and the same local outcome is
+    ///    presented as the ordinary requester treatment instead (`.unavailable`
+    ///    notice, or the empty eligible outcome, which `apply` turns into
+    ///    `.noUsefulExtraction`).
     ///
     /// Nothing here mutates `draft`; the caller applies the result
     /// synchronously afterward via `apply(_:manualEdits:to:)`, since a
@@ -383,14 +357,15 @@ final class ScreenshotProposalStore: ObservableObject {
     ///
     /// `participantAuthority` supplies the requester's CURRENT participant
     /// authority (`nil` once it was lost after this already-admitted form
-    /// mounted). It is evaluated ONLY at the moment the external-AI popup would
-    /// be offered — after evidence derivation and the local attempt have
-    /// finished — never earlier, so authority lost while those ran can never
-    /// still yield the offer. Local analysis and its ordinary outcome notice are
-    /// unaffected by it, and its value is not retained.
+    /// mounted). It is evaluated ONLY at the moment an external attempt would
+    /// run — after evidence derivation and the local attempt have finished,
+    /// and again immediately before the provider is invoked — never earlier,
+    /// so authority lost while those ran can never still yield a transfer.
+    /// Local analysis and its ordinary outcome notice are unaffected by it,
+    /// and its value is not retained.
     func analyzeScreenshot(
         images: [ScreenshotPreparedImage],
-        participantAuthority: @MainActor () -> String?,
+        participantAuthority: @escaping @MainActor () -> String?,
         token: ScreenshotSelectionToken
     ) async -> ScreenshotProposalOutcome? {
         guard !images.isEmpty,
@@ -442,7 +417,7 @@ final class ScreenshotProposalStore: ObservableObject {
             let outcome = analysis.outcome
             guard outcome.eligible else { return outcome }
             if outcome.isEmpty {
-                return resolveExternalFallback(
+                return await attemptExternalFallback(
                     .noUsefulExtraction,
                     evaluation: evaluation,
                     participantAuthority: participantAuthority,
@@ -451,7 +426,7 @@ final class ScreenshotProposalStore: ObservableObject {
             }
             return outcome
         case .localUnavailable, .failed:
-            return resolveExternalFallback(
+            return await attemptExternalFallback(
                 .localUnavailable,
                 evaluation: evaluation,
                 participantAuthority: participantAuthority,
@@ -464,114 +439,31 @@ final class ScreenshotProposalStore: ObservableObject {
         }
     }
 
-    /// A local fallback outcome (`reason`) either holds the external-AI popup
-    /// or, when current participant authority is missing, is presented as the
-    /// ordinary requester outcome it always was. Only the offer depends on
-    /// authority; no verification prompt is ever launched from here.
+    /// W4-S3 consent-authority revision: runs the one terminal external
+    /// attempt automatically under Screenshot Assistance's standing consent —
+    /// no popup, no per-attempt tap. Without current participant authority
+    /// (read here, at the decision, and nowhere earlier) the attempt does not
+    /// run and the ordinary local-outcome treatment is presented instead; no
+    /// Screenshot Assistance-owned verification prompt is ever launched from
+    /// here.
     ///
-    /// `participantAuthority` is evaluated here, at the offer decision, and
-    /// nowhere else on the analysis path.
-    ///
-    /// Returns what the caller should apply: `nil` when the popup is now
-    /// pending or the reason has only a notice, otherwise the ordinary empty
-    /// outcome.
-    private func resolveExternalFallback(
+    /// Returns the outcome to apply, or `nil` for a notice-only treatment, a
+    /// stale/cancelled/superseded attempt, or a failure (which sets `notice`).
+    private func attemptExternalFallback(
         _ reason: ScreenshotExternalFallbackReason,
         evaluation: ScreenshotAssistanceRuntime<RequesterOrderWorkflow>.Evaluation,
-        participantAuthority: @MainActor () -> String?,
+        participantAuthority: @escaping @MainActor () -> String?,
         token: ScreenshotSelectionToken
-    ) -> ScreenshotProposalOutcome? {
+    ) async -> ScreenshotProposalOutcome? {
         guard participantAuthority() != nil else {
             return presentLocalOutcome(for: reason)
-        }
-        pendingExternalFallback = PendingExternalFallback(
-            token: token,
-            evaluation: evaluation,
-            reason: reason
-        )
-        return nil
-    }
-
-    /// The existing requester treatment for a local fallback outcome:
-    /// `.unavailable` is a notice (nothing to apply); zero usable fields is the
-    /// ordinary eligible-but-empty outcome, which `apply` turns into the
-    /// existing `.noUsefulExtraction` treatment.
-    private func presentLocalOutcome(for reason: ScreenshotExternalFallbackReason) -> ScreenshotProposalOutcome? {
-        switch reason {
-        case .localUnavailable:
-            notice = .unavailable
-            return nil
-        case .noUsefulExtraction:
-            return ScreenshotProposalOutcome(eligible: true, proposal: .empty)
-        }
-    }
-
-    /// Participant authority was lost while the popup was pending: the
-    /// external action is no longer usable, so it is retired (its held
-    /// screenshots released, nothing sent, no verification prompt) and the
-    /// local outcome that originally caused it is presented instead. Returns
-    /// the outcome the caller must apply (with its token), or `nil` when
-    /// nothing is pending, the selection is no longer current, or the
-    /// treatment is notice-only.
-    func retireExternalFallbackForLostAuthority() -> (token: ScreenshotSelectionToken, outcome: ScreenshotProposalOutcome)? {
-        guard let pending = pendingExternalFallback else { return nil }
-        discardPendingExternalFallback()
-        guard isCurrent(pending.token), isAIAssistanceEnabled,
-              let outcome = presentLocalOutcome(for: pending.reason) else {
-            return nil
-        }
-        return (pending.token, outcome)
-    }
-
-    /// `Continue manually`: sends nothing off-device, dismisses the popup,
-    /// releases the held screenshots, and leaves manual entry (and Screenshot
-    /// Assistance itself, still On) exactly as they were.
-    func continueManually() {
-        discardPendingExternalFallback()
-    }
-
-    /// `Use external AI`: the requester's explicit permission to send the
-    /// CURRENTLY SELECTED screenshots, through CommonPlate, to OpenAI for this
-    /// one external attempt. There is no second confirmation, and the
-    /// permission is consumed here: it is not persisted, remembered, or reusable.
-    ///
-    /// This is one terminal attempt for the selection. Whatever it produces —
-    /// a useful proposal, nothing useful, or a failure — ends with the existing
-    /// requester treatment; it never offers the popup again for the same
-    /// selection (the requester may `Change` the selection).
-    ///
-    /// Returns the outcome to apply, with the token it belongs to, or `nil` for
-    /// stale/cancelled/superseded/failed work (a failure sets `notice`).
-    func useExternalAI(
-        participantAuthority: @escaping @MainActor () -> String?
-    ) async -> (token: ScreenshotSelectionToken, outcome: ScreenshotProposalOutcome)? {
-        guard let pending = pendingExternalFallback,
-              isCurrent(pending.token),
-              isAIAssistanceEnabled else {
-            // A retired popup's permission can never be used.
-            discardPendingExternalFallback()
-            return nil
-        }
-        // Consumed: the popup is gone and the held screenshots are now owned
-        // solely by this one attempt. A second tap finds nothing pending.
-        pendingExternalFallback = nil
-        let token = pending.token
-
-        // Authority lost between the popup being offered and this tap (the view
-        // normally retires the popup first): send nothing, surface no
-        // verification prompt from Screenshot Assistance, and present the
-        // local outcome that originally caused the popup. Manual entry stays
-        // available. This tap-time check is not sufficient by itself: the
-        // runtime reads authority again at the transfer boundary.
-        guard participantAuthority() != nil else {
-            return presentLocalOutcome(for: pending.reason).map { (token, $0) }
         }
 
         // The runtime mints the permission for exactly this token and this
         // evaluation, and only while the token is current and is the attempt the
         // evaluation was produced for. A refusal means the selection was
         // retired: nothing is resumed and no resource exists.
-        guard let permission = runtime.authorizeExternalTransfer(for: token, evaluation: pending.evaluation) else {
+        guard let permission = runtime.authorizeExternalTransfer(for: token, evaluation: evaluation) else {
             return nil
         }
 
@@ -603,12 +495,12 @@ final class ScreenshotProposalStore: ObservableObject {
            let failure = error as? ScreenshotAnalysisFailure {
             // Refused by the runtime's own gates, before any provider work: no
             // provider call. A retired selection presents nothing; authority
-            // that disappeared after the tap presents the local outcome that
-            // caused the popup, exactly as the tap-time check does.
+            // that disappeared between the offer decision and the transfer
+            // boundary presents the local outcome that caused the fallback.
             switch failure {
             case .authorityUnavailable:
                 guard isCurrent(token), isAIAssistanceEnabled else { return nil }
-                return presentLocalOutcome(for: pending.reason).map { (token, $0) }
+                return presentLocalOutcome(for: reason)
             case .permissionUnavailable:
                 return nil
             default:
@@ -622,7 +514,7 @@ final class ScreenshotProposalStore: ObservableObject {
 
         switch result {
         case .success(let outcome):
-            return (token, outcome)
+            return outcome
         case .failure(let error):
             if error is CancellationError { return nil }
             notice = ScreenshotProposalNotice.map(error)
@@ -630,7 +522,21 @@ final class ScreenshotProposalStore: ObservableObject {
         }
     }
 
-    /// Applies an outcome `analyzeScreenshot` (or `useExternalAI`) returned. Synchronous and
+    /// The existing requester treatment for a local fallback outcome:
+    /// `.unavailable` is a notice (nothing to apply); zero usable fields is the
+    /// ordinary eligible-but-empty outcome, which `apply` turns into the
+    /// existing `.noUsefulExtraction` treatment.
+    private func presentLocalOutcome(for reason: ScreenshotExternalFallbackReason) -> ScreenshotProposalOutcome? {
+        switch reason {
+        case .localUnavailable:
+            notice = .unavailable
+            return nil
+        case .noUsefulExtraction:
+            return ScreenshotProposalOutcome(eligible: true, proposal: .empty)
+        }
+    }
+
+    /// Applies an outcome `analyzeScreenshot` returned. Synchronous and
     /// side-effect-bounded to `draft`/`notice` only — safe to call with an
     /// `inout` `@State` draft because it never suspends. Callers must check
     /// `isCurrent(token)` again immediately before calling this (the result

@@ -9,7 +9,7 @@
 // guarantees the view used to provide are proved here against the real store:
 //
 // - a retired selection stops recognizing immediately and can never reach a
-//   provider or raise the popup;
+//   provider, local or external;
 // - a newer selection wins over an older one still recognizing;
 // - Settings Off during derivation retires the attempt;
 // - `isApplying` covers exactly the provider attempt, never the derivation, so
@@ -107,12 +107,11 @@ final class ScreenshotEvaluationFencingTests: XCTestCase {
         XCTAssertLessThan(harness.recognizer.callCount, 5, "a retired selection stops recognizing the rest of its screenshots")
         XCTAssertEqual(harness.local.extractCallCount, 0)
         XCTAssertEqual(harness.external.analyzeCallCount, 0)
-        XCTAssertFalse(harness.store.isAwaitingExternalAIPermission)
         XCTAssertFalse(harness.store.isApplying)
         XCTAssertNil(harness.store.notice)
     }
 
-    func testSettingsOffDuringDerivationRetiresTheAttemptWithoutAPopupOrAProviderCall() async {
+    func testSettingsOffDuringDerivationRetiresTheAttemptWithoutAProviderCall() async {
         let harness = makeHarness(recognizerDelay: .milliseconds(120), localBehavior: .fail(StubLocalProvider.StubError()))
         let token = begin(harness.store)
         let task = Task {
@@ -130,8 +129,7 @@ final class ScreenshotEvaluationFencingTests: XCTestCase {
         XCTAssertNil(outcome)
         XCTAssertFalse(harness.store.isCurrent(token))
         XCTAssertEqual(harness.local.extractCallCount, 0)
-        XCTAssertEqual(harness.external.analyzeCallCount, 0)
-        XCTAssertFalse(harness.store.isAwaitingExternalAIPermission, "the local failure that would have raised the popup never happened")
+        XCTAssertEqual(harness.external.analyzeCallCount, 0, "the local failure that would have fallen through to external AI never happened")
     }
 
     func testANewerSelectionWinsOverAnOlderSelectionStillRecognizing() async {
@@ -209,6 +207,5 @@ final class ScreenshotEvaluationFencingTests: XCTestCase {
         XCTAssertEqual(harness.recognizer.callCount, 1)
         XCTAssertEqual(harness.local.extractCallCount, 0)
         XCTAssertEqual(harness.external.analyzeCallCount, 0)
-        XCTAssertFalse(harness.store.isAwaitingExternalAIPermission)
     }
 }

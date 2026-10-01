@@ -2,13 +2,15 @@
 //  ScreenshotLocalFirstRoutingTests.swift
 //  CommonPlateiosTests
 //
-// W4-S3 requester routing, per-attempt permission, and privacy proof against
-// the real `ScreenshotProposalStore`: the local-first routing matrix, the three
-// accepted external-AI popup triggers (and every case that must NOT show it),
-// zero external transfer before `Use external AI`, `Continue manually`, the
-// per-selection/per-attempt nature of permission, Settings ON/OFF semantics,
-// the inert legacy consent flag, external-attempt terminality, and stale-result
-// fencing. All evidence is synthetic.
+// W4-S3 requester routing and privacy proof against the real
+// `ScreenshotProposalStore`: the local-first routing matrix, every local
+// fallback class falling through to ONE automatic external attempt under
+// Screenshot Assistance's standing consent (W4-S3 consent-authority
+// revision — there is no per-attempt external-AI permission step any more),
+// Settings ON/OFF semantics over that standing consent, external-attempt
+// terminality, and stale-result fencing. All evidence is synthetic. Legacy
+// pre-revision consent-key behavior is covered in
+// `ScreenshotAssistanceConsentAuthorityTests`, not here.
 import Foundation
 import XCTest
 @testable import CommonPlateios
@@ -36,7 +38,10 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
     }
 
     /// Store wired to the injected qualified local path and a counting external
-    /// stub — for behavior that needs to observe provider calls.
+    /// stub — for behavior that needs to observe provider calls. Screenshot
+    /// Assistance starts On with standing consent
+    /// (`InMemoryScreenshotProposalPreferencesStorage`'s default) unless the
+    /// caller supplies its own `preferences`.
     private func makeStore(
         local: StubLocalProvider?,
         external providedExternal: StubExternalProvider? = nil,
@@ -90,9 +95,19 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         return .response(data: try! JSONSerialization.data(withJSONObject: body))
     }
 
-    // MARK: - Routing matrix: success and ineligible never show the popup
+    /// An external provider configured to return a result distinguishable
+    /// from any local output, so a test can tell the external attempt's
+    /// result from a local one.
+    private func distinguishableExternal() -> StubExternalProvider {
+        StubExternalProvider(result: .success(ScreenshotProposalOutcome(
+            eligible: true,
+            proposal: ScreenshotProposal(mealItems: [MealItem(name: "External Item")])
+        )))
+    }
 
-    func testUsefulPartialLocalResultIsSuccessWithNoPopupAndNoExternalCall() async {
+    // MARK: - Routing matrix: success and ineligible never reach any provider fallback
+
+    func testUsefulPartialLocalResultIsSuccessWithNoExternalCall() async {
         let local = StubLocalProvider(behavior: .output(usefulOutput()))
         let external = StubExternalProvider()
         let store = makeStore(local: local, external: external)
@@ -104,12 +119,11 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         XCTAssertEqual(outcome?.proposal.selectedDiningSpot?.name, "Palladium")
         XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "1 Bowl")])
         XCTAssertNil(outcome?.proposal.mealSwipes)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "a useful partial local result must not offer external AI")
-        XCTAssertEqual(external.analyzeCallCount, 0)
+        XCTAssertEqual(external.analyzeCallCount, 0, "a useful partial local result must not fall through to external AI")
         XCTAssertNil(store.notice)
     }
 
-    func testPolicyIneligibleSelectionGetsTheExistingIneligibleTreatmentAndNoPopup() async {
+    func testPolicyIneligibleSelectionGetsTheExistingIneligibleTreatment() async {
         let local = StubLocalProvider(behavior: .output(usefulOutput()))
         let external = StubExternalProvider()
         let store = makeStore(local: local, external: external)
@@ -122,9 +136,8 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         )
 
         XCTAssertEqual(outcome, ScreenshotProposalOutcome(eligible: false, proposal: .empty))
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "policy-ineligible evidence never gets the popup")
         XCTAssertEqual(local.extractCallCount, 0, "no provider of either class sees ineligible evidence")
-        XCTAssertEqual(external.analyzeCallCount, 0)
+        XCTAssertEqual(external.analyzeCallCount, 0, "policy-ineligible evidence never reaches external AI")
 
         var draft = RequestFoodFormDraft()
         store.apply(outcome!, manualEdits: noManualEdits, to: &draft)
@@ -148,64 +161,65 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         XCTAssertEqual(local.lastEvidenceTexts, ["Your Pickup Order eligible one"])
     }
 
-    // MARK: - Routing matrix: the three popup triggers
+    // MARK: - Routing matrix: every local fallback class falls through to one
+    // automatic external attempt under standing consent (W4-S3 consent-authority
+    // revision: no per-attempt permission step)
 
-    func testUnavailableLocalModelOffersThePopupAndSendsNothing() async {
+    func testUnavailableLocalModelFallsThroughToAutomaticExternalAttempt() async {
         let local = StubLocalProvider(availability: .unavailable(.appleIntelligenceNotEnabledForTest), behavior: .output(usefulOutput()))
-        let external = StubExternalProvider()
+        let external = distinguishableExternal()
         let store = makeStore(local: local, external: external)
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "External Item")])
         XCTAssertEqual(local.extractCallCount, 0)
-        XCTAssertEqual(external.analyzeCallCount, 0, "offering the popup transfers nothing")
+        XCTAssertEqual(external.analyzeCallCount, 1, "falls through to the external attempt automatically")
     }
 
-    func testUnqualifiedLocalCombinationOffersThePopupWithoutRunningTheModel() async {
+    func testUnqualifiedLocalCombinationFallsThroughToAutomaticExternalAttemptWithoutRunningTheModel() async {
         let local = StubLocalProvider(behavior: .output(usefulOutput()))
-        let external = StubExternalProvider()
+        let external = distinguishableExternal()
         let store = makeStore(local: local, external: external, qualified: false)
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "External Item")])
         XCTAssertEqual(local.extractCallCount, 0, "an available but unqualified model is not used")
-        XCTAssertEqual(external.analyzeCallCount, 0)
+        XCTAssertEqual(external.analyzeCallCount, 1)
     }
 
-    func testLocalFailureOffersThePopup() async {
+    func testLocalFailureFallsThroughToAutomaticExternalAttempt() async {
         let local = StubLocalProvider(behavior: .fail(StubLocalProvider.StubError()))
-        let external = StubExternalProvider()
+        let external = distinguishableExternal()
         let store = makeStore(local: local, external: external)
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-        XCTAssertEqual(external.analyzeCallCount, 0, "a local failure never silently falls back to external AI")
-        XCTAssertNil(store.notice, "the popup, not a notice, is the treatment for a local failure")
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "External Item")])
+        XCTAssertEqual(external.analyzeCallCount, 1, "a local failure falls through to the external attempt")
+        XCTAssertNil(store.notice)
     }
 
-    func testLocalTimeoutOffersThePopup() async {
+    func testLocalTimeoutFallsThroughToAutomaticExternalAttempt() async {
         let local = StubLocalProvider(behavior: .hang)
-        let store = makeStore(local: local, timeout: .milliseconds(80))
+        let external = distinguishableExternal()
+        let store = makeStore(local: local, external: external, timeout: .milliseconds(80))
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "External Item")])
+        XCTAssertEqual(external.analyzeCallCount, 1)
     }
 
-    func testLocalResultWithZeroUsableValidFieldsOffersThePopup() async {
+    func testLocalResultWithZeroUsableValidFieldsFallsThroughToAutomaticExternalAttempt() async {
         let local = StubLocalProvider(behavior: .output(emptyOutput))
-        let store = makeStore(local: local)
+        let external = distinguishableExternal()
+        let store = makeStore(local: local, external: external)
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(
@@ -214,29 +228,31 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
             token: token
         )
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "External Item")])
+        XCTAssertEqual(external.analyzeCallCount, 1)
     }
 
     /// A vendor grounded in the independent OCR evidence is itself a valid
-    /// proposal field even when the model returns nothing, so such a result is a
-    /// (partial) success rather than a popup trigger.
+    /// proposal field even when the model returns nothing, so such a result is
+    /// a (partial) success rather than an external-fallback trigger.
     func testEvidenceGroundedVendorAloneIsAUsefulLocalResult() async {
-        let store = makeStore(local: StubLocalProvider(behavior: .output(emptyOutput)))
+        let external = StubExternalProvider()
+        let store = makeStore(local: StubLocalProvider(behavior: .output(emptyOutput)), external: external)
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
         XCTAssertEqual(outcome?.proposal.selectedDiningSpot?.name, "Palladium")
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(external.analyzeCallCount, 0, "a useful local result never falls through")
     }
 
     /// Output that only looked useful before validation counts as zero usable
     /// fields once the on-device validator has dropped what evidence doesn't
     /// support.
-    func testLocalOutputThatValidationEmptiesOffersThePopup() async {
+    func testLocalOutputThatValidationEmptiesFallsThroughToAutomaticExternalAttempt() async {
         let ungrounded = RequesterOrderRawOutput(visibleVenueText: "Cafe 370", foodItems: [], mealSwipes: 3)
-        let store = makeStore(local: StubLocalProvider(behavior: .output(ungrounded)))
+        let external = distinguishableExternal()
+        let store = makeStore(local: StubLocalProvider(behavior: .output(ungrounded)), external: external)
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(
@@ -245,29 +261,30 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
             token: token
         )
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "External Item")])
+        XCTAssertEqual(external.analyzeCallCount, 1)
     }
 
     /// The production wiring has no qualified combination, so every eligible
-    /// attempt reaches the popup — proven with a real network-backed external
-    /// provider so any leaked byte would be captured.
-    func testProductionWiringIsLocalNotQualifiedAndSendsNothingBeforeTheTap() async {
+    /// attempt falls through to the external attempt — proven with a real
+    /// network-backed external provider on a stubbed transport.
+    func testProductionWiringFallsThroughToAutomaticExternalAttempt() async {
+        ScreenshotProposalURLProtocol.enqueue(eligibleExternalStub())
         let store = makeProductionWiredStore()
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-        XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0)
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "1 Bowl")])
+        XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 1)
     }
 
-    // MARK: - Not shown for cancelled / stale / superseded attempts
+    // MARK: - No automatic external attempt for cancelled / stale / superseded / Off work
 
-    func testCancelledLocalAttemptShowsNoPopup() async {
+    func testCancelledLocalAttemptMakesNoExternalAttempt() async {
         let local = StubLocalProvider(behavior: .delayed(.milliseconds(300), usefulOutput()))
-        let store = makeStore(local: local)
+        let external = StubExternalProvider()
+        let store = makeStore(local: local, external: external)
         let (token, _) = begin(store)
         let task = Task { await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token) }
         try? await Task.sleep(for: .milliseconds(30))
@@ -276,10 +293,10 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
 
         let outcome = await task.value
         XCTAssertNil(outcome)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(external.analyzeCallCount, 0)
     }
 
-    func testSupersededLocalAttemptShowsNoPopupAndCannotApply() async {
+    func testSupersededLocalAttemptMakesNoExternalAttemptAndCannotApply() async {
         let slowFailing = StubLocalProvider(behavior: .fail(StubLocalProvider.StubError()))
         let external = StubExternalProvider()
         let store = makeStore(local: slowFailing, external: external)
@@ -294,68 +311,37 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         XCTAssertNil(outcome)
         XCTAssertFalse(store.isCurrent(older))
         XCTAssertTrue(store.isCurrent(newer))
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "a superseded attempt must not raise a popup for the newer selection")
-        XCTAssertEqual(external.analyzeCallCount, 0)
+        XCTAssertEqual(external.analyzeCallCount, 0, "a superseded attempt must not fall through for the newer selection")
     }
 
-    func testAttemptStartedWhileAssistanceIsOffShowsNoPopup() async {
-        let store = makeStore(local: StubLocalProvider(behavior: .fail(StubLocalProvider.StubError())))
+    func testAttemptStartedWhileAssistanceIsOffMakesNoExternalAttempt() async {
+        let external = StubExternalProvider()
+        let store = makeStore(local: StubLocalProvider(behavior: .fail(StubLocalProvider.StubError())), external: external)
         let (token, _) = begin(store)
         store.setAIAssistanceEnabled(false)
 
         let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
         XCTAssertNil(outcome)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(external.analyzeCallCount, 0)
     }
 
-    // MARK: - No external transfer before `Use external AI`; Continue manually
+    // MARK: - Automatic external fallback proceeds in the one call, exactly once
 
-    func testPendingPopupTransfersNothingUntilTheRequesterTapsUseExternalAI() async {
+    func testAutomaticExternalFallbackTransfersInTheSameCallWithNoSeparateStepNeeded() async {
         let external = StubExternalProvider(result: .success(ScreenshotProposalOutcome(eligible: true, proposal: .empty)))
         let store = makeStore(local: nil, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
 
-        // Time passes with the popup open; nothing moves.
-        try? await Task.sleep(for: .milliseconds(80))
-        XCTAssertEqual(external.analyzeCallCount, 0)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
-
-        XCTAssertNotNil(resolved)
+        XCTAssertNotNil(outcome, "the external attempt's result is the one call's own return value")
         XCTAssertEqual(external.analyzeCallCount, 1)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
     }
 
-    func testContinueManuallySendsNothingDismissesThePopupAndKeepsAssistanceOn() async {
-        let external = StubExternalProvider()
-        let preferences = InMemoryScreenshotProposalPreferencesStorage()
-        let store = makeStore(local: nil, external: external, preferences: preferences)
-        let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-
-        store.continueManually()
-
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
-        XCTAssertEqual(external.analyzeCallCount, 0)
-        XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0)
-        XCTAssertTrue(store.isAIAssistanceEnabled, "Continue manually does not turn Screenshot Assistance Off")
-        XCTAssertTrue(preferences.isAIAssistanceEnabled)
-        XCTAssertNil(store.notice)
-
-        // The retired popup's permission cannot be used afterwards.
-        let late = await store.useExternalAI(participantAuthority: { "an-authority" })
-        XCTAssertNil(late)
-        XCTAssertEqual(external.analyzeCallCount, 0)
-    }
-
-    func testRealTransportSeesZeroRequestsForLocalSuccessPopupAndContinueManually() async {
+    func testRealTransportSeesZeroRequestsForAnOutrightLocalSuccess() async {
         // Real network-backed external provider on a capturing transport, with
-        // a qualified local stub so the local path genuinely runs.
+        // a qualified local stub so the local path genuinely runs and succeeds.
         let runtime = ScreenshotAssistanceRuntime(
             workflow: RequesterOrderWorkflow(recognizer: SyntheticTextRecognizer()),
             localProvider: StubLocalProvider(behavior: .output(usefulOutput())),
@@ -377,135 +363,104 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         )
     }
 
-    // MARK: - Permission is per attempt and per selection
+    // MARK: - Each selection's automatic attempt is independent
 
-    func testUseExternalAIIsSingleUse() async {
-        let external = StubExternalProvider()
-        let store = makeStore(local: nil, external: external)
-        let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
-
-        let first = await store.useExternalAI(participantAuthority: { "an-authority" })
-        let second = await store.useExternalAI(participantAuthority: { "an-authority" })
-
-        XCTAssertNotNil(first)
-        XCTAssertNil(second, "a second tap has no permission to spend")
-        XCTAssertEqual(external.analyzeCallCount, 1)
-    }
-
-    func testEveryNewSelectionNeedsANewExternalPermissionTap() async {
+    func testEachNewSelectionRunsItsOwnAutomaticExternalAttempt() async {
         let external = StubExternalProvider()
         let store = makeStore(local: nil, external: external)
         var draft = RequestFoodFormDraft()
 
         let first = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
         _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: first)
-        _ = await store.useExternalAI(participantAuthority: { "an-authority" })
         XCTAssertEqual(external.analyzeCallCount, 1)
 
-        // A new selection: the earlier tap grants nothing. Nothing is sent
-        // until the requester encounters the popup and taps again.
         let second = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
-        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input(byte: 2)], participantAuthority: { "an-authority" }, token: second)
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-        XCTAssertEqual(external.analyzeCallCount, 1, "no transfer without a fresh tap")
-
-        _ = await store.useExternalAI(participantAuthority: { "an-authority" })
-        XCTAssertEqual(external.analyzeCallCount, 2)
+        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input(byte: 2)], participantAuthority: { "an-authority" }, token: second)
+        XCTAssertEqual(external.analyzeCallCount, 2, "each selection's own attempt runs independently, with no reuse")
     }
 
-    func testANewSelectionRetiresThePreviousPopupAndItsPermission() async {
-        let external = StubExternalProvider()
+    func testANewSelectionRetiresTheOlderAttemptsLateExternalResult() async {
+        let external = StubExternalProvider(result: .success(ScreenshotProposalOutcome(
+            eligible: true,
+            proposal: ScreenshotProposal(mealItems: [MealItem(name: "Stale")])
+        )))
+        external.delay = .milliseconds(200)
         let store = makeStore(local: nil, external: external)
         var draft = RequestFoodFormDraft()
-        let first = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: first)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        let older = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
+        let olderTask = Task { await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: older) }
+        try? await Task.sleep(for: .milliseconds(30))
 
-        let second = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
+        let newer = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
 
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
-        XCTAssertFalse(store.isCurrent(first))
-        XCTAssertTrue(store.isCurrent(second))
-        let stale = await store.useExternalAI(participantAuthority: { "an-authority" })
-        XCTAssertNil(stale, "a replaced selection cannot reuse the previous permission")
-        XCTAssertEqual(external.analyzeCallCount, 0)
+        XCTAssertFalse(store.isCurrent(older))
+        XCTAssertTrue(store.isCurrent(newer))
+        let olderOutcome = await olderTask.value
+        XCTAssertNil(olderOutcome, "a replaced selection's late external result can never apply")
     }
 
-    func testLeavingTheScreenRetiresThePopupAndReleasesTheSelection() async {
+    func testLeavingTheScreenRetiresAnInFlightAutomaticExternalAttempt() async {
         let external = StubExternalProvider()
+        external.delay = .milliseconds(200)
         let store = makeStore(local: nil, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
+        let task = Task { await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token) }
+        try? await Task.sleep(for: .milliseconds(30))
 
         store.invalidateCurrentSelection()
 
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
-        let retired = await store.useExternalAI(participantAuthority: { "an-authority" })
-        XCTAssertNil(retired)
-        XCTAssertEqual(external.analyzeCallCount, 0)
+        let outcome = await task.value
+        XCTAssertNil(outcome)
     }
 
-    // MARK: - Settings ON / OFF
+    // MARK: - Settings ON / OFF over the standing consent
 
-    /// ON enables Screenshot Assistance and may allow the offer; it never
-    /// authorizes a transfer by itself.
-    func testSettingsOnAloneAuthorizesNoTransfer() async {
+    /// Enabling the setting alone, with no selection in flight, sends nothing:
+    /// only an actual attempt — which only starts from `beginSelection` — can
+    /// ever reach a provider.
+    func testEnablingAloneSendsNothingUntilAnAttemptRuns() {
         let external = StubExternalProvider()
         let preferences = InMemoryScreenshotProposalPreferencesStorage()
-        preferences.isAIAssistanceEnabled = false
+        preferences.hasValidScreenshotAssistanceConsent = false
         let store = makeStore(local: nil, external: external, preferences: preferences)
 
         store.setAIAssistanceEnabled(true)
 
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
-        let retired = await store.useExternalAI(participantAuthority: { "an-authority" })
-        XCTAssertNil(retired)
+        XCTAssertTrue(store.isAIAssistanceEnabled)
         XCTAssertEqual(external.analyzeCallCount, 0)
         XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0)
     }
 
-    func testSettingsOffRetiresThePendingPopupAndTurningOnDoesNotReviveIt() async {
-        let external = StubExternalProvider()
-        let store = makeStore(local: nil, external: external)
-        let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-
-        store.setAIAssistanceEnabled(false)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
-        XCTAssertFalse(store.isCurrent(token))
-
-        store.setAIAssistanceEnabled(true)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "On does not revive a retired popup")
-        let retired = await store.useExternalAI(participantAuthority: { "an-authority" })
-        XCTAssertNil(retired)
-        XCTAssertEqual(external.analyzeCallCount, 0)
-    }
-
-    func testSettingsOffDiscardsALateExternalResult() async {
+    func testOffRetiresAnInFlightAutomaticExternalAttemptAndOnDoesNotReviveIt() async {
         let external = StubExternalProvider(result: .success(ScreenshotProposalOutcome(
             eligible: true,
             proposal: ScreenshotProposal(mealItems: [MealItem(name: "Bowl")])
         )))
-        external.delay = .milliseconds(300)
+        external.delay = .milliseconds(200)
         let store = makeStore(local: nil, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
-        let task = Task { await store.useExternalAI(participantAuthority: { "an-authority" }) }
+        let task = Task { await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token) }
         try? await Task.sleep(for: .milliseconds(40))
-        XCTAssertEqual(external.analyzeCallCount, 1, "the transfer had already begun")
+        XCTAssertEqual(external.analyzeCallCount, 1, "the attempt had already begun")
 
         store.setAIAssistanceEnabled(false)
 
         let resolved = await task.value
         XCTAssertNil(resolved, "a retired attempt's late result can never apply")
         XCTAssertFalse(store.isApplying)
+        XCTAssertFalse(store.isCurrent(token))
+
+        store.setAIAssistanceEnabled(true)
+        XCTAssertEqual(external.analyzeCallCount, 1, "re-enabling never replays the retired attempt")
+
+        var draft = RequestFoodFormDraft()
+        let fresh = store.beginSelection(clearing: &draft, manualEdits: noManualEdits)
+        let freshOutcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input(byte: 2)], participantAuthority: { "an-authority" }, token: fresh)
+        XCTAssertNotNil(freshOutcome, "a fresh selection after re-enabling runs its own attempt normally")
+        XCTAssertEqual(external.analyzeCallCount, 2)
     }
 
-    func testSettingsOffWhileALocalAttemptRunsRetiresItWithoutAPopup() async {
+    func testSettingsOffWhileALocalAttemptRunsRetiresIt() async {
         let local = StubLocalProvider(behavior: .delayed(.milliseconds(300), usefulOutput()))
         let store = makeStore(local: local)
         let (token, _) = begin(store)
@@ -516,110 +471,58 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
 
         let cancelled = await task.value
         XCTAssertNil(cancelled)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
-    }
-
-    // MARK: - Legacy consent grants no authority
-
-    func testPreS3RecordedConsentGrantsNoTransferAuthority() async throws {
-        let suiteName = "commonplate.tests.s3.legacyConsent.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        // A build from before S3 recorded this flag when the requester tapped
-        // Continue on the old disclosure.
-        defaults.set(true, forKey: "commonplate.screenshotProposal.thirdPartyConsentRecorded")
-
-        let store = makeProductionWiredStore(
-            preferences: UserDefaultsScreenshotProposalPreferencesStorage(defaults: defaults)
-        )
-        let (token, _) = begin(store)
-        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
-
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission, "old consent neither skips nor pre-answers the popup")
-        XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0, "old consent authorizes no transfer")
-
-        store.continueManually()
-        XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0)
-    }
-
-    func testNoPersistedRemotePermissionExists() throws {
-        let suiteName = "commonplate.tests.s3.noPersisted.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = ScreenshotProposalStore(
-            service: makeService(),
-            preferences: UserDefaultsScreenshotProposalPreferencesStorage(defaults: defaults),
-            runtime: nil
-        )
-        store.setAIAssistanceEnabled(true)
-        store.recordScreenshotHelpCompleted()
-        let keys = Set(defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("commonplate.screenshotProposal") })
-        XCTAssertEqual(keys, [
-            "commonplate.screenshotProposal.aiAssistanceEnabled",
-            "commonplate.screenshotProposal.helpCompleted",
-        ])
     }
 
     // MARK: - External attempt is one terminal attempt
 
-    func testExternalFailureUsesTheExistingNoticeAndOffersNoSecondPopup() async {
+    func testExternalFailureUsesTheExistingNotice() async {
         let external = StubExternalProvider(result: .failure(ScreenshotProposalServiceError.unavailable(underlying: StubLocalProvider.StubError())))
         let store = makeStore(local: nil, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let resolved = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
         XCTAssertNil(resolved)
         XCTAssertEqual(store.notice, .unavailable)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "no second external-AI offer for the same selection")
         XCTAssertEqual(external.analyzeCallCount, 1)
     }
 
-    func testExternalResultWithNoUsefulFieldsIsTheExistingTreatmentNotASecondPopup() async {
+    func testExternalResultWithNoUsefulFieldsIsTheExistingTreatment() async {
         let external = StubExternalProvider(result: .success(ScreenshotProposalOutcome(eligible: true, proposal: .empty)))
         let store = makeStore(local: nil, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
-        let outcome = try? XCTUnwrap(resolved?.outcome)
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
         XCTAssertEqual(outcome?.isEmpty, true)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
         var draft = RequestFoodFormDraft()
         store.apply(outcome!, manualEdits: noManualEdits, to: &draft)
         XCTAssertEqual(store.notice, .noUsefulExtraction)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
     }
 
-    func testExternalIneligibleResultUsesTheUnsupportedTreatmentNotASecondPopup() async {
+    func testExternalIneligibleResultUsesTheUnsupportedTreatment() async {
         let external = StubExternalProvider(result: .success(ScreenshotProposalOutcome(eligible: false, proposal: .empty)))
         let store = makeStore(local: nil, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertEqual(resolved?.outcome.eligible, false)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(outcome?.eligible, false)
     }
 
-    /// Authority lost between the popup being offered and its tap: nothing is
-    /// sent and Screenshot Assistance surfaces no verification notice.
-    func testExternalAttemptWithoutParticipantAuthoritySendsNothingAndPresentsTheLocalOutcomeInsteadOfVerification() async {
+    /// Without current participant authority, nothing is sent and Screenshot
+    /// Assistance surfaces no verification notice — the ordinary local-outcome
+    /// treatment is presented instead.
+    func testExternalAttemptWithoutParticipantAuthorityPresentsTheLocalOutcomeInsteadOfVerification() async {
         let external = StubExternalProvider()
         let store = makeStore(local: nil, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        let resolved = await store.useExternalAI(participantAuthority: { nil })
+        let resolved = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { nil }, token: token)
 
         XCTAssertNil(resolved)
         XCTAssertEqual(store.notice, .unavailable, "the original local outcome, not a verification notice")
         XCTAssertEqual(external.analyzeCallCount, 0)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "the tap spent this attempt's permission")
     }
 
     /// One logical attempt uses one provider class: an external attempt neither
@@ -632,7 +535,7 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         )))
         let store = makeStore(local: local, external: external)
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(
+        let resolved = await store.analyzeScreenshot(
             images: [
                 ScreenshotTestEvidence.input(ScreenshotTestEvidence.ineligible, byte: 1),
                 ScreenshotTestEvidence.input(ScreenshotTestEvidence.eligibleCartWithoutVendor, byte: 2),
@@ -642,20 +545,19 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
         )
         XCTAssertEqual(local.extractCallCount, 1)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
-
         XCTAssertEqual(external.lastImages.map { $0.data.first }, [2], "an ineligible screenshot is never sent")
-        XCTAssertEqual(resolved?.outcome.proposal.mealItems, [MealItem(name: "External Item")])
-        XCTAssertNil(resolved?.outcome.proposal.selectedDiningSpot)
+        XCTAssertEqual(resolved?.proposal.mealItems, [MealItem(name: "External Item")])
+        XCTAssertNil(resolved?.proposal.selectedDiningSpot)
     }
 
     // MARK: - Real transport: what an external attempt actually sends
 
-    func testExternalAttemptTransmitsOnlyAfterTheTapAndCarriesEligibleEvidence() async throws {
+    func testExternalAttemptTransmitsAutomaticallyAndCarriesEligibleEvidence() async throws {
         ScreenshotProposalURLProtocol.enqueue(eligibleExternalStub())
         let store = makeProductionWiredStore()
         let (token, _) = begin(store)
-        _ = await store.analyzeScreenshot(
+
+        let resolved = await store.analyzeScreenshot(
             images: [
                 ScreenshotTestEvidence.input("Your Pickup Order first", byte: 1),
                 ScreenshotTestEvidence.input(ScreenshotTestEvidence.ineligible, byte: 2),
@@ -663,16 +565,13 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
             participantAuthority: { "an-authority" },
             token: token
         )
-        XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 0)
-
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
 
         XCTAssertEqual(ScreenshotProposalURLProtocol.capturedRequests.count, 1)
         let body = try XCTUnwrap(ScreenshotProposalURLProtocol.capturedRequests.first?.body)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let images = try XCTUnwrap(json["images"] as? [[String: Any]])
         XCTAssertEqual(images.compactMap { $0["localEvidenceText"] as? String }, ["Your Pickup Order first"])
-        XCTAssertEqual(resolved?.outcome.proposal.mealItems, [MealItem(name: "1 Bowl")])
+        XCTAssertEqual(resolved?.proposal.mealItems, [MealItem(name: "1 Bowl")])
     }
 
     // MARK: - 1–5 screenshots and concurrency
@@ -698,7 +597,8 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
 
     func testMoreThanFiveScreenshotsAreRefusedBeforeAnyProvider() async {
         let local = StubLocalProvider(behavior: .output(usefulOutput()))
-        let store = makeStore(local: local)
+        let external = StubExternalProvider()
+        let store = makeStore(local: local, external: external)
         let (token, _) = begin(store)
 
         let outcome = await store.analyzeScreenshot(
@@ -709,7 +609,7 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
 
         XCTAssertNil(outcome)
         XCTAssertEqual(local.extractCallCount, 0)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
+        XCTAssertEqual(external.analyzeCallCount, 0)
     }
 
     func testANewerSelectionWinsOverAnOlderSlowLocalAttempt() async {
@@ -744,6 +644,6 @@ final class ScreenshotLocalFirstRoutingTests: XCTestCase {
 }
 
 private extension ScreenshotLocalUnavailableReason {
-    /// Readable name for the reason the popup tests use.
+    /// Readable name for the local-fallback tests use.
     static var appleIntelligenceNotEnabledForTest: ScreenshotLocalUnavailableReason { .modelNotEnabled }
 }

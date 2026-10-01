@@ -11,6 +11,10 @@
 // `RequesterOpenAIExternalProvider`, `ScreenshotProposalService`, `APIClient`, and
 // a real `URLSession` whose transport is a recording `URLProtocol`. The proof is
 // the transport's submitted-request count plus the store's resulting state.
+//
+// W4-S3 consent-authority revision: the offer decision and (when authorized)
+// the transfer both happen inside the one `analyzeScreenshot` call now — there
+// is no separate per-attempt permission popup/tap to drive first.
 import Foundation
 import XCTest
 @testable import CommonPlateios
@@ -137,71 +141,45 @@ final class ScreenshotExternalRequestSeamTests: XCTestCase {
         return (store, service)
     }
 
-    private func offerPopup(_ store: ScreenshotProposalStore) async -> ScreenshotSelectionToken {
-        let token = beginAttempt(store)
-        _ = await store.analyzeScreenshot(
-            images: [ScreenshotTestEvidence.input()],
-            participantAuthority: { "an-authority" },
-            token: token
-        )
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-        return token
-    }
-
     // MARK: - Accepted submission
 
     func testAnAuthorizedTransferSubmitsExactlyOneRequestAndAppliesItsResult() async {
         let (store, _) = makeStack(.respond(status: 200, body: successBody))
-        _ = await offerPopup(store)
-        XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 0, "nothing is submitted before the tap")
+        let token = beginAttempt(store)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let resolved = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertEqual(resolved?.outcome.proposal.mealItems?.first?.name, "External Item")
+        XCTAssertEqual(resolved?.proposal.mealItems?.first?.name, "External Item")
         XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 1)
         XCTAssertFalse(store.isApplying)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
         XCTAssertNil(store.notice)
     }
 
     func testAnAttemptedRequestThatFailsInTransportKeepsItsNormalFailureNotice() async {
         let (store, _) = makeStack(.respond(status: 500, body: "{}"))
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let resolved = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
         XCTAssertNil(resolved)
         XCTAssertEqual(store.notice, .unavailable)
         XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 1, "the request was submitted once and never retried")
     }
 
-    func testAPermissionIsSingleUseSoASecondTapSubmitsNothing() async {
-        let (store, _) = makeStack(.respond(status: 200, body: successBody))
-        _ = await offerPopup(store)
-
-        let first = await store.useExternalAI(participantAuthority: { "an-authority" })
-        let second = await store.useExternalAI(participantAuthority: { "an-authority" })
-
-        XCTAssertNotNil(first)
-        XCTAssertNil(second)
-        XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 1)
-    }
-
     // MARK: - Cancelled or retired before the submission seam
 
     private func assertNoRequestWasSubmitted(
         _ store: ScreenshotProposalStore,
-        resolved: (token: ScreenshotSelectionToken, outcome: ScreenshotProposalOutcome)?,
+        outcome: ScreenshotProposalOutcome?,
         noticeBefore: ScreenshotProposalNotice?,
         _ message: String,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        XCTAssertNil(resolved, message, file: file, line: line)
+        XCTAssertNil(outcome, message, file: file, line: line)
         XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 0, "\(message): URLSession was never handed a request", file: file, line: line)
         XCTAssertEqual(store.notice, noticeBefore, "\(message): no requester-visible mutation", file: file, line: line)
         XCTAssertFalse(store.isApplying, message, file: file, line: line)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, message, file: file, line: line)
     }
 
     func testACancellationAfterTheRuntimesGatesButBeforeSubmissionSubmitsNoRequest() async {
@@ -210,58 +188,60 @@ final class ScreenshotExternalRequestSeamTests: XCTestCase {
         let (store, _) = makeStack(.respond(status: 200, body: successBody)) { _ in
             { withUnsafeCurrentTask { $0?.cancel() } }
         }
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
         let noticeBefore = store.notice
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        assertNoRequestWasSubmitted(store, resolved: resolved, noticeBefore: noticeBefore, "task cancelled before submission")
+        assertNoRequestWasSubmitted(store, outcome: outcome, noticeBefore: noticeBefore, "task cancelled before submission")
     }
 
     func testARetirementAfterTheRuntimesGatesButBeforeSubmissionSubmitsNoRequest() async {
         let (store, _) = makeStack(.respond(status: 200, body: successBody)) { store in
             { store.invalidateCurrentSelection() }
         }
-        let token = await offerPopup(store)
+        let token = beginAttempt(store)
         let noticeBefore = store.notice
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        assertNoRequestWasSubmitted(store, resolved: resolved, noticeBefore: noticeBefore, "selection retired before submission")
+        assertNoRequestWasSubmitted(store, outcome: outcome, noticeBefore: noticeBefore, "selection retired before submission")
         XCTAssertFalse(store.isCurrent(token))
     }
 
-    func testARetirementBeforeTheTapSubmitsNoRequest() async {
+    func testARetirementBeforeTheCallSubmitsNoRequest() async {
         let (store, _) = makeStack(.respond(status: 200, body: successBody))
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
         let noticeBefore = store.notice
 
         store.invalidateCurrentSelection()
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        assertNoRequestWasSubmitted(store, resolved: resolved, noticeBefore: noticeBefore, "retired before the tap")
+        assertNoRequestWasSubmitted(store, outcome: outcome, noticeBefore: noticeBefore, "retired before the call")
     }
 
-    func testAStalePermissionIsRefusedByTheRuntimeAndSubmitsNoRequest() async {
+    /// A concurrent retirement queued before the call, landing at whichever
+    /// internal suspension point the scheduler reaches first.
+    func testConcurrentRetirementDuringTheAttemptSubmitsNoRequest() async {
         let (store, _) = makeStack(.respond(status: 200, body: successBody))
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
         let noticeBefore = store.notice
 
-        let retire = Task { store.invalidateCurrentSelection() } // runs at the tap's first suspension
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let retire = Task { store.invalidateCurrentSelection() }
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
         await retire.value
 
-        assertNoRequestWasSubmitted(store, resolved: resolved, noticeBefore: noticeBefore, "stale permission")
+        assertNoRequestWasSubmitted(store, outcome: outcome, noticeBefore: noticeBefore, "concurrent retirement")
     }
 
     func testAuthorityLostAtTheBoundarySubmitsNoRequest() async {
         let (store, _) = makeStack(.respond(status: 200, body: successBody))
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
         let authority = BoundaryScriptedAuthority(["an-authority", nil])
 
-        let resolved = await store.useExternalAI(participantAuthority: { authority.read() })
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { authority.read() }, token: token)
 
-        XCTAssertNil(resolved)
+        XCTAssertNil(outcome)
         XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 0)
         XCTAssertEqual(store.notice, .unavailable, "the accepted authority-loss treatment, unchanged")
     }
@@ -276,11 +256,11 @@ final class ScreenshotExternalRequestSeamTests: XCTestCase {
             preferences: InMemoryScreenshotProposalPreferencesStorage(),
             runtime: makeRequesterTestRuntime(local: nil, external: failing)
         )
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let outcome = await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token)
 
-        XCTAssertNil(resolved)
+        XCTAssertNil(outcome)
         XCTAssertEqual(store.notice, .unavailable, "a genuine failure keeps its requester notice")
         XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 0)
     }
@@ -289,19 +269,18 @@ final class ScreenshotExternalRequestSeamTests: XCTestCase {
 
     func testACancellationAfterSubmissionBeganPresentsNothingAndMutatesNoRequesterState() async {
         let (store, _) = makeStack(.hang)
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
         let noticeBefore = store.notice
 
-        let tap = Task { await store.useExternalAI(participantAuthority: { "an-authority" }) }
+        let attempt = Task { await store.analyzeScreenshot(images: [ScreenshotTestEvidence.input()], participantAuthority: { "an-authority" }, token: token) }
         await waitUntil("the request reached the transport") { SeamURLProtocol.submittedRequestCount == 1 }
         store.invalidateCurrentSelection()
-        let resolved = await tap.value
+        let outcome = await attempt.value
 
-        XCTAssertNil(resolved, "a retired attempt's result is never usable")
+        XCTAssertNil(outcome, "a retired attempt's result is never usable")
         XCTAssertEqual(SeamURLProtocol.submittedRequestCount, 1, "exactly the one request that had begun; never retried")
         XCTAssertEqual(store.notice, noticeBefore, "no requester-visible mutation from the cancelled request")
         XCTAssertFalse(store.isApplying)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
     }
 
     // MARK: - The client and service seam

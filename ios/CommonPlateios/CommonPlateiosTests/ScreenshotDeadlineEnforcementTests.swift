@@ -227,33 +227,32 @@ final class ScreenshotDeadlineEnforcementTests: XCTestCase {
         )
     }
 
-    func testATimedOutAttemptOffersThePopupAndAnyLateUsefulResultChangesNothing() async {
+    func testATimedOutAttemptFallsThroughAutomaticallyAndAnyLateUsefulResultFromTheAbandonedProviderChangesNothing() async {
         let provider = NonCooperativeLocalProvider(output: usefulRequesterOutput)
-        let external = StubExternalProvider()
+        let external = StubExternalProvider(result: .success(ScreenshotProposalOutcome(
+            eligible: true,
+            proposal: ScreenshotProposal(mealItems: [MealItem(name: "External Item")])
+        )))
         let store = makeStore(provider: provider, external: external, timeout: .milliseconds(50))
         let token = beginAttempt(store)
 
         let outcome = await analyze(store, token: token)
 
-        XCTAssertNil(outcome)
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-        XCTAssertEqual(store.pendingExternalFallbackReason, .localUnavailable)
+        XCTAssertEqual(outcome?.proposal.mealItems, [MealItem(name: "External Item")], "falls through automatically at the deadline")
         XCTAssertNil(store.notice)
         XCTAssertFalse(store.isApplying)
         XCTAssertTrue(provider.isRunning)
+        XCTAssertEqual(external.analyzeCallCount, 1)
 
-        provider.release() // a USEFUL result, arriving after the deadline
+        provider.release() // a USEFUL result, arriving after the deadline and after the external attempt already settled
         await waitUntil("the abandoned provider finished") { provider.completionCount == 1 }
         await letScheduledWorkSettle()
 
-        XCTAssertTrue(store.isAwaitingExternalAIPermission, "the popup is exactly as it was")
-        XCTAssertEqual(store.pendingExternalFallbackReason, .localUnavailable, "not upgraded by the late result")
-        XCTAssertNil(store.notice, "no notice appears")
         XCTAssertFalse(store.isApplying)
-        XCTAssertEqual(external.analyzeCallCount, 0, "no external call")
+        XCTAssertEqual(external.analyzeCallCount, 1, "the abandoned local provider's late result never triggers another external attempt")
     }
 
-    func testATimeoutWithoutAuthorityPresentsTheUnavailableTreatmentAndALateResultRaisesNoPopup() async {
+    func testATimeoutWithoutAuthorityPresentsTheUnavailableTreatmentAndALateResultChangesNothing() async {
         let provider = NonCooperativeLocalProvider(output: usefulRequesterOutput)
         let external = StubExternalProvider()
         let store = makeStore(provider: provider, external: external, timeout: .milliseconds(50))
@@ -263,13 +262,11 @@ final class ScreenshotDeadlineEnforcementTests: XCTestCase {
 
         XCTAssertNil(outcome)
         XCTAssertEqual(store.notice, .unavailable)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
 
         provider.release()
         await waitUntil("the abandoned provider finished") { provider.completionCount == 1 }
         await letScheduledWorkSettle()
 
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "no late popup")
         XCTAssertEqual(store.notice, .unavailable)
         XCTAssertEqual(external.analyzeCallCount, 0)
     }
@@ -299,7 +296,6 @@ final class ScreenshotDeadlineEnforcementTests: XCTestCase {
         XCTAssertTrue(store.isCurrent(newer))
         XCTAssertFalse(store.isApplying, "the abandoned attempt did not mark the new selection busy")
         XCTAssertNil(store.notice)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission, "no late popup")
         XCTAssertEqual(external.analyzeCallCount, 0)
     }
 
@@ -321,22 +317,21 @@ final class ScreenshotDeadlineEnforcementTests: XCTestCase {
         await waitUntil("the abandoned provider finished") { provider.completionCount == 1 }
     }
 
-    func testALateResultNeverAuthorizesAnExternalTransfer() async {
+    func testALateResultFromTheAbandonedLocalProviderNeverTriggersASecondExternalAttempt() async {
         let provider = NonCooperativeLocalProvider(output: usefulRequesterOutput)
         let external = StubExternalProvider()
         let store = makeStore(provider: provider, external: external, timeout: .milliseconds(50))
         let token = beginAttempt(store)
-        _ = await analyze(store, token: token)
-        store.continueManually() // the requester declines the popup
+        _ = await analyze(store, token: token) // times out, falls through, the one external attempt settles
 
-        provider.release()
+        XCTAssertEqual(external.analyzeCallCount, 1)
+
+        provider.release() // the abandoned local provider's late, useful result
         await waitUntil("the abandoned provider finished") { provider.completionCount == 1 }
         await letScheduledWorkSettle()
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
 
-        XCTAssertNil(resolved)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
-        XCTAssertEqual(external.analyzeCallCount, 0)
+        XCTAssertEqual(external.analyzeCallCount, 1, "the late local result never triggers another external attempt")
+        XCTAssertFalse(store.isApplying)
     }
 
     // MARK: - Mechanism structure

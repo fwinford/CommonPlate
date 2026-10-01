@@ -1467,24 +1467,6 @@ final class RequestCreationViewTests: XCTestCase {
         return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 
-    /// W4-S3 (supersedes the pre-S3 disclosure/consent coupling): `Continue
-    /// manually` sends nothing off-device, dismisses the popup, and — unlike the
-    /// pre-S3 `Not now` — does NOT turn Screenshot Assistance Off. It never
-    /// touches `draft`, so manual Request Food stays usable.
-    func testContinueManuallyDismissesWithoutTurningScreenshotAssistanceOff() throws {
-        let source = try requestFoodViewSource(
-            from: "private func continueScreenshotManually() {",
-            to: "/// Applies one validated outcome"
-        )
-
-        XCTAssertTrue(source.contains("screenshotProposalStore.continueManually()"))
-        XCTAssertFalse(source.contains("setAIAssistanceEnabled"))
-        XCTAssertFalse(source.contains("useExternalAI"))
-        XCTAssertFalse(source.contains("draft ="))
-        XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
-        XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))
-    }
-
     /// W4-S3 flow ordering: `Choose Grubhub screenshot` / `Change` →
     /// Screenshot Help (if unseen) → picker. There is no third-party-AI
     /// disclosure or consent step before photo selection.
@@ -1515,10 +1497,11 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertTrue(source.contains("isPresentingScreenshotHelp = true"))
     }
 
-    /// W4-S3: the pre-S3 requester-side disclosure and remembered consent are
-    /// gone — nothing in the view (or the store it drives) presents a
-    /// third-party-AI disclosure before the picker, records consent, or
-    /// consults recorded consent.
+    /// W4-S3: the pre-S3 requester-side disclosure and remembered consent
+    /// mechanism are gone — superseded by the W4-S3 consent-authority
+    /// revision's `Turn on Screenshot Assistance?` disclosure
+    /// (`ScreenshotAssistanceDisclosurePresentationTests`), which uses
+    /// entirely different identifiers and copy from this retired mechanism.
     func testRequesterViewHasNoPreS3DisclosureOrConsentSurface() throws {
         let view = try String(
             contentsOf: repositoryFile("ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift"),
@@ -1539,19 +1522,22 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertFalse(view.contains("Use Screenshot Assistance?"))
     }
 
-    /// W4-S3: `Turn on Screenshot Assistance` is a plain On action with no
-    /// disclosure and no consent, continuing into the same Help/picker step as
-    /// `Choose Grubhub screenshot`. Turning On authorizes nothing external.
-    func testTurnOnFlowIsAPlainOnActionWithNoDisclosureOrConsent() throws {
+    /// W4-S3 consent-authority revision: `Turn on Screenshot Assistance`
+    /// presents the disclosure rather than flipping the setting directly —
+    /// full wiring proof (exact ordering of dismiss/grant/proceed, and the
+    /// `Not Now` path) lives in
+    /// `ScreenshotAssistanceDisclosurePresentationTests`. This test only
+    /// confirms the Off-row action itself does nothing but open that
+    /// disclosure.
+    func testTurnOnRowOpensTheDisclosureRatherThanEnablingDirectly() throws {
         let source = try requestFoodViewSource(
             from: "private func beginTurnOnScreenshotAssistanceFlow() {",
-            to: "@MainActor\n    private func beginScreenshotAnalysis("
+            to: "private func confirmTurnOnScreenshotAssistance() {"
         )
 
-        XCTAssertTrue(source.contains("screenshotProposalStore.setAIAssistanceEnabled(true)"))
-        XCTAssertTrue(source.contains("proceedToScreenshotSelection()"))
-        XCTAssertFalse(source.lowercased().contains("consent"))
-        XCTAssertFalse(source.lowercased().contains("disclosure"))
+        XCTAssertTrue(source.contains("isPresentingScreenshotAssistanceDisclosure = true"))
+        XCTAssertFalse(source.contains("setAIAssistanceEnabled"))
+        XCTAssertFalse(source.contains("proceedToScreenshotSelection()"))
         XCTAssertFalse(source.contains("useExternalAI"))
         XCTAssertFalse(source.contains("isPresentingScreenshotHelp = true"))
         XCTAssertFalse(source.contains("isPresentingScreenshotPicker = true"))

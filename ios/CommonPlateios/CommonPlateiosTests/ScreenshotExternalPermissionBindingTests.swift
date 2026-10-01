@@ -312,22 +312,18 @@ final class ScreenshotExternalPermissionBindingTests: XCTestCase {
     }
 
     // MARK: - The store: a refused transfer is invisible
+    //
+    // W4-S3 consent-authority revision: the offer decision and (when
+    // authorized) the transfer both happen inside the one `analyzeScreenshot`
+    // call now — there is no separate `offerPopup` + tap step to retire
+    // between. `local: nil` reaches the fallback decision immediately, so
+    // these fixtures still exercise exactly the store ↔ runtime boundary the
+    // pre-revision popup tests did.
 
     private func makeStore() -> (store: ScreenshotProposalStore, external: StubExternalProvider) {
         let external = StubExternalProvider()
         let runtime = makeRequesterTestRuntime(local: nil, external: external)
         return (makeStoreOver(runtime), external)
-    }
-
-    private func offerPopup(_ store: ScreenshotProposalStore) async -> ScreenshotSelectionToken {
-        let token = beginAttempt(store)
-        _ = await store.analyzeScreenshot(
-            images: [ScreenshotTestEvidence.input()],
-            participantAuthority: { "an-authority" },
-            token: token
-        )
-        XCTAssertTrue(store.isAwaitingExternalAIPermission)
-        return token
     }
 
     func testTheStoreAndItsRuntimeShareOneFence() async throws {
@@ -343,27 +339,38 @@ final class ScreenshotExternalPermissionBindingTests: XCTestCase {
         XCTAssertFalse(store.isCurrent(token))
     }
 
-    func testARetiredPopupCannotProduceATransferThroughTheStore() async {
+    func testARetiredSelectionCannotProduceATransferThroughTheStore() async {
         let (store, external) = makeStore()
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
 
         store.invalidateCurrentSelection()
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let resolved = await store.analyzeScreenshot(
+            images: [ScreenshotTestEvidence.input()],
+            participantAuthority: { "an-authority" },
+            token: token
+        )
 
         XCTAssertNil(resolved)
         XCTAssertEqual(external.analyzeCallCount, 0)
     }
 
-    func testAttemptRetiredBetweenMintingAndExecutionIsRejectedWithNoProviderCall() async {
+    func testConcurrentRetirementDuringTheAutomaticAttemptResultsInNoProviderCallAndNoStateMutation() async {
         let (store, external) = makeStore()
-        let token = await offerPopup(store)
+        let token = beginAttempt(store)
         let noticeBefore = store.notice
 
-        // Queued BEFORE the tap runs, so it executes at the tap's first
-        // suspension — after the permission was minted and the external task
-        // scheduled, but before that task can run.
+        // Queued before the call, so it has a chance to run at one of
+        // `analyzeScreenshot`'s own internal suspension points — evidence
+        // derivation, the local attempt, or immediately before the external
+        // task runs, whichever the scheduler reaches first. Wherever it
+        // lands, the fence must make the result unusable and the provider
+        // unreached.
         let retire = Task { store.invalidateCurrentSelection() }
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let resolved = await store.analyzeScreenshot(
+            images: [ScreenshotTestEvidence.input()],
+            participantAuthority: { "an-authority" },
+            token: token
+        )
         await retire.value
 
         XCTAssertNil(resolved)
@@ -371,33 +378,40 @@ final class ScreenshotExternalPermissionBindingTests: XCTestCase {
         XCTAssertEqual(external.analyzeCallCount, 0, "zero provider calls")
         XCTAssertEqual(store.notice, noticeBefore, "no state mutation from the rejected attempt")
         XCTAssertFalse(store.isApplying)
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
     }
 
-    func testAuthorityDisappearingAfterTheTapButBeforeTheTransferBeginsSendsNothing() async {
+    func testAuthorityDisappearingBetweenTheOfferDecisionAndTheTransferBoundarySendsNothing() async {
         let (store, external) = makeStore()
-        let token = await offerPopup(store)
-        // First read: the tap. Second read: the transfer boundary, inside the runtime.
+        let token = beginAttempt(store)
+        // First read: the offer decision. Second read: the transfer boundary,
+        // inside the runtime.
         let authority = BoundaryScriptedAuthority(["an-authority", nil])
 
-        let resolved = await store.useExternalAI(participantAuthority: { authority.read() })
+        let resolved = await store.analyzeScreenshot(
+            images: [ScreenshotTestEvidence.input()],
+            participantAuthority: { authority.read() },
+            token: token
+        )
 
-        XCTAssertNil(resolved, "the local outcome that caused the popup (a notice) is presented, nothing to apply")
-        XCTAssertEqual(authority.readCount, 2, "read at the tap and again at the boundary")
+        XCTAssertNil(resolved, "the local outcome that caused the fallback (a notice) is presented, nothing to apply")
+        XCTAssertEqual(authority.readCount, 2, "read at the offer decision and again at the transfer boundary")
         XCTAssertEqual(external.analyzeCallCount, 0)
         XCTAssertEqual(store.notice, .unavailable, "the accepted authority-loss treatment")
-        XCTAssertFalse(store.isAwaitingExternalAIPermission)
         XCTAssertFalse(store.isApplying)
         XCTAssertTrue(store.isCurrent(token))
     }
 
     func testAuthorityDisappearingAtTheBoundaryAlongsideRetirementPresentsNothing() async {
         let (store, external) = makeStore()
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
         let authority = BoundaryScriptedAuthority(["an-authority", nil])
 
         let retire = Task { store.invalidateCurrentSelection() }
-        let resolved = await store.useExternalAI(participantAuthority: { authority.read() })
+        let resolved = await store.analyzeScreenshot(
+            images: [ScreenshotTestEvidence.input()],
+            participantAuthority: { authority.read() },
+            token: token
+        )
         await retire.value
 
         XCTAssertNil(resolved)
@@ -407,9 +421,13 @@ final class ScreenshotExternalPermissionBindingTests: XCTestCase {
 
     func testAnAuthorizedTransferThroughTheStoreReachesTheProviderExactlyOnce() async {
         let (store, external) = makeStore()
-        _ = await offerPopup(store)
+        let token = beginAttempt(store)
 
-        let resolved = await store.useExternalAI(participantAuthority: { "an-authority" })
+        let resolved = await store.analyzeScreenshot(
+            images: [ScreenshotTestEvidence.input()],
+            participantAuthority: { "an-authority" },
+            token: token
+        )
 
         XCTAssertNotNil(resolved)
         XCTAssertEqual(external.analyzeCallCount, 1)

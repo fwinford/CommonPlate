@@ -238,11 +238,13 @@ func evaluated<W: ScreenshotWorkflow>(
     return evaluation
 }
 
-/// The requester's interaction against the real store: the local-first phase,
-/// then — only when the external-AI popup is actually offered — the explicit
-/// `Use external AI` tap. Returns the outcome that would be applied, or `nil`
-/// for stale/cancelled/failed/ended work. If the popup is not offered
-/// (ineligible, useful local result, superseded, Off), nothing external happens.
+/// The requester's interaction against the real store. W4-S3 consent-authority
+/// revision: `analyzeScreenshot` itself now runs the local-first phase and,
+/// when it falls through, the automatic external attempt under Screenshot
+/// Assistance's standing consent — there is no separate tap step any more, so
+/// this is a thin passthrough kept so call sites (which predate the
+/// revision) do not all need renaming. Returns the outcome that would be
+/// applied, or `nil` for stale/cancelled/failed/notice-only/ended work.
 @MainActor
 func analyzeThroughExternalFallback(
     store: ScreenshotProposalStore,
@@ -250,8 +252,5 @@ func analyzeThroughExternalFallback(
     participantAuthority: String?,
     token: ScreenshotSelectionToken
 ) async -> ScreenshotProposalOutcome? {
-    let local = await store.analyzeScreenshot(images: images, participantAuthority: { participantAuthority }, token: token)
-    if let local { return local }
-    guard store.isAwaitingExternalAIPermission else { return nil }
-    return await store.useExternalAI(participantAuthority: { participantAuthority })?.outcome
+    await store.analyzeScreenshot(images: images, participantAuthority: { participantAuthority }, token: token)
 }
