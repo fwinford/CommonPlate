@@ -36,7 +36,8 @@ struct RequesterOpenAIExternalProvider: ScreenshotExternalProvider {
             ScreenshotProposalImage(
                 data: item.image.data,
                 mimeType: item.image.mimeType,
-                localEvidenceText: input.derived.text(at: item.index)
+                localEvidenceText: input.derived.text(at: item.index),
+                localTotalGeometry: input.derived.totalGeometry(at: item.index)
             )
         }
         let outcome = try await service.requestProposal(

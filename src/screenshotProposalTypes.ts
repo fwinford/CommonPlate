@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ProposedMenuPath } from "./screenshotEligibility.js";
 
 /**
  * W4-S1 provider output shape. Distinct from every request-create schema in
@@ -58,19 +59,22 @@ export const FORBIDDEN_PROVIDER_FIELDS = [
   "submit",
   "reasoning",
   "explanation",
-  // Screenshot Assistance never chooses a menu path or accepts a provider's
-  // money claim. Current-cart Dining Dollars are derived only from bounded
-  // independent OCR evidence below, never provider output.
+  // Screenshot Assistance never accepts a provider's menu-path or money claim.
+  // The W4-R4.1 menu path and current-cart Dining Dollars are derived only
+  // from bounded independent OCR evidence (`screenshotEligibility.ts`,
+  // `screenshotProposalValidation.ts`), never provider output.
   "menuPath",
   "orderDetails",
   "diningDollars",
   "estimatedDiningDollars",
   "estimatedDiningDollarsCents",
+  "diningDollarsOrderTotalCents",
 ] as const;
 
 /**
  * The allowlisted proposal shape: location, structured literal food, meal
- * swipes, and a deterministic current-cart Dining Dollars estimate.
+ * swipes, a deterministic current-cart Dining Dollars estimate, and a
+ * deterministic menu path (W4-R4.1).
  *
  * W4-R4 replaces the single `foodRequest` string with `mealItems` — one
  * entry per distinct observed item — so a proposal can populate the
@@ -79,10 +83,18 @@ export const FORBIDDEN_PROVIDER_FIELDS = [
  * independent, order-level OCR rule in `screenshotProposalValidation.ts`.
  */
 export interface ScreenshotProposal {
+  /**
+   * W4-R4.1: set only by `resolveMenuPath`'s independent deterministic
+   * on-device evidence (`screenshotEligibility.ts`), never from provider
+   * output — `menuPath` stays in `FORBIDDEN_PROVIDER_FIELDS`.
+   */
+  menuPath?: ProposedMenuPath;
   selectedDiningSpot?: { name: string; address: string };
   mealItems?: Array<{ name: string; details?: string }>;
   mealSwipes?: number;
   estimatedDiningDollarsCents?: number;
+  /** Independent current cart/review Total for the Dining-Dollars-only draft. */
+  diningDollarsOrderTotalCents?: number;
 }
 
 export interface ScreenshotProposalResponseBody {

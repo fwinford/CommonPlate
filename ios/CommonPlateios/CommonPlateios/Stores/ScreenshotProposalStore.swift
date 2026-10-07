@@ -88,9 +88,36 @@ struct ScreenshotFieldManualEditState: Equatable {
     /// The Dining-Dollars-only order-details field, which the same
     /// manual-precedence rule covers.
     var hasManuallyEditedOrderDetails = false
-    /// A current-cart estimate is still only a proposal. Once the requester
-    /// edits it, later screenshot selections cannot overwrite that value.
+    /// The Meal Exchange branch's current-cart Dining Dollars TOP-UP is still
+    /// only a proposal. Once the requester edits it, later screenshot
+    /// selections cannot overwrite that value. It concerns the top-up draft
+    /// only; the Dining-Dollars-only amount has its own authority flag below.
     var hasManuallyEditedDiningDollars = false
+    /// Requester edits protect the Dining-Dollars-only whole-order estimate
+    /// independently of the Meal Exchange top-up.
+    var hasManuallyEditedDiningDollarsOnly = false
+    /// A real requester change of the menu path owns the selection. A store
+    /// write and a same-value selection never set this flag.
+    var hasManuallyEditedMenuPath = false
+    /// Screenshot Assistance has applied or confirmed a deterministic path in
+    /// this draft session. Set only through `record(_:)`, from
+    /// `ScreenshotProposalAppliedFields.establishedMenuPath`.
+    var hasScreenshotEstablishedMenuPath = false
+
+    /// Records what an `apply(...)` call established, after the caller has
+    /// applied it. The only way `hasScreenshotEstablishedMenuPath` is set.
+    mutating func record(_ applied: ScreenshotProposalAppliedFields) {
+        if applied.establishedMenuPath {
+            hasScreenshotEstablishedMenuPath = true
+        }
+    }
+
+    /// The one requester-selector interaction rule. Re-selecting the already
+    /// current option is a no-op, not a manual path change.
+    mutating func recordMenuPathSelection(from current: RequestMenuPath, to selected: RequestMenuPath) {
+        guard selected != current else { return }
+        hasManuallyEditedMenuPath = true
+    }
 
     func hasManuallyEditedMealItemName(_ index: Int) -> Bool {
         manuallyEditedMealItemNames.contains(index)
@@ -104,19 +131,32 @@ struct ScreenshotFieldManualEditState: Equatable {
 /// Which of the three allowlisted proposal fields a single `apply(...)` call
 /// actually wrote into the draft (W4-R2 presentation plumbing only — this
 /// carries no additional S1 authority). `RequestFoodView` uses this purely to
-/// drive its own provenance caption ("Filled from screenshot") and brief
+/// drive its own provenance caption ("Suggested") and brief
 /// afterglow on exactly the fields that changed; it has no bearing on what
 /// `apply(...)` is allowed to write, which remains governed entirely by the
 /// allowlist and manual-precedence rules below.
 struct ScreenshotProposalAppliedFields: Equatable {
+    /// This call switched the selector to a deterministic path.
+    var menuPath = false
+    /// This call accepted a deterministic path proposal — whether it switched
+    /// the selector or the selector already showed that path. Drives the
+    /// view's recording of `hasScreenshotEstablishedMenuPath`.
+    var establishedMenuPath = false
+    /// An opposite deterministic path was withheld from a requester-owned
+    /// selection. The view may offer explicit acceptance for this result.
+    var suggestedMenuPath: RequestMenuPath?
     var location = false
     var mealSwipes = false
+    /// A valid current result proposes a larger count than a requester-owned
+    /// Meal Exchange count. Presentation may offer explicit adoption.
+    var suggestedMealSwipes: Int?
     /// Exactly the structured meal subfields this call wrote. These are also
     /// the independent presentation-provenance units.
     var mealItemNames: Set<Int> = []
     var mealItemDetails: Set<Int> = []
     var orderDetails = false
     var diningDollars = false
+    var diningDollarsOnly = false
     /// A proposal contained at least one field that was kept because it
     /// currently held requester-owned non-empty content. This is deliberately
     /// aggregate: the UI displays one temporary message per rerun.
@@ -134,7 +174,7 @@ struct ScreenshotProposalAppliedFields: Equatable {
     }
 
     var isEmpty: Bool {
-        !location && !mealSwipes && mealItemNames.isEmpty && mealItemDetails.isEmpty && !orderDetails && !diningDollars
+        !menuPath && !location && !mealSwipes && mealItemNames.isEmpty && mealItemDetails.isEmpty && !orderDetails && !diningDollars && !diningDollarsOnly
     }
 }
 
@@ -300,10 +340,13 @@ final class ScreenshotProposalStore: ObservableObject {
         if !manualEdits.hasManuallyEditedMealSwipes {
             draft.mealSwipes = RequestFoodFormDraft.mealSwipeOptions.first!
         }
-        // `menuPath` and `diningDollarsText` are deliberately untouched here
-        // and everywhere else in this store: Screenshot Assistance proposes
-        // values, it does not decide which menu the requester is using or how
-        // many Dining Dollars they need.
+        if !manualEdits.hasManuallyEditedDiningDollarsOnly {
+            draft.diningDollarsOnlyText = ""
+        }
+        // The selector and Meal Exchange top-up keep their existing
+        // new-selection behavior. The Dining-Dollars-only whole-order amount
+        // clears only while screenshot-owned; its provenance clears at this
+        // same boundary in `RequestFoodDraftSession`.
         return token
     }
 
@@ -554,6 +597,24 @@ final class ScreenshotProposalStore: ObservableObject {
         to draft: inout RequestFoodFormDraft
     ) -> ScreenshotProposalAppliedFields {
         var applied = ScreenshotProposalAppliedFields()
+        // W4-R4.1: the deterministic path is resolved FIRST, so everything
+        // branch-dependent below is written into the branch the form is
+        // actually on after this proposal. A requester-owned manual path is
+        // never overwritten; an attempted opposite path is offered inline,
+        // while a same-path proposal changes and preserves nothing.
+        if outcome.eligible, let proposedPath = outcome.proposal.menuPath {
+            if manualEdits.hasManuallyEditedMenuPath {
+                if draft.menuPath != proposedPath {
+                    applied.suggestedMenuPath = proposedPath
+                }
+            } else {
+                if draft.menuPath != proposedPath {
+                    draft.menuPath = proposedPath
+                    applied.menuPath = true
+                }
+                applied.establishedMenuPath = true
+            }
+        }
         if let spot = outcome.proposal.selectedDiningSpot {
             if manualEdits.hasManuallyEditedLocation {
                 applied.preservedManualFieldCount += 1
@@ -564,23 +625,30 @@ final class ScreenshotProposalStore: ObservableObject {
         }
         // Meal swipes first, so the entry fill below writes into the count
         // this same proposal just established rather than the previous one.
-        if let mealSwipes = outcome.proposal.mealSwipes {
+        if let mealSwipes = outcome.proposal.mealSwipes,
+           applied.suggestedMenuPath == nil {
             if manualEdits.hasManuallyEditedMealSwipes {
                 applied.preservedManualFieldCount += 1
+                if outcome.eligible, draft.menuPath == .mealExchange,
+                   mealSwipes > draft.mealSwipes, (1...5).contains(mealSwipes) {
+                    applied.suggestedMealSwipes = mealSwipes
+                }
             } else {
                 draft.mealSwipes = mealSwipes
                 applied.mealSwipes = true
             }
         }
 
-        if let mealItems = outcome.proposal.mealItems, !mealItems.isEmpty {
+        if let mealItems = outcome.proposal.mealItems, !mealItems.isEmpty,
+           applied.suggestedMenuPath == nil {
             switch draft.menuPath {
             case .mealExchange:
                 // One proposed item per active meal field, in order. A name
                 // and its optional details are independent manual-authority
                 // and provenance units; writing one never authorizes writing
                 // the other.
-                for index in draft.activeMealEntryIndices
+                let proposedEntryCount = applied.suggestedMealSwipes ?? draft.mealSwipes
+                for index in 0..<min(proposedEntryCount, RequestFoodFormDraft.maxMealSwipes)
                 where index < mealItems.count {
                     let proposal = mealItems[index]
                     if manualEdits.hasManuallyEditedMealItemName(index) {
@@ -621,18 +689,31 @@ final class ScreenshotProposalStore: ObservableObject {
             }
         }
 
-        // This narrow R4 authority is populated only by the backend's
-        // independent current-cart/order-level OCR rule. It remains a draft
-        // value the requester can edit; it never selects a menu path or
-        // submits a request.
+        // This narrow R4 authority is populated only by the independent
+        // current-cart/order-level OCR rule. It fills ONLY the Meal Exchange
+        // branch's top-up draft; the Dining-Dollars-only whole-order Total is
+        // handled separately below. Neither submits a request.
         if let cents = outcome.proposal.estimatedDiningDollarsCents,
+           applied.suggestedMenuPath == nil,
            draft.menuPath == .mealExchange,
            !manualEdits.hasManuallyEditedDiningDollars {
-            draft.diningDollarsText = DiningDollarsEntry.formatted(cents: cents)
+            draft.mealExchangeDiningDollarsText = DiningDollarsEntry.formatted(cents: cents)
             applied.diningDollars = true
         } else if outcome.proposal.estimatedDiningDollarsCents != nil,
+                  applied.suggestedMenuPath == nil,
                   draft.menuPath == .mealExchange {
             applied.preservedManualFieldCount += 1
+        }
+
+        if let cents = outcome.proposal.diningDollarsOrderTotalCents,
+           applied.suggestedMenuPath == nil,
+           draft.menuPath == .diningDollars {
+            if manualEdits.hasManuallyEditedDiningDollarsOnly {
+                applied.preservedManualFieldCount += 1
+            } else {
+                draft.diningDollarsOnlyText = DiningDollarsEntry.formatted(cents: cents)
+                applied.diningDollarsOnly = true
+            }
         }
 
         if !outcome.eligible {
@@ -642,5 +723,23 @@ final class ScreenshotProposalStore: ObservableObject {
         }
 
         return applied
+    }
+
+    /// Explicit acceptance of this result's larger, independently validated
+    /// swipe proposal. The view checks the result token before calling this.
+    /// This is screenshot provenance, never a picker/manual edit.
+    func adoptSuggestedMealSwipes(
+        _ count: Int,
+        manualEdits: inout ScreenshotFieldManualEditState,
+        provenance: inout ScreenshotProposalAppliedFields,
+        to draft: inout RequestFoodFormDraft
+    ) -> Bool {
+        guard draft.menuPath == .mealExchange,
+              manualEdits.hasManuallyEditedMealSwipes,
+              count > draft.mealSwipes, (1...5).contains(count) else { return false }
+        draft.mealSwipes = count
+        manualEdits.hasManuallyEditedMealSwipes = false
+        provenance.mealSwipes = true
+        return true
     }
 }

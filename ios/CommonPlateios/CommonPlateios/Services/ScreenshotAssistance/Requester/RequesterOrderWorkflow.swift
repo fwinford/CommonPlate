@@ -31,6 +31,9 @@ enum RequesterOrderPolicy {
 struct RequesterOrderEvidence {
     /// Recognized text keyed by ORIGINAL selection index.
     let textsByIndex: [Int: String]
+    /// Minimal relation evidence keyed by the same ORIGINAL selection index.
+    /// Raw Vision boxes have already been discarded.
+    let totalGeometryByIndex: [Int: ScreenshotTotalGeometryEvidence]
     /// The admitted screenshots' text joined with newlines in selection order.
     let combinedText: String
 
@@ -38,9 +41,17 @@ struct RequesterOrderEvidence {
         textsByIndex[index] ?? ""
     }
 
+    func totalGeometry(at index: Int) -> ScreenshotTotalGeometryEvidence? {
+        totalGeometryByIndex[index]
+    }
+
     /// The text of each item of `selection`, in selection order.
     func orderedTexts(for selection: ScreenshotSelection) -> [String] {
         selection.items.map { text(at: $0.index) }
+    }
+
+    func orderedTotalGeometry(for selection: ScreenshotSelection) -> [ScreenshotTotalGeometryEvidence?] {
+        selection.items.map { totalGeometry(at: $0.index) }
     }
 }
 
@@ -88,14 +99,17 @@ struct RequesterOrderWorkflow: ScreenshotWorkflow {
     func evaluate(_ selection: ScreenshotSelection) async -> ScreenshotWorkflowEvaluation<RequesterOrderEvidence>? {
         var eligibleIndices: Set<Int> = []
         var textsByIndex: [Int: String] = [:]
+        var totalGeometryByIndex: [Int: ScreenshotTotalGeometryEvidence] = [:]
         var eligibleTexts: [String] = []
         for item in selection.items {
-            let text = await recognizer.recognizeText(in: item.image)
+            let recognized = await recognizer.recognize(in: item.image)
+            let text = recognized.text
             // A retired attempt stops recognizing the rest of its selection.
             if Task.isCancelled { return nil }
             guard RequesterOrderDeterministicEvidence.evaluateEligibility(text).eligible else { continue }
             eligibleIndices.insert(item.index)
             textsByIndex[item.index] = text
+            totalGeometryByIndex[item.index] = recognized.totalGeometryEvidence
             eligibleTexts.append(text)
         }
         guard let eligible = selection.retaining(eligibleIndices) else { return nil }
@@ -103,6 +117,7 @@ struct RequesterOrderWorkflow: ScreenshotWorkflow {
             selection: eligible,
             derived: RequesterOrderEvidence(
                 textsByIndex: textsByIndex,
+                totalGeometryByIndex: totalGeometryByIndex,
                 combinedText: eligibleTexts.joined(separator: "\n")
             )
         )
@@ -119,6 +134,8 @@ struct RequesterOrderWorkflow: ScreenshotWorkflow {
             raw: result.output.jsonObject,
             evidenceText: evaluation.derived.combinedText,
             evidenceImageCount: evaluation.selection.count,
+            imageEvidenceTexts: evaluation.derived.orderedTexts(for: evaluation.selection),
+            imageTotalGeometryEvidence: evaluation.derived.orderedTotalGeometry(for: evaluation.selection),
             allowsDiningDollarsEstimate: RequesterOrderPolicy.permitsDiningDollarsEstimate(for: strategy),
             vendors: vendors
         ) {
@@ -141,6 +158,8 @@ struct RequesterOrderWorkflow: ScreenshotWorkflow {
             RequesterOrderExternalOutcomeValidator.validate(
                 result.output,
                 evidenceText: evaluation.derived.combinedText,
+                imageEvidenceTexts: evaluation.derived.orderedTexts(for: evaluation.selection),
+                imageTotalGeometryEvidence: evaluation.derived.orderedTotalGeometry(for: evaluation.selection),
                 allowsDiningDollarsEstimate: RequesterOrderPolicy.permitsDiningDollarsEstimate(for: strategy),
                 vendors: vendors
             ),

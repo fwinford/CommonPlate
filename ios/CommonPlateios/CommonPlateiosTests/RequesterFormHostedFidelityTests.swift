@@ -248,7 +248,7 @@ final class RequesterFormHostedFidelityTests: XCTestCase {
         }
 
         XCTAssertTrue(host.activate("request-menu-path-meal-exchange"))
-        XCTAssertTrue(host.exists("label:Meal swipes"))
+        XCTAssertTrue(host.exists("label:Number of meal swipes"))
         let afterMealExchange = try keys.map { try frame(host, $0) }
         for (key, pair) in zip(keys, zip(before, afterMealExchange)) {
             assertSameFrame(pair.0, pair.1, "\(key) moved on Dining Dollars → Meal Exchange")

@@ -176,7 +176,7 @@ describe("validateProviderOutput", () => {
     );
     expect(result).toEqual({
       ok: true,
-      proposal: { mealSwipes: 3, estimatedDiningDollarsCents: 200 },
+      proposal: { menuPath: "meal-exchange", mealSwipes: 3, estimatedDiningDollarsCents: 200 },
     });
   });
 
@@ -439,6 +439,7 @@ describe("validateProviderOutput", () => {
         },
         mealItems: [{ name: "1 Burger", details: "No Bag" }, { name: "1 Fries" }, { name: "1 burger", details: "no  bag" }],
         mealSwipes: 3,
+        menuPath: "meal-exchange",
       },
     });
   });
@@ -460,6 +461,9 @@ describe("validateProviderOutput", () => {
           name: "Palladium",
           address: "Palladium Hall, 140 E 14th St",
         },
+        // The path comes from the independent `1M` evidence, not from the
+        // ambiguous provider item list, so it survives the dropped items.
+        menuPath: "meal-exchange",
       },
     });
   });
@@ -489,6 +493,7 @@ describe("validateProviderOutput", () => {
           { name: "Burger", details: "No Bag" },
         ],
         mealSwipes: 2,
+        menuPath: "meal-exchange",
       },
     });
   });
@@ -507,5 +512,220 @@ describe("validateProviderOutput", () => {
       2
     );
     expect(result).toEqual({ ok: true, proposal: {} });
+  });
+});
+
+describe("W4-R4.1 deterministic menu path in validated proposals", () => {
+  const review = (...lines: string[]) => ["Review your pickup order", ...lines].join("\n");
+  const DINING_ROW = ["Your payment", "Payment method", "Dining Dollars"];
+  const bowl = { name: "Chicken Bowl", quantity: 1, modifiers: [] };
+  const empty = { visibleVenueText: null, foodItems: [], mealSwipes: null };
+
+  it("proposes Dining Dollars path and a separate labeled Total estimate", () => {
+    const text = review("Your order", "1 Chicken Bowl", "Subtotal $12.00", "Total $13.06", ...DINING_ROW);
+    expect(validateProviderOutput(empty, text, 1)).toEqual({
+      ok: true,
+      proposal: { menuPath: "dining-dollars", diningDollarsOrderTotalCents: 1306 },
+    });
+    const withItems = validateProviderOutput(
+      { visibleVenueText: null, foodItems: [bowl], mealSwipes: 2 },
+      text,
+      1
+    );
+    expect(withItems).toEqual({
+      ok: true,
+      proposal: {
+        menuPath: "dining-dollars",
+        mealItems: [{ name: "1 Chicken Bowl" }],
+        diningDollarsOrderTotalCents: 1306,
+      },
+    });
+  });
+
+  it("omits a whole-order estimate for conflicting, split, or out-of-bounds Totals", () => {
+    const cart = "Your Pickup Order\nContinue to Checkout\nStarbucks";
+    expect(validateProviderOutput(empty, `${cart}\nTotal $99.00`, 1)).toEqual({
+      ok: true, proposal: { menuPath: "dining-dollars" },
+    });
+    for (const suffix of [
+      "Total $12.00\nTotal $13.00",
+      "Total $12.00\nSplit payment",
+      "Subtotal $12.00\nTax $1.00",
+    ]) {
+      expect(validateProviderOutput(empty, `${cart}\n${suffix}`, 1)).toEqual({
+        ok: true, proposal: {},
+      });
+    }
+  });
+
+  it("proposes Meal Exchange from explicit wording without a swipe count or amount", () => {
+    expect(
+      validateProviderOutput(
+        { visibleVenueText: null, foodItems: [bowl], mealSwipes: 2 },
+        `${cartEvidenceText}\nMeal Exchange`,
+        1
+      )
+    ).toEqual({
+      ok: true,
+      proposal: { menuPath: "meal-exchange", mealItems: [{ name: "1 Chicken Bowl" }] },
+    });
+  });
+
+  it.each([
+    ["pickup heading", "Review your pickup order"],
+    ["delivery heading", "Review your delivery order"],
+  ])(
+    "grants no amount authority to a checkout/review screenshot: `3M + $2.00` under the %s proposes the path but no amount",
+    (_label, heading) => {
+      expect(
+        validateProviderOutput(
+          { visibleVenueText: null, foodItems: [bowl], mealSwipes: 3 },
+          [heading, "Your order", "1 Chicken Bowl", "3M + $2.00"].join("\n"),
+          1
+        )
+      ).toEqual({
+        ok: true,
+        proposal: {
+          menuPath: "meal-exchange",
+          mealItems: [{ name: "1 Chicken Bowl" }],
+          mealSwipes: 3,
+        },
+      });
+    }
+  );
+
+  it("does not let checkout chrome (Checkout word, Place-your-order CTA) stand in for a current-cart marker", () => {
+    expect(
+      validateProviderOutput(
+        { visibleVenueText: null, foodItems: [bowl], mealSwipes: 3 },
+        review("Checkout", "Your order", "1 Chicken Bowl", "3M + $2.00", "Place your pickup order"),
+        1
+      )
+    ).toEqual({
+      ok: true,
+      proposal: {
+        menuPath: "meal-exchange",
+        mealItems: [{ name: "1 Chicken Bowl" }],
+        mealSwipes: 3,
+      },
+    });
+  });
+
+  describe("amount authority across a mixed per-screenshot selection", () => {
+    const cartWithAmount = "Your pickup order\nItems subtotal\n3M + $2.00";
+    const cartWithoutAmount = "Your pickup order\nItems subtotal\nContinue to checkout";
+    const checkoutItems = review("Your order", "1 Chicken Bowl");
+    const checkoutWithAmount = review("Your order", "1 Chicken Bowl", "3M + $2.00");
+    const select = (images: string[]) =>
+      validateProviderOutput(
+        { visibleVenueText: null, foodItems: [bowl], mealSwipes: 3 },
+        images.join("\n"),
+        images.length,
+        images
+      );
+
+    it("keeps the existing current-cart amount when a cart screenshot carries both marker and amount", () => {
+      expect(select([cartWithAmount, checkoutItems])).toEqual({
+        ok: true,
+        proposal: {
+          menuPath: "meal-exchange",
+          mealItems: [{ name: "1 Chicken Bowl" }],
+          mealSwipes: 3,
+          estimatedDiningDollarsCents: 200,
+        },
+      });
+    });
+
+    it("does not let a cart screenshot's marker carry an amount that only a checkout screenshot shows", () => {
+      expect(select([cartWithoutAmount, checkoutWithAmount])).toEqual({
+        ok: true,
+        proposal: {
+          menuPath: "meal-exchange",
+          mealItems: [{ name: "1 Chicken Bowl" }],
+          mealSwipes: 3,
+        },
+      });
+    });
+  });
+
+  it("proposes neither a path nor a branch-dependent value when evidence conflicts, but keeps the shared location", () => {
+    const text = review("Your order", "1 Chicken Bowl", "Palladium", "3M + $2.00", ...DINING_ROW);
+    expect(
+      validateProviderOutput(
+        { visibleVenueText: "Palladium", foodItems: [bowl], mealSwipes: 3 },
+        text,
+        1
+      )
+    ).toEqual({
+      ok: true,
+      proposal: {
+        selectedDiningSpot: { name: "Palladium", address: "Palladium Hall, 140 E 14th St" },
+      },
+    });
+  });
+
+  it("treats `Use 1 Meal + Dining Dollars` as Meal Exchange, with no count or amount", () => {
+    expect(
+      validateProviderOutput(
+        { visibleVenueText: null, foodItems: [bowl], mealSwipes: 1 },
+        `${cartEvidenceText}\nUse 1 Meal + Dining Dollars`,
+        1
+      )
+    ).toEqual({ ok: true, proposal: {
+      menuPath: "meal-exchange", mealItems: [{ name: "1 Chicken Bowl" }],
+    } });
+  });
+
+  it("rejects a provider-supplied menuPath outright, and a valid path never needs the provider", () => {
+    const dining = review(...DINING_ROW);
+    for (const menuPath of ["dining-dollars", "meal-exchange", "MEAL_EXCHANGE", null]) {
+      expect(validateProviderOutput({ ...empty, menuPath }, dining, 1)).toEqual({
+        ok: false,
+        reason: "forbidden_fields",
+      });
+    }
+    expect(validateProviderOutput(empty, dining, 1)).toEqual({
+      ok: true,
+      proposal: { menuPath: "dining-dollars" },
+    });
+  });
+
+  it("uses per-screenshot evidence when supplied, defaulting the combined text to one screenshot", () => {
+    const images = [review(...DINING_ROW), review("Your payment", "Payment method", "Visa ending 1234")];
+    expect(
+      validateProviderOutput(empty, images.join("\n"), 2, images)
+    ).toEqual({ ok: true, proposal: {} });
+    // The combined text alone is one screenshot with two Payment method rows,
+    // which is equally an ambiguous layout.
+    expect(validateProviderOutput(empty, images.join("\n"), 2)).toEqual({ ok: true, proposal: {} });
+  });
+
+  it("turns a supported cart's complete derived Total relation into DD plus its editable estimate", () => {
+    const text = [
+      "Your Pickup Order", "Continue to Checkout", "$9.00", "Items subtotal",
+      "$14.00", "Sales tax", "$1.45", "Total", "Order actions", "$15.45",
+    ].join("\n");
+    const geometry = {
+      observations: [
+        { id: 2, classification: "amount" as const, cents: 900, geometryValid: true },
+        { id: 4, classification: "amount" as const, cents: 1_400, geometryValid: true },
+        { id: 6, classification: "amount" as const, cents: 145, geometryValid: true },
+        { id: 7, classification: "total-label" as const, geometryValid: true },
+        { id: 9, classification: "amount" as const, cents: 1_545, geometryValid: true },
+      ],
+      relations: [2, 4, 6, 9].map((amountObservationID) => ({
+        totalObservationID: 7,
+        amountObservationID,
+        sameRow: amountObservationID === 9,
+        rightOf: amountObservationID === 9,
+      })),
+    };
+    expect(validateProviderOutput(empty, text, 1, [text], [geometry])).toEqual({
+      ok: true,
+      proposal: {
+        menuPath: "dining-dollars",
+        diningDollarsOrderTotalCents: 1_545,
+      },
+    });
   });
 });

@@ -19,9 +19,68 @@ final class RequestFoodDraftSession: ObservableObject {
     /// already edited manually.
     @Published var screenshotManualEdits = ScreenshotFieldManualEditState()
 
-    /// Retains the truthful "Filled from screenshot" presentation for values
+    /// Retains the truthful "Suggested" presentation for values
     /// that remain accepted and unedited when the route is recreated.
     @Published var screenshotProvenance = ScreenshotProposalAppliedFields()
+
+    /// One new-selection boundary for draft clearing and its matching badge
+    /// clearing. A requester-owned value keeps both its value and authority;
+    /// the Meal Exchange top-up retains its existing selection behavior.
+    func beginScreenshotSelection(using store: ScreenshotProposalStore) -> ScreenshotSelectionToken {
+        let token = store.beginSelection(clearing: &draft, manualEdits: screenshotManualEdits)
+        screenshotProvenance.menuPath = false
+        if !screenshotManualEdits.hasManuallyEditedLocation { screenshotProvenance.location = false }
+        if !screenshotManualEdits.hasManuallyEditedMealSwipes { screenshotProvenance.mealSwipes = false }
+        if !screenshotManualEdits.hasManuallyEditedOrderDetails { screenshotProvenance.orderDetails = false }
+        if !screenshotManualEdits.hasManuallyEditedDiningDollarsOnly {
+            screenshotProvenance.diningDollarsOnly = false
+        }
+        for index in 0..<RequestFoodFormDraft.maxMealSwipes {
+            if !screenshotManualEdits.hasManuallyEditedMealItemName(index) {
+                screenshotProvenance.mealItemNames.remove(index)
+            }
+            if !screenshotManualEdits.hasManuallyEditedMealItemDetails(index) {
+                screenshotProvenance.mealItemDetails.remove(index)
+            }
+        }
+        return token
+    }
+
+    /// The Request Food picker binding's requester-owned count transition.
+    /// A store write or explicit screenshot adoption never calls this.
+    func setMealSwipesManually(_ count: Int) {
+        guard RequestFoodFormDraft.mealSwipeOptions.contains(count) else { return }
+        draft.mealSwipes = count
+        screenshotManualEdits.hasManuallyEditedMealSwipes = true
+        screenshotProvenance.mealSwipes = false
+    }
+
+    /// Reject only surplus subfields that this result actually wrote. The
+    /// caller fences the result token; these current manual/provenance checks
+    /// also protect a subfield the requester has since taken ownership of.
+    func rejectCurrentScreenshotSurplus(
+        above manualCount: Int,
+        names: Set<Int>,
+        details: Set<Int>
+    ) {
+        guard screenshotManualEdits.hasManuallyEditedMealSwipes,
+              draft.mealSwipes == manualCount,
+              RequestFoodFormDraft.mealSwipeOptions.contains(manualCount) else { return }
+        for index in manualCount..<RequestFoodFormDraft.maxMealSwipes {
+            if names.contains(index),
+               screenshotProvenance.mealItemNames.contains(index),
+               !screenshotManualEdits.hasManuallyEditedMealItemName(index) {
+                draft.mealEntries[index].name = ""
+                screenshotProvenance.mealItemNames.remove(index)
+            }
+            if details.contains(index),
+               screenshotProvenance.mealItemDetails.contains(index),
+               !screenshotManualEdits.hasManuallyEditedMealItemDetails(index) {
+                draft.mealEntries[index].details = nil
+                screenshotProvenance.mealItemDetails.remove(index)
+            }
+        }
+    }
 
     /// Called only after request creation is authoritatively confirmed. D1
     /// ambiguity, verification, route departure, backgrounding, and every

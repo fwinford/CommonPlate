@@ -14,12 +14,18 @@ import Foundation
 ///
 /// W4-R4 proposals use the same `MealItem` shape as manual entry.  A current
 /// cart's order-level amount may also be proposed as an estimate, but never
-/// selects the requester-owned menu path or submits anything.
+/// submits anything. W4-R4.1 adds the deterministic `menuPath` proposal.
 struct ScreenshotProposal: Equatable {
+    /// W4-R4.1: the deterministic menu path, established only by CommonPlate's
+    /// independent on-device evidence rule (`RequesterOrderDeterministicEvidence
+    /// .resolveMenuPath`) — never a provider-produced field. Proposal-only: the
+    /// requester remains able to change it, and it never submits anything.
+    var menuPath: RequestMenuPath?
     var selectedDiningSpot: DiningSpot?
     var mealItems: [MealItem]?
     var mealSwipes: Int?
     var estimatedDiningDollarsCents: Int?
+    var diningDollarsOrderTotalCents: Int?
 
     static let empty = ScreenshotProposal()
 }
@@ -33,9 +39,11 @@ struct ScreenshotProposalOutcome: Equatable {
     let proposal: ScreenshotProposal
 
     var isEmpty: Bool {
-        proposal.selectedDiningSpot == nil
+        proposal.menuPath == nil
+            && proposal.selectedDiningSpot == nil
             && (proposal.mealItems?.isEmpty ?? true)
             && proposal.mealSwipes == nil
             && proposal.estimatedDiningDollarsCents == nil
+            && proposal.diningDollarsOrderTotalCents == nil
     }
 }

@@ -16,8 +16,10 @@ import XCTest
 final class ScreenshotConformanceVectorTests: XCTestCase {
     private struct Vectors {
         let version: Int
+        let totalGeometry: [[String: Any]]
         let eligibility: [[String: Any]]
         let mealSwipeCorroboration: [[String: Any]]
+        let menuPath: [[String: Any]]
         let providerOutput: [[String: Any]]
     }
 
@@ -33,8 +35,10 @@ final class ScreenshotConformanceVectorTests: XCTestCase {
         )
         return Vectors(
             version: try XCTUnwrap(object["version"] as? Int),
+            totalGeometry: try XCTUnwrap(object["totalGeometry"] as? [[String: Any]]),
             eligibility: try XCTUnwrap(object["eligibility"] as? [[String: Any]]),
             mealSwipeCorroboration: try XCTUnwrap(object["mealSwipeCorroboration"] as? [[String: Any]]),
+            menuPath: try XCTUnwrap(object["menuPath"] as? [[String: Any]]),
             providerOutput: try XCTUnwrap(object["providerOutput"] as? [[String: Any]])
         )
     }
@@ -42,12 +46,45 @@ final class ScreenshotConformanceVectorTests: XCTestCase {
     func testVectorFileIsTheKnownVersionAndIsNotHollowedOut() throws {
         let vectors = try loadVectors()
         XCTAssertEqual(vectors.version, 1)
-        XCTAssertGreaterThanOrEqual(vectors.eligibility.count, 24)
+        XCTAssertGreaterThanOrEqual(vectors.totalGeometry.count, 6)
+        XCTAssertGreaterThanOrEqual(vectors.eligibility.count, 41)
         XCTAssertGreaterThanOrEqual(vectors.mealSwipeCorroboration.count, 22)
-        XCTAssertGreaterThanOrEqual(vectors.providerOutput.count, 70)
-        for group in [vectors.eligibility, vectors.mealSwipeCorroboration, vectors.providerOutput] {
+        XCTAssertGreaterThanOrEqual(vectors.menuPath.count, 50)
+        XCTAssertGreaterThanOrEqual(vectors.providerOutput.count, 113)
+        for group in [vectors.totalGeometry, vectors.eligibility, vectors.mealSwipeCorroboration, vectors.menuPath, vectors.providerOutput] {
             let ids = group.compactMap { $0["id"] as? String }
             XCTAssertEqual(ids.count, Set(ids).count, "vector ids must be unique")
+        }
+    }
+
+    func testTotalGeometryVectors() throws {
+        for vector in try loadVectors().totalGeometry {
+            let id = try XCTUnwrap(vector["id"] as? String)
+            let texts = try XCTUnwrap(vector["evidenceTexts"] as? [String])
+            let rawGeometry = try XCTUnwrap(vector["geometryEvidence"] as? [Any])
+            let geometry = try JSONDecoder().decode(
+                [ScreenshotTotalGeometryEvidence?].self,
+                from: JSONSerialization.data(withJSONObject: rawGeometry)
+            )
+            let expected = try XCTUnwrap(vector["expected"] as? [String: Any])
+            XCTAssertEqual(
+                RequesterOrderDeterministicEvidence.currentOrderTotalCents(
+                    imageEvidenceTexts: texts,
+                    imageTotalGeometryEvidence: geometry
+                ),
+                expected["totalCents"] as? Int,
+                "Total geometry: \(id)"
+            )
+            let resolution = RequesterOrderDeterministicEvidence.resolveMenuPath(
+                imageEvidenceTexts: texts,
+                imageTotalGeometryEvidence: geometry
+            )
+            XCTAssertEqual(
+                resolution.menuPath,
+                Self.domainPath(expected["menuPath"] as? String),
+                "Total geometry path: \(id)"
+            )
+            XCTAssertEqual(resolution.conflict, expected["conflict"] as? Bool, "Total geometry conflict: \(id)")
         }
     }
 
@@ -71,6 +108,27 @@ final class ScreenshotConformanceVectorTests: XCTestCase {
         }
     }
 
+    /// W4-R4.1: the deterministic menu-path rule, per-screenshot, including
+    /// conflicts. Wire strings map to the domain path; `null` is no proposal.
+    func testMenuPathVectors() throws {
+        for vector in try loadVectors().menuPath {
+            let id = try XCTUnwrap(vector["id"] as? String)
+            let texts = try XCTUnwrap(vector["evidenceTexts"] as? [String])
+            let expected = try XCTUnwrap(vector["expected"] as? [String: Any])
+            let result = RequesterOrderDeterministicEvidence.resolveMenuPath(imageEvidenceTexts: texts)
+            XCTAssertEqual(result.menuPath, Self.domainPath(expected["menuPath"] as? String), "menu path: \(id)")
+            XCTAssertEqual(result.conflict, expected["conflict"] as? Bool, "conflict: \(id)")
+        }
+    }
+
+    private static func domainPath(_ wire: String?) -> RequestMenuPath? {
+        switch wire {
+        case "meal-exchange": return .mealExchange
+        case "dining-dollars": return .diningDollars
+        default: return nil
+        }
+    }
+
     func testProviderOutputVectors() throws {
         let catalog = SupportedVendorCatalog.diningSpots
         for vector in try loadVectors().providerOutput {
@@ -78,11 +136,16 @@ final class ScreenshotConformanceVectorTests: XCTestCase {
             let evidence = try XCTUnwrap(vector["evidenceText"] as? String)
             let count = try XCTUnwrap(vector["evidenceImageCount"] as? Int)
             let expected = try XCTUnwrap(vector["expected"] as? [String: Any])
+            let imageTexts = vector["evidenceTexts"] as? [String]
+            if let imageTexts {
+                XCTAssertEqual(evidence, imageTexts.joined(separator: "\n"), "combined evidence text: \(id)")
+            }
 
             let result = RequesterOrderOutputValidator.validate(
                 raw: vector["raw"],
                 evidenceText: evidence,
                 evidenceImageCount: count,
+                imageEvidenceTexts: imageTexts,
                 // The shared vectors describe the backend's behavior, where the
                 // OCR-derived Dining Dollars rule is available. The OCR→local
                 // restriction is Swift-only policy, proven separately below.
@@ -107,6 +170,7 @@ final class ScreenshotConformanceVectorTests: XCTestCase {
         id: String
     ) throws -> ScreenshotProposal {
         var result = ScreenshotProposal()
+        result.menuPath = Self.domainPath(proposal["menuPath"] as? String)
         if let spot = proposal["selectedDiningSpot"] as? [String: Any] {
             let name = try XCTUnwrap(spot["name"] as? String)
             let catalogSpot = try XCTUnwrap(catalog.first { $0.name == name }, "vendor \(name) in \(id)")
@@ -120,6 +184,7 @@ final class ScreenshotConformanceVectorTests: XCTestCase {
         }
         result.mealSwipes = proposal["mealSwipes"] as? Int
         result.estimatedDiningDollarsCents = proposal["estimatedDiningDollarsCents"] as? Int
+        result.diningDollarsOrderTotalCents = proposal["diningDollarsOrderTotalCents"] as? Int
         return result
     }
 

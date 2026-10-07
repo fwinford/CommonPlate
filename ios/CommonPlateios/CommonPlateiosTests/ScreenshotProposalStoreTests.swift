@@ -1214,7 +1214,7 @@ extension ScreenshotProposalStoreTests {
         XCTAssertFalse(applied.orderDetails)
     }
 
-    func testAProposalNeverChangesTheMenuPathOrTheDiningDollarAmount() {
+    func testAProposalWithoutADeterministicPathNeverChangesTheMenuPathOrTheDiningDollarAmount() {
         let store = makeMultiStore()
         var draft = RequestFoodFormDraft(
             menuPath: .diningDollars,
@@ -1234,8 +1234,9 @@ extension ScreenshotProposalStoreTests {
             to: &draft
         )
 
-        // Screenshot Assistance proposes values; it does not decide which
-        // menu the requester is using or how much money they need.
+        // With no deterministic path proposal (W4-R4.1 covers that case in
+        // `ScreenshotMenuPathApplicationTests`), Screenshot Assistance does not
+        // decide which menu the requester is using or how much money they need.
         XCTAssertEqual(draft.menuPath, .diningDollars)
         XCTAssertEqual(draft.diningDollarsText, "7.25")
     }

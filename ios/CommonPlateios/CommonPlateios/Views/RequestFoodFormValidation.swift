@@ -108,8 +108,10 @@ enum DiningDollarsEntry: Equatable {
 /// never persisted to disk/server or shared with fulfillment.
 struct RequestFoodFormDraft: Equatable {
     var selectedDiningSpot: DiningSpot?
-    /// W4-R4: which menu the requester is using. Requester-owned; Screenshot
-    /// Assistance never sets it.
+    /// W4-R4: which menu the requester is using. Requester-owned, with one
+    /// W4-R4.1 exception: deterministic Screenshot Assistance evidence may
+    /// switch it until the requester changes it after assistance has acted
+    /// (`ScreenshotFieldManualEditState`).
     var menuPath: RequestMenuPath
     var timing: RequestTiming
     var preferredPickupTime: Date
@@ -139,11 +141,34 @@ struct RequestFoodFormDraft: Equatable {
     /// hidden meal entries are: the requester's typing is theirs.
     var orderDetails: String
 
-    /// The requester's Dining Dollar estimate, as they typed it. Optional on
-    /// the Meal Exchange path, required on the Dining-Dollars-only one. Kept
-    /// as text so the field can be empty — which means "none needed" and is
-    /// never rendered or submitted as `$0.00`.
-    var diningDollarsText: String
+    /// W4-R4.1: the two Dining Dollars drafts are distinct domains and are
+    /// never copied into, derived from, or reinterpreted as each other.
+    ///
+    /// The Meal Exchange branch's optional Dining Dollars TOP-UP, as typed.
+    /// Empty means "none needed" and is never rendered or submitted as `$0.00`.
+    var mealExchangeDiningDollarsText: String
+
+    /// The Dining-Dollars-only branch's required whole-order amount, as typed.
+    var diningDollarsOnlyText: String
+
+    /// The amount text of the ACTIVE branch — the only one validation and
+    /// submission ever read, and the one the form field edits. Writing it
+    /// changes only the active branch's value; the inactive branch keeps its
+    /// draft untouched (no capping, zeroing, truncating, or copying).
+    var diningDollarsText: String {
+        get {
+            switch menuPath {
+            case .mealExchange: return mealExchangeDiningDollarsText
+            case .diningDollars: return diningDollarsOnlyText
+            }
+        }
+        set {
+            switch menuPath {
+            case .mealExchange: mealExchangeDiningDollarsText = newValue
+            case .diningDollars: diningDollarsOnlyText = newValue
+            }
+        }
+    }
 
     init(
         selectedDiningSpot: DiningSpot? = nil,
@@ -153,7 +178,9 @@ struct RequestFoodFormDraft: Equatable {
         mealSwipes: Int = RequestFoodFormDraft.mealSwipeOptions.first!,
         mealEntries: [MealItem] = RequestFoodFormDraft.emptyMealEntries,
         orderDetails: String = "",
-        diningDollarsText: String = ""
+        diningDollarsText: String = "",
+        mealExchangeDiningDollarsText: String = "",
+        diningDollarsOnlyText: String = ""
     ) {
         self.selectedDiningSpot = selectedDiningSpot
         self.menuPath = menuPath
@@ -165,7 +192,15 @@ struct RequestFoodFormDraft: Equatable {
         // truncated, rather than silently changing what "active" means.
         self.mealEntries = RequestFoodFormDraft.normalized(mealEntries)
         self.orderDetails = orderDetails
-        self.diningDollarsText = diningDollarsText
+        self.mealExchangeDiningDollarsText = mealExchangeDiningDollarsText
+        self.diningDollarsOnlyText = diningDollarsOnlyText
+        // `diningDollarsText` is the long-standing single-value parameter: a
+        // non-empty value is the ACTIVE branch's amount (for both the former
+        // flat callers and D2 payload restoration, which carries only the
+        // submitted branch's amount).
+        if !diningDollarsText.isEmpty {
+            self.diningDollarsText = diningDollarsText
+        }
     }
 
     /// Test/support convenience for the former flat draft callers. It
@@ -179,7 +214,9 @@ struct RequestFoodFormDraft: Equatable {
         mealSwipes: Int = RequestFoodFormDraft.mealSwipeOptions.first!,
         mealEntries: [String],
         orderDetails: String = "",
-        diningDollarsText: String = ""
+        diningDollarsText: String = "",
+        mealExchangeDiningDollarsText: String = "",
+        diningDollarsOnlyText: String = ""
     ) {
         self.init(
             selectedDiningSpot: selectedDiningSpot,
@@ -189,7 +226,9 @@ struct RequestFoodFormDraft: Equatable {
             mealSwipes: mealSwipes,
             mealEntries: mealEntries.map { MealItem(name: $0) },
             orderDetails: orderDetails,
-            diningDollarsText: diningDollarsText
+            diningDollarsText: diningDollarsText,
+            mealExchangeDiningDollarsText: mealExchangeDiningDollarsText,
+            diningDollarsOnlyText: diningDollarsOnlyText
         )
     }
 
@@ -231,8 +270,8 @@ struct RequestFoodFormDraft: Equatable {
         }
     }
 
-    /// The parsed estimate. `.empty` on the Meal Exchange path is valid and
-    /// means no Dining Dollars are needed.
+    /// The parsed estimate of the ACTIVE branch. `.empty` on the Meal
+    /// Exchange path is valid and means no Dining Dollars are needed.
     var diningDollars: DiningDollarsEntry {
         DiningDollarsEntry.parse(diningDollarsText)
     }
@@ -260,7 +299,9 @@ struct RequestFoodFormDraft: Equatable {
     /// the picker's own first option when the payload's is `0` (the
     /// Dining-Dollars-only path's submitted value), since the stored property
     /// is only ever meaningful on the Meal Exchange path and must stay within
-    /// the picker's bounded set.
+    /// the picker's bounded set. Only the submitted branch's amount is
+    /// restored (the payload carries nothing about the inactive branch's
+    /// session draft, which cannot be reconstructed).
     init(restoring payload: CreateRequestPayload) {
         self.init(
             selectedDiningSpot: DiningSpot(name: payload.vendor, address: nil),

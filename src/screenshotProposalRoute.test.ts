@@ -103,13 +103,21 @@ function imageBody(localEvidenceText: string, overrides: Record<string, unknown>
  * Each entry supplies its own independent on-device evidence text, exactly
  * as iOS sends it. */
 function multiImageBody(
-  images: { localEvidenceText: string; imageBase64?: string; mimeType?: string }[]
+  images: Array<{
+    localEvidenceText: string;
+    imageBase64?: string;
+    mimeType?: string;
+    localTotalGeometry?: unknown;
+  }>
 ) {
   return {
     images: images.map((image) => ({
       imageBase64: image.imageBase64 ?? ONE_PIXEL_PNG_BASE64,
       mimeType: image.mimeType ?? "image/png",
       localEvidenceText: image.localEvidenceText,
+      ...(image.localTotalGeometry === undefined
+        ? {}
+        : { localTotalGeometry: image.localTotalGeometry }),
     })),
   };
 }
@@ -398,6 +406,7 @@ describe("handleScreenshotProposal", () => {
       proposal: {
         selectedDiningSpot: { name: "Crave NYU", address: "John A. Paulson Center, 6th Floor" },
         mealSwipes: 2,
+        menuPath: "meal-exchange",
       },
     });
   });
@@ -1563,5 +1572,241 @@ describe("W4-R4 multi-screenshot evidence for one logical order", () => {
     expect(JSON.stringify(body)).not.toMatch(
       /operationId|requestId|createRequest|claimToken/
     );
+  });
+});
+
+describe("W4-R4.1 checkout/review eligibility and menu path through the route", () => {
+  const review = (...lines: string[]) => ["Review your pickup order", ...lines].join("\n");
+  const DINING_ROW = ["Your payment", "Payment method", "Dining Dollars"];
+  const emptyOutput = { visibleVenueText: null, foodItems: [], mealSwipes: null };
+
+  it("carries complete per-image derived Total evidence through the route", async () => {
+    const text = [
+      "Your Pickup Order", "Continue to Checkout", "$9.00", "Items subtotal",
+      "$14.00", "Sales tax", "$1.45", "Total", "Order actions", "$15.45",
+    ].join("\n");
+    const localTotalGeometry = {
+      observations: [
+        { id: 2, classification: "amount", cents: 900, geometryValid: true },
+        { id: 4, classification: "amount", cents: 1_400, geometryValid: true },
+        { id: 6, classification: "amount", cents: 145, geometryValid: true },
+        { id: 7, classification: "total-label", geometryValid: true },
+        { id: 9, classification: "amount", cents: 1_545, geometryValid: true },
+      ],
+      relations: [2, 4, 6, 9].map((amountObservationID) => ({
+        totalObservationID: 7,
+        amountObservationID,
+        sameRow: amountObservationID === 9,
+        rightOf: amountObservationID === 9,
+      })),
+    };
+    callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: emptyOutput });
+    const { req, res, status, json } = routeContext(imageBody(text, { localTotalGeometry }));
+    await handleScreenshotProposal(req, res);
+    expect(status).toHaveBeenCalledWith(200);
+    expect(json).toHaveBeenCalledWith({
+      eligible: true,
+      proposal: { menuPath: "dining-dollars", diningDollarsOrderTotalCents: 1_545 },
+    });
+  });
+
+  it("rejects raw coordinates and non-allowlisted geometry fields at the route schema", async () => {
+    const text = "Your Pickup Order\nContinue to Checkout\nTotal\n$15.45";
+    const localTotalGeometry = {
+      observations: [{
+        id: 2, classification: "total-label", geometryValid: true,
+        boundingBox: { x: 0, y: 0, width: 1, height: 1 },
+      }],
+      relations: [],
+    };
+    const { req, res, status } = routeContext(imageBody(text, { localTotalGeometry }));
+    await handleScreenshotProposal(req, res);
+    expect(status).toHaveBeenCalledWith(400);
+    expect(callScreenshotProvider).not.toHaveBeenCalled();
+  });
+
+  it("admits a qualifying checkout/review screenshot and returns the deterministic Dining Dollars path", async () => {
+    callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: emptyOutput });
+    const { req, res, status, json } = routeContext(imageBody(review(...DINING_ROW)));
+    await handleScreenshotProposal(req, res);
+    expect(status).toHaveBeenCalledWith(200);
+    expect(callScreenshotProvider).toHaveBeenCalledTimes(1);
+    expect(json).toHaveBeenCalledWith({ eligible: true, proposal: { menuPath: "dining-dollars" } });
+  });
+
+  it.each([
+    ["heading only", "Review your pickup order\nTotal due today\nEstimated total 12.00"],
+    ["a Place-your-order CTA only", "Place your pickup order\nYour order\n1 Chicken Bowl"],
+    ["a receipt/payment sheet without the heading", "Your payment\nPayment method\nDining Dollars\nReceipt total 12.00"],
+  ])("never calls the provider for %s", async (_name, text) => {
+    const { req, res, status, json } = routeContext(imageBody(text));
+    await handleScreenshotProposal(req, res);
+    expect(status).toHaveBeenCalledWith(200);
+    expect(callScreenshotProvider).not.toHaveBeenCalled();
+    expect(json).toHaveBeenCalledWith({ eligible: false, proposal: {} });
+  });
+
+  it("attributes path evidence per eligible screenshot and ignores an ineligible one", async () => {
+    callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: emptyOutput });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: review(...DINING_ROW) },
+        { localEvidenceText: `Menu browse popular items reviews rating\nBowl 1M` },
+      ])
+    );
+    await handleScreenshotProposal(context.req, context.res);
+    expect(context.json).toHaveBeenCalledWith({
+      eligible: true,
+      proposal: { menuPath: "dining-dollars" },
+    });
+  });
+
+  it("omits the path when eligible screenshots hold conflicting evidence", async () => {
+    callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: emptyOutput });
+    const context = routeContext(
+      multiImageBody([
+        { localEvidenceText: review(...DINING_ROW) },
+        { localEvidenceText: cartEvidenceText + " Bowl 1M" },
+      ])
+    );
+    await handleScreenshotProposal(context.req, context.res);
+    expect(context.json).toHaveBeenCalledWith({ eligible: true, proposal: {} });
+  });
+
+  // The route must hand the validator each screenshot's own evidence. Without
+  // it the validator falls back to one blob made of every screenshot's text,
+  // which lets structure stitch together across screenshots.
+  describe("per-screenshot evidence reaches proposal validation", () => {
+    it("resolves a path that depends on each screenshot being read on its own", async () => {
+      callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: emptyOutput });
+      // Two checkout screenshots, each with its own single Dining Dollars row.
+      // As one blob they would read as one screenshot with two Payment method
+      // rows, an ambiguous layout that proposes no path.
+      const context = routeContext(
+        multiImageBody([
+          { localEvidenceText: review(...DINING_ROW) },
+          { localEvidenceText: review("Your order", "1 Chicken Bowl", ...DINING_ROW) },
+        ])
+      );
+      await handleScreenshotProposal(context.req, context.res);
+      expect(context.json).toHaveBeenCalledWith({
+        eligible: true,
+        proposal: { menuPath: "dining-dollars" },
+      });
+    });
+
+    it("does not stitch a `Your payment` title in one screenshot to a Dining Dollars row in another", async () => {
+      callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: emptyOutput });
+      // Screenshot A ends at the `Your payment` title. Screenshot B starts with
+      // `Payment method` / `Dining Dollars` and is eligible only as a cart, so
+      // it has no payment-section evidence of its own. As one blob the two
+      // would read as a single selected Dining Dollars row.
+      const context = routeContext(
+        multiImageBody([
+          { localEvidenceText: review("Your order", "1 Chicken Bowl", "Your payment") },
+          { localEvidenceText: ["Payment method", "Dining Dollars", cartEvidenceText].join("\n") },
+        ])
+      );
+      await handleScreenshotProposal(context.req, context.res);
+      expect(context.json).toHaveBeenCalledWith({ eligible: true, proposal: {} });
+    });
+
+    it("keeps the existing cart amount from a cart screenshot beside a checkout screenshot, and never takes one from the checkout screenshot", async () => {
+      const chickenBowl = {
+        visibleVenueText: null,
+        foodItems: [{ name: "Chicken Bowl", quantity: 1, modifiers: [] }],
+        mealSwipes: 3,
+      };
+      const cartAmount = "Your Pickup Order Items subtotal 3M + $2.00";
+      const checkout = review("Your order", "1 Chicken Bowl");
+
+      callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: chickenBowl });
+      const kept = routeContext(
+        multiImageBody([{ localEvidenceText: cartAmount }, { localEvidenceText: checkout }])
+      );
+      await handleScreenshotProposal(kept.req, kept.res);
+      expect(kept.json).toHaveBeenCalledWith({
+        eligible: true,
+        proposal: {
+          menuPath: "meal-exchange",
+          mealItems: [{ name: "1 Chicken Bowl" }],
+          mealSwipes: 3,
+          estimatedDiningDollarsCents: 200,
+        },
+      });
+
+      callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: chickenBowl });
+      const dropped = routeContext(
+        multiImageBody([
+          { localEvidenceText: "Your Pickup Order Items subtotal Continue to Checkout" },
+          { localEvidenceText: review("Your order", "1 Chicken Bowl", "3M + $2.00") },
+        ])
+      );
+      await handleScreenshotProposal(dropped.req, dropped.res);
+      expect(dropped.json).toHaveBeenCalledWith({
+        eligible: true,
+        proposal: {
+          menuPath: "meal-exchange",
+          mealItems: [{ name: "1 Chicken Bowl" }],
+          mealSwipes: 3,
+        },
+      });
+    });
+  });
+
+  it("refuses a provider menuPath with the same sanitized failure as any forbidden field", async () => {
+    callScreenshotProvider.mockResolvedValue({
+      ok: true,
+      rawJson: { ...emptyOutput, menuPath: "dining-dollars" },
+    });
+    const { req, res, status } = routeContext(imageBody(review(...DINING_ROW)));
+    await handleScreenshotProposal(req, res);
+    expect(status).toHaveBeenCalledWith(503);
+  });
+});
+
+describe("W4-R4.1 meal-swipe inference stays inside the eligible-image boundary", () => {
+  const header = "View order\nOrder information\nUnlisted Cafe - Meal Exchange";
+  const meal = (name: string) => ({ name, quantity: 1, modifiers: [] });
+  const twoMeals = {
+    visibleVenueText: null,
+    foodItems: [meal("Build Your Own Bowl"), meal("Create Your Own Pasta Bowl")],
+    mealSwipes: null,
+  };
+  const items = [{ name: "1 Build Your Own Bowl" }, { name: "1 Create Your Own Pasta Bowl" }];
+
+  it("counts two meals when each is grounded in its own eligible screenshot", async () => {
+    callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: twoMeals });
+    const { req, res, json } = routeContext(
+      multiImageBody([
+        { localEvidenceText: `${header}\n1 Build Your Own Bowl` },
+        { localEvidenceText: `${header}\n1 Create Your Own Pasta Bowl` },
+      ])
+    );
+    await handleScreenshotProposal(req, res);
+    expect(json).toHaveBeenCalledWith({
+      eligible: true,
+      proposal: { menuPath: "meal-exchange", mealItems: items, mealSwipes: 2 },
+    });
+  });
+
+  it("never lets an ineligible screenshot's OCR ground a counted meal", async () => {
+    callScreenshotProvider.mockResolvedValue({ ok: true, rawJson: twoMeals });
+    // The second screenshot is ineligible (browse chrome), so it contributes
+    // neither bytes nor evidence — even though its OCR holds a line that would
+    // ground the second meal if it were read.
+    const { req, res, json } = routeContext(
+      multiImageBody([
+        { localEvidenceText: `${header}\n1 Build Your Own Bowl` },
+        { localEvidenceText: "Menu browse popular items reviews rating\n1 Create Your Own Pasta Bowl" },
+      ])
+    );
+    await handleScreenshotProposal(req, res);
+    const [options] = callScreenshotProvider.mock.calls[0] as [{ images: unknown[] }];
+    expect(options.images).toHaveLength(1);
+    expect(json).toHaveBeenCalledWith({
+      eligible: true,
+      proposal: { menuPath: "meal-exchange", mealItems: items },
+    });
   });
 });

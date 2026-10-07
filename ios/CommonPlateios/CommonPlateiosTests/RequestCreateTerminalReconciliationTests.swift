@@ -1146,6 +1146,8 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         // below does that).
         XCTAssertTrue(resetBody.contains("RequestFoodMountedPresentationState("))
         XCTAssertTrue(resetBody.contains("mountedState.resetForTerminalRecovery(screenshotProposalStore:"))
+        XCTAssertTrue(resetBody.contains("mealSwipeMismatch: mealSwipeMismatch"))
+        XCTAssertTrue(resetBody.contains("mealSwipeMismatch = mountedState.mealSwipeMismatch"))
         for field in ["focusedField = nil", "selectedScreenshotItems = []"] {
             XCTAssertTrue(resetBody.contains(field), "resetFormLocalPresentationState must reset \(field)")
         }
@@ -1251,6 +1253,8 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
             manualEdits: ScreenshotFieldManualEditState()
         )
         XCTAssertTrue(screenshotProposalStore.isCurrent(staleSelectionToken))
+        contaminated.mealSwipeMismatch.present(2, for: staleSelectionToken)
+        XCTAssertEqual(contaminated.mealSwipeMismatch.suggestion?.proposedCount, 2)
 
         contaminated.resetForTerminalRecovery(screenshotProposalStore: screenshotProposalStore)
 
@@ -1263,6 +1267,8 @@ final class RequestCreateTerminalReconciliationTests: XCTestCase {
         XCTAssertFalse(contaminated.isPresentingTimingInfo)
         XCTAssertEqual(contaminated.screenshotAfterglowFields, ScreenshotProposalAppliedFields())
         XCTAssertFalse(contaminated.screenshotChecked)
+        XCTAssertNil(contaminated.mealSwipeMismatch.suggestion)
+        XCTAssertNil(contaminated.mealSwipeMismatch.dismissedToken)
         XCTAssertFalse(contaminated.preservedEntryFeedback.isShowing)
         XCTAssertFalse(contaminated.preservedEntryFeedback.hasCompletedScreenshotAssistanceRun)
         XCTAssertNil(contaminated.expandedMealIndex)

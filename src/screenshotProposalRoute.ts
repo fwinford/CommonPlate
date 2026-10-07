@@ -87,6 +87,30 @@ const SCREENSHOT_BODY_LIMIT = "34mb";
  */
 const MAX_LOCAL_EVIDENCE_TEXT_LENGTH = 20_000;
 
+const totalGeometryObservationSchema = z.discriminatedUnion("classification", [
+  z.object({
+    id: z.number().int().min(0).max(20_000),
+    classification: z.literal("total-label"),
+    geometryValid: z.boolean(),
+  }).strict(),
+  z.object({
+    id: z.number().int().min(0).max(20_000),
+    classification: z.literal("amount"),
+    cents: z.number().int().min(0).max(999_999),
+    geometryValid: z.boolean(),
+  }).strict(),
+]);
+
+const totalGeometryEvidenceSchema = z.object({
+  observations: z.array(totalGeometryObservationSchema).max(512),
+  relations: z.array(z.object({
+    totalObservationID: z.number().int().min(0).max(20_000),
+    amountObservationID: z.number().int().min(0).max(20_000),
+    sameRow: z.boolean(),
+    rightOf: z.boolean(),
+  }).strict()).max(4_096),
+}).strict();
+
 /**
  * One selected screenshot and its own independent on-device evidence.
  * Evidence is per image, not per request: eligibility is decided for each
@@ -107,6 +131,9 @@ const screenshotImageSchema = z
      * image), which the eligibility rule below simply rejects.
      */
     localEvidenceText: z.string().max(MAX_LOCAL_EVIDENCE_TEXT_LENGTH),
+    /** Complete privacy-safe relation evidence derived from this image's
+     * transient Vision boxes. Coordinates are never accepted by this route. */
+    localTotalGeometry: totalGeometryEvidenceSchema.optional(),
   })
   .strict();
 
@@ -595,7 +622,9 @@ export async function handleScreenshotProposal(
   const validation = validateProviderOutput(
     providerResult.rawJson,
     combinedEvidenceText,
-    eligibleImages.length
+    eligibleImages.length,
+    eligibleImages.map((image) => image.localEvidenceText),
+    eligibleImages.map((image) => image.localTotalGeometry)
   );
   if (!validation.ok) {
     // The provider returned a well-formed HTTP response but content this

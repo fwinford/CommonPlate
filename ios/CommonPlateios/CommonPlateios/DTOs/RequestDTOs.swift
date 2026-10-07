@@ -174,8 +174,9 @@ struct CreateRequestPayload: Codable, Equatable {
     let vendor: String
     let timing: RequestTimingWire
     let windowStart: Date?
-    /// W4-R4 menu path. Requester-owned truth; Screenshot Assistance can
-    /// never set it.
+    /// W4-R4 menu path. Requester-owned truth: Screenshot Assistance's
+    /// deterministic proposal (W4-R4.1) only ever switches the form's selector,
+    /// never this payload, and the requester can change it first.
     let menuPath: RequestMenuPathWire
     /// V1 meal-swipe requirement (W3-C1), widened to 0-5 by W4-R4: an exact
     /// integer chosen from `RequestFoodView`'s bounded control, 1 through 5

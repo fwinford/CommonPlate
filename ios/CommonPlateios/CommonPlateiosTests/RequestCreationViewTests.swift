@@ -1149,7 +1149,7 @@ final class RequestCreationViewTests: XCTestCase {
         // menu-dependent resource fields take its place ahead of Timing.
         XCTAssertFalse(requestFormSource.contains("pickupNameLabel"))
         XCTAssertFalse(requestFormSource.contains("Name on order"))
-        let menuPath = try XCTUnwrap(requestFormSource.range(of: "Text(Self.menuPathLabel)"))
+        let menuPath = try XCTUnwrap(requestFormSource.range(of: "menuPathLabelText"))
         let timing = try XCTUnwrap(requestFormSource.range(of: "Text(Self.timingLabel)"))
 
         XCTAssertLessThan(menuPath.lowerBound, timing.lowerBound)
@@ -1293,8 +1293,9 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertEqual(form.components(separatedBy: "GeometryReader").count - 1, 1)
         XCTAssertTrue(form.contains("RequesterViewportHeightKey"))
         XCTAssertFalse(form.contains("minHeight: geometry"))
-        // The one remaining `Spacer()` is the Timing header's label/info row.
-        XCTAssertFalse(form.contains("Spacer(minLength"))
+        // The path label now has one bounded spacer for its provenance.
+        XCTAssertEqual(form.components(separatedBy: "Spacer(minLength: CommonPlateStyle.Spacing.s)").count - 1, 1)
+        XCTAssertFalse(form.contains("Spacer(minLength: geometry"))
         XCTAssertEqual(form.components(separatedBy: "Spacer()").count - 1, 1)
         XCTAssertFalse(form.contains("adaptiveMajorGap"))
         XCTAssertFalse(form.contains("majorGap"))
@@ -1920,7 +1921,7 @@ final class RequestCreationViewTests: XCTestCase {
             XCTFail("expected to find requestForm")
             return
         }
-        guard let timingButtonRange = source.range(of: "private func chooseTimeButton", range: requestFormRange.upperBound..<source.endIndex) else {
+        guard let timingButtonRange = source.range(of: "// MARK: - W4-R2 approved `Requester / Form Field` controls", range: requestFormRange.upperBound..<source.endIndex) else {
             XCTFail("expected to find the end of requestForm")
             return
         }
@@ -1929,7 +1930,8 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertTrue(requestFormSource.contains(".safeAreaInset(edge: .bottom, spacing: 0)"))
         XCTAssertTrue(requestFormSource.contains("anchorsPostRequestDecision"))
         XCTAssertFalse(requestFormSource.contains("minHeight: geometry"))
-        XCTAssertFalse(requestFormSource.contains("Spacer(minLength"))
+        XCTAssertEqual(requestFormSource.components(separatedBy: "Spacer(minLength: CommonPlateStyle.Spacing.s)").count - 1, 1)
+        XCTAssertFalse(requestFormSource.contains("Spacer(minLength: geometry"))
         XCTAssertFalse(requestFormSource.contains("adaptiveMajorGap"))
         XCTAssertFalse(requestFormSource.contains("majorGap"))
     }

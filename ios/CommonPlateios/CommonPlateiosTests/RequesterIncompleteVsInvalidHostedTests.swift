@@ -214,7 +214,7 @@ final class RequesterIncompleteVsInvalidHostedTests: XCTestCase {
         XCTAssertTrue(host.exists("request-dining-dollars-error"), "precondition: invalid amount is visible")
 
         XCTAssertTrue(host.activate("request-menu-path-meal-exchange"))
-        XCTAssertTrue(host.exists("label:Meal swipes"))
+        XCTAssertTrue(host.exists("label:Number of meal swipes"))
         XCTAssertFalse(host.exists("request-dining-dollars-error"), "Meal Exchange starts visually clean")
 
         XCTAssertTrue(host.activate("request-menu-path-dining-dollars"))
@@ -259,7 +259,7 @@ final class RequesterIncompleteVsInvalidHostedTests: XCTestCase {
         (host.uiView(withIdentifier: "request-dining-dollars") ?? field).resignFirstResponder()
         host.settle(0.7)
 
-        XCTAssertTrue(host.exists("label:Meal swipes"))
+        XCTAssertTrue(host.exists("label:Number of meal swipes"))
         XCTAssertFalse(host.exists("request-dining-dollars-error"), "the switch's blur is not an invalid blur")
         assertNoErrorTextOrRequired(host, "after switching with the amount focused")
     }

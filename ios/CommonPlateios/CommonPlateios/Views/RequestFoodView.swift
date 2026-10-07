@@ -205,6 +205,7 @@ struct RequestFoodMountedPresentationState: Equatable {
     var isPresentingTimingInfo = false
     var screenshotAfterglowFields = ScreenshotProposalAppliedFields()
     var screenshotChecked = false
+    var mealSwipeMismatch = ScreenshotMealSwipeMismatchState()
     var preservedEntryFeedback = ScreenshotPreservedEntryFeedbackState()
     var expandedMealIndex: Int?
 
@@ -280,6 +281,90 @@ struct ScreenshotPreservedEntryFeedbackState: Equatable {
     mutating func clearAfterTimeout(ifCurrent timeoutGeneration: Int) {
         guard self.timeoutGeneration == timeoutGeneration else { return }
         isShowing = false
+    }
+}
+
+/// Result-scoped suggestion and dismissal; neither survives a new selection.
+struct ScreenshotMealSwipeMismatch: Equatable {
+    let token: ScreenshotSelectionToken
+    let proposedCount: Int
+    /// Only the Meal subfields written by this analyzed result may be
+    /// rejected. Earlier accepted or requester-owned content is not inferred
+    /// from the count or from a whole Meal row.
+    let contributedMealItemNames: Set<Int>
+    let contributedMealItemDetails: Set<Int>
+
+    var message: String { "We found \(proposedCount) meals" }
+    var action: String { "Use \(proposedCount) swipes" }
+}
+
+/// Keeps the approved manual provenance label after this result is dismissed,
+/// while refusing to present that same result again.
+struct ScreenshotMealSwipeMismatchState: Equatable {
+    private(set) var suggestion: ScreenshotMealSwipeMismatch?
+    private(set) var dismissedToken: ScreenshotSelectionToken?
+
+    var showsManualProvenance: Bool {
+        suggestion != nil || dismissedToken != nil
+    }
+
+    mutating func present(
+        _ count: Int?,
+        for token: ScreenshotSelectionToken,
+        applied: ScreenshotProposalAppliedFields = ScreenshotProposalAppliedFields()
+    ) {
+        guard let count else {
+            suggestion = nil
+            if dismissedToken != token { dismissedToken = nil }
+            return
+        }
+        if dismissedToken != token {
+            dismissedToken = nil
+            suggestion = ScreenshotMealSwipeMismatch(
+                token: token,
+                proposedCount: count,
+                contributedMealItemNames: applied.mealItemNames,
+                contributedMealItemDetails: applied.mealItemDetails
+            )
+        }
+    }
+
+    mutating func dismiss() {
+        dismissedToken = suggestion?.token
+        suggestion = nil
+    }
+
+    mutating func clear() {
+        suggestion = nil
+        dismissedToken = nil
+    }
+}
+
+/// One analyzed result can recommend the opposite path until it is accepted
+/// or dismissed. A dismissed token cannot re-present during ordinary edits.
+struct ScreenshotMenuPathConflict: Equatable {
+    let token: ScreenshotSelectionToken
+    let proposedPath: RequestMenuPath
+    let outcome: ScreenshotProposalOutcome
+}
+
+struct ScreenshotMenuPathConflictState: Equatable {
+    private(set) var suggestion: ScreenshotMenuPathConflict?
+    private(set) var dismissedToken: ScreenshotSelectionToken?
+
+    mutating func present(_ path: RequestMenuPath?, outcome: ScreenshotProposalOutcome, for token: ScreenshotSelectionToken) {
+        guard dismissedToken != token else { return }
+        suggestion = path.map { ScreenshotMenuPathConflict(token: token, proposedPath: $0, outcome: outcome) }
+    }
+
+    mutating func dismiss() {
+        dismissedToken = suggestion?.token
+        suggestion = nil
+    }
+
+    mutating func clear() {
+        suggestion = nil
+        dismissedToken = nil
     }
 }
 
@@ -459,6 +544,11 @@ struct RequestFoodView: View {
     /// begins (`Change`/a fresh pick), so the compact result row only ever
     /// reflects the current selection's own outcome.
     @State private var screenshotChecked = false
+    /// One suggestion belongs to one completed, current analysis token.
+    /// Dismissal rejects that token's surplus Meal contribution; a later
+    /// analysis receives a new token and may make a fresh suggestion.
+    @State private var mealSwipeMismatch = ScreenshotMealSwipeMismatchState()
+    @State private var menuPathConflict = ScreenshotMenuPathConflictState()
     /// A bounded, rerun-only acknowledgement. It is intentionally view-local:
     /// it neither changes draft authority nor survives route recreation.
     @State private var preservedEntryFeedback = ScreenshotPreservedEntryFeedbackState()
@@ -724,10 +814,16 @@ struct RequestFoodView: View {
             // left could still be applied if this exact view instance were
             // ever reused.
             screenshotProposalStore.invalidateCurrentSelection()
+            mealSwipeMismatch.clear()
+            menuPathConflict.clear()
             preservedEntryFeedback.retire()
         }
         .onChange(of: screenshotProposalStore.isAIAssistanceEnabled) { _, isEnabled in
-            if !isEnabled { preservedEntryFeedback.retire() }
+            if !isEnabled {
+                preservedEntryFeedback.retire()
+                mealSwipeMismatch.clear()
+                menuPathConflict.clear()
+            }
         }
         .onChange(of: selectedScreenshotItems) { _, newItems in
             guard !newItems.isEmpty else { return }
@@ -735,25 +831,9 @@ struct RequestFoodView: View {
             // selection starts — "last selection wins from the moment the
             // requester chooses it," not from whenever its preprocessing
             // happens to finish.
-            let token = screenshotProposalStore.beginSelection(
-                clearing: &draft,
-                manualEdits: screenshotManualEdits
-            )
-            // Mirrors `beginSelection`'s own draft-clearing rule: a field the
-            // requester has not manually edited loses its stale provenance
-            // exactly when its stale AI value is cleared, never a field
-            // manual ownership already covers.
-            if !screenshotManualEdits.hasManuallyEditedLocation { screenshotProvenance.location = false }
-            if !screenshotManualEdits.hasManuallyEditedMealSwipes { screenshotProvenance.mealSwipes = false }
-            if !screenshotManualEdits.hasManuallyEditedOrderDetails { screenshotProvenance.orderDetails = false }
-            for index in 0..<RequestFoodFormDraft.maxMealSwipes {
-                if !screenshotManualEdits.hasManuallyEditedMealItemName(index) {
-                    screenshotProvenance.mealItemNames.remove(index)
-                }
-                if !screenshotManualEdits.hasManuallyEditedMealItemDetails(index) {
-                    screenshotProvenance.mealItemDetails.remove(index)
-                }
-            }
+            let token = draftSession.beginScreenshotSelection(using: screenshotProposalStore)
+            mealSwipeMismatch.clear()
+            menuPathConflict.clear()
             screenshotAfterglowFields = ScreenshotProposalAppliedFields()
             // A fresh selection starts its own result: the prior selection's
             // `✓ Screenshot checked` row must not keep describing this new,
@@ -1093,8 +1173,13 @@ struct RequestFoodView: View {
             manualEdits: screenshotManualEdits,
             to: &draft
         )
+        screenshotManualEdits.record(applied)
+        if applied.establishedMenuPath { screenshotProvenance.menuPath = true }
         if applied.location { screenshotProvenance.location = true }
         if applied.mealSwipes { screenshotProvenance.mealSwipes = true }
+        if applied.diningDollarsOnly { screenshotProvenance.diningDollarsOnly = true }
+        mealSwipeMismatch.present(applied.suggestedMealSwipes, for: token, applied: applied)
+        menuPathConflict.present(applied.suggestedMenuPath, outcome: outcome, for: token)
         if applied.orderDetails { screenshotProvenance.orderDetails = true }
         screenshotProvenance.mealItemNames.formUnion(applied.mealItemNames)
         screenshotProvenance.mealItemDetails.formUnion(applied.mealItemDetails)
@@ -1106,9 +1191,14 @@ struct RequestFoodView: View {
             screenshotChecked = true
         }
 
+        var feedbackApplied = applied
+        if applied.suggestedMenuPath != nil {
+            // The inline path assistance is the entire conflict treatment.
+            feedbackApplied.preservedManualFieldCount = 0
+        }
         if let feedbackTimeoutGeneration = preservedEntryFeedback.completeAnalysis(
             eligible: outcome.eligible,
-            applying: applied
+            applying: feedbackApplied
         ) {
             // Fenced only by the feedback's own generation: the store token
             // goes stale on disappearance or disablement, and gating on it
@@ -1137,7 +1227,7 @@ struct RequestFoodView: View {
 
     static let afterglowDuration: Duration = .milliseconds(900)
 
-    static let filledFromScreenshotLabel = "Filled from screenshot"
+    static let filledFromScreenshotLabel = "Suggested"
     static let preservedEntryFeedbackMessage =
         "Screenshot checked. Your existing entries were kept."
     /// Kept as a named seam so the temporary acknowledgement's intended
@@ -1152,9 +1242,8 @@ struct RequestFoodView: View {
         Binding(
             get: { draft.mealSwipes },
             set: { newValue in
-                draft.mealSwipes = newValue
-                screenshotManualEdits.hasManuallyEditedMealSwipes = true
-                screenshotProvenance.mealSwipes = false
+                draftSession.setMealSwipesManually(newValue)
+                mealSwipeMismatch.clear()
             }
         )
     }
@@ -1230,27 +1319,47 @@ struct RequestFoodView: View {
         )
     }
 
-    /// The narrowly supported current-cart estimate remains requester-owned:
-    /// any nonempty manual edit prevents a later proposal from replacing it.
+    /// The field edits the ACTIVE branch's amount only (W4-R4.1). The
+    /// narrowly supported current-cart estimate fills the Meal Exchange top-up
+    /// alone and remains requester-owned: any nonempty manual edit of the
+    /// top-up prevents a later proposal from replacing it. Typing the
+    /// Dining-Dollars-only amount touches neither the top-up draft nor its
+    /// manual-edit flag.
     private var diningDollarsBinding: Binding<String> {
         Binding(
             get: { draft.diningDollarsText },
             set: {
                 draft.diningDollarsText = $0
-                screenshotManualEdits.hasManuallyEditedDiningDollars = !$0.isEmpty
+                if draft.menuPath == .mealExchange {
+                    screenshotManualEdits.hasManuallyEditedDiningDollars = !$0.isEmpty
+                } else {
+                    screenshotManualEdits.hasManuallyEditedDiningDollarsOnly = !$0.isEmpty
+                    screenshotProvenance.diningDollarsOnly = false
+                }
             }
         )
     }
 
-    /// Switching menus is purely a requester decision, and deliberately
-    /// destroys nothing: the meal entries, order details, and typed estimate
-    /// all survive a switch, so a requester who changes their mind twice
-    /// finds their own words still there. Which of them are submitted is
-    /// decided by `menuPath` at submission, not by clearing fields here.
+    /// Switching menus destroys nothing: the meal entries, order details, and
+    /// BOTH branches' typed amounts survive a switch (W4-R4.1 keeps the Meal
+    /// Exchange top-up and the Dining-Dollars-only amount as separate drafts),
+    /// so a requester who changes their mind twice finds their own words still
+    /// there. Which of them are submitted is decided by `menuPath` at
+    /// submission, not by clearing fields here. An actual requester change
+    /// becomes requester-owned
+    /// (`recordMenuPathSelection`); re-selecting the current option is a no-op.
     private var menuPathBinding: Binding<RequestMenuPath> {
         Binding(
             get: { draft.menuPath },
-            set: { draft.menuPath = $0 }
+            set: { newValue in
+                screenshotManualEdits.recordMenuPathSelection(from: draft.menuPath, to: newValue)
+                if newValue != draft.menuPath {
+                    menuPathConflict.clear()
+                    screenshotProvenance.menuPath = false
+                }
+                draft.menuPath = newValue
+                if newValue != .mealExchange { mealSwipeMismatch.clear() }
+            }
         )
     }
 
@@ -1450,6 +1559,7 @@ struct RequestFoodView: View {
             isPresentingTimingInfo: isPresentingTimingInfo,
             screenshotAfterglowFields: screenshotAfterglowFields,
             screenshotChecked: screenshotChecked,
+            mealSwipeMismatch: mealSwipeMismatch,
             preservedEntryFeedback: preservedEntryFeedback,
             expandedMealIndex: expandedMealIndex
         )
@@ -1469,6 +1579,8 @@ struct RequestFoodView: View {
         isPresentingTimingInfo = mountedState.isPresentingTimingInfo
         screenshotAfterglowFields = mountedState.screenshotAfterglowFields
         screenshotChecked = mountedState.screenshotChecked
+        mealSwipeMismatch = mountedState.mealSwipeMismatch
+        menuPathConflict.clear()
         preservedEntryFeedback = mountedState.preservedEntryFeedback
         expandedMealIndex = mountedState.expandedMealIndex
     }
@@ -1932,8 +2044,21 @@ struct RequestFoodView: View {
                         }
 
                         VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                            Text(Self.menuPathLabel)
-                                .font(.subheadline.weight(.semibold))
+                            ViewThatFits(in: .horizontal) {
+                                HStack(alignment: .firstTextBaseline, spacing: CommonPlateStyle.Spacing.s) {
+                                    menuPathLabelText
+                                    Spacer(minLength: CommonPlateStyle.Spacing.s)
+                                    menuPathProvenance
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    menuPathLabelText
+                                    menuPathProvenance
+                                }
+                            }
+
+                            if let conflict = menuPathConflict.suggestion {
+                                menuPathConflictInset(conflict)
+                            }
 
                             menuPathControl
                         }
@@ -2254,6 +2379,91 @@ struct RequestFoodView: View {
         )
     }
 
+    private var menuPathLabelText: some View {
+        Text(Self.menuPathLabel)
+            .font(.subheadline.weight(.semibold))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var menuPathProvenance: some View {
+        if screenshotManualEdits.hasManuallyEditedMenuPath {
+            Text(Self.manuallySelectedLabel)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("request-menu-path-provenance")
+        } else if screenshotProvenance.menuPath {
+            Text(Self.filledFromScreenshotLabel)
+                .font(.caption2)
+                .foregroundStyle(Color("AccentColor"))
+                .accessibilityIdentifier("request-menu-path-provenance")
+        }
+    }
+
+    private func menuPathConflictInset(_ conflict: ScreenshotMenuPathConflict) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: CommonPlateStyle.Spacing.xs) {
+                menuPathConflictMessage(conflict)
+                Spacer(minLength: 0)
+                menuPathConflictActions(conflict)
+            }
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
+                menuPathConflictMessage(conflict)
+                HStack {
+                    Spacer(minLength: 0)
+                    menuPathConflictActions(conflict)
+                }
+            }
+        }
+        .frame(minHeight: 44)
+        .padding(.leading, CommonPlateStyle.Spacing.s)
+        .background(
+            CommonPlateStyle.Color.requestCardSurface.opacity(0.55),
+            in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+        )
+        .accessibilityIdentifier("request-menu-path-conflict")
+    }
+
+    private func menuPathConflictMessage(_ conflict: ScreenshotMenuPathConflict) -> some View {
+        Text("We found \(Self.menuPathTitle(conflict.proposedPath))")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func menuPathConflictActions(_ conflict: ScreenshotMenuPathConflict) -> some View {
+        HStack(spacing: CommonPlateStyle.Spacing.xs) {
+            Button("Switch") {
+                guard menuPathConflict.suggestion == conflict,
+                      screenshotProposalStore.isCurrent(conflict.token),
+                      screenshotManualEdits.hasManuallyEditedMenuPath,
+                      draft.menuPath != conflict.proposedPath else { return }
+                screenshotManualEdits.hasManuallyEditedMenuPath = false
+                menuPathConflict.clear()
+                applyScreenshotOutcome(conflict.outcome, token: conflict.token)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(Color("AccentColor"))
+            .accessibilityIdentifier("request-switch-screenshot-menu-path")
+
+            Button {
+                guard menuPathConflict.suggestion == conflict,
+                      screenshotProposalStore.isCurrent(conflict.token) else { return }
+                menuPathConflict.dismiss()
+            } label: {
+                Text("×")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss menu suggestion")
+            .accessibilityIdentifier("request-dismiss-screenshot-menu-path")
+        }
+    }
+
     /// W4-R4 `Which menu are you using?`: the requester's choice between Meal
     /// Exchange and Dining Dollars. Reuses the same segmented grammar the
     /// accepted `Requester / Timing` control already uses, so the new
@@ -2301,9 +2511,12 @@ struct RequestFoodView: View {
     private func mealExchangeFields(errors: [RequestFoodFieldError]) -> some View {
         RequesterFormFieldContainer(
             label: Self.mealSwipesLabel,
+            manualProvenanceLabel: screenshotManualEdits.hasManuallyEditedMealSwipes
+                && mealSwipeMismatch.showsManualProvenance ? Self.manuallySelectedLabel : nil,
             showsProvenance: screenshotProvenance.mealSwipes,
             isGlowing: screenshotAfterglowFields.mealSwipes,
-            provenanceIdentifier: "request-meal-swipes-provenance"
+            provenanceIdentifier: "request-meal-swipes-provenance",
+            assistance: mealSwipeMismatch.suggestion.map { AnyView(mealSwipeMismatchInset($0)) }
         ) {
             mealSwipesControl
         }
@@ -2320,6 +2533,83 @@ struct RequestFoodView: View {
             placeholder: Self.diningDollarsPlaceholder,
             errors: errors
         )
+    }
+
+    private func mealSwipeMismatchInset(_ mismatch: ScreenshotMealSwipeMismatch) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: CommonPlateStyle.Spacing.xs) {
+                mealSwipeMismatchMessage(mismatch)
+                Spacer(minLength: 0)
+                mealSwipeMismatchActions(mismatch)
+            }
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.xs) {
+                mealSwipeMismatchMessage(mismatch)
+                HStack {
+                    Spacer(minLength: 0)
+                    mealSwipeMismatchActions(mismatch)
+                }
+            }
+        }
+        .frame(minHeight: 44)
+        .padding(.leading, CommonPlateStyle.Spacing.s)
+        .background(
+            CommonPlateStyle.Color.requestCardSurface.opacity(0.55),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+        )
+        .accessibilityIdentifier("request-meal-swipe-mismatch")
+    }
+
+    private func mealSwipeMismatchMessage(_ mismatch: ScreenshotMealSwipeMismatch) -> some View {
+        Text(mismatch.message)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func mealSwipeMismatchActions(_ mismatch: ScreenshotMealSwipeMismatch) -> some View {
+        HStack(spacing: CommonPlateStyle.Spacing.xs) {
+            Button(mismatch.action) {
+                guard mealSwipeMismatch.suggestion == mismatch,
+                      screenshotProposalStore.isCurrent(mismatch.token) else { return }
+                var currentDraft = draft
+                var currentEdits = screenshotManualEdits
+                var currentProvenance = screenshotProvenance
+                guard screenshotProposalStore.adoptSuggestedMealSwipes(
+                    mismatch.proposedCount,
+                    manualEdits: &currentEdits,
+                    provenance: &currentProvenance,
+                    to: &currentDraft
+                ) else { return }
+                draft = currentDraft
+                screenshotManualEdits = currentEdits
+                screenshotProvenance = currentProvenance
+                mealSwipeMismatch.clear()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(Color("AccentColor"))
+            .accessibilityIdentifier("request-use-screenshot-swipes")
+
+            Button {
+                guard mealSwipeMismatch.suggestion == mismatch,
+                      screenshotProposalStore.isCurrent(mismatch.token) else { return }
+                draftSession.rejectCurrentScreenshotSurplus(
+                    above: draft.mealSwipes,
+                    names: mismatch.contributedMealItemNames,
+                    details: mismatch.contributedMealItemDetails
+                )
+                mealSwipeMismatch.dismiss()
+            } label: {
+                Text("×")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss meal swipe suggestion")
+            .accessibilityIdentifier("request-dismiss-screenshot-swipes")
+        }
     }
 
     @ViewBuilder
@@ -2529,7 +2819,7 @@ struct RequestFoodView: View {
     }
 
     /// The same accepted CommonPlate purple provenance treatment used by
-    /// `RequesterFormFieldContainer`'s trailing `Filled from screenshot`
+    /// `RequesterFormFieldContainer`'s trailing `Suggested`
     /// label (W4-R4 2026-09-28 unified badge sync) — this must not render
     /// gray/secondary while other requester provenance indicators are purple.
     private func screenshotFieldProvenance(_ identifier: String, isGlowing: Bool = false) -> some View {
@@ -2595,7 +2885,8 @@ struct RequestFoodView: View {
             RequesterFormFieldContainer(
                 label: label,
                 trailingLabel: trailingLabel,
-                showsProvenance: false,
+                showsProvenance: draft.menuPath == .diningDollars
+                    && screenshotProvenance.diningDollarsOnly,
                 provenanceIdentifier: "request-dining-dollars-provenance",
                 controlIdentifier: "request-dining-dollars-control"
             ) {
@@ -2804,7 +3095,8 @@ struct RequestFoodView: View {
     /// Same example-text treatment as the Meal item ordering field
     /// (2026-09-27 supersedes the 2026-09-26 "no placeholder" decision).
     static let orderDetailsPlaceholder = "e.g. Chicken Wings"
-    static let mealSwipesLabel = "Meal swipes"
+    static let mealSwipesLabel = "Number of meal swipes"
+    static let manuallySelectedLabel = "Manually selected"
     static let timingLabel = "Timing"
     static let chooseTimeLabel = "Choose time"
     static let postRequestLabel = "Post request"
@@ -3388,8 +3680,8 @@ struct RequestFoodView: View {
 }
 
 /// W4-R2 approved `Requester / Form Field` visual language (Figma node
-/// `209:364`): a bold field label with inline trailing `Filled from
-/// screenshot` provenance, and a bordered warm-canvas control box beneath.
+/// `209:364`): a bold field label with inline trailing `Suggested`
+/// provenance, and a bordered warm-canvas control box beneath.
 /// Reused for the requester form's approved field kinds (Dining location,
 /// Order details, Meal swipes). Purely presentational: it owns no draft
 /// state and enforces no validation; the caller's `content` is the actual
@@ -3397,9 +3689,12 @@ struct RequestFoodView: View {
 struct RequesterFormFieldContainer<Content: View>: View {
     let label: String
     var trailingLabel: String? = nil
+    var manualProvenanceLabel: String? = nil
     var showsProvenance: Bool = false
     var isGlowing: Bool = false
     var provenanceIdentifier: String?
+    /// Optional inline help between the label/provenance and bordered control.
+    var assistance: AnyView? = nil
     /// Identifies the bordered control box itself (not only the text inside
     /// it), so its rendered frame can be measured.
     var controlIdentifier: String?
@@ -3423,6 +3718,8 @@ struct RequesterFormFieldContainer<Content: View>: View {
                     trailingLabelText
                 }
             }
+
+            if let assistance { assistance }
 
             identifiedControlBox(
                 content
@@ -3458,7 +3755,12 @@ struct RequesterFormFieldContainer<Content: View>: View {
 
     @ViewBuilder
     private var trailingLabelText: some View {
-        if let trailingLabel {
+        if let manualProvenanceLabel {
+            Text(manualProvenanceLabel)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(provenanceIdentifier ?? "")
+        } else if let trailingLabel {
             Text(trailingLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)

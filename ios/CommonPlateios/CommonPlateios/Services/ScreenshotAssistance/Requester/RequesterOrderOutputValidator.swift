@@ -62,6 +62,7 @@ enum RequesterOrderOutputValidator {
         "pickupName", "timing", "preferredPickupTime", "action", "submit",
         "reasoning", "explanation", "menuPath", "orderDetails", "diningDollars",
         "estimatedDiningDollars", "estimatedDiningDollarsCents",
+        "diningDollarsOrderTotalCents",
     ]
 
     /// - Parameters:
@@ -70,6 +71,10 @@ enum RequesterOrderOutputValidator {
     ///     the eligible screenshots analyzed.
     ///   - evidenceImageCount: how many eligible screenshots were analyzed
     ///     together (drives the multi-screenshot overlap rule).
+    ///   - imageEvidenceTexts: each eligible screenshot's own on-device OCR
+    ///     text, in selection order, for the W4-R4.1 menu-path rule's
+    ///     per-screenshot attribution. `nil` means `evidenceText` is one
+    ///     screenshot, mirroring the backend default.
     ///   - allowsDiningDollarsEstimate: whether this evidence strategy may
     ///     propose the order-level Dining Dollars estimate at all. A strategy
     ///     that reads the same runtime OCR text as the corroborating evidence
@@ -80,6 +85,8 @@ enum RequesterOrderOutputValidator {
         raw: Any?,
         evidenceText: String,
         evidenceImageCount: Int,
+        imageEvidenceTexts: [String]? = nil,
+        imageTotalGeometryEvidence: [ScreenshotTotalGeometryEvidence?] = [],
         allowsDiningDollarsEstimate: Bool,
         vendors: [DiningSpot] = SupportedVendorCatalog.diningSpots
     ) -> Result {
@@ -93,6 +100,8 @@ enum RequesterOrderOutputValidator {
         return .valid(
             buildProposal(
                 evidenceText: evidenceText,
+                imageEvidenceTexts: imageEvidenceTexts ?? [evidenceText],
+                imageTotalGeometryEvidence: imageTotalGeometryEvidence,
                 evidenceImageCount: evidenceImageCount,
                 visibleVenueText: parsed.visibleVenueText,
                 foodItems: parsed.foodItems,
@@ -226,6 +235,8 @@ enum RequesterOrderOutputValidator {
 
     private static func buildProposal(
         evidenceText: String,
+        imageEvidenceTexts: [String],
+        imageTotalGeometryEvidence: [ScreenshotTotalGeometryEvidence?],
         evidenceImageCount: Int,
         visibleVenueText: String?,
         foodItems: [RequesterOrderRawOutput.Item],
@@ -241,6 +252,25 @@ enum RequesterOrderOutputValidator {
             vendors: vendors
         )
 
+        // W4-R4.1: the path comes only from independent deterministic
+        // evidence and is resolved before anything branch-dependent. Disputed
+        // evidence proposes no path AND omits every value whose meaning
+        // depends on the path (items, swipes, the top-up estimate); the shared
+        // location stays.
+        let pathResolution = RequesterOrderDeterministicEvidence.resolveMenuPath(
+            imageEvidenceTexts: imageEvidenceTexts,
+            imageTotalGeometryEvidence: imageTotalGeometryEvidence
+        )
+        proposal.menuPath = pathResolution.menuPath
+        if pathResolution.conflict { return proposal }
+        if pathResolution.menuPath != .mealExchange {
+            proposal.diningDollarsOrderTotalCents =
+                RequesterOrderDeterministicEvidence.currentOrderTotalCents(
+                    imageEvidenceTexts: imageEvidenceTexts,
+                    imageTotalGeometryEvidence: imageTotalGeometryEvidence
+                )
+        }
+
         let mealItems = proposedMealItems(foodItems, evidenceImageCount: evidenceImageCount)
         if let mealItems, !mealItems.isEmpty {
             proposal.mealItems = mealItems
@@ -250,8 +280,23 @@ enum RequesterOrderOutputValidator {
            RequesterOrderDeterministicEvidence.corroboratedMealSwipeCount(evidenceText) == mealSwipes {
             proposal.mealSwipes = mealSwipes
             if allowsDiningDollarsEstimate {
+                // Checkout/review screenshots grant no amount authority of
+                // their own.
                 proposal.estimatedDiningDollarsCents =
-                    RequesterOrderDeterministicEvidence.currentCartDiningDollarsCents(evidenceText)
+                    RequesterOrderDeterministicEvidence.currentCartDiningDollarsCents(
+                        RequesterOrderDeterministicEvidence.amountAuthorityEvidenceText(
+                            imageEvidenceTexts: imageEvidenceTexts
+                        )
+                    )
+            }
+        }
+        if pathResolution.menuPath == .mealExchange, let mealItems,
+           !RequesterOrderDeterministicEvidence.hasExplicitMealSwipeNotation(evidenceText) {
+            let sourceItems = foodItems.filter { !ScreenshotJSText.trimmed($0.name).isEmpty }
+            if sourceItems.count == mealItems.count && sourceItems.allSatisfy({ $0.quantity == 1 }) {
+                proposal.mealSwipes = RequesterOrderDeterministicEvidence.inferredMealSwipeCount(
+                    mealItems: mealItems, imageEvidenceTexts: imageEvidenceTexts
+                )
             }
         }
         return proposal
@@ -271,6 +316,8 @@ enum RequesterOrderExternalOutcomeValidator {
     static func validate(
         _ outcome: ScreenshotProposalOutcome,
         evidenceText: String,
+        imageEvidenceTexts: [String]? = nil,
+        imageTotalGeometryEvidence: [ScreenshotTotalGeometryEvidence?] = [],
         allowsDiningDollarsEstimate: Bool,
         vendors: [DiningSpot] = SupportedVendorCatalog.diningSpots
     ) -> ScreenshotProposalOutcome {
@@ -280,6 +327,17 @@ enum RequesterOrderExternalOutcomeValidator {
 
         var validated = ScreenshotProposal()
 
+        // W4-R4.1: a returned path survives only when CommonPlate's own
+        // on-device evidence independently establishes exactly that path; a
+        // disputed selection drops every branch-dependent value as well.
+        let pathResolution = RequesterOrderDeterministicEvidence.resolveMenuPath(
+            imageEvidenceTexts: imageEvidenceTexts ?? [evidenceText],
+            imageTotalGeometryEvidence: imageTotalGeometryEvidence
+        )
+        if let proposed = outcome.proposal.menuPath, proposed == pathResolution.menuPath {
+            validated.menuPath = proposed
+        }
+
         if let spot = outcome.proposal.selectedDiningSpot,
            let grounded = RequesterOrderDeterministicEvidence.resolveVendor(
                evidenceText: evidenceText,
@@ -288,6 +346,17 @@ enum RequesterOrderExternalOutcomeValidator {
            ),
            grounded.name == spot.name {
             validated.selectedDiningSpot = grounded
+        }
+        if pathResolution.conflict {
+            return ScreenshotProposalOutcome(eligible: true, proposal: validated)
+        }
+        if pathResolution.menuPath != .mealExchange,
+           let total = outcome.proposal.diningDollarsOrderTotalCents,
+           RequesterOrderDeterministicEvidence.currentOrderTotalCents(
+               imageEvidenceTexts: imageEvidenceTexts ?? [evidenceText],
+               imageTotalGeometryEvidence: imageTotalGeometryEvidence
+           ) == total {
+            validated.diningDollarsOrderTotalCents = total
         }
 
         let items = (outcome.proposal.mealItems ?? []).compactMap { item -> MealItem? in
@@ -306,9 +375,21 @@ enum RequesterOrderExternalOutcomeValidator {
             validated.mealSwipes = swipes
             if allowsDiningDollarsEstimate,
                let cents = outcome.proposal.estimatedDiningDollarsCents,
-               RequesterOrderDeterministicEvidence.currentCartDiningDollarsCents(evidenceText) == cents {
+               RequesterOrderDeterministicEvidence.currentCartDiningDollarsCents(
+                   RequesterOrderDeterministicEvidence.amountAuthorityEvidenceText(
+                       imageEvidenceTexts: imageEvidenceTexts ?? [evidenceText]
+                   )
+               ) == cents {
                 validated.estimatedDiningDollarsCents = cents
             }
+        }
+        if pathResolution.menuPath == .mealExchange,
+           !RequesterOrderDeterministicEvidence.hasExplicitMealSwipeNotation(evidenceText),
+           let swipes = outcome.proposal.mealSwipes,
+           RequesterOrderDeterministicEvidence.inferredMealSwipeCount(
+               mealItems: items, imageEvidenceTexts: imageEvidenceTexts ?? [evidenceText]
+           ) == swipes {
+            validated.mealSwipes = swipes
         }
         return ScreenshotProposalOutcome(eligible: true, proposal: validated)
     }

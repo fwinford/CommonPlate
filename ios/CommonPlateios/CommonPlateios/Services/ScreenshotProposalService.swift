@@ -40,6 +40,21 @@ struct ScreenshotProposalImage {
     let data: Data
     let mimeType: String
     let localEvidenceText: String
+    /// Privacy-safe derived relation evidence only. Raw Vision boxes never
+    /// enter this DTO.
+    let localTotalGeometry: ScreenshotTotalGeometryEvidence?
+
+    init(
+        data: Data,
+        mimeType: String,
+        localEvidenceText: String,
+        localTotalGeometry: ScreenshotTotalGeometryEvidence? = nil
+    ) {
+        self.data = data
+        self.mimeType = mimeType
+        self.localEvidenceText = localEvidenceText
+        self.localTotalGeometry = localTotalGeometry
+    }
 }
 
 /// One selected screenshot and its own independent on-device evidence.
@@ -53,6 +68,7 @@ private struct ScreenshotImagePayload: Encodable {
     /// provider to produce or confirm its own evidence. Sent per image, so
     /// the backend can decide each screenshot's eligibility independently.
     let localEvidenceText: String
+    let localTotalGeometry: ScreenshotTotalGeometryEvidence?
 }
 
 /// W4-R4: 1 to 5 screenshots, which are evidence for ONE logical order
@@ -67,12 +83,17 @@ private struct ScreenshotProposalLocationDTO: Decodable {
 }
 
 private struct ScreenshotProposalFieldsDTO: Decodable {
+    /// W4-R4.1 deterministic path as the backend's wire string. Decoded
+    /// leniently: an absent or unrecognized value is simply no path proposal,
+    /// never a decoding failure for the rest of the proposal.
+    let menuPath: String?
     let selectedDiningSpot: ScreenshotProposalLocationDTO?
     /// W4-R4: one entry per distinct observed item, already deduplicated
     /// across overlapping screenshots by the backend.
     let mealItems: [MealItem]?
     let mealSwipes: Int?
     let estimatedDiningDollarsCents: Int?
+    let diningDollarsOrderTotalCents: Int?
 }
 
 private struct ScreenshotProposalResponseDTO: Decodable {
@@ -115,7 +136,8 @@ struct ScreenshotProposalService {
                         ScreenshotImagePayload(
                             imageBase64: $0.data.base64EncodedString(),
                             mimeType: $0.mimeType,
-                            localEvidenceText: $0.localEvidenceText
+                            localEvidenceText: $0.localEvidenceText,
+                            localTotalGeometry: $0.localTotalGeometry
                         )
                     }
                 ),
@@ -144,10 +166,14 @@ struct ScreenshotProposalService {
             SupportedVendorCatalog.diningSpots.first { $0.name == locationDTO.name }
         }
         return ScreenshotProposal(
+            menuPath: dto.menuPath
+                .flatMap(RequestMenuPathWire.init(rawValue:))
+                .map(\.domainMenuPath),
             selectedDiningSpot: spot,
             mealItems: dto.mealItems,
             mealSwipes: dto.mealSwipes,
-            estimatedDiningDollarsCents: dto.estimatedDiningDollarsCents
+            estimatedDiningDollarsCents: dto.estimatedDiningDollarsCents,
+            diningDollarsOrderTotalCents: dto.diningDollarsOrderTotalCents
         )
     }
 

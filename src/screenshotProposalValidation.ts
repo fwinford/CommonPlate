@@ -1,5 +1,13 @@
 import { SUPPORTED_VENDORS, type SupportedVendor } from "./supportedVendors.js";
-import { corroboratedMealSwipeCount } from "./screenshotEligibility.js";
+import {
+  amountAuthorityEvidenceText,
+  corroboratedMealSwipeCount,
+  currentOrderTotalCents,
+  hasExplicitMealSwipeNotation,
+  inferredMealSwipeCount,
+  resolveMenuPath,
+  type TotalGeometryEvidence,
+} from "./screenshotEligibility.js";
 import {
   FORBIDDEN_PROVIDER_FIELDS,
   ScreenshotProviderOutputSchema,
@@ -201,6 +209,8 @@ function resolveVendor(
 
 function buildProposal(
   evidenceText: string,
+  imageEvidenceTexts: readonly string[],
+  imageTotalGeometryEvidence: readonly (TotalGeometryEvidence | undefined)[],
   evidenceImageCount: number,
   visibleVenueText: string | null,
   foodItems: ScreenshotFoodItem[],
@@ -211,6 +221,28 @@ function buildProposal(
   const vendor = resolveVendor(evidenceText, visibleVenueText);
   if (vendor) {
     proposal.selectedDiningSpot = { name: vendor.name, address: vendor.address };
+  }
+
+  // W4-R4.1: the path comes only from independent deterministic evidence and
+  // is resolved before anything branch-dependent. Disputed evidence proposes
+  // no path AND omits every value whose meaning depends on the path (meal
+  // items, swipes, the top-up estimate); the shared location stays.
+  const pathResolution = resolveMenuPath(imageEvidenceTexts, imageTotalGeometryEvidence);
+  if (pathResolution.menuPath) {
+    proposal.menuPath = pathResolution.menuPath;
+  }
+  if (pathResolution.conflict) {
+    return proposal;
+  }
+
+  // A labeled current order Total is a separate whole-order estimate. It is
+  // useful even without provider food output and can fill a requester-owned
+  // Dining Dollars path; Meal Exchange evidence never grants this amount.
+  if (pathResolution.menuPath !== "meal-exchange") {
+    const total = currentOrderTotalCents(
+      imageEvidenceTexts, true, imageTotalGeometryEvidence
+    );
+    if (total !== null) proposal.diningDollarsOrderTotalCents = total;
   }
 
   // W4-R4: one entry per observed order line. `null` means repeated
@@ -236,10 +268,22 @@ function buildProposal(
     // overlap, while conflicting totals fail closed.
     if (corroboratedMealSwipeCount(evidenceText) === mealSwipes) {
       proposal.mealSwipes = mealSwipes;
-      const estimatedDiningDollarsCents = currentCartDiningDollarsCents(evidenceText);
+      // Checkout/review screenshots grant no amount authority of their own.
+      const estimatedDiningDollarsCents = currentCartDiningDollarsCents(
+        amountAuthorityEvidenceText(imageEvidenceTexts)
+      );
       if (estimatedDiningDollarsCents !== null) {
         proposal.estimatedDiningDollarsCents = estimatedDiningDollarsCents;
       }
+    }
+  }
+
+  if (pathResolution.menuPath === "meal-exchange" && mealItems !== null &&
+      !hasExplicitMealSwipeNotation(evidenceText)) {
+    const sourceItems = sanitizeModifiers(foodItems).filter((item) => item.name.trim());
+    if (sourceItems.length === mealItems.length && sourceItems.every((item) => item.quantity === 1)) {
+      const inferred = inferredMealSwipeCount(mealItems, imageEvidenceTexts);
+      if (inferred !== null) proposal.mealSwipes = inferred;
     }
   }
 
@@ -262,11 +306,16 @@ function buildProposal(
  * corroboration; it is never re-derived from, or trusted against, anything
  * the provider itself returned. `evidenceImageCount` is how many eligible
  * screenshots the provider analyzed together (see `proposedMealItems`).
+ * `imageEvidenceTexts` is each eligible screenshot's own evidence, which the
+ * W4-R4.1 menu-path rule needs for per-screenshot attribution; it defaults to
+ * `evidenceText` as one screenshot.
  */
 export function validateProviderOutput(
   raw: unknown,
   evidenceText: string,
-  evidenceImageCount: number
+  evidenceImageCount: number,
+  imageEvidenceTexts: readonly string[] = [evidenceText],
+  imageTotalGeometryEvidence: readonly (TotalGeometryEvidence | undefined)[] = []
 ): ProviderValidationResult {
   if (raw && typeof raw === "object") {
     for (const key of Object.keys(raw as Record<string, unknown>)) {
@@ -286,6 +335,8 @@ export function validateProviderOutput(
     ok: true,
     proposal: buildProposal(
       evidenceText,
+      imageEvidenceTexts,
+      imageTotalGeometryEvidence,
       evidenceImageCount,
       visibleVenueText,
       foodItems,

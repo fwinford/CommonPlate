@@ -233,7 +233,8 @@ final class ScreenshotAssistanceDisclosurePresentationTests: XCTestCase {
         // the checked row, guarded by the outcome's eligibility.
         XCTAssertEqual(source.components(separatedBy: "screenshotChecked = true").count - 1, 1)
         XCTAssertEqual(source.components(separatedBy: "screenshotProposalStore.apply(").count - 1, 1)
-        XCTAssertEqual(source.components(separatedBy: "applyScreenshotOutcome(").count - 1, 2) // one call + declaration
+        XCTAssertEqual(source.components(separatedBy: "applyScreenshotOutcome(").count - 1, 3) // analysis, explicit Switch, declaration
+        XCTAssertTrue(source.contains("applyScreenshotOutcome(conflict.outcome, token: conflict.token)"))
         let apply = try XCTUnwrap(source.range(of: "private func applyScreenshotOutcome("))
         let tail = String(source[apply.upperBound...])
         XCTAssertLessThan(

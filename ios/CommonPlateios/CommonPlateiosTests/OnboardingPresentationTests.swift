@@ -306,7 +306,7 @@ final class OnboardingPresentationTests: XCTestCase {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/RequestFoodView.swift")
 
         XCTAssertTrue(source.contains("mealSwipesControl"))
-        XCTAssertTrue(source.contains("static let mealSwipesLabel = \"Meal swipes\""))
+        XCTAssertTrue(source.contains("static let mealSwipesLabel = \"Number of meal swipes\""))
         XCTAssertFalse(source.contains("Choose how many meal swipes your Grubhub order requires."))
         // W4-R4: pickup name is removed from the requester form entirely,
         // so the label it used no longer exists anywhere in this source.
