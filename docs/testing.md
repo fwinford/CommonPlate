@@ -386,6 +386,70 @@ Each of these suites clears state with `Subscriber.deleteMany({})`. The distinct
 
 `scripts/run-mongo-integration.mjs` runs all `.mongo.test.ts` files and does not currently support forwarding a single test-file argument. A requested focused Mongo verification therefore necessarily executes the complete Mongo-gated suite.
 
+### Local QA harness and scenario reset (W4-QA1)
+
+Dev/test-only tooling for isolated, repeatable requester/helper QA on a Mac. It adds no endpoint, bypass, credential injection, or quota change, and it does not alter how participants verify. It is **Simulator/local evidence only**: it does not prove real email delivery, APNs delivery, physical-device behavior, signed Release/Archive/TestFlight behavior, or production endpoint selection.
+
+**Prerequisites and safety rules**
+
+- A dedicated, disposable, local MongoDB **replica set** (transactions are required). Never point it at a shared, staging, tunneled, or production database.
+- Each environment is one explicit JSON file named by `QA_ENV_FILE`: `{ slug, database, mongoUri, backendPort, mailSinkPort }`. Keep it outside the repository. The tool reads nothing else: no `.env`, no `MONGO_URI`, no default database. Run the tool from a worktree without a `.env`.
+- Gates enforced before any connection: `database` is exactly `commonplate_qa_<slug>` (slug is 1-4 lowercase words joined by underscores; production-like names are refused); `mongoUri` is a plain `mongodb://` loopback URI naming that same database; the two ports are explicit and different; `ALLOW_LOCAL_SEED=true` and `NODE_ENV` other than `production` are required for every mutating command. After connecting, the connected database name must match, and a marker document stored in the database (written by `init`) must name the same environment. A database with no marker, or another environment's marker, is refused.
+- **Loopback host validation does not establish that the database is physically local.** A tunnel or proxy bound to `127.0.0.1` passes every check. Before the first `init`, confirm that `db.hello().hosts` and `me` list only the member(s) you started and that `lsof -nP -iTCP:<port> -sTCP:LISTEN` shows your own `mongod`, not `ssh`, `socat`, `kubectl`, or another forwarder. The tool does not perform this check.
+- Use isolated ports and one Simulator pair per environment. A participant credential belongs to the backend that issued it; nothing here copies or injects credentials.
+
+**Routine use** (`npm run qa:env -- <command>`; run `npm run qa:mail-sink` and the backend on the environment's own ports)
+
+1. Start the local mail sink (`QA_MAIL_SINK_PORT=<mailSinkPort>`; binds 127.0.0.1 only; remembers only the six-digit verification code per recipient for 10 minutes) and the backend with the environment's `MONGO_URI`, `PORT=<backendPort>`, generated throwaway secrets, `RESEND_BASE_URL=http://127.0.0.1:<mailSinkPort>`, a fake `RESEND_API_KEY`, and `PUBLIC_ACTIONS_PAUSED=false`.
+2. Launch the Debug app with `SIMCTL_CHILD_COMMONPLATE_DEBUG_API_BASE_URL=http://127.0.0.1:<backendPort>`. The override exists only in Debug builds (a Release build neither contains nor reads it), accepts only local/private `http://` hosts without credentials, path, query, or fragment, and a present-but-invalid value stops the launch rather than falling back.
+3. Verify the requester and helper participants through the app's normal flow and read each code from the sink (`/latest-code?to=<address>`). Keep the Simulators and database alive so verification happens once; a normal reset preserves these identities.
+4. `init` stores the environment marker (idempotent). `status` is read-only and prints counts only: no URI, address, or identifier. `reset`, `scenario`, and `drop` refuse to run without the marker.
+5. **Idle both apps before `reset` or `scenario`.** Do not mutate one environment from two places at once. Use a separate environment (database, ports, Simulators) for each concurrent slice.
+
+| Command | Effect |
+| --- | --- |
+| `init` | Create the marker for this environment. |
+| `status` | Read-only counts and the base URL. |
+| `reset` | Normal reset (below). |
+| `scenario <preset>...` | Normal reset, then load presets. |
+| `drop --confirm-database <exact database name>` | Full teardown (below). |
+
+**Normal reset.** In one transaction it removes every `Request` in the environment and, for exactly those Requests, their `RequestParticipation`, `Fulfillment`, `PushDelivery`, and `SendLog` rows and owned-fixture manifest entries. It clears `Participant.activeReservationRequestId` and `activeReservationClaimExpiresAt` only where the lock points at a removed Request, so a deleted claimed request cannot leave a helper reserved. It preserves `Participant` (all other fields), `ParticipantVerification`, `RequestOperation`, `RequestOperationAuthority`, `Installation`, `Subscriber`, and `System`, and any row that does not point at a removed Request. Simulator credentials therefore keep working. `PlacementEvidence` does not exist; a guard test fails if a new model referencing `Request` appears, so it must be classified deliberately. QA `/api/stats` totals fall because fulfillment rows go with their Requests.
+
+- **Quota.** The daily limit is unchanged (3 per address per campus day, counted from `Request` rows). Removing the rows is what makes the participant eligible again; nothing writes quota state.
+- **D1/D2.** The operation ledger and authority survive, so replaying an operation whose Request was reset reconciles as terminal expired (410 `OPERATION_EXPIRED`), never creates a Request, and no NO-CREATE row is invented. A create still in flight in an app at reset time may therefore end up terminally expired there. Reset does not read or clear an app's private pending-operation state.
+- **Orphans.** Rows whose Request had already expired by TTL are not part of the reset and are left alone.
+
+**Full drop.** `drop` is a separate command that needs the exact database name typed as confirmation; `reset` rejects extra arguments and can never drop. It deletes the whole database, including participants, verification challenges, and the operation ledger and authority. Existing Simulator credentials for that environment stop validating and participants must verify again. Restart the environment's backend afterwards (it re-creates its indexes and operation authority at startup), then run `init` again. Use it only for the exceptional case where D1/D2 history must be discarded.
+
+**Scenario presets.** `scenario` validates every preset document and the requester before resetting, so invalid input fails with nothing removed. At most one requester-owned preset per scenario; requester presets need `QA_REQUESTER_EMAIL` to name a participant who already verified through the app (the tool only looks it up and never creates identity).
+
+| Preset | Resulting state |
+| --- | --- |
+| `clean` | Zero Requests. |
+| `helper-board` | Five unowned helper-visible Requests: ASAP, two currently visible Later, ASAP with an estimate, Dining Dollars only. |
+| `future-later` | One unowned future Later Request that helpers cannot see before its start. |
+| `requester-below-quota` | One current-day ASAP Request owned by the verified requester. |
+| `requester-quota-boundary` | Two current-day ASAP Requests owned by the verified requester, so their next real submission is the third of the day. |
+
+Presets never fabricate D1/D2 ambiguity, claim or placement state, fulfillment, R3, or moderation state. Seeded quota requests have no operation history and prove only the quota count. Owned presets are recorded in the owned-fixture manifest, so `seed:ui:owned:cleanup` still removes exactly them. The older `seed:ui*` commands (narrow manifest/fixture cleanup) are unchanged. **Preset Requests expire like any other** (MongoDB TTL, roughly three hours, with a lagging sweep): reload with `scenario <preset>` when the expected state is gone.
+
+**QA1 verification commands** (all from the repository root; Mongo suites need `MONGO_INTEGRATION_URI` for a replica set, which `npm run test:mongo` provides):
+
+```bash
+npm run typecheck
+npx vitest run scripts/qa-environment.test.ts scripts/seed-ui-request.test.ts scripts/local-mail-sink.test.ts
+npm test                 # Mongo-gated suites are skipped by configuration
+npm run test:mongo       # runs qa-environment.mongo, qa-environment.operations.mongo, seed-ui-request.mongo
+npm run ci-check
+```
+
+Focused iOS: `-only-testing:CommonPlateiosTests/APIConfigurationDebugOverrideTests` with the command in section 9, then the complete `CommonPlateiosTests` target. The standard checks in sections 3, 4, 5, 9, 11, and 12 still apply unchanged.
+
+`scripts/qa-environment.mongo.test.ts` gives its suite a file-local 15-second timeout (`QA_CLI_WORKFLOW_TIMEOUT_MS`, passed through the suite helper); it is not a global configuration. Its tests each run several CLI commands that open their own Mongo connection. They take about 0.3-1.5 s on a quiet machine and two exceeded the default 5 s while Xcode was building concurrently. Under heavy CPU contention the slowest took 2-3 s. That is the remaining limit: a machine more than roughly ten times slower than quiet can still time out, and the response is to diagnose rather than raise the limit again.
+
+**Accepted evidence and proof boundaries.** Automated: unit, real-Mongo (including two simultaneous environments, D1/D2 non-resurrection through the real `createRequest` route, the real quota flow, identity preservation, and full-drop separation), two mutation checks, and the iOS override tests. The two-Simulator requester/helper verify-claim-fulfill walkthrough and a live reset-between-apps check were completed on Simulators against an isolated backend (recorded in the weekly spec); independent HIGH-risk review passed with nonblocking findings F1-F5, all dispositioned. Not proven: physical device, real Resend or APNs delivery (the fulfillment email goes to the sink; `notificationStatus: sent` is provider acceptance only), signed Release/Archive/TestFlight, production endpoint selection, and a Release app launch (Release isolation was shown by binary inspection and Release builds). Pre-existing and not QA1-owned: `npm ci` fails on a clean base because `package-lock.json` has drifted from `package.json`, and some hosted-layout iOS tests are environment-dependent (one complete iOS run failed with extra Simulators booted and passed on a rerun with them shut down; cause not established).
+
 ## 6. Browser-client bundles
 
 Edit `src/client/*.ts`; never edit `public/js/*.js` directly. Rebuild with:
@@ -738,6 +802,7 @@ Add new Week 3 iOS tests in new focused files where practical. Do not keep exten
 | Browser source | Focused browser tests, typecheck, and `npm run build:client`. |
 | iOS production or test change | Focused tests plus the complete `CommonPlateiosTests` target. |
 | Cross-stack contract | All affected backend and iOS suites. |
+| Local QA tooling (`scripts/qa-*.ts`, `scripts/seed-ui-request.ts`, mail sink) | Typecheck, the focused QA unit and Mongo tests listed under the Local QA harness subsection of section 5, `npm test`, `npm run test:mongo`; iOS suites only if the Debug override changes. |
 | Comment/document-only | `git diff --check` and content review; run tests only when executable behavior is also pending in the same working tree. |
 
 `npm run ci-check` runs lint, typecheck, prune, and build. It does not run the test suites.

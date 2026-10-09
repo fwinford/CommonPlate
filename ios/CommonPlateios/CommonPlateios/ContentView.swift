@@ -119,7 +119,7 @@ struct ContentView: View {
         notificationRouter: HelperNotificationRouter
     ) {
         self.notificationRouter = notificationRouter
-        let client = APIClient(configuration: .localSimulator)
+        let client = APIClient(configuration: .forLaunch())
         let service = RequestService(client: client)
         // The app's real installation-identity storage, shared by
         // `RequestStore` (which only ever reads the stable credential) and

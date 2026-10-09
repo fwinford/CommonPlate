@@ -1,76 +1,164 @@
-import "dotenv/config";
+// This module is imported by tests, so it must not load the developer's
+// private `.env` as an import side effect. Only the command-line entry point at
+// the bottom loads it; test harnesses supply configuration explicitly.
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import mongoose, { Types } from "mongoose";
 import { Participant, Request as MealRequest } from "../models/db.js";
+import { REQUEST_VISIBLE_DURATION_MS } from "../src/requestTiming.js";
+import {
+  deriveFoodSummary,
+  type StructuredMealItem,
+} from "../src/structuredRequest.js";
+import { formatMealRequestWindow } from "../src/utils/date.js";
 
-export const UI_FIXTURE_MARKER = {
-  vendor: "CommonPlate QA Dining Hall",
-  food: "Test meal — safe to delete",
-  email: "commonplate-ui-seed@example.invalid",
-  pickupWindowText: "Available for UI review",
-  // W3-C1 made this a required part of every request's public shape, and
-  // W4-R4 added the structured fields beside it; the client's decoder fails
-  // the whole list on a request that omits either, so the fixture carries a
-  // complete Meal Exchange representation like every real request.
-  menuPath: "meal-exchange",
-  mealSwipes: 2,
-  mealItems: ["Test meal — safe to delete", "Test side — safe to delete"],
-} as const;
+// Fixtures are built to satisfy the same constraints a request created through
+// the app does, so a layout or behavior problem seen with them is a real one:
+// a vendor from the supported catalog, the fixed three-hour visibility window,
+// the structured `mealItems`/`food` relationship (W4-R4), and the timing text
+// the create route would have written. What is open text in the product
+// (meal items, order details) is free text here too.
+//
+// Because the visible fields carry no "QA" marker, a fixture is recognized for
+// cleanup by identity the product cannot produce instead:
+//  - legacy and needs-help fixtures: a reserved `@example.invalid` address (no
+//    real request can carry one — the create route only accepts NYU addresses)
+//    and no owner;
+//  - owned fixtures: these are ordinary requests under the owner's real address
+//    and participant id, so nothing about them can tell them from a real one.
+//    The tool therefore records the exact ids it inserted in a dev-only
+//    manifest collection in the same (loopback, safe-named) database, and
+//    cleanup deletes a request only if its id is in that manifest AND its
+//    owner id AND requester address still match. Visible content never
+//    decides, so a real request that looks identical to a fixture is never
+//    eligible. No manifest means nothing is deleted.
+export const UI_FIXTURE_EMAIL = "commonplate-ui-seed@example.invalid";
+const NEEDS_HELP_EMAIL_PATTERN = "^commonplate-ui-seed-needs-help-\\d+@example\\.invalid$";
 
-const FIXTURE_LIFETIME_MS = 2 * 60 * 60 * 1000;
-
-/** W4-R4 requires exactly one structured meal-detail entry per selected
- * swipe, so a seeded fixture supplies one per swipe rather than a single
- * flat description. */
-function mealItemsFor(label: string, mealSwipes: number): string[] {
-  return Array.from({ length: mealSwipes }, (_, index) => `${label} — item ${index + 1}`);
-}
-
-// W4-H4 device-walkthrough support: distinct varied vendors so the seeded
-// owned fixtures are easy to tell apart on screen. This is local dev/test
-// tooling only — it has no bearing on the H4 SwiftUI composition contract.
-const OWNED_FIXTURE_VENDORS: readonly string[] = [
-  "CommonPlate QA Dining Hall",
-  "CommonPlate QA Kosher Kitchen",
-  "CommonPlate QA Global Eats",
-  "CommonPlate QA Vegan Corner",
+const FIXTURE_MEAL_ITEMS: readonly StructuredMealItem[] = [
+  { name: "Chicken tenders", details: "Crispy, no sauce" },
+  { name: "Veggie wrap" },
+  { name: "Cheeseburger", details: "No onions" },
+  { name: "Caesar salad", details: "Dressing on the side" },
+  { name: "Breakfast sandwich" },
+  { name: "Poke bowl", details: "Extra edamame" },
+  { name: "Chicken quesadilla" },
+  { name: "Large fries" },
+];
+const FIXTURE_ORDER_DETAILS: readonly string[] = [
+  "Large iced latte and a blueberry muffin",
+  "Two bagels with cream cheese and a coffee",
+  "Chicken burrito bowl and a bottled water",
 ];
 
-// Every owned fixture's `food` starts with this exact prefix, which is the
-// sole cleanup-matching key (alongside the resolved owner's participant id).
-// It must never collide with a real request's food description.
-export const OWNED_FIXTURE_FOOD_PREFIX = "H4 QA owned fixture";
+let cachedVendorNames: string[] | undefined;
+/** The supported-vendor catalog both clients and the backend share, read
+ * relative to this file so it does not depend on the working directory. */
+function supportedVendorNames(): string[] {
+  cachedVendorNames ??= (
+    JSON.parse(
+      readFileSync(new URL("../shared/vendors.json", import.meta.url), "utf8")
+    ) as Array<{ name: string }>
+  ).map((vendor) => vendor.name);
+  return cachedVendorNames;
+}
+
+export type FixtureShape =
+  | "asap"
+  | "later-started"
+  | "asap-with-estimate"
+  | "dining-dollars"
+  | "later-upcoming";
+
+// Repeats every six fixtures. `later-upcoming` is a scheduled request whose
+// start is still ahead, so helpers correctly do not see it yet.
+const FIXTURE_SHAPES: readonly FixtureShape[] = [
+  "asap",
+  "later-started",
+  "asap-with-estimate",
+  "dining-dollars",
+  "later-started",
+  "later-upcoming",
+];
+
+const MINUTE_MS = 60 * 1000;
+const FIXTURE_ESTIMATE_CENTS = 650;
+const FIXTURE_DINING_DOLLARS_ONLY_CENTS = 1450;
+
+/**
+ * Everything about a fixture request except who it belongs to, shaped like what
+ * `POST /api/request` persists for the same kind of request.
+ */
+function buildFixtureFields(
+  index: number,
+  now: Date,
+  shapeOverride?: FixtureShape
+) {
+  const shape = shapeOverride ?? FIXTURE_SHAPES[index % FIXTURE_SHAPES.length]!;
+  const vendors = supportedVendorNames();
+  const vendor = vendors[index % vendors.length]!;
+
+  // Timing, per `src/requestTiming.ts`: visible for exactly three hours from
+  // `visibleFrom` (the creation instant for ASAP, the scheduled start for
+  // Later).
+  const isLater = shape === "later-started" || shape === "later-upcoming";
+  const windowStart = isLater
+    ? new Date(now.getTime() + (shape === "later-upcoming" ? 60 : -30) * MINUTE_MS)
+    : undefined;
+  const visibleFrom = windowStart ?? now;
+  const expiresAt = new Date(visibleFrom.getTime() + REQUEST_VISIBLE_DURATION_MS);
+  const createdAt =
+    shape === "later-started" ? new Date(windowStart!.getTime() - 15 * MINUTE_MS) : now;
+
+  // Structure, per `src/structuredRequest.ts`.
+  const structured =
+    shape === "dining-dollars"
+      ? {
+          menuPath: "dining-dollars" as const,
+          mealSwipes: 0,
+          mealItems: [] as StructuredMealItem[],
+          orderDetails: FIXTURE_ORDER_DETAILS[index % FIXTURE_ORDER_DETAILS.length]!,
+          estimatedDiningDollarsCents: FIXTURE_DINING_DOLLARS_ONLY_CENTS,
+        }
+      : {
+          menuPath: "meal-exchange" as const,
+          mealSwipes: (index % 5) + 1,
+          mealItems: Array.from({ length: (index % 5) + 1 }, (_, position) => ({
+            ...FIXTURE_MEAL_ITEMS[(index * 3 + position) % FIXTURE_MEAL_ITEMS.length]!,
+          })),
+          ...(shape === "asap-with-estimate"
+            ? { estimatedDiningDollarsCents: FIXTURE_ESTIMATE_CENTS }
+            : {}),
+        };
+
+  return {
+    vendor,
+    ...structured,
+    food: deriveFoodSummary(structured),
+    pickupWindowText: windowStart
+      ? formatMealRequestWindow(windowStart, expiresAt)
+      : "ASAP",
+    ...(windowStart ? { windowStart, windowEnd: expiresAt } : {}),
+    status: "open" as const,
+    visibleFrom,
+    helperNotification: (visibleFrom.getTime() <= now.getTime()
+      ? "initiated"
+      : "awaiting-eligibility") as "initiated" | "awaiting-eligibility",
+    createdAt,
+    expiresAt,
+    deleteAt: expiresAt,
+  };
+}
 
 const MIN_OWNED_FIXTURE_COUNT = 1;
 const MAX_OWNED_FIXTURE_COUNT = 20;
 const DEFAULT_OWNED_FIXTURE_COUNT = 8;
-
-// W4-H4 device-walkthrough support: reproduces a `Needs help right now`
-// board deep enough to reach the persistent `Request Food` area. These
-// fixtures are deliberately never owned by anyone — `requesterParticipantId`
-// stays `null`, the same "no current-authority server evidence" shape a real
-// request has before ownership resolution, which the backend already proves
-// resolves to `isOwnRequest: false` for every verified caller (see
-// `src/requestDetailOwnership.test.ts`). This tool never looks up or
-// fabricates a participant identity for these fixtures.
-const NEEDS_HELP_FIXTURE_VENDORS: readonly string[] = [
-  "CommonPlate QA Dining Hall",
-  "CommonPlate QA Kosher Kitchen",
-  "CommonPlate QA Global Eats",
-  "CommonPlate QA Vegan Corner",
-  "CommonPlate QA Noodle Bar",
-];
-
-// Sole cleanup-matching key. Must never collide with a real request's food
-// description, and is distinct from `OWNED_FIXTURE_FOOD_PREFIX` so the two
-// fixture sets can be seeded/cleaned up independently.
-export const NEEDS_HELP_FIXTURE_FOOD_PREFIX = "H4 QA needs-help fixture";
-
 const MIN_NEEDS_HELP_FIXTURE_COUNT = 1;
 const MAX_NEEDS_HELP_FIXTURE_COUNT = 20;
 const DEFAULT_NEEDS_HELP_FIXTURE_COUNT = 8;
 const SAFE_DATABASE_NAME =
-  /^(test|testing|dev|development|local|qa|staging|sandbox)$|(^|[-_])(test|testing|dev|development|local|qa|staging|sandbox)([-_]|$)/i;
+  /^(test|testing|dev|development|local|qa|sandbox)$|(^|[-_])(test|testing|dev|development|local|qa|sandbox)([-_]|$)/i;
+const LOOPBACK_MONGO_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const PRODUCTION_DATABASE_NAME =
   /^(commonplate|prod|production|live)$|(^|[-_])(prod|production|live)([-_]|$)/i;
 
@@ -114,18 +202,93 @@ export function validateRuntimeSafety(environment: SeedEnvironment): string {
   return environment.MONGO_URI;
 }
 
-export function parseExplicitDatabaseName(uri: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(uri);
-  } catch {
-    throw new SeedSafetyError("MONGO_URI could not be parsed safely.");
+type MongoTarget = {
+  hosts: string[];
+  databaseName: string | null;
+};
+
+// Parsed by hand because `new URL` rejects the comma-separated multi-host form
+// a replica-set URI uses. No message below may quote the URI: it can carry
+// credentials.
+function parseMongoTarget(uri: string, subject = "MONGO_URI"): MongoTarget {
+  const match = /^(mongodb(?:\+srv)?):\/\/([^/?#]*)(?:\/([^?#]*))?(?:\?([^#]*))?$/.exec(
+    uri.trim()
+  );
+  if (!match) {
+    throw new SeedSafetyError(`${subject} could not be parsed safely.`);
+  }
+  const [, scheme, authority, pathPart, queryPart] = match;
+  if (scheme !== "mongodb") {
+    throw new SeedSafetyError(
+      "Refusing a non-loopback MongoDB target: only mongodb:// URIs on this machine are allowed."
+    );
   }
 
-  const queryDatabaseName = parsed.searchParams.get("dbName");
-  const pathDatabaseName = parsed.pathname.replace(/^\/+/, "").split("/")[0];
-  const encodedDatabaseName = queryDatabaseName || pathDatabaseName;
-  return encodedDatabaseName ? decodeURIComponent(encodedDatabaseName) : null;
+  const hostList = authority!.slice(authority!.lastIndexOf("@") + 1);
+  const hosts = hostList
+    .split(",")
+    .map((entry) => entry.replace(/:\d*$/, "").toLowerCase());
+  if (hosts.length === 0 || hosts.some((host) => host === "")) {
+    throw new SeedSafetyError(`${subject} could not be parsed safely.`);
+  }
+
+  let pathDatabaseName: string | null = null;
+  let queryDatabaseName: string | null = null;
+  try {
+    pathDatabaseName = pathPart ? decodeURIComponent(pathPart.split("/")[0]!) : null;
+    queryDatabaseName =
+      new URLSearchParams(queryPart ?? "").get("dbName") || null;
+  } catch {
+    throw new SeedSafetyError(`${subject} could not be parsed safely.`);
+  }
+  if (
+    pathDatabaseName &&
+    queryDatabaseName &&
+    pathDatabaseName !== queryDatabaseName
+  ) {
+    throw new SeedSafetyError(
+      `${subject} names two different databases; refusing an ambiguous target.`
+    );
+  }
+  return { hosts, databaseName: queryDatabaseName || pathDatabaseName || null };
+}
+
+export function parseExplicitDatabaseName(
+  uri: string,
+  subject = "MONGO_URI"
+): string | null {
+  return parseMongoTarget(uri, subject).databaseName;
+}
+
+/** Seed and cleanup only ever touch a MongoDB on this machine. */
+export function assertLoopbackMongoTarget(uri: string, subject = "MONGO_URI"): void {
+  const { hosts } = parseMongoTarget(uri, subject);
+  if (!hosts.every((host) => LOOPBACK_MONGO_HOSTS.has(host))) {
+    throw new SeedSafetyError(
+      "Refusing a non-loopback MongoDB target: only localhost, 127.0.0.1, or [::1] are allowed."
+    );
+  }
+}
+
+/**
+ * The single target gate for seed and cleanup: loopback host, and an explicit,
+ * clearly development/test database name in the URI itself. A URI that names no
+ * database is refused rather than left to the driver's default.
+ */
+export function resolveSeedTarget(environment: SeedEnvironment): {
+  uri: string;
+  databaseName: string;
+} {
+  const uri = validateRuntimeSafety(environment);
+  assertLoopbackMongoTarget(uri);
+  const databaseName = parseExplicitDatabaseName(uri);
+  if (!databaseName) {
+    throw new SeedSafetyError(
+      "MONGO_URI must name the target database explicitly; refusing an unnamed target."
+    );
+  }
+  assertSafeDatabaseName(databaseName);
+  return { uri, databaseName };
 }
 
 export function assertSafeDatabaseName(databaseName: string): void {
@@ -142,17 +305,20 @@ export function assertSafeDatabaseName(databaseName: string): void {
   }
 }
 
+// The legacy fixture is a single unowned request under the reserved address.
 export function buildExactFixtureFilter() {
-  return { ...UI_FIXTURE_MARKER };
+  return { email: UI_FIXTURE_EMAIL, requesterParticipantId: null };
 }
 
+// A fixture index no default needs-help or owned run reaches, so this request
+// does not duplicate one of theirs on screen.
+const LEGACY_FIXTURE_INDEX = 12;
+
 export function buildFixtureDocument(now = new Date()) {
-  const expiresAt = new Date(now.getTime() + FIXTURE_LIFETIME_MS);
   return {
-    ...UI_FIXTURE_MARKER,
-    status: "open" as const,
-    expiresAt,
-    deleteAt: expiresAt,
+    ...buildFixtureFields(LEGACY_FIXTURE_INDEX, now),
+    email: UI_FIXTURE_EMAIL,
+    requesterParticipantId: null,
   };
 }
 
@@ -188,34 +354,43 @@ export function parseOwnedFixtureCount(argument: string | undefined): number {
   return parsed;
 }
 
+// A multiple of the shape cycle (so the first fixtures keep the same request
+// shapes) chosen so the first three owned fixtures use the supported vendors the
+// default needs-help and legacy fixtures do not, and so cannot be mistaken for
+// them on a helper's screen.
+const OWNED_FIXTURE_INDEX_OFFSET = 30;
+
 export function buildOwnedFixtureDocument(
   index: number,
   ownerEmail: string,
   requesterParticipantId: unknown,
-  now = new Date()
+  now = new Date(),
+  // Assigned before insertion so the manifest can be written first.
+  _id: Types.ObjectId = new Types.ObjectId(),
+  // Lets a QA preset pin the shape (e.g. `asap`, which is created "now" and so
+  // is always inside the current campus day the daily quota counts).
+  shape?: FixtureShape
 ) {
-  const expiresAt = new Date(now.getTime() + FIXTURE_LIFETIME_MS);
-  const vendor = OWNED_FIXTURE_VENDORS[index % OWNED_FIXTURE_VENDORS.length];
-  const label = `${OWNED_FIXTURE_FOOD_PREFIX} #${index + 1}`;
   return {
-    vendor,
-    food: label,
+    _id,
+    ...buildFixtureFields(index + OWNED_FIXTURE_INDEX_OFFSET, now, shape),
     email: ownerEmail,
-    pickupWindowText: `${label} — safe to delete`,
-    menuPath: "meal-exchange",
-    mealSwipes: (index % 5) + 1,
-    mealItems: mealItemsFor(label, (index % 5) + 1),
-    status: "open" as const,
-    expiresAt,
-    deleteAt: expiresAt,
     requesterParticipantId,
   };
 }
 
-export function buildOwnedFixtureFilter(requesterParticipantId: unknown) {
+// The full hidden identity: a request this tool recorded (its id is in the
+// manifest) that is still bound to this owner's participant id and requester
+// address. An empty manifest matches nothing.
+export function buildOwnedFixtureFilter(
+  requesterParticipantId: unknown,
+  ownerEmail: string,
+  manifestRequestIds: readonly Types.ObjectId[]
+) {
   return {
+    _id: { $in: [...manifestRequestIds] },
     requesterParticipantId,
-    food: { $regex: `^${escapeRegExp(OWNED_FIXTURE_FOOD_PREFIX)}` },
+    email: ownerEmail,
   };
 }
 
@@ -237,32 +412,19 @@ export function parseNeedsHelpFixtureCount(argument: string | undefined): number
 }
 
 export function buildNeedsHelpFixtureDocument(index: number, now = new Date()) {
-  const expiresAt = new Date(now.getTime() + FIXTURE_LIFETIME_MS);
-  const vendor = NEEDS_HELP_FIXTURE_VENDORS[index % NEEDS_HELP_FIXTURE_VENDORS.length];
-  const label = `${NEEDS_HELP_FIXTURE_FOOD_PREFIX} #${index + 1}`;
   return {
-    vendor,
-    food: label,
+    ...buildFixtureFields(index, now),
     email: `commonplate-ui-seed-needs-help-${index + 1}@example.invalid`,
-    pickupWindowText: `${label} — safe to delete`,
-    menuPath: "meal-exchange",
-    mealSwipes: (index % 5) + 1,
-    mealItems: mealItemsFor(label, (index % 5) + 1),
-    status: "open" as const,
-    expiresAt,
-    deleteAt: expiresAt,
     requesterParticipantId: null,
   };
 }
 
+// Never owned, and under the reserved fixture address no real request can use.
 export function buildNeedsHelpFixtureFilter() {
   return {
-    food: { $regex: `^${escapeRegExp(NEEDS_HELP_FIXTURE_FOOD_PREFIX)}` },
+    email: { $regex: NEEDS_HELP_EMAIL_PATTERN },
+    requesterParticipantId: null,
   };
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parseOperation(argument: string | undefined): SeedOperation {
@@ -282,16 +444,20 @@ function parseOperation(argument: string | undefined): SeedOperation {
 }
 
 // Looks up an *already verified* Participant by email — never creates one.
-// A missing record means Faith has not yet verified that address in the app
-// on this database, which this tool must not work around.
-async function findOwnerParticipantId(ownerEmail: string): Promise<Types.ObjectId> {
+// A missing record means that address has not yet been verified in the app on
+// this database, which this tool must not work around. Neither the address nor
+// the resolved identifier is ever echoed back.
+export async function findOwnerParticipantId(
+  ownerEmail: string,
+  emailVariable = "SEED_OWNER_EMAIL"
+): Promise<Types.ObjectId> {
   const participant = await Participant.findOne({ email: ownerEmail })
     .select("_id")
     .lean()
     .exec();
   if (!participant) {
     throw new SeedSafetyError(
-      `No verified Participant found for "${ownerEmail}" in this database. ` +
+      `No verified Participant found for ${emailVariable} in this database. ` +
         "Verify that email in the app first (this tool never creates or " +
         "fabricates participant identity)."
     );
@@ -299,52 +465,161 @@ async function findOwnerParticipantId(ownerEmail: string): Promise<Types.ObjectI
   return participant._id as Types.ObjectId;
 }
 
+// The step a failure happened in, so a sanitized failure still says what broke.
+export type SeedPhase =
+  | "configuration"
+  | "database connection"
+  | "participant lookup"
+  | "fixture cleanup"
+  | "fixture write"
+  | "environment verification"
+  | "environment reset"
+  | "scenario load"
+  | "environment teardown";
+
+/** An unexpected failure, already reduced to text that is safe to print. */
+export class SeedOperationError extends Error {}
+
+/**
+ * Reduces any thrown value to a diagnosis that names the failing step and its
+ * category without ever quoting the underlying message, which can contain a
+ * connection URI, a credential, or a document value. Only schema paths, driver
+ * error codes, and error class names are used.
+ */
+export function describeSeedFailure(
+  error: unknown,
+  phase: SeedPhase,
+  subject = "UI seed operation"
+): string {
+  const name =
+    error instanceof Error && /^[A-Za-z]{1,60}$/.test(error.name)
+      ? error.name
+      : "unknown error";
+  let detail: string;
+  if (error instanceof mongoose.Error.ValidationError) {
+    const paths = Object.keys(error.errors)
+      .filter((path) => /^[A-Za-z0-9_.]{1,80}$/.test(path))
+      .join(", ");
+    detail = `document validation failed for: ${paths || "unknown fields"}`;
+  } else if (error instanceof mongoose.Error.CastError) {
+    const path = /^[A-Za-z0-9_.]{1,80}$/.test(error.path) ? error.path : "unknown";
+    detail = `a value could not be cast at path "${path}"`;
+  } else if (/ServerSelection|Network|Timeout|ParseError/.test(name)) {
+    detail = "MongoDB was unreachable or the connection settings were rejected";
+  } else if (name === "MongoServerError") {
+    const code = (error as { code?: unknown }).code;
+    detail = `MongoDB rejected the operation${typeof code === "number" ? ` (code ${code})` : ""}`;
+  } else {
+    detail = `unexpected ${name}`;
+  }
+  return `${subject} failed during ${phase}: ${detail}. Nothing sensitive was printed.`;
+}
+
+async function inPhase<T>(phase: SeedPhase, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof SeedSafetyError) throw error;
+    throw new SeedOperationError(describeSeedFailure(error, phase));
+  }
+}
+
+// Dev-tool bookkeeping only: not a product model, not in `models/db.ts`, and
+// never read by the app. Lives in the same validated local database as the
+// fixtures it describes, one document per owner (`_id` = participant id).
+export const OWNED_MANIFEST_COLLECTION = "qa1OwnedFixtureManifest";
+
+function ownedManifest() {
+  return mongoose.connection.collection(OWNED_MANIFEST_COLLECTION);
+}
+
+async function readOwnedManifest(
+  participantId: Types.ObjectId
+): Promise<Types.ObjectId[]> {
+  const entry = await ownedManifest().findOne({ _id: participantId } as never);
+  const ids: unknown = entry?.requestIds;
+  return Array.isArray(ids)
+    ? ids.filter((id): id is Types.ObjectId => id instanceof Types.ObjectId)
+    : [];
+}
+
+async function deleteRecordedOwnedFixtures(
+  participantId: Types.ObjectId,
+  ownerEmail: string
+): Promise<number> {
+  const recorded = await readOwnedManifest(participantId);
+  // Fail closed: nothing recorded means nothing is eligible.
+  if (recorded.length === 0) return 0;
+  const result = await MealRequest.deleteMany(
+    buildOwnedFixtureFilter(participantId, ownerEmail, recorded)
+  ).exec();
+  await ownedManifest().deleteOne({ _id: participantId } as never);
+  return result.deletedCount;
+}
+
 async function seedOwned(
   databaseName: string,
   ownerEmail: string,
   count: number
 ): Promise<void> {
-  const participantId = await findOwnerParticipantId(ownerEmail);
-  const filter = buildOwnedFixtureFilter(participantId);
-  const removed = await MealRequest.deleteMany(filter).exec();
+  const participantId = await inPhase("participant lookup", () =>
+    findOwnerParticipantId(ownerEmail)
+  );
+  const removed = await inPhase("fixture cleanup", () =>
+    deleteRecordedOwnedFixtures(participantId, ownerEmail)
+  );
 
   const now = new Date();
   const documents = Array.from({ length: count }, (_, index) =>
     buildOwnedFixtureDocument(index, ownerEmail, participantId, now)
   );
-  const created = await MealRequest.insertMany(documents);
+  // Recorded before inserting, so a failure part-way through still leaves
+  // every request that may exist reachable by cleanup.
+  await inPhase("fixture write", () =>
+    ownedManifest().updateOne(
+      { _id: participantId } as never,
+      { $set: { requestIds: documents.map((document) => document._id), seededAt: now } },
+      { upsert: true }
+    )
+  );
+  const created = await inPhase("fixture write", () =>
+    MealRequest.insertMany(documents)
+  );
 
   console.log(`database name: ${databaseName}`);
-  console.log(`owner email: ${ownerEmail}`);
-  console.log(`owner participant id: ${String(participantId)}`);
-  console.log(`removed prior matching owned fixtures: ${removed.deletedCount}`);
+  console.log(`removed prior recorded owned fixtures: ${removed}`);
   console.log(`inserted owned fixtures: ${created.length}`);
   console.log(`expiration: ${documents[0]!.expiresAt.toISOString()}`);
   console.log(
-    `cleanup command: ALLOW_LOCAL_SEED=true SEED_OWNER_EMAIL=${ownerEmail} npm run seed:ui:owned:cleanup`
+    "cleanup command: ALLOW_LOCAL_SEED=true SEED_OWNER_EMAIL=<owner email> npm run seed:ui:owned:cleanup"
   );
 }
 
 async function cleanupOwned(databaseName: string, ownerEmail: string): Promise<void> {
-  const participantId = await findOwnerParticipantId(ownerEmail);
-  const result = await MealRequest.deleteMany(
-    buildOwnedFixtureFilter(participantId)
-  ).exec();
+  const participantId = await inPhase("participant lookup", () =>
+    findOwnerParticipantId(ownerEmail)
+  );
+  const removed = await inPhase("fixture cleanup", () =>
+    deleteRecordedOwnedFixtures(participantId, ownerEmail)
+  );
 
   console.log(`database name: ${databaseName}`);
-  console.log(`owner email: ${ownerEmail}`);
-  console.log(`matching owned fixtures removed: ${result.deletedCount}`);
+  console.log(`recorded owned fixtures removed: ${removed}`);
 }
 
 async function seedNeedsHelp(databaseName: string, count: number): Promise<void> {
   const filter = buildNeedsHelpFixtureFilter();
-  const removed = await MealRequest.deleteMany(filter).exec();
+  const removed = await inPhase("fixture cleanup", () =>
+    MealRequest.deleteMany(filter).exec()
+  );
 
   const now = new Date();
   const documents = Array.from({ length: count }, (_, index) =>
     buildNeedsHelpFixtureDocument(index, now)
   );
-  const created = await MealRequest.insertMany(documents);
+  const created = await inPhase("fixture write", () =>
+    MealRequest.insertMany(documents)
+  );
 
   console.log(`database name: ${databaseName}`);
   console.log(`removed prior matching needs-help fixtures: ${removed.deletedCount}`);
@@ -356,7 +631,9 @@ async function seedNeedsHelp(databaseName: string, count: number): Promise<void>
 }
 
 async function cleanupNeedsHelp(databaseName: string): Promise<void> {
-  const result = await MealRequest.deleteMany(buildNeedsHelpFixtureFilter()).exec();
+  const result = await inPhase("fixture cleanup", () =>
+    MealRequest.deleteMany(buildNeedsHelpFixtureFilter()).exec()
+  );
 
   console.log(`database name: ${databaseName}`);
   console.log(`matching needs-help fixtures removed: ${result.deletedCount}`);
@@ -364,8 +641,12 @@ async function cleanupNeedsHelp(databaseName: string): Promise<void> {
 
 async function seed(databaseName: string): Promise<void> {
   const filter = buildExactFixtureFilter();
-  const removed = await MealRequest.deleteMany(filter).exec();
-  const request = await MealRequest.create(buildFixtureDocument());
+  const removed = await inPhase("fixture cleanup", () =>
+    MealRequest.deleteMany(filter).exec()
+  );
+  const request = await inPhase("fixture write", () =>
+    MealRequest.create(buildFixtureDocument())
+  );
 
   console.log(`database name: ${databaseName}`);
   console.log(`removed prior matching fixtures: ${removed.deletedCount}`);
@@ -377,7 +658,9 @@ async function seed(databaseName: string): Promise<void> {
 }
 
 async function cleanup(databaseName: string): Promise<void> {
-  const result = await MealRequest.deleteMany(buildExactFixtureFilter()).exec();
+  const result = await inPhase("fixture cleanup", () =>
+    MealRequest.deleteMany(buildExactFixtureFilter()).exec()
+  );
 
   console.log(`database name: ${databaseName}`);
   console.log(`matching fixtures removed: ${result.deletedCount}`);
@@ -388,15 +671,33 @@ export async function runSeedTool(
   environment: SeedEnvironment = process.env
 ): Promise<void> {
   const operation = parseOperation(operationArgument);
-  const uri = validateRuntimeSafety(environment);
-  const explicitDatabaseName = parseExplicitDatabaseName(uri);
-  if (explicitDatabaseName) {
-    assertSafeDatabaseName(explicitDatabaseName);
-  }
+  const { uri, databaseName: expectedDatabaseName } = resolveSeedTarget(environment);
+  // Validated before connecting, so a missing owner or a bad count never opens
+  // a connection.
+  const ownerEmail =
+    operation === "seed-owned" || operation === "cleanup-owned"
+      ? normalizeOwnerEmail(environment.SEED_OWNER_EMAIL)
+      : null;
+  const ownedCount =
+    operation === "seed-owned"
+      ? parseOwnedFixtureCount(environment.SEED_OWNER_COUNT)
+      : 0;
+  const needsHelpCount =
+    operation === "seed-needs-help"
+      ? parseNeedsHelpFixtureCount(environment.SEED_NEEDS_HELP_COUNT)
+      : 0;
 
   try {
-    await mongoose.connect(uri);
+    await inPhase("database connection", async () => {
+      await mongoose.connect(uri, { dbName: expectedDatabaseName });
+    });
+    // The connection must land on exactly the database that was validated.
     const databaseName = mongoose.connection.name;
+    if (databaseName !== expectedDatabaseName) {
+      throw new SeedSafetyError(
+        "Connected database does not match the validated MONGO_URI database; refusing to continue."
+      );
+    }
     assertSafeDatabaseName(databaseName);
 
     if (operation === "seed") {
@@ -404,15 +705,11 @@ export async function runSeedTool(
     } else if (operation === "cleanup") {
       await cleanup(databaseName);
     } else if (operation === "seed-owned") {
-      const ownerEmail = normalizeOwnerEmail(environment.SEED_OWNER_EMAIL);
-      const count = parseOwnedFixtureCount(environment.SEED_OWNER_COUNT);
-      await seedOwned(databaseName, ownerEmail, count);
+      await seedOwned(databaseName, ownerEmail!, ownedCount);
     } else if (operation === "cleanup-owned") {
-      const ownerEmail = normalizeOwnerEmail(environment.SEED_OWNER_EMAIL);
-      await cleanupOwned(databaseName, ownerEmail);
+      await cleanupOwned(databaseName, ownerEmail!);
     } else if (operation === "seed-needs-help") {
-      const count = parseNeedsHelpFixtureCount(environment.SEED_NEEDS_HELP_COUNT);
-      await seedNeedsHelp(databaseName, count);
+      await seedNeedsHelp(databaseName, needsHelpCount);
     } else {
       await cleanupNeedsHelp(databaseName);
     }
@@ -424,10 +721,13 @@ export async function runSeedTool(
 const entryPath = process.argv[1];
 if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
   try {
+    // Command-line use only: configuration still comes from the environment
+    // and any `.env`, but never as a side effect of importing this module.
+    await import("dotenv/config");
     await runSeedTool(process.argv[2]);
   } catch (error) {
     const message =
-      error instanceof SeedSafetyError
+      error instanceof SeedSafetyError || error instanceof SeedOperationError
         ? error.message
         : "UI seed operation failed; no credentials were printed.";
     console.error(message);
