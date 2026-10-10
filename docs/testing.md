@@ -11,6 +11,69 @@
 | iOS tests | See [section 9](#9-complete-terminal-ios-test-command). | Builds and runs `CommonPlateiosTests` on a simulator. | Compilation alone is not a passing test run. |
 | Diff validation | `git diff --check` | Detects whitespace errors in unstaged changes. | It does not establish behavioral correctness. |
 
+### Verification tiers and post-fix invalidation
+
+This subsection owns *how much* verification a change needs; sections 3–9 own the commands, section 11 owns the per-change-class matrix, and the routing manifests at the end of section 9 own the named test groups. It was introduced by W4-VP1 and is subject to the prospective transition rule at the end of this subsection.
+
+**Tiers.**
+
+| Tier | Name | What it is |
+| --- | --- | --- |
+| 1 | Focused | Tests and compile/typecheck that directly exercise the implementation change. |
+| 2 | Affected-neighbor | Tests for the immediate producer/consumer, state, navigation, persistence, or accessibility neighbors the change can affect. |
+| 3 | Change-type acceptance | The acceptance bundle section 11 requires for the actual change class, executed on the acceptance candidate. |
+| 4 | Full regression/integration | The complete target(s), required by change class (triggers below), by an explicit slice contract, by broad blast radius, by cross-slice integration, or by a release checkpoint. |
+| 5 | Post-fix | After a fix: rerun the direct and neighbor proof the fix invalidated, plus any still-mandatory final gate. Earlier full-run evidence for areas the fix did not touch is preserved, not mechanically rerun. |
+
+Tiers 1–3 apply to every change that seeks acceptance. Tier 4 applies only when a trigger below, a section 11 tier-3 bundle, an explicit slice contract, or a release checkpoint requires it. Tier 5 applies whenever a change is made after any earlier tier's evidence exists. A tier-3 bundle that section 11 defines as the complete target is also tier 4.
+
+**Full-regression triggers: complete iOS `CommonPlateiosTests`.** Required for:
+
+- slices whose contract explicitly requires it;
+- app root and global navigation/routing;
+- app lifecycle and notification handoff;
+- the shared `APIClient → RequestService → RequestStore` boundary (any edit to `APIClient`, `RequestService`, or `RequestStore` source, or to shared model types);
+- identity, persistence, cache semantics, and shared models;
+- project, scheme, dependency, and build-configuration changes;
+- cross-stack contract changes as defined in section 11;
+- cross-slice integration and release checkpoints;
+- other broad or materially uncertain blast-radius changes.
+
+**Full-regression triggers: complete backend `npm test`, plus `npm run test:mongo` when applicable.** Required for:
+
+- `app.ts` startup/registration behavior;
+- shared authentication, error (`src/day4Errors.ts`), and public-projection boundaries;
+- Mongo persistence of any kind: schemas, indexes, migrations, transactions, uniqueness, lifecycle transitions, concurrency, and any change to a query, update, aggregation, or other code path exercised by a `*.mongo.test.ts` suite (these also require `npm run test:mongo`);
+- credential, token, privacy-by-omission, and ambiguous-mutation boundaries recorded in `docs/system-contract.md`;
+- shared cross-route contracts;
+- notification/delivery infrastructure;
+- dependency and runtime configuration;
+- cross-stack changes and release checkpoints.
+
+**Localized changes.** Localized SwiftUI layout, accessibility, copy, leaf presentation state (view-local `@State` or view models, never store state), isolated route validation/copy that does not touch persistence, credentials or tokens, response projection/allowlists, lifecycle transitions, or ambiguous-mutation handling, and test-only corrections confined to one test class or file (not a shared helper, fixture, or mock) may use tier 1–3 proof (focused plus affected-neighbor) *unless another trigger above or an explicit slice contract applies*. A trigger always wins over this exception. When it is genuinely unclear whether a change is localized, the blast radius is "materially uncertain" and tier 4 applies; do not resolve the doubt toward less testing. When no named group covers the affected area, tier 2 names the neighbor classes or files explicitly in the report; if no defensible neighbor set can be named, the blast radius is materially uncertain and tier 4 applies.
+
+**Acceptance candidate.** Tier 3 and tier 4 evidence must be produced on the acceptance candidate: the exact tree proposed for acceptance, identified by commit or by a recorded `git status`/`git diff` state. The evidence must name the candidate it ran on, and a tree containing other uncommitted work must say what was mixed in. A later change to the candidate does not invalidate the evidence wholesale; it invalidates exactly what the post-fix rule below says it does. A slice that is required to pass a complete-target gate on its acceptance candidate must pass it on the *final* candidate, after its last change.
+
+**Post-fix invalidation.** After any fix, including a review fix:
+
+1. Identify the files and behavior the fix changed.
+2. Rerun tier 1 for the fix.
+3. Rerun the tier 2 neighbors and the tier 3 bundle components the fix could invalidate.
+4. Rerun tier 4 when the fix itself meets a full-regression trigger, is not localized, or when a tier 4 gate is still mandatory for the final candidate (explicit slice contract, or a trigger that applied to the slice).
+5. Otherwise preserve earlier tier 3 and tier 4 evidence for the unchanged areas, and say in the report which earlier run it was, what it covered, and what the fix touched.
+
+Evidence is never carried across a change that could alter what it established. Skipping a rerun is a recorded decision with a reason, not a default.
+
+**Evidence rules that do not change.**
+
+- `-skip-testing` filters are never acceptance evidence. Only complete-target runs and explicit repeated `-only-testing:` runs count.
+- Selective Mongo verification is not defined: `npm run test:mongo` runs the entire Mongo-gated suite (section 5) and is the only valid Mongo gate.
+- Compilation alone is not a passing iOS result; reports distinguish tests executed, tests skipped by configuration, source inspection only, manual/physical verification, and behavior not yet verified (`AGENTS.md`).
+- A focused run counts only if its output shows each named class or file executed with a non-zero test count; a filter naming a class that no longer exists can still report success. Report the executed count per group.
+- Green results are never obtained by weakening, narrowing, or skipping required proof.
+
+**Prospective transition (W4-VP1).** This policy is effective from the commit that lands it on `main` in canonical repository truth (record that commit hash in the W4-VP1 weekly-spec entry when it exists). It applies only to slices whose weekly-spec card records a *first READY transition* after that commit. Successor or split slices of a grandfathered slice inherit its grandfathered status unless Week HQ states otherwise. A slice that was already READY, ACTIVE, in VERIFY, or acceptance-pending when this policy landed keeps its original acceptance-proof obligations, including for every subsequent fix: the rule in force before this policy, which is the complete grandfathered table at the end of section 11 (including "iOS production or test change" and "Backend TypeScript only"), plus whatever its own weekly-spec card states. In particular, W4-H3 and W4-U1.1 still require their explicitly contracted complete `CommonPlateiosTests` acceptance gate; nothing here reduces it, and neither slice may use tier 5 to avoid rerunning that gate on its final candidate. Work with no weekly-spec card recording a first READY transition after that commit is treated as grandfathered. When it is unclear whether a slice is grandfathered, it is: the stricter rule applies until Week HQ states otherwise.
+
 ## 2. Node and dependency setup
 
 Install dependencies with:
@@ -499,6 +562,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
 
 The current accepted W4-F1 complete-iOS proof is **785 passed, 0 failed, 0 skipped, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
 
+**Focused routing and its limits.** After W4-S3, the complete target (1,713 tests) took about 242 seconds of test-action time, with most of that cost concentrated in the hosted Requester UI classes (`RequesterFormHostedFidelityTests`, `RequesterIncompleteVsInvalidHostedTests`, `RequesterMealPresentationHostedTests`, and `RequestCreationContinuityHostedGeometryTests`). Focused `-only-testing:CommonPlateiosTests/<TestClass>` runs are tier 1 and tier 2 proof under [Verification tiers and post-fix invalidation](#verification-tiers-and-post-fix-invalidation); they are acceptance evidence (tier 3) only for change classes that section 11 allows to use them, and never replace a complete-target run that a full-regression trigger or an explicit slice contract requires. Named test groups are listed in [Verification routing manifests](#verification-routing-manifests) below. `-skip-testing` is never acceptance evidence: it may shorten a local loop, and any result obtained with it must be rerun with `-only-testing` filters or the unchanged complete command before it counts. Class names and timings drift; re-check the live test target rather than treating a manifest as a maintained list.
+
 Automated routing tests (this target included) prove tap-routing logic against stubbed backend resolution; they do not by themselves prove real APNs terminated-launch handoff on a device. Physical-device proof was required for helper terminated-launch tap routing and for requester-fulfillment push, and both have now passed on a physical iPhone. Release/Archive/TestFlight signing and environment behavior is unrelated evidence and remains a separate, still-open environmental gate (see `docs/system-contract.md` section 11).
 
 Automated and source-text assertions can prove that `RequestFoodView` installs the NYU/New York timezone and calendar into the SwiftUI environment; they cannot prove what a real `DatePicker` renders on a device actually configured to a different timezone. W3-R1 required physical-device verification on a non-Eastern device for exactly that reason: an iPhone configured to Phoenix time (no DST offset from New York for part of the year) displayed the intended NYU/New York wall-clock selection of 10:30 PM rather than device-local Phoenix time, and submitted `windowStart = 2026-08-09T02:30:00.000Z`, `visibleFrom = 2026-08-09T02:30:00.000Z`, and `expiresAt = 2026-08-09T05:30:00.000Z`; the requester email rendered `Aug 8, 10:30 PM – Aug 9, 1:30 AM`. This is device evidence, not part of the automated `CommonPlateiosTests` count above, and it predates and is unaffected by the later presentation-contract correction, which does not touch timezone rendering or submission code.
@@ -789,11 +854,79 @@ A focused run uses section 9's command with `-only-testing:CommonPlateiosTests/<
 
 **Accepted verification limitation.** No iOS UI-test target exists; disclosure presentation, retirement, and routing are proven by store/runtime/source-inspection tests plus the physical-device evidence above, not by UI automation. The deadline test proves control returns without waiting for a non-cooperative provider; it does not prove cancellation of a provider that blocks the main actor.
 
+### Verification routing manifests
+
+These named groups route verification using **existing** tests only; they are not XCTest targets, test plans, or Vitest projects. A group is a list of test classes or files to pass to the commands below. Membership was checked against the committed test tree at `c3cb034`: every class and file named here exists there. Test classes added after that point (including classes in slices that have not landed) are not members until the slice that adds them updates this manifest. Membership is routing, not coverage certification: a class may belong to a group because it is the closest neighbor, and classes that belong to no group are run by explicit class/file name or by the complete target.
+
+**iOS command template.** Reuse the command at the top of this section, replacing the single `-only-testing:CommonPlateiosTests` line with one repeated filter per class:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
+  -project ios/CommonPlateios/CommonPlateios.xcodeproj \
+  -scheme CommonPlateios \
+  -destination 'platform=iOS Simulator,id=<AVAILABLE_SIMULATOR_UDID>' \
+  -derivedDataPath /tmp/CommonPlate-Tests-DerivedData \
+  -only-testing:CommonPlateiosTests/<ClassA> \
+  -only-testing:CommonPlateiosTests/<ClassB>
+```
+
+Do not use `-skip-testing` for acceptance evidence. The `FullRegression` group is the section 9 command unchanged (`-only-testing:CommonPlateiosTests`).
+
+| iOS group | Test classes |
+| --- | --- |
+| `HomeRefresh` | `HomeRefreshCallerCancellationTests`, `ManualRefreshCancellationTests`, `HomeExchangeRefreshDeadlineTests`, `HomeContinuousScrollCompositionTests`, `HomeExchangeBoardStateTests`, `HomeExchangeStatePresentationTests`, `HomeExchangeContinueHelpingDedupTests`, `HomeOwnershipPartitionRegressionTests` |
+| `HelperFulfillmentCore` | `ClaimFlowTests`, `PlacementReentryContinuationTests`, `ReservationContinuationTests`, `ReservationFulfillmentContinuationTests`, `ReservationReleaseTests`, `ReservationWarningTests`, `RequestDetailStaleParticipationTests`, `RequestNotYetAvailableRoutingTests` |
+| `HelperSuccess` | `HelperCompletionLifecycleTests`, `HelperHeldRequestNavigationTests`, `HelperJourneyFulfillmentTests`, `HelperSuccessForegroundProgressionTests` |
+| `RequesterCore` | `RequestCreationViewTests`, `RequestFoodEntryTests`, `RequestFoodDraftSessionTests`, `RequestFoodBranchAmountDraftTests`, `StructuredRequestDraftTests`, `RequestIncompleteVsInvalidValidationTests`, `RequestTimingContractTests`, `RequestEligibilityTests`, `RequestPostingLimitCopyTests`, `RequesterFormLayoutBehaviorTests`, `MealSwipeQuantityTests`, `RequesterOrderPerImageEvidenceWiringTests`, `RequestCreateDurableOperationTests`, `RequestCreateDurablePersistenceFailureTests`, `RequestCreatePendingOperationScopeTests`, `RequestCreateTerminalReconciliationTests`, `PendingRequestOperationUpgradeTests`, `RequestCreationInstallationCredentialTests`, `RequestCreationContinuityTests`, `RequestCreationContinuityLandingTests`, `RequestCreationContinuityFallbackCrossfadeTests`, `RequestCreationContinuityHomeRevealTests`, `HomeExactCreatedRequestAvailabilityTests` |
+| `HostedRequesterUI` | `RequesterFormHostedFidelityTests`, `RequesterIncompleteVsInvalidHostedTests`, `RequesterMealPresentationHostedTests`, `RequestCreationContinuityHostedGeometryTests`, `RequestFoodMenuPathHostedTests` |
+| `IdentityAndNavigation` | `ParticipantIdentityTests`, `ParticipantGateTests`, `ParticipantVerificationHierarchyTests`, `ParticipantContinuationTests`, `RemoveEmailTests`, `RemoveEmailInFlightCreateGatingTests`, `RemoveEmailStatusKindTests`, `ChangeEmailPresentationAndOverlayDismissalTests`, `OnboardingPresentationTests`, `OwnRequestsSeeAllDestinationTests`, `SettingsRequestAlertsToggleTests`, `HelperNotificationPayloadParsingTests`, `HelperNotificationRouterTests`, `HelperNotificationDestinationRoutingTests`, `HelperNotificationDestinationTruthTests`, `HelperNotificationTerminatedLaunchRoutingTests`, `RequesterFulfillmentNotificationPayloadParsingTests`, `RequesterFulfillmentNotificationRouterTests`, `TapAuthorityFenceTests`, `ReservationWarningNotificationPayloadParsingTests`, `ReservationWarningRouterTests`, `ReservationWarningRouteDriverTests`, `PushAppDelegateLifecycleTests` |
+| `AccessibilitySensitive (overlay)` | `RequestCreationContinuityHomeRevealTests`, `RequestCreationContinuityLandingTests`, `RequestCreationContinuityFallbackCrossfadeTests`, `HelperSuccessForegroundProgressionTests`, `HomeExchangeStatePresentationTests`, `RequesterMealPresentationHostedTests`, `RequesterIncompleteVsInvalidHostedTests`, `ScreenshotHelpPresentationTests`, `RequestCreationViewTests`, `OnboardingPresentationTests`, `HelperJourneyFulfillmentTests`, `RequesterFormHostedFidelityTests`, `CommonPlateStatusTests`, `RequesterFormLayoutBehaviorTests`, `ScreenshotMenuPathApplicationTests`, `ScreenshotAssistanceDisclosurePresentationTests`, `RequestFoodMenuPathHostedTests`, `OwnRequestsSeeAllDestinationTests`, `HomeExchangeRefreshDeadlineTests`, `HomeContinuousScrollCompositionTests`, `CommonPlateFoundationPresentationTests` |
+| `FullRegression` | Unfiltered `CommonPlateiosTests` (the section 9 command). |
+
+`AccessibilitySensitive` is an overlay, not a complete accessibility certification: it lists classes that assert accessibility labels, hints, identifiers, Dynamic Type, or Reduce Motion behavior, and is run *in addition to* the primary group when a change touches layout, accessibility, or motion. It does not replace Faith's physical-device accessibility observations. `HomeRefresh` currently names only the committed Home/refresh classes; W4-H3's refresh-experience classes join it when H3 lands.
+
+**Backend command template.** Pass explicit file paths (a bare name would also match the `*.mongo.test.ts` siblings):
+
+```bash
+npm test -- src/<fileA>.test.ts src/<fileB>.test.ts
+```
+
+| Backend group | Vitest files |
+| --- | --- |
+| `RequestCore` | `src/createRequestRoute.test.ts`, `src/requestAvailability.test.ts`, `src/requestDetailRoute.test.ts`, `src/requestDetailOwnership.test.ts`, `src/requestEligibility.test.ts`, `src/requestEligibilityRoute.test.ts`, `src/requestDailyQuota.test.ts`, `src/requestTiming.test.ts`, `src/requestListResponse.test.ts`, `src/structuredRequest.test.ts`, `src/requestOperationTerminalRoute.test.ts`, `src/requestInstallationAssociation.test.ts` |
+| `FulfillmentCore` | `src/claimRoute.test.ts`, `src/claimRouteParticipation.test.ts`, `src/claimToken.test.ts`, `src/fulfillmentRoute.test.ts`, `src/reservationRoute.test.ts`, `src/requestParticipation.test.ts` |
+| `SubscriptionAndAlerts` | `src/subscribeRoute.test.ts`, `src/confirmSubscription.test.ts`, `src/confirmSubscriptionRoute.test.ts`, `src/unsubscribeRoute.test.ts`, `src/unsubscribeSubscriber.test.ts`, `src/unsubscribeCredential.test.ts`, `src/notifySubscribers.test.ts`, `src/sendDigestEmail.test.ts`, `src/eligibilityNotificationSweep.test.ts`, `src/emailAlertState.test.ts`, `src/emailAlertStateRoute.test.ts`, `src/emailHelpers.test.ts`, `src/participantEmailUnsubscribe.test.ts`, `src/participantEmailUnsubscribeRoute.test.ts`, `src/publicActionsPause.test.ts`, `src/publicActionsRoutes.test.ts`, `src/helperNewRequestPush.test.ts`, `src/helperPushPayload.test.ts`, `src/installationPushRoute.test.ts`, `src/requesterFulfillmentPush.test.ts`, `src/requesterFulfillmentPushPayload.test.ts` |
+| `PersistenceMongo` | `npm run test:mongo` — the entire Mongo-gated suite; no selective form is defined (section 5). |
+| `FullNonMongo` | `npm test` — the complete non-Mongo suite (Mongo-gated suites skipped by configuration). |
+
+Backend files in no group (for example the `screenshot*`, `apns*`, participant-verification, startup-validation, and `statsRoute` suites) are run by explicit file path or by `FullNonMongo`. `npm test` does not replace `PersistenceMongo`.
+
 ## 10. Test-file organization
 
 Add new Week 3 iOS tests in new focused files where practical. Do not keep extending `ClaimFlowTests.swift` merely because it already contains related tests. Preserve existing test files rather than splitting them during unrelated feature work, and keep one endpoint and one user-flow slice per test change. This does not prescribe a new test framework or UI-test target.
 
 ## 11. Verification by change type
+
+Applies to slices whose first READY transition is recorded after W4-VP1 landed on `main`; earlier slices use the grandfathered table at the end of this section. Tier numbers are those of [Verification tiers and post-fix invalidation](#verification-tiers-and-post-fix-invalidation); group names are those of [Verification routing manifests](#verification-routing-manifests). Every row also requires `git diff --check` and a content review of the diff. A full-regression trigger or an explicit slice contract always adds tier 4 to any row.
+
+| Change class | Tier 1–2 (focused, affected-neighbor) | Tier 3 acceptance bundle on the candidate | Tier 4 full regression |
+| --- | --- | --- | --- |
+| Backend, localized (isolated route validation or copy that does not touch persistence, credentials or tokens, response projection/allowlists, lifecycle transitions, or ambiguous-mutation handling) | `npm run typecheck`; focused test file(s); the affected backend group(s). | Typecheck plus the affected backend group(s). | Not required unless a trigger applies. |
+| Backend, shared boundary (`app.ts` startup/registration, shared auth/error/public-projection, cross-route contract, notification/delivery, dependency or runtime configuration) | `npm run typecheck`; focused tests; affected groups. | Typecheck and `FullNonMongo`. | `FullNonMongo` (this is the bundle); add `PersistenceMongo` when persistence is involved. |
+| Mongo schema, index, migration, transaction, uniqueness, lifecycle transition, concurrency | `npm run typecheck`; focused tests; affected groups. | Typecheck, `FullNonMongo`, and `PersistenceMongo` (`npm run test:mongo`, the entire suite). | Both complete runs (this is the bundle). |
+| Browser client source | Focused browser tests; `npm run typecheck`. | `npm run build:client` with the regenerated bundle diff inspected and the generated-file banner preserved; `FullNonMongo` when user-facing copy changed, because the production-source copy guard in section 4 scans bundles. | Not required unless a trigger applies. |
+| iOS, localized (SwiftUI layout, accessibility, copy, leaf presentation state, test-only correction confined to one test class/file) | Focused classes for the change; the primary iOS group(s) for the affected area, plus `AccessibilitySensitive` when layout, accessibility, or motion changed, plus `HostedRequesterUI` whenever the change touches Requester UI, the request form, meal presentation, or request-creation continuity; compile. | The same classes and groups on the acceptance candidate, run to `TEST SUCCEEDED`. | Not required unless a trigger or explicit contract applies. |
+| iOS, shared boundary (app root/global navigation/routing, app lifecycle/notification handoff, `APIClient → RequestService → RequestStore`, identity, persistence, cache semantics, shared models, project/scheme/dependency/build configuration) | Focused classes; `IdentityAndNavigation` and the affected primary group(s); compile. | Complete `CommonPlateiosTests` (`FullRegression`). | `FullRegression` (this is the bundle). |
+| iOS, explicitly contracted slice, cross-slice integration, or release checkpoint | Focused classes; affected groups. | Complete `CommonPlateiosTests` on the final candidate. | `FullRegression` (this is the bundle). |
+| Cross-stack contract | Focused tests on each side. | `FullNonMongo` (plus `PersistenceMongo` when applicable) and complete `CommonPlateiosTests`. | Both sides complete. |
+| Local QA tooling (`scripts/qa-*.ts`, `scripts/seed-ui-request.ts`, mail sink) | Typecheck; the focused QA unit and Mongo tests listed under the Local QA harness subsection of section 5. | `FullNonMongo` and `PersistenceMongo`; iOS suites only if the Debug override changes (then complete `CommonPlateiosTests`, because it is a build-configuration change). | As the bundle states. |
+| Comment/document-only | `git diff --check`; content review; validation that every published command and name exists. | Not applicable; run tests only when executable behavior is also pending in the same working tree. | Not applicable. |
+
+Any user-facing copy change on any surface (backend, browser, or iOS production source) also runs `src/createRequestRoute.test.ts`, which holds the production-source copy guard. A change to `shared/*.json`, `ios/CommonPlateios/CommonPlateios/Resources/SupportedVendors.json`, or any iOS source file that a backend test opens by explicit path (currently `RequestFoodView.swift`, read by `src/createRequestRoute.test.ts`) is a cross-stack contract change.
+
+A change that fits more than one row takes the union of the rows' requirements. A change that does not clearly fit a "localized" row is treated as a shared-boundary change.
+
+**Grandfathered rule (slices whose first READY transition predates W4-VP1).** These were the section 11 requirements before W4-VP1 and remain binding for those slices, in addition to anything their weekly-spec card states:
 
 | Change | Minimum verification |
 | --- | --- |

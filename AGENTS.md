@@ -146,14 +146,21 @@ Provider acceptance is not verified delivery, reading, or pickup.
 
 Use this compact minimum:
 
-* TypeScript/backend: `npm run typecheck` plus focused tests.
-* Complete non-Mongo backend: `npm test`.
+* TypeScript/backend: `npm run typecheck` plus focused and affected-neighbor
+  tests.
+* Complete non-Mongo backend, when `docs/testing.md` (a full-regression
+  trigger or its change-type matrix) requires it: `npm test`.
 * Mongo persistence, transactions, uniqueness, concurrency, or index work:
   `npm run test:mongo` in addition to `npm test`.
 * Browser client: focused tests, `npm run typecheck`, and
   `npm run build:client`.
-* iOS or cross-stack work: focused iOS tests and the complete
-  `CommonPlateiosTests` target.
+* iOS or cross-stack work: focused iOS tests, affected-neighbor tests, and
+  the complete `CommonPlateiosTests` target when a full-regression trigger or
+  the change-type matrix in `docs/testing.md`, an explicit slice contract, or a
+  release checkpoint requires it.
+* Verification tiers, full-regression triggers, post-fix invalidation, and the
+  prospective transition for slices that were already READY or active are
+  defined in `docs/testing.md`.
 * Every change: `git diff --check`.
 * Before committing: inspect `git status` and run
   `git diff --cached --check`.
