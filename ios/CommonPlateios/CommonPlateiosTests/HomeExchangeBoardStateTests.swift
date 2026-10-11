@@ -280,8 +280,11 @@ final class HomeExchangeBoardStateTests: XCTestCase {
         XCTAssertEqual(preview.seeAllCount, 10)
     }
 
-    func testSeeAllOwnRequestsTitleUsesTheFullAuthoritativeCount() {
-        XCTAssertEqual(HomeExchangeView.seeAllOwnRequestsTitle(count: 3), "See all 3")
-        XCTAssertEqual(HomeExchangeView.seeAllOwnRequestsTitle(count: 10), "See all 10")
+    /// W4-H3: the visible action is `See all` with no count; the full
+    /// authoritative count is retained only for accessibility.
+    func testSeeAllOwnRequestsTitleIsCountFreeAndAccessibilityKeepsTheFullCount() {
+        XCTAssertEqual(HomeExchangeView.seeAllOwnRequestsTitle, "See all")
+        XCTAssertEqual(HomeExchangeView.seeAllOwnRequestsAccessibilityLabel(count: 3), "See all 3 requests")
+        XCTAssertEqual(HomeExchangeView.seeAllOwnRequestsAccessibilityLabel(count: 10), "See all 10 requests")
     }
 }

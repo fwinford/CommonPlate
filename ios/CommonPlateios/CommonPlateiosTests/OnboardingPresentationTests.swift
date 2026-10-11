@@ -192,7 +192,8 @@ final class OnboardingPresentationTests: XCTestCase {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
         XCTAssertTrue(source.contains("GeometryReader { geometry in"))
-        XCTAssertTrue(source.contains(".frame(minHeight: geometry.size.height, alignment: .top)"))
+        // W4-H3: content fills the viewport visible beneath the reserved band.
+        XCTAssertTrue(source.contains(".frame(minHeight: max(0, geometry.size.height - headerBandHeight), alignment: .top)"))
         XCTAssertTrue(source.contains("continueHelpingSection"))
         XCTAssertTrue(source.contains("boardSection"))
         XCTAssertTrue(source.contains("home-request-a-meal"))

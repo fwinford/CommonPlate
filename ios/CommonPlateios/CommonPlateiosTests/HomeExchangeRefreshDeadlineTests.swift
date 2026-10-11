@@ -32,9 +32,16 @@ final class HomeExchangeRefreshDeadlineTests: XCTestCase {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
         XCTAssertTrue(source.contains(
-            "let didResolveInTime = await Self.awaitWithDeadline(Self.manualRefreshDeadline) {"
+            "let didResolveInTime = await Self.awaitWithDeadline(deadline) {"
         ))
-        XCTAssertTrue(source.contains("guard didResolveInTime else { return }"))
+        // The race's deadline defaults to the one 5-second manual deadline,
+        // and the view's refresh closure passes no other value.
+        XCTAssertTrue(source.contains("deadline: Duration = manualRefreshDeadline"))
+        XCTAssertTrue(source.contains("await Self.resolveRefresh(store: store)"))
+        // The deadline outcome feeds the success predicate, whose first
+        // guard rejects any unresolved (timed-out) refresh.
+        XCTAssertTrue(source.contains("didResolveInTime: didResolveInTime,"))
+        XCTAssertTrue(source.contains("guard didResolveInTime else { return false }"))
     }
 
     /// Cancellation/stale-result correctness relies entirely on
@@ -71,41 +78,62 @@ final class HomeExchangeRefreshDeadlineTests: XCTestCase {
     }
 
     /// A refresh that times out ends the refresh interaction without a
-    /// success checkmark, and never invokes any recovery/fabrication path
-    /// after the `guard didResolveInTime else { return }` above returns.
-    func testTimeoutNeverReachesTheRecoveryCheckmarkAssignment() throws {
+    /// success acknowledgment: the acknowledgment is reachable only through
+    /// `shouldAcknowledgeRefreshSuccess`, whose `didResolveInTime` guard
+    /// rejects an unresolved refresh before anything else is evaluated, and
+    /// the fetch outcome is read only when the race reports the fetch itself
+    /// finished first.
+    func testTimeoutNeverReachesTheSuccessAcknowledgment() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
-        guard let refreshRange = source.range(of: "private func performAuthoredRefresh() async {"),
-              let guardRange = source.range(
-                of: "guard didResolveInTime else { return }",
-                range: refreshRange.upperBound..<source.endIndex
+        guard let resolveRange = source.range(of: "static func resolveRefresh("),
+              let outcomeReadRange = source.range(
+                of: "if didResolveInTime {\n            fetchOutcome = await outcomeRecorder.outcome",
+                range: resolveRange.upperBound..<source.endIndex
               ),
-              let checkmarkRange = source.range(
-                of: "isShowingRecoverySuccess = true",
-                range: refreshRange.upperBound..<source.endIndex
+              let predicateCallRange = source.range(
+                of: "return shouldAcknowledgeRefreshSuccess(",
+                range: resolveRange.upperBound..<source.endIndex
+              ),
+              let guardRange = source.range(
+                of: "guard didResolveInTime else { return false }",
+                range: predicateCallRange.upperBound..<source.endIndex
               )
         else {
-            return XCTFail("expected performAuthoredRefresh to contain the deadline guard and checkmark assignment")
+            return XCTFail("expected resolveRefresh to read the outcome only after the deadline race and then apply the success predicate")
         }
 
-        XCTAssertLessThan(guardRange.upperBound, checkmarkRange.lowerBound)
+        XCTAssertLessThan(outcomeReadRange.upperBound, predicateCallRange.lowerBound)
+        XCTAssertLessThan(predicateCallRange.upperBound, guardRange.lowerBound, "predicate body follows resolveRefresh")
+        XCTAssertTrue(source[predicateCallRange.lowerBound..<guardRange.lowerBound].contains("didResolveInTime: didResolveInTime"))
+
+        // The authored settle (and with it the acknowledgment) is begun only
+        // behind that result.
+        guard let performRange = source.range(of: "private func performAuthoredRefresh() async {"),
+              let gateRange = source.range(of: "if acknowledgesSuccess {", range: performRange.upperBound..<source.endIndex),
+              let presentRange = source.range(of: "beginRefreshSettle()", range: gateRange.upperBound..<source.endIndex)
+        else {
+            return XCTFail("expected beginRefreshSettle() to be gated on acknowledgesSuccess")
+        }
+        XCTAssertLessThan(gateRange.upperBound, presentRange.lowerBound)
+        XCTAssertEqual(
+            source.components(separatedBy: "beginRefreshSettle()").count - 1,
+            2,
+            "expected exactly one declaration and one gated call site"
+        )
     }
 
-    // MARK: - Refresh symbol transition (pull arrow → circular refresh symbol)
+    // MARK: - Authored spinner removed (W4-H3)
 
-    /// The refreshing symbol itself spins; the pull arrow must never appear
-    /// to rotate in place. Starting the continuous rotation in lockstep with
-    /// the `.symbolEffect(.replace)` morph applied rotation to the morph
-    /// itself, reading as the old arrow spinning into place — the delayed,
-    /// generation-fenced start below keeps the two motions separate.
-    func testSpinStartIsDeferredPastTheSymbolMorphAndGenerationFenced() throws {
+    /// W4-H3: the native system indicator is the only loading affordance, so
+    /// the authored arrow-to-spinner morph and its delayed spin start no
+    /// longer exist.
+    func testAuthoredSpinnerAndSymbolMorphAreGone() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
-        XCTAssertTrue(source.contains("private static let symbolMorphDuration: Duration = .milliseconds(350)"))
-        XCTAssertTrue(source.contains("@State private var spinGeneration = 0"))
-        XCTAssertTrue(source.contains("try? await Task.sleep(for: Self.symbolMorphDuration)"))
-        XCTAssertTrue(source.contains("guard generation == spinGeneration else { return }"))
+        XCTAssertFalse(source.contains("symbolMorphDuration"))
+        XCTAssertFalse(source.contains("spinGeneration"))
+        XCTAssertFalse(source.contains("arrow.triangle.2.circlepath"))
     }
 
     // MARK: - Text ghosting
@@ -125,18 +153,27 @@ final class HomeExchangeRefreshDeadlineTests: XCTestCase {
         XCTAssertFalse(cueBody.contains(".contentTransition(.opacity)"))
     }
 
-    // MARK: - Recovery bounce respects Reduce Motion (review triage finding 2)
+    // MARK: - Success mark is opacity-only (W4-H3)
 
-    /// The recovery checkmark itself must always render (static communication
-    /// of recovery is never removed by Reduce Motion), but its `.bounce`
-    /// symbol effect must not trigger while Reduce Motion is on — matching
-    /// every other motion in this cue (spin, pull-progress offset/opacity).
-    func testRecoveryBounceIsSuppressedByReduceMotion() throws {
+    /// The selected micro-check is opacity-only: no symbol bounce/effect, no
+    /// scale, no offset animation, and no haptic — under every motion
+    /// preference, since Reduce Motion authorizes no separate variant.
+    func testSuccessMarkIsOpacityOnlyWithNoBounceScaleOrHaptic() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
-        XCTAssertTrue(source.contains(
-            ".symbolEffect(.bounce, options: .nonRepeating, value: !reduceMotion && phase == .recoverySuccess)"
-        ))
+        XCTAssertFalse(source.contains(".symbolEffect"))
+        XCTAssertFalse(source.contains("scaleEffect"))
+        XCTAssertFalse(source.contains("UIImpactFeedbackGenerator"))
+        XCTAssertFalse(source.contains("UINotificationFeedbackGenerator"))
+        XCTAssertFalse(source.contains("sensoryFeedback"))
+        guard let markRange = source.range(of: "private var refreshSuccessMark: some View {"),
+              let markEnd = source.range(of: "static let refreshSuccessMarkSide", range: markRange.upperBound..<source.endIndex)
+        else {
+            return XCTFail("expected refreshSuccessMark")
+        }
+        let mark = source[markRange.lowerBound..<markEnd.lowerBound]
+        XCTAssertTrue(mark.contains(".opacity(isShowingRefreshSuccess ? 1 : 0)"))
+        XCTAssertFalse(mark.contains("reduceMotion"))
     }
 
     private func fileSource(_ relativePath: String) throws -> String {

@@ -91,8 +91,8 @@ final class HomeContinuousScrollCompositionTests: XCTestCase {
             "expected exactly one persistent bottom safe-area inset on Home"
         )
         guard let refreshableRange = source.range(of: ".refreshable {"),
-              let refreshableCloseRange = source.range(of: "}\n            .safeAreaInset(edge: .bottom) {\n                requestMealButton\n            }\n        }\n        .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())") else {
-            return XCTFail("expected .refreshable, then the persistent Request Food safeAreaInset attached to the same ScrollView, then the scroll's own closing braces")
+              let refreshableCloseRange = source.range(of: "}\n            .safeAreaInset(edge: .bottom) {\n                requestMealButton\n            }") else {
+            return XCTFail("expected .refreshable, then the persistent Request Food safeAreaInset attached to the same ScrollView (after the W4-H3 top-band inset)")
         }
         XCTAssertLessThan(refreshableRange.upperBound, refreshableCloseRange.lowerBound)
 
@@ -148,7 +148,7 @@ final class HomeContinuousScrollCompositionTests: XCTestCase {
     }
 
     /// W4-H4 final shared-content-column reconciliation: ownership cards,
-    /// `Needs help right now` cards, and the persistent CTA must all read
+    /// `Needs help` cards, and the persistent CTA must all read
     /// from the exact same `homeContentColumnInset` authority — never three
     /// independently sized margins — and that authority must not be the
     /// general-purpose `Spacing.l` step other unrelated screens also use,
@@ -161,8 +161,8 @@ final class HomeContinuousScrollCompositionTests: XCTestCase {
         // this file legitimately keeps its own unrelated `Spacing.l`
         // horizontal padding and is out of scope for the shared column.
         guard let exchangeContentStart = source.range(of: "private var exchangeContent: some View {"),
-              let exchangeContentEnd = source.range(of: "// MARK: - Authored refresh feedback", range: exchangeContentStart.upperBound..<source.endIndex) else {
-            return XCTFail("expected exchangeContent followed by the refresh-feedback section")
+              let exchangeContentEnd = source.range(of: "private var header: some View {", range: exchangeContentStart.upperBound..<source.endIndex) else {
+            return XCTFail("expected exchangeContent followed by the header")
         }
         let exchangeContentRegion = source[exchangeContentStart.lowerBound..<exchangeContentEnd.lowerBound]
         let button = try requestMealButtonSource()
@@ -175,8 +175,8 @@ final class HomeContinuousScrollCompositionTests: XCTestCase {
         ).count - 1
         XCTAssertEqual(
             sharedColumnUsages,
-            3,
-            "expected exactly three shared-column horizontal-inset call sites: the header/ownership stack, the board stack, and the CTA"
+            4,
+            "expected exactly four shared-column horizontal-inset call sites: the shared header composition (W4-H3 band and in-scroll copies), the ownership stack, the board stack, and the CTA"
         )
 
         XCTAssertFalse(

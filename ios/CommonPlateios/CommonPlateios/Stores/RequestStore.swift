@@ -531,6 +531,18 @@ struct RequestCreationContinuity: Identifiable, Equatable {
     }
 }
 
+/// W4-H3: whether one `RequestStore.fetchRequests()` call's own authoritative
+/// result was applied under the existing generation / collection-revision /
+/// participant-authority fences. `.succeeded` is independent of whether the
+/// fetched data differs from what was already shown. Cancellation, a
+/// superseded or stale completion, a failed fetch, and a result applied only
+/// fail-closed after a mid-flight participant change are all
+/// `.didNotSucceed`.
+enum RequestFetchOutcome: Equatable {
+    case succeeded
+    case didNotSucceed
+}
+
 @MainActor
 final class RequestStore: ObservableObject {
     @Published private(set) var requests: [FoodRequest] = []
@@ -985,7 +997,15 @@ final class RequestStore: ObservableObject {
     /// `GET /api/requests`. Before the first successful response this is an
     /// initial load (including retries after an initial failure). Later calls
     /// are refreshes that preserve the current collection until success.
-    func fetchRequests() async {
+    ///
+    /// W4-H3: the returned outcome reports only whether *this call's own*
+    /// authoritative result was applied. It adds no state, changes no
+    /// reload/generation/revision/authority behavior, and is not a second
+    /// source of request truth — it is derived at the exact points the
+    /// existing fences already decide whether this call's result may be
+    /// applied. Every existing caller ignores it.
+    @discardableResult
+    func fetchRequests() async -> RequestFetchOutcome {
         hasAttemptedRequestFetch = true
         fetchGeneration += 1
         let generation = fetchGeneration
@@ -1024,7 +1044,7 @@ final class RequestStore: ObservableObject {
             )
             guard generation == fetchGeneration,
                   startingCollectionRevision == collectionRevision else {
-                return
+                return .didNotSucceed
             }
             guard participantAuthorityProvider() == requestingAuthority else {
                 // The participant changed while this was in flight. The public
@@ -1038,7 +1058,10 @@ final class RequestStore: ObservableObject {
                 ownershipAuthority = nil
                 hasSuccessfullyFetchedRequests = true
                 hasFailedInitialFetchAtLeastOnce = false
-                return
+                // Applied only fail-closed (ownership unresolved) because the
+                // participant changed mid-flight; a fresh fetch follows. That
+                // is not an established outcome for this call.
+                return .didNotSucceed
             }
             requests = fetchedRequests
             ownershipAuthority = requestingAuthority
@@ -1049,12 +1072,13 @@ final class RequestStore: ObservableObject {
             } else {
                 initialFetchError = nil
             }
+            return .succeeded
         } catch is CancellationError {
-            return
+            return .didNotSucceed
         } catch {
             guard generation == fetchGeneration,
                   startingCollectionRevision == collectionRevision else {
-                return
+                return .didNotSucceed
             }
             if isRefresh {
                 refreshError = Self.asServiceError(error)
@@ -1062,6 +1086,7 @@ final class RequestStore: ObservableObject {
                 initialFetchError = Self.asServiceError(error)
                 hasFailedInitialFetchAtLeastOnce = true
             }
+            return .didNotSucceed
         }
     }
 

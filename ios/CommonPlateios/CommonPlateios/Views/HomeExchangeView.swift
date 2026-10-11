@@ -44,32 +44,49 @@ struct HomeExchangeView: View {
     /// only observes native refresh lifecycle; it never decides whether a
     /// refresh happens.
     @State private var isRefreshInFlight = false
-    /// True only after `performAuthoredRefresh()` observes an authoritative
-    /// refresh that recovered Home from Exchange Unavailable into a genuinely
-    /// healthy board state — never set on a timer, never on a generic
-    /// successful fetch. Cleared shortly after by `body`'s `onChange`, which
-    /// is cosmetic dismissal timing only, not a fabricated outcome. While
-    /// true, `displayedBoardState` deliberately holds the Unavailable-shaped
-    /// presentation so the brief recovery checkmark (HQ decision 6) renders
-    /// in the same persistent cue before content flips to the now-truthful
-    /// board.
-    @State private var isShowingRecoverySuccess = false
-    /// Passive observation only (Section 9 "H2 refresh implementation-
-    /// authority clarification"): how far the exchange `ScrollView`'s own
-    /// content has been pulled below its rest position, read from the native
-    /// scroll geometry via `HomeExchangeScrollOffsetKey`. This never decides
-    /// whether refresh fires — only `.refreshable`'s own closure does that —
-    /// it only drives the authored arrow's continuous, presentation-only
-    /// travel while the pull is in progress. Per Faith's resolution (final
-    /// H2 visual alignment FIX, item 2), the cue makes no semantic claim
-    /// about when releasing will trigger refresh — SwiftUI never exposes
-    /// `.refreshable`'s own internal activation distance, so no approximated
-    /// threshold or "Release to refresh" label is derived from `pullOffset`.
-    /// It only ever produces continuous motion that becomes more pronounced
-    /// with distance, then the cue jumps straight to the Loading phase once
-    /// `isRefreshInFlight` — set only from inside `.refreshable`'s own
-    /// closure — actually becomes true.
-    @State private var pullOffset: CGFloat = 0
+    /// W4-H3 A2 header ownership. `true` while the stationary band header owns
+    /// the CommonPlate header (rest, pull, active refresh, native collapse);
+    /// `false` once the in-scroll header copy has scrolled away from rest and
+    /// owns it. Derived only from passively measured scroll position (see
+    /// `HomeHeaderAnchorKey`) — never from refresh state, a timer, a gesture,
+    /// or UIKit introspection.
+    @State private var ownsBandHeader = true
+    /// Measured height of the reserved top band, so short content can be
+    /// sized to the band-reduced viewport and gain no artificial scroll range.
+    @State private var headerBandHeight: CGFloat = 0
+    /// W4-H3 truthful-success acknowledgment: whether the bare micro-check is
+    /// currently faded in, and the generation that owns its pending
+    /// show/hide. A new refresh (or a newer success) invalidates any older
+    /// pending presentation, so a stale timer can never show or hide the mark
+    /// for a different refresh. Cosmetic only — it never decides an outcome.
+    @State private var isShowingRefreshSuccess = false
+    @State private var refreshSuccessGeneration = 0
+    /// Whether the refresh in progress began from Unavailable (Decision 12
+    /// Option B input). Presentation only; never decides an outcome.
+    @State private var isRecoveryRefresh = false
+    /// W4-H3 authored post-refresh settle (Decision 11; see `HomeRefreshSettle`).
+    /// Presentation only: the hold applied to the dynamic Home region, the fixed
+    /// lane the check sits in, and the passive scroll state machine are all set
+    /// only on a truthful successful refresh and read only by the presentation.
+    /// None of it feeds a refresh, `RequestStore`, data, or header ownership. The
+    /// machine is a reference type, so per-frame samples invalidate nothing.
+    @State private var refreshSettleHold: CGFloat = 0
+    @State private var refreshSuccessLaneCenter: CGFloat = 0
+    @State private var refreshSettleRestMinY: CGFloat = 0
+    @State private var refreshSettleMachine = HomeRefreshSettleMachine()
+    /// W4-H3 context-bound acknowledgment: whether this Home presentation is
+    /// currently the presented destination. Set by appearance/disappearance
+    /// only, so a pending acknowledgment task that outlives the presentation
+    /// (e.g. the user pushed a request or Settings) reads `false` when it would
+    /// begin. Presentation-only; it feeds no refresh, store, or data decision.
+    @State private var isHomePresented = false
+    /// True from the start of a native refresh until shortly after its
+    /// presentation settles. Scopes the brief hierarchy-resolution animation
+    /// to refresh-driven category changes only, so unrelated Home changes
+    /// (e.g. the request-creation continuity landing) keep their existing
+    /// unanimated behavior.
+    @State private var animatesHierarchyResolution = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// HQ decision 5: a presentation-only maximum for the initial Loading
@@ -101,6 +118,12 @@ struct HomeExchangeView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: isPresentingRequestAlerts)
+        .onAppear { isHomePresented = true }
+        .onDisappear {
+            isHomePresented = false
+            // Leaves no stale transform or mark for the next time Home appears.
+            endRefreshSettleImmediately()
+        }
         // Same fetch-on-appearance contract `ActiveRequestsView` already
         // uses: an initial load on first appearance, a refresh classified by
         // `hasSuccessfullyFetchedRequests` on any later one, guarded so a
@@ -122,13 +145,6 @@ struct HomeExchangeView: View {
             guard !store.hasSuccessfullyFetchedRequests,
                   !store.hasFailedInitialFetchAtLeastOnce else { return }
             hasInitialLoadDeadlineElapsed = true
-        }
-        .onChange(of: isShowingRecoverySuccess) { _, isShowing in
-            guard isShowing else { return }
-            Task {
-                try? await Task.sleep(nanoseconds: 900_000_000)
-                isShowingRecoverySuccess = false
-            }
         }
         // Participant-scoped ownership review (Section 9): `store.requests`
         // carries caller-relative `isOwnRequest` truth resolved for whoever
@@ -156,42 +172,111 @@ struct HomeExchangeView: View {
     /// state machine decides whether this runs; SwiftUI already decided the
     /// user completed a pull-to-refresh before calling this closure.
     private func performAuthoredRefresh() async {
-        let wasUnavailable = currentBoardState == .unavailable
+        animatesHierarchyResolution = true
         isRefreshInFlight = true
+        // Read before the fetch applies, from the state Home is presenting
+        // (including the initial-load deadline): whether this refresh is a
+        // recovery from Unavailable. Presentation only; it feeds Decision 12 Option B's
+        // no-lane fallback and nothing about the refresh or its data.
+        isRecoveryRefresh = currentBoardState == .unavailable
+        // A new refresh supersedes any settle or acknowledgment still pending
+        // or showing from an earlier one.
+        supersedeRefreshSettle()
 
-        // HQ decision 8: a user-initiated refresh may remain in the
-        // authored Refreshing presentation for at most
-        // `manualRefreshDeadline`. `awaitWithDeadline` cancels whichever of
-        // the fetch/timeout loses the race, so a fetch that times out here
-        // cannot keep running to mutate state later — it relies entirely on
-        // `RequestStore.fetchRequests()`'s own existing `CancellationError`
-        // handling and `fetchGeneration`/`collectionRevision` fence, not any
-        // new store mechanism, and that same fence is what guarantees a
-        // late/cancelled result from this attempt can never overwrite a
-        // subsequent refresh's result even if cancellation isn't observed
-        // instantly.
-        let didResolveInTime = await Self.awaitWithDeadline(Self.manualRefreshDeadline) {
-            await store.fetchRequests()
+        // The refreshed hierarchy resolves from the store as soon as the
+        // fetch applies — it is never held back for the settle or the
+        // acknowledgment.
+        let acknowledgesSuccess = await Self.resolveRefresh(store: store)
+        // The settle is begun synchronously, inside this closure and before it
+        // can return — SwiftUI ends the native refresh only after the closure
+        // returns. Beginning it arms nothing from the displacement seen right now
+        // (while the refresh is active that reading is one lane height off); the
+        // hold is armed from the first displacement that is real once the refresh
+        // has ended, so the handoff has no discontinuity. It is a render-time
+        // translation of the dynamic region only; the data is already applied.
+        if acknowledgesSuccess {
+            beginRefreshSettle()
         }
-
         isRefreshInFlight = false
-        pullOffset = 0
+        scheduleHierarchyAnimationReset()
+    }
 
-        // A refresh still unresolved at the deadline ends the refresh
-        // interaction without a success checkmark. `currentBoardState` is
-        // already whatever RequestStore's own authoritative state is — the
-        // guard above prevents a cancelled/stale fetch from having mutated
-        // it — so Unavailable stays Unavailable and a healthy board stays
-        // exactly as it was.
-        guard didResolveInTime else { return }
+    /// Runs the one authoritative reload under the manual-refresh deadline and
+    /// reports whether this refresh operation truthfully succeeded.
+    ///
+    /// HQ decision 8: a user-initiated refresh may remain in the
+    /// refreshing presentation for at most `manualRefreshDeadline`.
+    /// `awaitWithDeadline` cancels whichever of the fetch/timeout loses the
+    /// race, so a fetch that times out here cannot keep running to mutate
+    /// state later — it relies entirely on
+    /// `RequestStore.fetchRequests()`'s own existing `CancellationError`
+    /// handling and `fetchGeneration`/`collectionRevision` fence, not any
+    /// new store mechanism, and that same fence is what guarantees a
+    /// late/cancelled result from this attempt can never overwrite a
+    /// subsequent refresh's result even if cancellation isn't observed
+    /// instantly.
+    ///
+    /// W4-H3: the fetch's own outcome is captured alongside the deadline
+    /// race. It is read only when the fetch itself finished before the
+    /// deadline (the recorder is written strictly before the race's
+    /// `operation` returns), so a timed-out or cancelled attempt can never
+    /// contribute one. Success is this refresh's own truthful outcome —
+    /// resolved before the deadline, applied by the current fetch generation —
+    /// and never inferred from what Home happens to look like afterwards.
+    ///
+    /// `internal` so the real composition is testable without UI
+    /// infrastructure, matching this file's testable-`static` pattern.
+    static func resolveRefresh(
+        store: RequestStore,
+        deadline: Duration = manualRefreshDeadline
+    ) async -> Bool {
+        let outcomeRecorder = RefreshOutcomeRecorder()
+        let didResolveInTime = await Self.awaitWithDeadline(deadline) {
+            let outcome = await store.fetchRequests()
+            await outcomeRecorder.record(outcome)
+        }
+        var fetchOutcome: RequestFetchOutcome?
+        if didResolveInTime {
+            fetchOutcome = await outcomeRecorder.outcome
+        }
+        return shouldAcknowledgeRefreshSuccess(
+            didResolveInTime: didResolveInTime,
+            fetchOutcome: fetchOutcome,
+            resolvedState: boardState(store: store)
+        )
+    }
 
-        // HQ decision 6: the checkmark is gated on genuine recovery — Home
-        // was Exchange Unavailable immediately before this refresh, and the
-        // authoritative result now resolves to a healthy board state. A
-        // healthy-to-healthy refresh, or a refresh that remains Unavailable,
-        // never sets this.
-        if wasUnavailable && currentBoardState != .unavailable {
-            isShowingRecoverySuccess = true
+    /// The truthful-success predicate (W4-H3, extending H2 HQ decision 6's
+    /// "authoritative result, not merely that HTTP finished" to every
+    /// refresh). A refresh is acknowledged only when it resolved before the
+    /// deadline, its own fetch reported `.succeeded` under the existing
+    /// generation/revision/authority fences, and Home resolves to a healthy
+    /// board. Unchanged data does not matter; timeout, cancellation, a stale
+    /// or superseded completion, a failed fetch (including one that leaves
+    /// stale healthy data on screen), and an Unavailable refresh that stays
+    /// Unavailable never qualify.
+    static func shouldAcknowledgeRefreshSuccess(
+        didResolveInTime: Bool,
+        fetchOutcome: RequestFetchOutcome?,
+        resolvedState: BoardState
+    ) -> Bool {
+        guard didResolveInTime else { return false }
+        guard fetchOutcome == .succeeded else { return false }
+        // Only a resolved healthy state qualifies; `.loading` is unresolved
+        // and `.unavailable` is not a successful result.
+        switch resolvedState {
+        case .empty, .populated: return true
+        case .loading, .unavailable: return false
+        }
+    }
+
+    /// Cosmetic settle only: lets the refresh-driven hierarchy resolution
+    /// finish animating before ordinary (unanimated) Home updates resume. It
+    /// gates no truth and no refresh outcome.
+    private func scheduleHierarchyAnimationReset() {
+        Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            animatesHierarchyResolution = false
         }
     }
 
@@ -260,52 +345,305 @@ struct HomeExchangeView: View {
     /// HQ decision 8.
     static let manualRefreshDeadline: Duration = .seconds(5)
 
-    /// The named coordinate space `pullOffset` is measured against — see the
-    /// `.background(GeometryReader { ... })` reader inside `exchangeContent`.
-    private static let scrollCoordinateSpace = "homeExchangeScroll"
+    // MARK: - Authored post-refresh settle and acknowledgment (W4-H3)
 
-    /// Purely cosmetic saturation distance for how far the authored arrow's
-    /// continuous travel/emphasis can grow — not a claim about when refresh
-    /// will actually fire. `pulling(progress:)` reaches `1` at and beyond
-    /// this distance and simply stops growing further; it is never compared
-    /// against, and never approximates, native `.refreshable`'s own
-    /// undocumented activation distance.
-    private static let pullVisualSaturationDistance: CGFloat = 70
+    /// Cosmetic timing only, within the accepted opacity-only / no-dwell
+    /// constraints — none of it gates Home content or any outcome. The settle's
+    /// own parameters live with `HomeRefreshSettle`.
+    static let refreshSuccessFadeInSeconds: Double = 0.15
+    static let refreshSuccessFadeOutSeconds: Double = 0.25
+    /// A takeover (a new pull, a scroll away) retires the settle and a showing
+    /// check quickly, so nothing stale lingers or stacks with the next native
+    /// indicator.
+    static let refreshSuccessRetireSeconds: Double = 0.1
 
-    /// Derives the authored cue's presentation phase from passively-observed
-    /// native scroll geometry and the existing authoritative refresh
-    /// lifecycle flags — never from an independent gesture or threshold.
-    /// Phase priority is `recoverySuccess > refreshing > pulling > idle`,
-    /// matching the actual native behavior where content stays displaced
-    /// under the system refresh control during and briefly after a fetch.
-    /// There is deliberately no intermediate "about to release" phase: per
-    /// Faith's resolution, the cue only ever shows continuous pull motion
-    /// until native `.refreshable` itself actually activates, at which point
-    /// `isRefreshInFlight` flips this straight to `.refreshing`.
-    private var pullRefreshPhase: PullRefreshPhase {
-        if isShowingRecoverySuccess { return .recoverySuccess }
-        if isRefreshInFlight { return .refreshing }
-        guard pullOffset > 0 else { return .idle }
-        let progress = min(pullOffset / Self.pullVisualSaturationDistance, 1)
-        return .pulling(progress: progress)
+    /// The context-bound acknowledgment rule. Evaluated at the start of the
+    /// settle (no settle is begun if it already fails) and again at the moment
+    /// the acknowledgment would begin — when the native indicator has cleared
+    /// the lane: Home must still be the presented destination, and the scroll
+    /// position must still be in the top/header-owned refresh context — which
+    /// is exactly the existing `ownsBandHeader` truth, not a second scroll
+    /// threshold. A `false` result suppresses the micro-check and the `Updated`
+    /// announcement together; the suppressed acknowledgment is dropped, never
+    /// queued or replayed. It is presentation-only: the refresh outcome and the
+    /// refreshed data have already been applied and are unaffected.
+    static func shouldBeginRefreshAcknowledgment(
+        isHomePresented: Bool,
+        ownsBandHeader: Bool
+    ) -> Bool {
+        isHomePresented && ownsBandHeader
     }
 
-    /// The board content actually rendered this frame. Identical to
-    /// `currentBoardState` except during the brief post-recovery checkmark
-    /// hold (HQ decision 6): while `isShowingRecoverySuccess` is true, this
-    /// deliberately keeps presenting the Unavailable-shaped state — whose own
-    /// persistent cue is already showing the checkmark — so the truthful
-    /// healthy content only appears once that brief acknowledgement finishes,
-    /// rather than swapping board content out from under the checkmark.
-    private var displayedBoardState: BoardState {
-        isShowingRecoverySuccess ? .unavailable : currentBoardState
+    /// Starts the authored settle for one truthful successful refresh. Called
+    /// only behind `shouldAcknowledgeRefreshSuccess`, from the one refresh
+    /// closure.
+    ///
+    /// Nothing is handed off from the displacement seen at this moment: while the
+    /// native refresh is active that reading is one lane height off, and a finger
+    /// may still be down (see `HomeRefreshSettle`). The settle waits for the first
+    /// displacement that is real once the refresh has ended, arms the hold from it
+    /// so the content carries on from where native left it, and begins the check
+    /// and `Updated` only once native has carried the content back to the
+    /// indicator-clear depth — the spinner being gone (`perform(_:)`).
+    private func beginRefreshSettle() {
+        guard let plan = HomeRefreshSettle.plan(
+            reduceMotion: reduceMotion,
+            isHomePresented: isHomePresented,
+            ownsBandHeader: ownsBandHeader
+        ) else { return }
+
+        refreshSuccessGeneration += 1
+        let generation = refreshSuccessGeneration
+        // The check's lane is fixed for the whole settle, by the plan, before any
+        // path that can show it (the mark is transparent here, and its position
+        // never animates).
+        refreshSuccessLaneCenter = plan.laneCenter
+        perform(refreshSettleMachine.begin(
+            plan: plan,
+            ownsBandHeader: ownsBandHeader,
+            isHomePresented: isHomePresented,
+            isRecovery: isRecoveryRefresh
+        ))
+
+        Task {
+            // The native refresh has ended: if the content is already at rest and
+            // nothing displaced has appeared, there is no collapse to wait for.
+            try? await Task.sleep(for: HomeRefreshSettle.postEndGrace)
+            guard generation == refreshSuccessGeneration else { return }
+            perform(refreshSettleMachine.nativeEndGraceElapsed(
+                ownsBandHeader: ownsBandHeader,
+                isHomePresented: isHomePresented
+            ))
+            // Bound: a settle whose native collapse never carries the content back
+            // to the clear depth is ended, never shown late.
+            try? await Task.sleep(for: HomeRefreshSettle.maxWaitForNativeCollapse)
+            guard generation == refreshSuccessGeneration else { return }
+            if refreshSettleMachine.isAwaitingCollapse { retireRefreshSettle() }
+        }
+    }
+
+    /// Feeds one passive displacement sample to the settle and performs what it
+    /// asks for. The context it is judged in is the accepted `ownsBandHeader`
+    /// truth and the presentation flag — read here, not by the ownership writer.
+    private func observeRefreshSettle(displacement: CGFloat) {
+        perform(refreshSettleMachine.observe(
+            displacement: displacement,
+            ownsBandHeader: ownsBandHeader,
+            isHomePresented: isHomePresented
+        ))
+    }
+
+    /// Performs what one passive scroll sample (or the start of the settle) asks
+    /// for. The check and `Updated` begin here — event-driven, once the native
+    /// indicator is clear of the lane — or the settle retires. It reads only
+    /// scroll geometry and the presentation context; it neither triggers nor
+    /// decides any refresh.
+    private func perform(_ effects: [HomeRefreshSettleMachine.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .armHold(let start):
+                armRefreshSettleHold(start: start)
+            case .startEase:
+                startRefreshSettleEase()
+            case .beginAcknowledgment:
+                beginRefreshAcknowledgment()
+            case .retire, .endWithoutAcknowledgment:
+                retireRefreshSettle()
+            case .releaseHold:
+                releaseRefreshSettleHold()
+            }
+        }
+    }
+
+    /// Holds the dynamic region at the displacement native had when the settle
+    /// took over (capped at the held lane), un-animated.
+    private func armRefreshSettleHold(start: CGFloat) {
+        var immediate = Transaction()
+        immediate.disablesAnimations = true
+        withTransaction(immediate) {
+            refreshSettleHold = start
+        }
+    }
+
+    /// Eases the armed hold to rest. Started only once native has fallen to the
+    /// hold, so a pull still being held keeps the hold in reserve rather than
+    /// spending its ease while the finger is down.
+    private func startRefreshSettleEase() {
+        guard let plan = refreshSettleMachine.plan else { return }
+        let generation = refreshSuccessGeneration
+        Task {
+            // Let the held value commit for a frame so the ease starts from it
+            // instead of coalescing with it.
+            try? await Task.sleep(for: HomeRefreshSettle.commitInterval)
+            guard generation == refreshSuccessGeneration else { return }
+            withAnimation(plan.animation) {
+                refreshSettleHold = 0
+            }
+            // Bound: an unfinished settle is ended, never left running.
+            try? await Task.sleep(for: plan.endsAfter)
+            guard generation == refreshSuccessGeneration else { return }
+            if !refreshSettleMachine.isAwaitingCollapse { refreshSettleMachine.reset() }
+        }
+    }
+
+    /// Shows the bare micro-check and posts the one VoiceOver announcement for
+    /// one truthful successful refresh. Reached only from the effect above,
+    /// which has already applied the context gate at this very moment, so the
+    /// two forms of feedback begin together or not at all. The announcement
+    /// moves no accessibility focus, and the mark itself is never an
+    /// accessibility element.
+    private func beginRefreshAcknowledgment() {
+        guard let plan = refreshSettleMachine.plan else { return }
+        let generation = refreshSuccessGeneration
+        withAnimation(.easeOut(duration: Self.refreshSuccessFadeInSeconds)) {
+            isShowingRefreshSuccess = true
+        }
+        AccessibilityNotification.Announcement(Self.refreshSuccessText).post()
+
+        Task {
+            try? await Task.sleep(for: plan.checkHold)
+            guard generation == refreshSuccessGeneration else { return }
+            withAnimation(.easeIn(duration: Self.refreshSuccessFadeOutSeconds)) {
+                isShowingRefreshSuccess = false
+            }
+        }
+    }
+
+    /// Releases the hold alone, leaving a begun check to finish its own fade.
+    /// The generation is untouched so that fade is not cancelled; the machine
+    /// goes idle so nothing further reacts to this settle.
+    private func releaseRefreshSettleHold() {
+        refreshSettleMachine.reset()
+        withAnimation(.easeOut(duration: Self.refreshSuccessRetireSeconds)) {
+            refreshSettleHold = HomeRefreshSettle.retiredHold
+        }
+    }
+
+    /// A new refresh invalidates any older settle and acknowledgment, so none
+    /// can appear late or linger across refreshes.
+    private func supersedeRefreshSettle() {
+        refreshSuccessGeneration += 1
+        retireRefreshSettle()
+    }
+
+    /// Eases any held displacement and a showing check away quickly. Presentation
+    /// only: it touches no store, refresh state, or data, and bumps the
+    /// generation so no pending task can revive what it retired.
+    private func retireRefreshSettle() {
+        refreshSuccessGeneration += 1
+        // The hold's state is already at its ease target (0) while it animates,
+        // so "is anything running" is read from the stage and the mark, not the
+        // hold value.
+        let isActive = refreshSettleMachine.stage != .idle || isShowingRefreshSuccess
+        refreshSettleMachine.reset()
+        guard isActive else { return }
+        withAnimation(.easeOut(duration: Self.refreshSuccessRetireSeconds)) {
+            refreshSettleHold = HomeRefreshSettle.retiredHold
+            isShowingRefreshSuccess = false
+        }
+    }
+
+    /// Ends the settle with no animation, for when Home leaves the screen.
+    private func endRefreshSettleImmediately() {
+        refreshSuccessGeneration += 1
+        refreshSettleMachine.reset()
+        var immediate = Transaction()
+        immediate.disablesAnimations = true
+        withTransaction(immediate) {
+            refreshSettleHold = 0
+            isShowingRefreshSuccess = false
+        }
+    }
+
+    // MARK: - Header ownership (W4-H3 A2 band / in-scroll handoff)
+
+    /// Two technically equivalent header representations exist (one scroll
+    /// surface only): the band copy, reserved at the top via a safe-area
+    /// inset, which owns rest, pull, active refresh, and collapse; and the
+    /// in-scroll copy, drawn exactly over the band copy at rest, which owns
+    /// ordinary upward scrolling. Which one is visible, hit-testable, and
+    /// accessibility-exposed is one rule — `ownsBandHeader` — derived only
+    /// from how far the in-scroll copy has moved from the band copy.
+    enum HeaderRepresentation {
+        case band
+        case scrolling
+    }
+
+    /// Small geometry tolerance (points) so sub-point layout noise at rest
+    /// never flips ownership.
+    static let headerHandoffTolerance: CGFloat = 1
+
+    /// Positive when the content has scrolled up from rest, negative while it
+    /// is pulled down. Both anchors are measured in `.global`, so any common
+    /// safe-area/window translation cancels out.
+    static func headerScrollOffset(bandMinY: CGFloat, scrollingMinY: CGFloat) -> CGFloat {
+        bandMinY - scrollingMinY
+    }
+
+    /// The band header owns the header at rest and for every pull
+    /// (non-positive scroll offset); the in-scroll copy owns it only once
+    /// content has scrolled up past the tolerance. This reads no refresh
+    /// state, timer, or gesture.
+    static func ownsBandHeader(scrollOffset: CGFloat) -> Bool {
+        scrollOffset <= headerHandoffTolerance
+    }
+
+    /// The one visibility / hit-testing / accessibility rule shared by both
+    /// header representations, so exactly one Settings action is usable and
+    /// exposed at a time.
+    static func isHeaderRepresentationActive(
+        _ representation: HeaderRepresentation,
+        ownsBandHeader: Bool
+    ) -> Bool {
+        switch representation {
+        case .band: return ownsBandHeader
+        case .scrolling: return !ownsBandHeader
+        }
+    }
+
+    /// What Exchange Unavailable's body area shows: the authored pull cue at
+    /// rest, nothing while native refresh occupies the area.
+    enum UnavailableAreaPresentation: Equatable {
+        case atRest
+        case refreshing
+    }
+
+    static func unavailableAreaPresentation(isRefreshInFlight: Bool) -> UnavailableAreaPresentation {
+        isRefreshInFlight ? .refreshing : .atRest
+    }
+
+    private var unavailableAreaPresentation: UnavailableAreaPresentation {
+        Self.unavailableAreaPresentation(isRefreshInFlight: isRefreshInFlight)
+    }
+
+    /// Identity of which Home categories exist. A change in it is the only
+    /// thing the refresh-scoped hierarchy resolution animation reacts to.
+    private struct HierarchyKey: Equatable {
+        let hasContinueHelping: Bool
+        let hasOwnRequests: Bool
+        let boardKind: Int
+    }
+
+    private var hierarchyKey: HierarchyKey {
+        let boardKind: Int
+        switch currentBoardState {
+        case .loading: boardKind = 0
+        case .unavailable: boardKind = 1
+        case .empty: boardKind = 2
+        case .populated: boardKind = 3
+        }
+        return HierarchyKey(
+            hasContinueHelping: store.activeClaim != nil,
+            hasOwnRequests: !ownRequests.isEmpty,
+            boardKind: boardKind
+        )
     }
 
     // MARK: - Exchange content
 
     /// W4-H4: one coherent vertical scrolling board. The established header/
     /// priorities, `Continue Helping`, the caller-owned ownership partition,
-    /// the shared board heading, and `Needs help right now` all live inside
+    /// the shared board heading, and `Needs help` all live inside
     /// the *same* refreshable `ScrollView` — superseding H2's prior
     /// composition, which kept that header/priorities/ownership stack
     /// outside a separately refreshable inner `ScrollView` and broke as one
@@ -327,117 +665,232 @@ struct HomeExchangeView: View {
         GeometryReader { geometry in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.l) {
-                        header
-                        // W4-D2 physical-device FIX: `header` is the stable
-                        // chrome the continuity reveals immediately; every
-                        // other card-bearing zone is held back until the
-                        // travelling card has landed — see
-                        // `isDeferringContinuityHomeContent(hasLiveContinuity:reduceMotion:)`.
-                        continueHelpingSection
-                            .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
-                        ownRequestsSection
-                        boardHeadingRow
-                            .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
-                    }
-                    // W4-H4 final reconciliation: the shared Home
-                    // content-column authority (see
-                    // `CommonPlateStyle.Metrics.homeContentColumnInset`),
-                    // not the general-purpose `Spacing.l` step — this margin
-                    // must stay identical to `boardSection`'s below and to
-                    // the persistent bottom CTA's so ownership cards, `Needs
-                    // help` cards, and the persistent action remain one
-                    // column.
-                    .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
-                    .padding(.top, CommonPlateStyle.Spacing.l)
-                    .padding(.bottom, CommonPlateStyle.Spacing.m)
+                    // W4-H3 A2: the in-scroll header copy. Zero layout height,
+                    // drawn directly above the content origin — exactly over
+                    // the band copy at rest — so it adds no scroll range and
+                    // scrolls away naturally once content moves up.
+                    scrollingHeader
 
-                    VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
-                        // This is load-bearing (Section 6): Exchange
-                        // Unavailable's own persistent cue inside
-                        // `unavailableState` already covers every phase, so
-                        // this transient banner must not also be mounted
-                        // there — doing so would render two refresh cues at
-                        // once during the same pull/refresh.
-                        if displayedBoardState != .unavailable {
-                            refreshFeedbackBanner
+                    // W4-H3 Decision 11: the whole dynamic Home region — Continue
+                    // Helping, Your request(s), `Needs help`, and the board body —
+                    // moves as ONE unit under the authored post-refresh settle.
+                    // The hold is a render-time translation only (no layout, scroll
+                    // range, inset, or scroll-position change); the header band, the
+                    // in-scroll header copy, and the persistent CTA sit outside it
+                    // and never move. `Needs help` is never animated separately.
+                    VStack(alignment: .leading, spacing: 0) {
+                        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.l) {
+                            // W4-D2 physical-device FIX: `header` is the stable
+                            // chrome the continuity reveals immediately; every
+                            // other card-bearing zone is held back until the
+                            // travelling card has landed — see
+                            // `isDeferringContinuityHomeContent(hasLiveContinuity:reduceMotion:)`.
+                            continueHelpingSection
+                                .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
+                            ownRequestsSection
+                            boardHeadingRow
+                                .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
                         }
-                        boardSection
+                        // W4-H4 final reconciliation: the shared Home
+                        // content-column authority (see
+                        // `CommonPlateStyle.Metrics.homeContentColumnInset`),
+                        // not the general-purpose `Spacing.l` step — this margin
+                        // must stay identical to `boardSection`'s below and to
+                        // the persistent bottom CTA's so ownership cards, `Needs
+                        // help` cards, and the persistent action remain one
+                        // column.
+                        .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
+                        // Header-to-content gap: the band's own bottom padding
+                        // (`Spacing.s`) plus this equals the `Spacing.l` the
+                        // header had above the first section before the band.
+                        .padding(.top, Self.contentTopPaddingBelowBand)
+                        .padding(.bottom, CommonPlateStyle.Spacing.m)
+
+                        VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.m) {
+                            boardSection
+                        }
+                        .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
+                        .padding(.bottom, CommonPlateStyle.Spacing.l)
+                        .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
                     }
-                    .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
-                    .padding(.bottom, CommonPlateStyle.Spacing.l)
-                    .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
+                    .modifier(HomeRefreshSettleHold(
+                        hold: refreshSettleHold,
+                        restMinY: refreshSettleRestMinY
+                    ))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(minHeight: geometry.size.height, alignment: .top)
-                .background(
-                    GeometryReader { contentGeometry in
-                        Color.clear.preference(
-                            key: HomeExchangeScrollOffsetKey.self,
-                            value: contentGeometry.frame(in: .named(Self.scrollCoordinateSpace)).minY
-                        )
-                    }
+                // Fills the viewport that is actually visible beneath the
+                // reserved band, so short content gains no band-created scroll
+                // range (the band reduces the visible height by its own).
+                .frame(minHeight: max(0, geometry.size.height - headerBandHeight), alignment: .top)
+                // W4-H3: when a refresh changes which categories exist, the
+                // whole dynamic region resolves into the new hierarchy with
+                // one brief fade/settle. Scoped to refresh-driven changes and
+                // suppressed under Reduce Motion (an instant swap).
+                .animation(
+                    animatesHierarchyResolution && !reduceMotion ? .easeInOut(duration: 0.25) : nil,
+                    value: hierarchyKey
                 )
             }
-            .coordinateSpace(name: Self.scrollCoordinateSpace)
-            .onPreferenceChange(HomeExchangeScrollOffsetKey.self) { minY in
-                pullOffset = max(0, minY)
-            }
             // Functional fix, not a motion-polish change: `.frame(
-            // minHeight: geometry.size.height)` above makes the exchange
-            // ScrollView's content exactly fill the viewport on every
-            // short-content state (Unavailable, Empty, and in practice
-            // most Populated/Low Activity boards too, since a handful of
-            // request cards rarely exceeds one screen). Without this
-            // modifier, UIKit only allows vertical rubber-banding — the
-            // drag `.refreshable` itself depends on — when a scroll
-            // view's content is taller than its bounds, so a physical
-            // pull could not initiate a refresh at all whenever content
-            // did not overflow the viewport. `.always` keeps bounce (and
-            // therefore the ability to pull) available regardless of
-            // content length; it changes no refresh authority or reload
+            // minHeight:)` above makes the exchange ScrollView's content
+            // exactly fill the visible viewport on every short-content state
+            // (Unavailable, Empty, and in practice most Populated/Low
+            // Activity boards too, since a handful of request cards rarely
+            // exceeds one screen). Without this modifier, UIKit only allows
+            // vertical rubber-banding — the drag `.refreshable` itself
+            // depends on — when a scroll view's content is taller than its
+            // bounds, so a physical pull could not initiate a refresh at all
+            // whenever content did not overflow the viewport. `.always` keeps
+            // bounce (and therefore the ability to pull) available regardless
+            // of content length; it changes no refresh authority or reload
             // path.
             .scrollBounceBehavior(.always, axes: .vertical)
             .refreshable {
                 await performAuthoredRefresh()
             }
+            // W4-H3 A2: reserved top band. Being a safe-area inset on the
+            // ScrollView itself, the one native refresh indicator sits
+            // beneath it — below the stationary CommonPlate header and above
+            // `Needs help` — while the band header owns rest, pull, active
+            // refresh, and collapse. The band has no background or other
+            // chrome of its own.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                bandHeader
+            }
             .safeAreaInset(edge: .bottom) {
                 requestMealButton
+            }
+            // Header ownership, band height, and the settle's scroll sample are
+            // passive reads of layout; they decide nothing about refresh.
+            .onPreferenceChange(HomeHeaderAnchorKey.self) { anchors in
+                if let bandHeight = anchors.bandHeight, bandHeight != headerBandHeight {
+                    headerBandHeight = bandHeight
+                }
+                guard let bandMinY = anchors.bandMinY, let scrollingMinY = anchors.scrollingMinY else { return }
+                if let bandHeight = anchors.bandHeight {
+                    let restMinY = bandMinY + bandHeight
+                    if restMinY != refreshSettleRestMinY {
+                        refreshSettleRestMinY = restMinY
+                    }
+                }
+                let scrollOffset = Self.headerScrollOffset(bandMinY: bandMinY, scrollingMinY: scrollingMinY)
+                let owner = Self.ownsBandHeader(scrollOffset: scrollOffset)
+                if owner != ownsBandHeader {
+                    ownsBandHeader = owner
+                }
+                // Displacement below rest, recorded without invalidating the
+                // view; the settle acts only when its own stage must change.
+                observeRefreshSettle(displacement: -scrollOffset)
+            }
+            // The micro-check lives in the transient refresh lane, positioned
+            // from the same passive anchors, not inside the band's rest gap.
+            .overlayPreferenceValue(HomeHeaderAnchorKey.self) { anchors in
+                refreshSuccessLayer(anchors)
             }
         }
         .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
     }
 
-    // MARK: - Authored refresh feedback (HQ decision 3)
+    // MARK: - Header (A2)
 
-    /// Transient, exchange/board-scoped presentation for Populated, Low
-    /// Activity, and Empty Exchange — never a second source of refresh
-    /// truth, and never mounted simultaneously with Exchange Unavailable's
-    /// own persistent cue in `unavailableState` (this view is only reachable
-    /// while `displayedBoardState != .unavailable`; see `exchangeContent`).
-    /// This is the SAME `PullRefreshCue` component Unavailable uses, always
-    /// mounted rather than conditionally inserted/removed, so its symbol
-    /// identity persists across every phase — collapsing to zero height at
-    /// `.idle` instead of being torn down avoids the layout flash a
-    /// conditional `if`/`.transition` produced.
-    private var refreshFeedbackBanner: some View {
-        PullRefreshCue(phase: pullRefreshPhase, showsIdleInstruction: false)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, CommonPlateStyle.Spacing.s)
+    /// Gap the dynamic Home content keeps below the band: with the band's own
+    /// bottom padding it reproduces the pre-A2 header-to-content spacing.
+    static let contentTopPaddingBelowBand = CommonPlateStyle.Spacing.l - headerBandBottomPadding
+    /// The band header's own bottom padding.
+    static let headerBandBottomPadding = CommonPlateStyle.Spacing.s
+
+    /// The shared header composition both representations render, so the two
+    /// copies are identical in content, environment, and geometry.
+    private var headerComposition: some View {
+        header
+            .padding(.horizontal, CommonPlateStyle.Metrics.homeContentColumnInset)
+            .padding(.top, CommonPlateStyle.Spacing.l)
+            .padding(.bottom, Self.headerBandBottomPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Applies the single ownership rule to one representation:
+    /// visibility, hit testing, and accessibility exposure all follow
+    /// `isHeaderRepresentationActive`, and the swap itself is never animated.
+    private func ownedHeader(_ representation: HeaderRepresentation) -> some View {
+        let isActive = Self.isHeaderRepresentationActive(representation, ownsBandHeader: ownsBandHeader)
+        return headerComposition
             .background(
-                Color.accentColor.opacity(pullRefreshPhase == .idle ? 0 : 0.12),
-                in: RoundedRectangle(cornerRadius: CommonPlateStyle.Radius.standard, style: .continuous)
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: HomeHeaderAnchorKey.self,
+                        value: HomeHeaderAnchors(
+                            representation: representation,
+                            minY: proxy.frame(in: .global).minY,
+                            height: proxy.size.height
+                        )
+                    )
+                }
             )
-            .frame(height: pullRefreshPhase == .idle ? 0 : nil)
-            .opacity(pullRefreshPhase == .idle ? 0 : 1)
-            .accessibilityHidden(pullRefreshPhase == .idle)
-            .accessibilityIdentifier(refreshFeedbackAccessibilityIdentifier)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: pullRefreshPhase)
+            .opacity(isActive ? 1 : 0)
+            .allowsHitTesting(isActive)
+            .accessibilityHidden(!isActive)
+            .transaction { $0.animation = nil }
     }
 
-    private var refreshFeedbackAccessibilityIdentifier: String {
-        pullRefreshPhase == .refreshing ? "home-refresh-refreshing" : "home-refresh-pulling"
+    private var bandHeader: some View {
+        ownedHeader(.band)
     }
+
+    private var scrollingHeader: some View {
+        Color.clear
+            .frame(height: 0)
+            .overlay(alignment: .bottomLeading) {
+                ownedHeader(.scrolling)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+    }
+
+    /// Places the mark in the transient refresh lane the native spinner occupied:
+    /// centered horizontally, and vertically at the center of that lane below the
+    /// stationary band — fixed for the whole settle. It is positioned from the
+    /// passive band anchors plus the lane center captured when the settle began;
+    /// it never follows the settling content, so its opacity is its only motion.
+    /// It reads no refresh state and adds no layout: the permanent Home spacing
+    /// is untouched, and the layer is non-interactive and hidden from
+    /// accessibility.
+    @ViewBuilder
+    private func refreshSuccessLayer(_ anchors: HomeHeaderAnchors) -> some View {
+        if let bandMinY = anchors.bandMinY,
+           let bandHeight = anchors.bandHeight {
+            GeometryReader { proxy in
+                refreshSuccessMark
+                    .position(
+                        x: proxy.size.width / 2,
+                        y: bandMinY + bandHeight
+                            + refreshSuccessLaneCenter
+                            - proxy.frame(in: .global).minY
+                    )
+                    // The lane center is captured once, while the mark is
+                    // transparent; it must never animate.
+                    .transaction(value: refreshSuccessLaneCenter) { $0.animation = nil }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    /// The bare 18×18 purple check. Always mounted but transparent at rest;
+    /// opacity is its only animated property. It is never an accessibility
+    /// element or hit target — VoiceOver gets the separate `Updated`
+    /// announcement instead.
+    private var refreshSuccessMark: some View {
+        Image(systemName: "checkmark")
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(Color.accentColor)
+            .frame(width: Self.refreshSuccessMarkSide, height: Self.refreshSuccessMarkSide)
+            .opacity(isShowingRefreshSuccess ? 1 : 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    static let refreshSuccessMarkSide: CGFloat = 18
 
     private var header: some View {
         HStack(alignment: .top) {
@@ -498,7 +951,7 @@ struct HomeExchangeView: View {
     /// authoritative order. `ownRequests` and `populatedBoard(_:)` below both
     /// derive from this one function rather than each re-filtering the same
     /// `requests` array independently, so the two zones cannot silently
-    /// diverge (e.g. an owned request leaking into `Needs help right now`).
+    /// diverge (e.g. an owned request leaking into `Needs help`).
     /// Pure and `static`, matching this file's existing testable-`static-func`
     /// pattern (`ownRequestsPreview`, `boardState`).
     struct BoardOwnershipPartition: Equatable {
@@ -536,7 +989,7 @@ struct HomeExchangeView: View {
     /// only Loading/Unavailable have no authoritative list to consult at all.
     private var ownRequests: [FoodRequest] {
         Self.ownRequests(
-            displayedBoardState: displayedBoardState,
+            displayedBoardState: currentBoardState,
             createdRequestContinuity: store.createdRequestContinuity
         )
     }
@@ -600,9 +1053,7 @@ struct HomeExchangeView: View {
         if !ownRequests.isEmpty {
             let preview = ownRequestsPreview
             VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
-                Text(Self.ownRequestsHeading(count: ownRequests.count))
-                    .font(.title3.weight(.bold))
-                    .accessibilityIdentifier("home-own-requests-heading")
+                ownRequestsHeadingRow(seeAllCount: preview.seeAllCount)
 
                 VStack(spacing: CommonPlateStyle.Spacing.m) {
                     ForEach(Array(preview.cards.enumerated()), id: \.element.id) { index, request in
@@ -656,20 +1107,47 @@ struct HomeExchangeView: View {
                         .accessibilityIdentifier("home-own-request-card-\(request.id)")
                     }
                 }
+            }
+        }
+    }
 
-                if let seeAllCount = preview.seeAllCount {
-                    NavigationLink(value: AppRoute.ownRequests(ownRequests)) {
-                        Text(Self.seeAllOwnRequestsTitle(count: seeAllCount))
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(minHeight: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("home-own-requests-see-all")
-                    .accessibilityLabel(Self.seeAllOwnRequestsTitle(count: seeAllCount))
-                    .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
+    /// W4-H3: `See all` sits beside `Your requests` with no visible count; the
+    /// full authoritative count lives in the accessibility label. At
+    /// accessibility Dynamic Type sizes it moves below the heading so neither
+    /// truncates. The action keeps a 44pt minimum target and the same
+    /// destination/complete carried set as before.
+    @ViewBuilder
+    private func ownRequestsHeadingRow(seeAllCount: Int?) -> some View {
+        let heading = Text(Self.ownRequestsHeading(count: ownRequests.count))
+            .font(.title3.weight(.bold))
+            .accessibilityIdentifier("home-own-requests-heading")
+        if let seeAllCount {
+            let seeAll = NavigationLink(value: AppRoute.ownRequests(ownRequests)) {
+                Text(Self.seeAllOwnRequestsTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("home-own-requests-see-all")
+            .accessibilityLabel(Self.seeAllOwnRequestsAccessibilityLabel(count: seeAllCount))
+            .modifier(ContinuityDeferredReveal(isDeferring: isDeferringContinuityHomeContent))
+
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 0) {
+                    heading
+                    seeAll
+                }
+            } else {
+                HStack(alignment: .center) {
+                    heading
+                    Spacer(minLength: CommonPlateStyle.Spacing.s)
+                    seeAll
                 }
             }
+        } else {
+            heading
         }
     }
 
@@ -823,8 +1301,10 @@ struct HomeExchangeView: View {
         }
     }
 
-    static func seeAllOwnRequestsTitle(count: Int) -> String {
-        "See all \(count)"
+    static let seeAllOwnRequestsTitle = "See all"
+
+    static func seeAllOwnRequestsAccessibilityLabel(count: Int) -> String {
+        "See all \(count) requests"
     }
 
     // MARK: - Board
@@ -841,7 +1321,7 @@ struct HomeExchangeView: View {
     }
 
     private var boardHeading: String {
-        switch displayedBoardState {
+        switch currentBoardState {
         case .loading:
             return Self.loadingHeading
         case .unavailable:
@@ -849,7 +1329,7 @@ struct HomeExchangeView: View {
         case .empty:
             return Self.emptyHeading
         case .populated:
-            return Self.needsHelpRightNowHeading
+            return Self.needsHelpHeading
         }
     }
 
@@ -875,7 +1355,7 @@ struct HomeExchangeView: View {
 
     @ViewBuilder
     private var boardSection: some View {
-        switch displayedBoardState {
+        switch currentBoardState {
         case .loading:
             loadingState
         case .unavailable:
@@ -981,16 +1461,24 @@ struct HomeExchangeView: View {
     /// presentation/discoverability only — it never implements, replaces, or
     /// simulates refresh.
     private var unavailableState: some View {
-        VStack(spacing: CommonPlateStyle.Spacing.m) {
+        let isBodyYielding = unavailableAreaPresentation == .refreshing
+        return VStack(spacing: CommonPlateStyle.Spacing.m) {
             Text(Self.unavailableTitle)
                 .font(.headline.weight(.bold))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: CommonPlateStyle.Metrics.stateContentWidth)
                 .accessibilityIdentifier("home-unavailable-title")
 
-            PullRefreshCue(phase: pullRefreshPhase, showsIdleInstruction: true)
+            PullRefreshCue()
                 .accessibilityIdentifier("home-unavailable-refresh-cue")
         }
+        // While native refresh is active the title and cue yield. They keep
+        // their layout space, so nothing reflows when they return after a
+        // failure or timeout; on success the refreshed hierarchy replaces
+        // this state outright (it is never held back).
+        .opacity(isBodyYielding ? 0 : 1)
+        .accessibilityHidden(isBodyYielding)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isBodyYielding)
         .frame(maxWidth: .infinity)
         .padding(.vertical, CommonPlateStyle.Spacing.xl)
         .padding(.horizontal, CommonPlateStyle.Spacing.l)
@@ -1074,7 +1562,7 @@ struct HomeExchangeView: View {
     // MARK: - Copy
 
     static let continueHelpingHeading = "Continue helping"
-    static let needsHelpRightNowHeading = "Needs help right now"
+    static let needsHelpHeading = "Needs help"
     static let emptyHeading = "Needs help"
     static let unavailableHeading = "Needs help"
     static let loadingHeading = "Needs help"
@@ -1086,7 +1574,6 @@ struct HomeExchangeView: View {
     static let unavailableTitle = "Helping is\ntemporarily unavailable"
     static let refreshCueText = "Pull down to refresh"
 
-    static let refreshingText = "Refreshing…"
     static let refreshSuccessText = "Updated"
 
     // MARK: - Board state derivation
@@ -1171,161 +1658,65 @@ struct HomeExchangeView: View {
     }
 }
 
-/// Passively observed, presentation-only pull distance for the exchange
-/// `ScrollView` — see `HomeExchangeView.pullOffset`'s doc comment. Read from
-/// native scroll geometry; never written to by any custom gesture, and never
-/// consulted to decide whether refresh fires.
-private struct HomeExchangeScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+/// W4-H3 A2 header anchors: the global top of each header representation, plus
+/// the band's height. Passively read from layout — never written by a custom
+/// gesture, and used only to derive header ownership (scroll position) and the
+/// band-reduced short-content height. It never decides whether refresh fires.
+private struct HomeHeaderAnchors: Equatable {
+    var bandMinY: CGFloat?
+    var scrollingMinY: CGFloat?
+    var bandHeight: CGFloat?
+
+    init() {}
+
+    init(representation: HomeExchangeView.HeaderRepresentation, minY: CGFloat, height: CGFloat) {
+        switch representation {
+        case .band:
+            bandMinY = minY
+            bandHeight = height
+        case .scrolling:
+            scrollingMinY = minY
+        }
     }
 }
 
-/// The authored pull/refreshing/recovery sequence (HQ decision 3; approved
-/// Figma "MOTION HANDOFF · Unavailable Pull to Refresh", narrowed by Faith's
-/// final H2 visual alignment FIX resolution to drop the motion handoff's
-/// "Release threshold" phase — see below). Derived entirely from
-/// passively-observed native scroll geometry (`HomeExchangeView.pullOffset`)
-/// and the existing authoritative refresh lifecycle
-/// (`isRefreshInFlight`/`isShowingRecoverySuccess`) — see
-/// `HomeExchangeView.pullRefreshPhase`. Never itself decides whether refresh
-/// fires.
-///
-/// There is deliberately no "release to refresh" phase: SwiftUI never
-/// exposes `.refreshable`'s own internal activation distance, so no
-/// presentation state here may claim releasing will trigger refresh — only
-/// `.refreshing`, entered once `isRefreshInFlight` actually becomes true,
-/// ever makes that claim. `.recoverySuccess` is not a generic "fetch
-/// succeeded" phase (HQ decision 6): it is reached only when Home was
-/// Exchange Unavailable immediately before the refresh and the authoritative
-/// result now resolves to a genuinely healthy board state.
-enum PullRefreshPhase: Equatable {
-    case idle
-    case pulling(progress: CGFloat)
-    case refreshing
-    case recoverySuccess
+private struct HomeHeaderAnchorKey: PreferenceKey {
+    static var defaultValue = HomeHeaderAnchors()
+    static func reduce(value: inout HomeHeaderAnchors, nextValue: () -> HomeHeaderAnchors) {
+        let next = nextValue()
+        if let bandMinY = next.bandMinY { value.bandMinY = bandMinY }
+        if let scrollingMinY = next.scrollingMinY { value.scrollingMinY = scrollingMinY }
+        if let bandHeight = next.bandHeight { value.bandHeight = bandHeight }
+    }
 }
 
-/// The single persistently-mounted refresh cue (Section 7/8/9/10), used both
-/// as Exchange Unavailable's persistent discoverability cue (HQ decision 1,
-/// `showsIdleInstruction: true`) and as the transient pull/refreshing/
-/// recovery feedback shown across Populated, Low Activity, and Empty
-/// Exchange (`showsIdleInstruction: false`, collapsed at `.idle`). One
-/// `Image(systemName:)` slot carries every phase via `.contentTransition(
-/// .symbolEffect(.replace))` rather than a `@ViewBuilder switch` producing a
-/// different icon identity per phase — the production flash this replaces
-/// came from exactly that identity churn plus conditional mounting. Reduce
-/// Motion suppresses every glyph movement (spin, pull-progress offset/
-/// opacity, and the recovery `.bounce`) while the glyph/text state change
-/// still communicates every phase without it.
+/// Exchange Unavailable's resting discoverability cue (HQ decision 1): the
+/// sole authored refresh cue, with its single arrow. Presentation only — it
+/// never implements, replaces, or simulates refresh, and no pull/release
+/// state exists. Once native refresh activates the cue yields (see
+/// `HomeExchangeView.unavailableState`).
 private struct PullRefreshCue: View {
-    let phase: PullRefreshPhase
-    let showsIdleInstruction: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isSpinning = false
-    /// Fences the delayed spin-start `Task` below against a later phase
-    /// change invalidating it — the same generation-counter shape
-    /// `RequestStore.fetchGeneration` already uses elsewhere in this
-    /// codebase, sized down to this view's own local concern.
-    @State private var spinGeneration = 0
-
     var body: some View {
         HStack(spacing: CommonPlateStyle.Spacing.xs) {
-            icon
-            if let text {
-                Text(text)
-                    .font(.subheadline.weight(.semibold))
-            }
+            Image(systemName: "arrow.down")
+                .font(.body.weight(.semibold))
+                .accessibilityHidden(true)
+            Text(HomeExchangeView.refreshCueText)
+                .font(.subheadline.weight(.semibold))
         }
         .foregroundStyle(Color.accentColor)
-        .opacity(isHidden ? 0 : 1)
-        .accessibilityHidden(isHidden)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
+        .accessibilityLabel(HomeExchangeView.refreshCueText)
     }
+}
 
-    /// `.idle` with no persistent instruction (Populated/Low Activity/Empty
-    /// Exchange) collapses invisibly rather than being torn down — see
-    /// `HomeExchangeView.refreshFeedbackBanner`'s own height/opacity
-    /// collapse, which reserves this view's identity across phase changes.
-    private var isHidden: Bool {
-        phase == .idle && !showsIdleInstruction
-    }
+/// Carries one refresh's own `fetchRequests()` outcome out of the deadline
+/// race's `@Sendable` operation. Written strictly before the operation
+/// returns, so it is read only when the fetch itself finished first.
+private actor RefreshOutcomeRecorder {
+    private(set) var outcome: RequestFetchOutcome?
 
-    @ViewBuilder
-    private var icon: some View {
-        Image(systemName: symbolName)
-            .font(.body.weight(.semibold))
-            .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
-            .rotationEffect(.degrees(isSpinning && !reduceMotion ? 360 : 0))
-            .symbolEffect(.bounce, options: .nonRepeating, value: !reduceMotion && phase == .recoverySuccess)
-            .offset(y: reduceMotion ? 0 : pullOffsetY)
-            .opacity(reduceMotion ? 1 : pullOpacity)
-            .accessibilityHidden(true)
-            .onAppear { updateSpinning() }
-            .onChange(of: phase) { _, _ in updateSpinning() }
-            .onChange(of: reduceMotion) { _, _ in updateSpinning() }
-    }
-
-    /// The pull arrow must not visibly rotate into the refreshing symbol —
-    /// only the refreshing symbol itself spins. Starting the continuous
-    /// rotation in the same instant `symbolName` switches to
-    /// `arrow.triangle.2.circlepath` would apply that rotation to the
-    /// `.contentTransition(.symbolEffect(.replace))` morph itself, reading
-    /// as the old arrow rotating into place. Waiting for the morph's own
-    /// duration to finish before starting the spin keeps the two motions
-    /// separate: a clean symbol swap, then rotation only on the settled
-    /// refresh glyph.
-    private static let symbolMorphDuration: Duration = .milliseconds(350)
-
-    private func updateSpinning() {
-        spinGeneration += 1
-        let generation = spinGeneration
-        isSpinning = false
-        guard phase == .refreshing, !reduceMotion else { return }
-        Task {
-            try? await Task.sleep(for: Self.symbolMorphDuration)
-            guard generation == spinGeneration else { return }
-            withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
-                isSpinning = true
-            }
-        }
-    }
-
-    private var symbolName: String {
-        switch phase {
-        case .idle, .pulling:
-            return "arrow.down"
-        case .refreshing:
-            return "arrow.triangle.2.circlepath"
-        case .recoverySuccess:
-            return "checkmark.circle.fill"
-        }
-    }
-
-    private var pullOffsetY: CGFloat {
-        guard case .pulling(let progress) = phase else { return 0 }
-        return progress * 10
-    }
-
-    private var pullOpacity: Double {
-        guard case .pulling(let progress) = phase else { return 1 }
-        return 0.55 + Double(progress) * 0.45
-    }
-
-    private var text: String? {
-        switch phase {
-        case .idle, .pulling: return HomeExchangeView.refreshCueText
-        case .refreshing: return HomeExchangeView.refreshingText
-        case .recoverySuccess: return nil
-        }
-    }
-
-    private var accessibilityLabel: String {
-        switch phase {
-        case .recoverySuccess: return HomeExchangeView.refreshSuccessText
-        default: return text ?? ""
-        }
+    func record(_ outcome: RequestFetchOutcome) {
+        self.outcome = outcome
     }
 }

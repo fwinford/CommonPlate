@@ -170,21 +170,18 @@ final class SettingsRequestAlertsToggleTests: XCTestCase {
         )
     }
 
-    func testPullRefreshPhaseHasNoReleaseThresholdCase() {
-        // Compile-time proof: `PullRefreshPhase` has exactly the four cases
-        // below. If a `.releaseThreshold` case is reintroduced, this
-        // exhaustive switch fails to compile rather than silently passing.
-        // `.recoverySuccess` replaces the old generic `.success` case (HQ
-        // decision 6): the checkmark is gated on genuine Unavailable →
-        // healthy recovery, not on any successful fetch.
-        func exhaustive(_ phase: PullRefreshPhase) -> String {
-            switch phase {
-            case .idle: return "idle"
-            case .pulling: return "pulling"
+    func testUnavailableAreaPresentationHasNoReleaseThresholdCase() {
+        // Compile-time proof: `UnavailableAreaPresentation` has exactly the
+        // two cases below. If a release-threshold or success case is
+        // reintroduced, this exhaustive switch fails to compile rather than
+        // silently passing. Success acknowledgment is not an
+        // unavailable-body presentation (W4-H3).
+        func exhaustive(_ presentation: HomeExchangeView.UnavailableAreaPresentation) -> String {
+            switch presentation {
+            case .atRest: return "atRest"
             case .refreshing: return "refreshing"
-            case .recoverySuccess: return "recoverySuccess"
             }
         }
-        XCTAssertEqual(exhaustive(.idle), "idle")
+        XCTAssertEqual(exhaustive(.atRest), "atRest")
     }
 }

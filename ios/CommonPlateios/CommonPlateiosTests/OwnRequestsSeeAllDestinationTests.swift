@@ -46,7 +46,8 @@ final class OwnRequestsSeeAllDestinationTests: XCTestCase {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
         XCTAssertTrue(
-            source.contains("if let seeAllCount = preview.seeAllCount {"),
+            source.contains("ownRequestsHeadingRow(seeAllCount: preview.seeAllCount)")
+                && source.contains("if let seeAllCount {"),
             "expected See all to be gated on the preview's seeAllCount, which is nil for 0/1/2 owned"
         )
     }

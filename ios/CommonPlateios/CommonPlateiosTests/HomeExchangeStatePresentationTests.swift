@@ -29,77 +29,62 @@ final class HomeExchangeStatePresentationTests: XCTestCase {
 
         XCTAssertFalse(source.contains("unavailableBody"))
         XCTAssertFalse(source.contains("couldn’t load the exchange"))
-        XCTAssertTrue(source.contains("PullRefreshCue(phase: pullRefreshPhase, showsIdleInstruction: true)"))
+        XCTAssertTrue(source.contains("PullRefreshCue()"))
     }
 
-    /// W4-H2-FIX (refresh motion architecture integration): the persistent
-    /// cue is one stable `Image(systemName:)` slot whose symbol/rotation/
-    /// bounce transform by phase (`.contentTransition(.symbolEffect(
-    /// .replace))`) rather than a `@ViewBuilder switch` producing a
-    /// different icon identity per phase — the prior architecture's source
-    /// of the production flash. `Reduce Motion` still suppresses every
-    /// glyph movement (spin, pull-progress offset/opacity, and the recovery
-    /// bounce) while state is still communicated through glyph/text changes,
-    /// and the cue's own body never calls the reload path — only
-    /// `pullOffset`, which is written solely from passively-read scroll
-    /// geometry, ever feeds its phase.
-    func testPullRefreshCueRespectsReduceMotionAndNeverImplementsRefresh() throws {
+    /// W4-H3: Exchange Unavailable's cue is the single authored refresh cue.
+    /// It has no phase, spin, pull-progress travel, or release state, and its
+    /// own body never calls the reload path. The failed counter-offset
+    /// architecture (pull-offset preference, header `.offset`) is gone; header
+    /// ownership is covered by `HomeRefreshExperienceTests`.
+    func testPullRefreshCueIsAStaticSingleCueAndNeverImplementsRefresh() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
-        XCTAssertTrue(source.contains("struct PullRefreshCue: View"))
-        XCTAssertTrue(source.contains("@Environment(\\.accessibilityReduceMotion) private var reduceMotion"))
-        // One stable symbol slot — never a per-phase `Image` identity.
-        XCTAssertTrue(source.contains(".contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))"))
-        XCTAssertFalse(source.contains("case .loading:\n            ProgressView()"))
-        // Pull-progress travel/emphasis and the continuous spin are both
-        // gated on `!reduceMotion`; the glyph/text swap between phases is
-        // not.
-        XCTAssertTrue(source.contains("reduceMotion ? 0 : pullOffsetY"))
-        XCTAssertTrue(source.contains("reduceMotion ? 1 : pullOpacity"))
-        XCTAssertTrue(source.contains("guard phase == .refreshing, !reduceMotion else {"))
-
-        // No semantic release-threshold enum case (Faith's resolution, item
-        // 2): the cue never claims releasing will refresh. (Doc comments may
-        // still name the removed/rejected phase to explain why it is gone.)
-        XCTAssertFalse(source.contains("case releaseThreshold"))
-        XCTAssertFalse(source.contains("static let releaseToRefreshText"))
-
-        // Presentation only: the cue's own body never calls the reload path,
-        // and `pullOffset` — the only thing that can move it out of `.idle`
-        // — is written exclusively from the passively-read scroll geometry
-        // preference, never from a custom gesture.
-        guard let cueRange = source.range(of: "private struct PullRefreshCue: View {") else {
+        guard let cueRange = source.range(of: "private struct PullRefreshCue: View {"),
+              let cueEnd = source.range(of: "/// Carries one refresh's own", range: cueRange.upperBound..<source.endIndex)
+        else {
             return XCTFail("expected PullRefreshCue to be defined")
         }
-        let cueBody = source[cueRange.lowerBound...]
+        let cueBody = source[cueRange.lowerBound..<cueEnd.lowerBound]
         XCTAssertFalse(cueBody.contains("fetchRequests()"))
+        XCTAssertEqual(cueBody.components(separatedBy: "Image(systemName:").count - 1, 1, "expected exactly one arrow in the cue")
+        XCTAssertFalse(source.contains("PullRefreshPhase"))
+        XCTAssertFalse(source.contains("case releaseThreshold"))
+        XCTAssertFalse(source.contains("releaseToRefreshText"))
         XCTAssertFalse(source.contains("DragGesture"))
-        XCTAssertTrue(source.contains("pullOffset = max(0, minY)"))
-        XCTAssertEqual(
-            source.components(separatedBy: "pullOffset =").count - 1,
-            2,
-            "expected pullOffset to be written only from the scroll-geometry preference and reset after a completed refresh"
-        )
+        XCTAssertFalse(source.contains("scrollCoordinateSpace"))
+        XCTAssertFalse(source.contains("pullOffset"))
+        XCTAssertFalse(source.contains("pullDisplacement"))
+        XCTAssertFalse(source.contains("HomeExchangePullOffsetKey"))
     }
 
-    /// This is load-bearing (H2-FIX Section 6): Exchange Unavailable must
-    /// never render both its own persistent cue and the transient
-    /// Populated/Empty banner at once. The transient banner is only mounted
-    /// while `displayedBoardState != .unavailable`.
-    func testUnavailableNeverMountsTheTransientRefreshBannerAlongsideItsOwnCue() throws {
+    /// W4-H3: healthy refresh has no authored arrow, banner, or `Refreshing…`
+    /// copy — the native indicator is the only loading affordance.
+    func testNoAuthoredRefreshBannerOrRefreshingCopyExists() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
-        XCTAssertTrue(source.contains("if displayedBoardState != .unavailable {\n                            refreshFeedbackBanner\n                        }"))
+        XCTAssertFalse(source.contains("refreshFeedbackBanner"))
+        XCTAssertFalse(source.contains("Refreshing…"))
+        XCTAssertFalse(source.contains("refreshingText"))
     }
 
-    /// HQ decision 6: the checkmark is gated on genuine Unavailable →
-    /// healthy recovery, never on a generic successful fetch.
-    func testRecoveryCheckmarkIsGatedOnActualRecoveryFromUnavailable() throws {
+    /// W4-H3: success acknowledgment is gated on the refresh operation's own
+    /// truthful outcome, never on how Home happens to look afterwards. The
+    /// H2 recovery-only gate (`wasUnavailable`) and the Unavailable-presentation
+    /// hold that deferred the refreshed hierarchy are gone.
+    func testSuccessAcknowledgmentIsGatedOnTheRefreshOperationsOwnOutcome() throws {
         let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/HomeExchangeView.swift")
 
-        XCTAssertTrue(source.contains("let wasUnavailable = currentBoardState == .unavailable"))
-        XCTAssertTrue(source.contains("if wasUnavailable && currentBoardState != .unavailable {"))
+        XCTAssertTrue(source.contains("guard fetchOutcome == .succeeded else { return false }"))
+        XCTAssertTrue(source.contains("case .empty, .populated: return true"))
+        XCTAssertTrue(source.contains("case .loading, .unavailable: return false"))
+        XCTAssertTrue(source.contains("guard didResolveInTime else { return false }"))
         XCTAssertFalse(source.contains("store.hasSuccessfullyFetchedRequests && store.refreshError == nil"))
+        XCTAssertFalse(source.contains("wasUnavailable"))
+        XCTAssertFalse(source.contains("unavailableRefreshHold"))
+        XCTAssertFalse(source.contains("isShowingRecoverySuccess"))
+        XCTAssertFalse(source.contains("shouldShowRecoverySuccess"))
+        XCTAssertFalse(source.contains("RecoverySuccessMark"))
     }
 
     /// Simulator FIX: physical pull-to-refresh could not be initiated at all

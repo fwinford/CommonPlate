@@ -93,7 +93,7 @@ An active claimed request is excluded from the shared board while `Continue Help
 
 #### Functional refresh
 
-Native SwiftUI `.refreshable` is the sole refresh trigger/activation authority; H2 introduces no competing gesture, arming threshold, or second refresh/reload mechanism. All refresh interactions reuse the existing authoritative request reload (`fetchRequests()`); no second source of request truth exists. Initial unresolved Home loading may remain in the Loading presentation for at most 5 seconds before falling back to Exchange Unavailable if authoritative truth has not resolved; a user-initiated refresh may remain in the Refreshing presentation for at most 5 seconds, never a minimum — a result that resolves before the ceiling completes immediately. Timeout or cancellation never fabricates success, and a stale/cancelled fetch generation can never overwrite a newer generation's result (the existing stale-response/generation boundary). The refresh success checkmark is recovery-only: it may appear only when a refresh actually recovers Home from Exchange Unavailable into a truthful healthy state, and must never appear for an already-healthy-to-healthy refresh or immediately before a return to Exchange Unavailable. Baseline Reduce Motion correctness (state, meaning, and operability preserved without relying on animation) is accepted runtime behavior. The current authored refresh visual/motion treatment (pull-cue choreography, easing, the arrow-to-symbol transform's visual quality, and spinner/symbol treatment) is explicitly **not** accepted as final; it is deferred to W4-H3 and must not be described as accepted runtime truth.
+Native SwiftUI `.refreshable` is the sole refresh trigger/activation authority; H2 introduces no competing gesture, arming threshold, or second refresh/reload mechanism. All refresh interactions reuse the existing authoritative request reload (`fetchRequests()`); no second source of request truth exists. Initial unresolved Home loading may remain in the Loading presentation for at most 5 seconds before falling back to Exchange Unavailable if authoritative truth has not resolved; a user-initiated refresh may remain in the Refreshing presentation for at most 5 seconds, never a minimum — a result that resolves before the ceiling completes immediately. Timeout or cancellation never fabricates success, and a stale/cancelled fetch generation can never overwrite a newer generation's result (the existing stale-response/generation boundary). The success acknowledgment and the authored refresh presentation are governed by section 1.5 (W4-H3), which supersedes the earlier H2 recovery-only checkmark: a truthful successful refresh — healthy → healthy as well as each Unavailable → healthy destination — is acknowledged there, and a failure, timeout, cancellation, stale result, or unresolved unavailable is never acknowledged as success. Baseline Reduce Motion correctness (state, meaning, and operability preserved without relying on animation) remains accepted runtime behavior.
 
 #### Settings, identity, and Request Alerts
 
@@ -101,25 +101,25 @@ Home reaches app-level utilities through one shared Settings route rather than p
 
 ### 1.4 Accepted Home continuous scroll composition (W4-H4)
 
-Home is one coherent vertical scroll. The established header and priority area, `Continue Helping` when applicable, the caller-owned request preview when applicable, and `Needs help right now` all live inside that same scroll, in that order. `Continue Helping` retains its accepted priority (section 1.3) and the ownership preview follows it; `Needs help right now` follows ownership. There is no nested `Needs help` vertical scroll and no horizontal `Needs help` carousel. Exactly one native `.refreshable` is attached to that unified scroll.
+Home is one coherent vertical scroll. The established header and priority area, `Continue Helping` when applicable, the caller-owned request preview when applicable, and `Needs help` all live inside that same scroll, in that order. `Continue Helping` retains its accepted priority (section 1.3) and the ownership preview follows it; `Needs help` follows ownership. There is no nested `Needs help` vertical scroll and no horizontal `Needs help` carousel. Exactly one native `.refreshable` is attached to that unified scroll.
 
 #### Home ownership preview
 
-Home presents the current participant's currently-open owned requests as a bounded, count-sensitive preview: zero owned requests render no ownership section; one renders `Your request` with one card and no `See all`; two render `Your requests` with both cards and no `See all`; three or more render the first two under the authoritative owned-request ordering plus `See all N`, where `N` is the full authoritative count of currently-open owned requests.
+Home presents the current participant's currently-open owned requests as a bounded, count-sensitive preview: zero owned requests render no ownership section; one renders `Your request` with one card and no `See all`; two render `Your requests` with both cards and no `See all`; three or more render the first two under the authoritative owned-request ordering plus a `See all` action; its visible label shows no count, and its accessibility label carries the full authoritative count of currently-open owned requests (for example `See all 4 requests`).
 
-The two-card Home cap is presentation-only. Ownership authority and board ordering are unchanged from section 1.3: ownership remains the server-derived caller-relative signal, never an installation-local heuristic. An owned open request never appears under `Needs help right now`, including an owned request that the two-card preview does not itself display.
+The two-card Home cap is presentation-only. Ownership authority and board ordering are unchanged from section 1.3: ownership remains the server-derived caller-relative signal, never an installation-local heuristic. An owned open request never appears under `Needs help`, including an owned request that the two-card preview does not itself display.
 
 Within this dedicated owned-request zone (the Home preview and its `See all` destination), `RequestCardView`'s `YOUR REQUEST` eyebrow is suppressed, because the zone itself already establishes ownership. The eyebrow is preserved wherever a request card renders outside that zone (W4-R2).
 
 #### See all
 
-For three or more owned open requests, `See all N` opens an ordinary subordinate destination containing the full currently-open owned-request set in the same authoritative ordering. It is not request history, not completed requests, not Edit/Remove, not requester management, and not a new root or tab.
+For three or more owned open requests, `See all` opens an ordinary subordinate destination containing the full currently-open owned-request set in the same authoritative ordering. It is not request history, not completed requests, not Edit/Remove, not requester management, and not a new root or tab.
 
 #### Persistent Request a Meal
 
 `Request a Meal` remains persistently available at the bottom of Home, outside the scrolling content, through a `ScrollView`-level `.safeAreaInset(edge: .bottom)`. That inset is the authoritative structural bottom accommodation: the final Home scroll content can be scrolled fully clear of the action rather than resting beneath it. The action carries a soft transparent-to-canvas transition above it instead of a hard opaque cutoff; that gradient is presentation only and supplies no scroll clearance of its own. There is no authored footer animation.
 
-The action shares the same Home content column as request cards. One shared horizontal content-column inset of 24 points governs ownership cards, `Needs help right now` cards, and the persistent action together; they are not sized independently of each other. Authored bottom padding on the action is zero, so the remaining clearance is the device-provided home-indicator safe area, which remains native and is never overlapped or negatively adjusted.
+The action shares the same Home content column as request cards. One shared horizontal content-column inset of 24 points governs ownership cards, `Needs help` cards, and the persistent action together; they are not sized independently of each other. Authored bottom padding on the action is zero, so the remaining clearance is the device-provided home-indicator safe area, which remains native and is never overlapped or negatively adjusted.
 
 #### Home freshness
 
@@ -127,9 +127,52 @@ Home resolves authoritative request data through the one existing reload path (`
 
 A pull-to-refresh must actually apply the authoritative result it resolves. The lifetime of the authoritative fetch is independent of SwiftUI's own cancellation of the pull interaction: SwiftUI cancels a `.refreshable` action task as soon as the view owning the modifier is invalidated, and a refresh necessarily invalidates Home the moment it publishes its own in-flight state, so an authoritative fetch owned by that action task's lifetime would be cancelled on every pull and silently apply nothing. Transient cancellation of the refresh *caller* therefore never cancels the authoritative fetch operation.
 
-This changes none of section 1.3's refresh authority. Native `.refreshable` remains the sole refresh trigger; there is no second refresh path, no reload authority beyond `fetchRequests()`, and no visible retry action. The initial-load and manual-refresh 5-second ceilings, the cancellation of whichever side loses the manual-refresh deadline, the recovery-only success checkmark, and the stale-response generation/collection-revision fencing that decides which result may be applied all remain exactly as recorded there. Timeout or cancellation still never fabricates success.
+This changes none of section 1.3's refresh authority. Native `.refreshable` remains the sole refresh trigger; there is no second refresh path, no reload authority beyond `fetchRequests()`, and no visible retry action. The initial-load and manual-refresh 5-second ceilings, the cancellation of whichever side loses the manual-refresh deadline, and the stale-response generation/collection-revision fencing that decides which result may be applied all remain exactly as recorded there; the success acknowledgment is superseded by section 1.5. Timeout or cancellation still never fabricates success.
 
-The authored refresh visual and motion treatment remains **not** accepted as final and remains deferred to W4-H3 (section 1.3); H4 accepts refresh correctness only, not refresh presentation.
+H4 accepts refresh correctness only; the authored refresh presentation and success acknowledgment are accepted separately in section 1.5 (W4-H3).
+
+### 1.5 Accepted Home refresh experience (W4-H3)
+
+Home pull-to-refresh presentation and success acknowledgment. This section completes the refresh presentation that sections 1.3 and 1.4 deferred, supersedes the H2-era recovery-only checkmark, and supersedes the visible board copy `Needs help right now` and the visible `See all N` label recorded in section 1.4. It changes no refresh authority.
+
+#### Authority is unchanged
+
+Native `.refreshable` remains the sole refresh trigger, spinner, and loading authority. `fetchRequests()`, the 5-second deadlines, cancellation, generation/collection-revision fencing, and concurrency semantics, and `RequestStore` truth, are exactly as recorded in sections 1.3 and 1.4. There is no custom drag gesture, release threshold, or `Release to refresh` state. The authored settle and the acknowledgment are presentation only: they never trigger a refresh, decide whether one succeeded, delay or suppress refreshed data, or alter the deadline. The refreshed hierarchy is never delayed for the acknowledgment.
+
+#### Header and rest layout
+
+The CommonPlate header stays visually stationary during pull, active refresh, and settle, and scrolls away normally during ordinary upward scrolling of a legitimately long Home; it is not permanently sticky. Ownership between the pull-band header and the in-scroll header is derived from scroll position only, never from refresh state or timers, and exactly one header and one Settings affordance are perceived and accessibility-exposed at a time. The permanent Home rest layout, the short-content scroll range, and the fixed bottom `Request a Meal` composition (section 1.4) are unchanged.
+
+#### Truthful success acknowledgment
+
+A truthful successful refresh — a user-initiated native refresh whose authoritative result resolved before the deadline, was applied under the generation fence, and resolves to a healthy Home — is acknowledged by a bare 18×18 purple check and a VoiceOver-only `Updated` announcement, exactly once per eligible refresh. This applies to healthy → healthy (whether or not visible content changed) and to every Unavailable → healthy destination: the ordinary board, Continue Helping, Your request(s), and the combined Continue Helping + Your request(s) state.
+
+The check is opacity-only: no circle or badge, no text, no scale or bounce, no haptic, and no success dwell. No visible `Updated` text appears anywhere on Home. The announcement does not move accessibility focus, and the check is neither focusable nor a persistent accessibility element.
+
+A failure, timeout, cancellation, stale or superseded result, failed fetch (a failed refresh of a previously healthy Home preserves the existing stale-healthy behavior), or an Unavailable refresh that remains Unavailable receives neither the check nor the announcement, and no failure copy, motion, or haptic is added.
+
+#### Authored post-refresh settle
+
+After a truthful successful refresh and once the native spinner is visually gone, the dynamic Home content is held in a 36 pt transient lane rather than snapping to rest, and the check sits fixed and horizontally centered 18 pt below the header band — below CommonPlate, above `Needs help`, clear of `at NYU`, not in the permanent rest gap, and not travelling with the content.
+
+- **Standard Motion:** the lane holds still for about 0.35 s; the check holds 200 ms and fades during one about 0.4 s ease-in-out return of the content to rest; the whole authored treatment is about 0.75 s. There is no overshoot, bounce, or oscillation, and the spinner and check never appear together.
+- **Reduce Motion:** the same lane and fixed check geometry; a 0.5 s static hold, the same 200 ms check hold, then one about 0.2 s ease-out return. No alternate success state or directional or celebratory motion exists, and the spinner remains native.
+
+#### Context-bound lifetime and stale retirement
+
+The acknowledgment is presented only if, at the moment it would begin, Home is still the presented destination and the scroll position is still within the top/header-owned refresh context. Otherwise both the check and the announcement are suppressed together; a suppressed acknowledgment is never queued, deferred, or replayed, and suppression never cancels the refresh or discards its data. A new refresh or repeated pull retires any older pending or visible acknowledgment, so an older check never stacks with a new spinner and at most one `Updated` is announced per eligible refresh.
+
+#### Successful-recovery fallback
+
+For a successful Unavailable → healthy recovery whose native reading is already at or within 6 pt of rest, with no transient lane in which to present the acknowledgment, neither the check nor `Updated` is emitted. The recovered data applies normally, no overlay is placed over ordinary Home content, and the recovered Home remains accessibly represented. The runtime cannot independently observe a visually open lane in every case; that accepted residual is recorded in the weekly spec and is not a guarantee that this fallback is never taken while a lane is visually open.
+
+#### Board copy and ownership overflow
+
+The Home board heading is `Needs help` in every state. For three or more owned open requests the heading remains `Your requests` and the trailing action is `See all` with no visible count; its accessibility label retains the full open-request count (for example `See all 4 requests`), it keeps a minimum 44 pt target, and at large Dynamic Type it may move below the heading. There is no `See all` for zero, one, or two owned requests. The destination, its full carried request set and order, and ownership semantics are unchanged.
+
+#### Verification boundary
+
+The rendered pull feel, VoiceOver announcement and focus behavior, accessibility frames, and hit-testing while the authored offset is active were verified manually on a physical iPhone by Faith, using a Debug build with a temporary LAN endpoint against a synthetic stub backend; they are not established by the automated suite. Release, Archive, and TestFlight behavior is not established (section 11).
 
 ## 2. Request lifecycle and availability
 
