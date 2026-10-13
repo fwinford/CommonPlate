@@ -175,6 +175,13 @@ struct FulfillmentConfirmation: Identifiable, Equatable {
     let vendor: String
     let foodDescription: String
     let kind: FulfillmentConfirmationKind
+    /// W4-U1.1: `true` only when the backend established — in the fulfillment
+    /// response, or through the participant-scoped placed read after an
+    /// ambiguous response — that placement committed but the helper's optional
+    /// Message was suppressed. Content-free: it never carries Message text.
+    /// `false` means "not established", never "the Message was sent", and it
+    /// changes nothing about placement truth or the automatic Home return.
+    var messageSuppressed: Bool = false
 }
 
 /// Backend-confirmed reasons a helper cannot start (or continue) helping with a
@@ -307,6 +314,15 @@ enum RequestOperationErrorCode {
     /// The generic shape/validation refusal `validateCreateShape` produces —
     /// also strictly pre-write, for the identical reason.
     static let invalidRequest = "INVALID_REQUEST"
+    /// W4-U1.1: requester-authored request text matched the backend's
+    /// participant-text filter. Returned after canonical validation and before
+    /// the quota read or either write, so — exactly like the validation codes
+    /// above — it proves a freshly minted attempt created nothing. During
+    /// recovery of an already-issued identity it proves nothing about an
+    /// earlier transmission (`isPostLookupRefusal`): it is only ever answered
+    /// after the identity lookup found nothing, so it is never terminal on its
+    /// own and converges through exact terminal reconciliation instead.
+    static let textNotAllowed = "REQUEST_TEXT_NOT_ALLOWED"
     /// The daily-limit refusal, read and returned before either write begins.
     static let requestLimitReached = "REQUEST_LIMIT_REACHED"
     /// The route-level create throttle, which runs before the handler and
@@ -353,6 +369,7 @@ enum RequestOperationErrorCode {
             || code == invalidVendor
             || code == participantPrincipalMismatch
             || code == invalidRequest
+            || code == textNotAllowed
             || code == requestLimitReached
             || code == rateLimited
     }
@@ -376,6 +393,7 @@ enum RequestOperationErrorCode {
         code == invalidVendor
             || code == participantPrincipalMismatch
             || code == invalidRequest
+            || code == textNotAllowed
             || code == requestLimitReached
     }
 
@@ -860,6 +878,12 @@ final class RequestStore: ObservableObject {
     private var activeClaimReleaseAttempt: ClaimReleaseAttempt?
     private var activeFulfillmentAttempt: FulfillmentAttempt?
     private var fulfillmentAmbiguityContext: FulfillmentAmbiguityContext?
+    /// The fulfillment attempt whose placement the authoritative status read has
+    /// already proven, while only its W4-U1.1 suppression enrichment is still
+    /// outstanding. Local claim expiry may abandon an *unresolved* status check,
+    /// but it must never discard placement truth that is already established,
+    /// so `markActiveClaimExpired` yields to it. Cleared with the attempt.
+    private var placementProvenFulfillmentAttemptID: UUID?
 
     /// Actual scene visibility supplied by `ContentView`. A live process is
     /// not necessarily visible: inactive and background scenes must leave the
@@ -2700,6 +2724,7 @@ final class RequestStore: ObservableObject {
 
     private func invalidateActiveFulfillmentAttempt() {
         activeFulfillmentAttempt = nil
+        placementProvenFulfillmentAttemptID = nil
         isFulfilling = false
     }
 
@@ -2859,6 +2884,12 @@ final class RequestStore: ObservableObject {
         // Once its outcome is known to be ambiguous, the accepted contract
         // preserves that state only until positive resolution or expiration.
         if let activeFulfillmentAttempt {
+            // Placement already proven: the deadline no longer decides anything
+            // here. The attempt applies the confirmed placement itself, and an
+            // expiry notice must not replace it (W4-U1.1 review F1).
+            if activeFulfillmentAttempt.id == placementProvenFulfillmentAttemptID {
+                return
+            }
             let expectedAmbiguityID = activeFulfillmentAttempt.originatingAmbiguityID
                 ?? activeFulfillmentAttempt.id
             // The POST itself may already be committing and must reach a
@@ -3308,6 +3339,7 @@ final class RequestStore: ObservableObject {
         defer {
             if activeFulfillmentAttempt == attempt {
                 activeFulfillmentAttempt = nil
+                placementProvenFulfillmentAttemptID = nil
                 isFulfilling = false
                 resumeClaimLifecycleAfterFulfillmentAttempt(attempt)
             }
@@ -3336,6 +3368,7 @@ final class RequestStore: ObservableObject {
             applyConfirmedFulfillment(
                 request: outcome.request,
                 notificationStatus: outcome.notificationStatus,
+                messageSuppressed: outcome.messageSuppressed,
                 attempt: attempt
             )
         } catch is CancellationError {
@@ -3433,6 +3466,7 @@ final class RequestStore: ObservableObject {
     private func applyConfirmedFulfillment(
         request: FoodRequest,
         notificationStatus: NotificationDeliveryStatus?,
+        messageSuppressed: Bool = false,
         attempt: FulfillmentAttempt
     ) {
         guard fulfillmentAttemptIsCurrent(attempt), request.status == .placed else { return }
@@ -3455,12 +3489,14 @@ final class RequestStore: ObservableObject {
             requestID: request.id,
             vendor: request.diningSpot.name,
             foodDescription: request.foodDescription,
-            kind: kind
+            kind: kind,
+            messageSuppressed: messageSuppressed
         )
         if let notificationStatus {
             confirmedFulfillmentOutcome = FulfillOutcome(
                 request: request,
-                notificationStatus: notificationStatus
+                notificationStatus: notificationStatus,
+                messageSuppressed: messageSuppressed
             )
         } else {
             confirmedFulfillmentOutcome = nil
@@ -3520,9 +3556,39 @@ final class RequestStore: ObservableObject {
             guard fulfillmentAmbiguityContext == context,
                   fulfillmentAttemptIsCurrent(attempt) else { return }
             if request.status == .placed {
+                // W4-U1.1: placement is already confirmed, so nothing below can
+                // change the outcome — it only decides whether the success
+                // presentation may truthfully say the optional Message was
+                // suppressed. The public status read above never carries that
+                // (moderation state is not a public surface); only the
+                // participant-scoped placed read can, and only when its durable
+                // content-free marker proves it. Anything else — no authority,
+                // a different request, a failed or undecodable read, an absent
+                // marker — leaves suppression unestablished and never fabricated.
+                //
+                // Placement is pinned as proven before anything is awaited: the
+                // claim-expiry timer and foreground check may abandon an
+                // unresolved status check, but they must not discard a placement
+                // this read has already established while the enrichment below is
+                // slow, failed, cancelled, or interrupted by backgrounding.
+                placementProvenFulfillmentAttemptID = attempt.id
+                // Suppression is impossible without a Message (the backend trims,
+                // so a blank one is no Message), so no lookup is made for it.
+                let messageSuppressed: Bool
+                if Self.submissionCarriesMessage(attempt.submission) {
+                    messageSuppressed = await authoritativeMessageSuppression(
+                        forPlacedRequestID: request.id,
+                        attempt: attempt
+                    )
+                } else {
+                    messageSuppressed = false
+                }
+                guard fulfillmentAmbiguityContext == context,
+                      fulfillmentAttemptIsCurrent(attempt) else { return }
                 applyConfirmedFulfillment(
                     request: request,
                     notificationStatus: nil,
+                    messageSuppressed: messageSuppressed,
                     attempt: attempt
                 )
                 return
@@ -3536,6 +3602,42 @@ final class RequestStore: ObservableObject {
               fulfillmentAttemptIsCurrent(attempt) else { return }
         fulfillmentAmbiguity?.isCheckingStatus = false
         fulfillmentAmbiguity?.isRecoveryAvailable = !context.hasConsumedRecovery
+    }
+
+    /// Whether the submission carried a Message the backend could have
+    /// suppressed. Mirrors the backend, which trims the Message and treats an
+    /// empty result as absent.
+    private static func submissionCarriesMessage(_ submission: FulfillmentSubmissionSnapshot) -> Bool {
+        guard let contactMessage = submission.contactMessage else { return false }
+        return !contactMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// W4-U1.1: whether the participant-scoped placed read authoritatively
+    /// proves that `requestID`'s placement suppressed the helper's optional
+    /// Message. `false` is "not established" — never "the Message was sent" —
+    /// and is the answer for every inconclusive path. The read is bound to the
+    /// placing helper by the backend (`helperParticipantId`), so a different or
+    /// replaced identity simply does not see this placement.
+    private func authoritativeMessageSuppression(
+        forPlacedRequestID requestID: String,
+        attempt: FulfillmentAttempt
+    ) async -> Bool {
+        guard let authority = attempt.authorization.participantAuthority
+                ?? participantAuthorityProvider(),
+              !authority.isEmpty else {
+            return false
+        }
+        do {
+            let state = try await service.fetchParticipantReservationState(
+                participantAuthority: authority
+            )
+            if case .placed(let placed) = state, placed.request.id == requestID {
+                return placed.messageSuppressed
+            }
+            return false
+        } catch {
+            return false
+        }
     }
 
     /// Runs the one privacy-safe status check only after an ambiguous response,

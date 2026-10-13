@@ -179,7 +179,14 @@ describe("Request lifecycle and retention schema", () => {
   it("models private placement and notification verification fields", () => {
     expect(MealRequest.schema.path("placedAt")).toBeDefined();
     expect(MealRequest.schema.path("fulfillerEmail")).toBeDefined();
-    expect(MealRequest.schema.path("contactMessage")).toBeDefined();
+    // W4-U1.1: the helper Message is transient and never persisted, so there is
+    // no stored Message field at all; only the content-free suppression marker
+    // is durable, and it is private (`select: false`) like other lifecycle state.
+    expect(MealRequest.schema.path("contactMessage")).toBeUndefined();
+    expect(MealRequest.schema.path("contactMessageSuppressed")).toBeDefined();
+    expect(
+      (MealRequest.schema.path("contactMessageSuppressed") as any).options.select
+    ).toBe(false);
     expect(MealRequest.schema.path("notificationAttemptedAt")).toBeDefined();
     expect(
       (MealRequest.schema.path("notificationStatus") as any).options.enum

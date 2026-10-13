@@ -194,6 +194,25 @@ export function refineStructuredRequest(
 }
 
 /**
+ * Every requester-authored free-text value in the structured representation:
+ * each Meal item's `name` and `details`, and `orderDetails`. These are the only
+ * request fields another participant can read that the requester typed — `food`
+ * is derived from them, and `vendor` is allowlisted — so they are exactly what
+ * W4-U1.1 filters before a request may be persisted or shown to a helper.
+ */
+export function structuredAuthoredTexts(
+  structured: StructuredRequestInput
+): string[] {
+  const texts: string[] = [];
+  for (const item of structured.mealItems ?? []) {
+    texts.push(item.name);
+    if (item.details !== undefined) texts.push(item.details);
+  }
+  if (structured.orderDetails !== undefined) texts.push(structured.orderDetails);
+  return texts;
+}
+
+/**
  * Exact cents to an exact display string. Integer arithmetic only — no
  * division into a float, and no `toFixed` on a value that could already have
  * lost precision — so `1234` is always `$12.34` and never `$12.33999…`.

@@ -17,6 +17,7 @@ import {
 import { createDay4MutationRateLimiter } from "./claimRoute.js";
 import { sendDay4Error } from "./day4Errors.js";
 import { sendFulfillmentEmail } from "./emailHelpers.js";
+import { isParticipantTextAllowed } from "./participantTextFilter.js";
 import { startRequesterFulfillmentPush } from "./requesterFulfillmentPush.js";
 import {
   resolveParticipantAuthority,
@@ -37,6 +38,20 @@ export const fulfillmentRateLimiter = createDay4MutationRateLimiter(10);
 // cap is a length bound on that string, not a magnitude bound.
 const orderNumberFormat = /^[0-9]{1,50}$/;
 const requiredText = z.string().trim().min(1);
+/**
+ * The only Pickup ETA values a helper may submit: the fixed options the iOS
+ * picker offers, sent verbatim. Surrounding whitespace is trimmed first, so the
+ * accepted value is still exactly one canonical option; anything else (blank,
+ * free text, a different case) is refused before any fulfillment work.
+ */
+const pickupEtaOptions = [
+  "ASAP",
+  "15 minutes",
+  "30 minutes",
+  "45 minutes",
+  "60 minutes",
+] as const;
+const pickupEta = z.string().trim().pipe(z.enum(pickupEtaOptions));
 /**
  * The historical `fulfillment.fulfillerEmail` key, tolerated and discarded.
  *
@@ -62,7 +77,7 @@ const fulfillmentPayloadSchema = z
   .object({
     fulfillerEmail: legacyFulfillerEmailWireKey,
     orderNumber: requiredText.regex(orderNumberFormat),
-    eta: requiredText,
+    eta: pickupEta,
     contactMessage: z
       .string()
       .trim()
@@ -293,6 +308,12 @@ async function persistCorePlacement(
   authorization: FulfillmentAuthorization,
   helper: BoundHelper,
   placedAt: Date,
+  /**
+   * W4-U1.1: whether the optional helper Message was refused by the
+   * participant-text filter. Persisted only as this content-free marker, in
+   * the same atomic conditional update that commits placement.
+   */
+  messageSuppressed: boolean,
   session: ClientSession
 ): Promise<IRequest> {
   let placedRequest: IRequest | null = null;
@@ -317,8 +338,14 @@ async function persistCorePlacement(
       // address from and the payload carries none (W3-I1 removed that field).
       // `fulfillerEmail` is optional on the schema, so leaving it unset is a
       // truthful placement, not a defect.
-      if (payload.fulfillment.contactMessage) {
-        setFields.contactMessage = payload.fulfillment.contactMessage;
+      // The helper Message is never written here, allowed or not: it is
+      // transient fulfillment/email-only context (W4-U1.1) that exists only in
+      // request memory for the immediate requester email attempt. Only the
+      // content-free suppression marker is durable, and only when set — written
+      // in this same conditional update so it can never disagree with
+      // committed placement.
+      if (messageSuppressed) {
+        setFields.contactMessageSuppressed = true;
       }
 
       const unsetFields: Record<string, 1> = {
@@ -327,9 +354,6 @@ async function persistCorePlacement(
         claimExtendedAt: 1,
         claimTokenDigest: 1,
       };
-      if (!payload.fulfillment.contactMessage) {
-        unsetFields.contactMessage = 1;
-      }
 
       placedRequest = await MealRequest.findOneAndUpdate(
         {
@@ -565,6 +589,18 @@ export async function fulfillRequest(
   }
   const payload: FulfillmentRequestPayload = validation.data;
 
+  // W4-U1.1: the optional helper Message is filtered after fulfillment
+  // authority/payload validation and before the durable placement mutation.
+  // A match is NOT a fulfillment failure: the real Grubhub order is already
+  // placed, so placement commits exactly once as if no Message existed, the
+  // Message is neither stored nor emailed, and the response carries a private
+  // content-free suppression signal. The filter is pure and reads/writes
+  // nothing, so no caller learns the verdict before authority is checked.
+  const submittedMessage = payload.fulfillment.contactMessage;
+  const messageSuppressed =
+    submittedMessage !== undefined && !isParticipantTextAllowed(submittedMessage);
+  const emailedMessage = messageSuppressed ? undefined : submittedMessage;
+
   const placedAt = new Date();
   // Declared here so the failure classifier and `finally` can see it, but
   // produced inside the try: an unavailable session must answer in the
@@ -596,6 +632,7 @@ export async function fulfillRequest(
       authorization,
       helper,
       placedAt,
+      messageSuppressed,
       session
     );
   } catch (error) {
@@ -659,7 +696,7 @@ export async function fulfillRequest(
       placedRequest,
       validation.data.fulfillment.orderNumber,
       validation.data.fulfillment.eta,
-      validation.data.fulfillment.contactMessage,
+      emailedMessage,
       // The Reply-To the requester sees is the claim-bound helper's verified
       // address — the same value persisted above — so the coordination address
       // in that email is one CommonPlate has actually proved. A
@@ -682,6 +719,11 @@ export async function fulfillRequest(
   res.json({
     request: publicResponse.request,
     notification: { status: notificationStatus },
+    // Present only when the optional Message was suppressed (W4-U1.1): the
+    // private, content-free signal the helper client needs to say the order was
+    // recorded but the Message was not sent. Absent otherwise, so every stale
+    // client keeps decoding the unchanged success shape.
+    ...(messageSuppressed ? { messageSuppressed: true } : {}),
   });
   // Started after the response is sent and deliberately not awaited, matching
   // `startHelperNewRequestPush`: a slow, timed-out, or misconfigured APNs

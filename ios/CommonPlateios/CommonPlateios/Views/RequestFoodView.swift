@@ -208,6 +208,10 @@ struct RequestFoodMountedPresentationState: Equatable {
     var mealSwipeMismatch = ScreenshotMealSwipeMismatchState()
     var preservedEntryFeedback = ScreenshotPreservedEntryFeedbackState()
     var expandedMealIndex: Int?
+    /// W4-U1.1: the section-level text-filtering notice. Presentation state
+    /// that belongs to one submission of one form, so a terminal-recovery
+    /// replacement resets it to `nil` with everything else here.
+    var textModeration: RequestTextModerationState?
 
     /// The one production reset both Path A and Path B route through.
     /// Always converges on the same clean defaults regardless of what this
@@ -443,6 +447,15 @@ struct RequestFoodView: View {
     /// failures never set it — they own `submissionError`, which is the
     /// authoritative message for anything the server decided.
     @State private var showsLocalRejectionPointer = false
+    /// W4-U1.1: set only by the backend's definitive text-filtering refusal,
+    /// and only while it still describes the current draft and participant
+    /// authority (`RequestTextModeration`). Deliberately separate from
+    /// `submissionError`: it never routes to the failure summary, never
+    /// disables `Post request`, and never touches the draft.
+    @State private var textModeration: RequestTextModerationState?
+    /// Moves VoiceOver to the notice when it appears, without assigning blame
+    /// to any field.
+    @AccessibilityFocusState private var isTextModerationNoticeFocused: Bool
     @State private var didCreateRequest = false
     /// Fences the one Success→Home handoff if SwiftUI re-evaluates the
     /// handoff task while this destination remains mounted, so the finished
@@ -1561,7 +1574,8 @@ struct RequestFoodView: View {
             screenshotChecked: screenshotChecked,
             mealSwipeMismatch: mealSwipeMismatch,
             preservedEntryFeedback: preservedEntryFeedback,
-            expandedMealIndex: expandedMealIndex
+            expandedMealIndex: expandedMealIndex,
+            textModeration: textModeration
         )
         // Retires any in-flight analysis and its notice for the previous
         // selection, exactly like leaving the screen would — this replaces
@@ -1577,6 +1591,7 @@ struct RequestFoodView: View {
         isPresentingScreenshotPicker = mountedState.isPresentingScreenshotPicker
         isPresentingExactTimePicker = mountedState.isPresentingExactTimePicker
         isPresentingTimingInfo = mountedState.isPresentingTimingInfo
+        textModeration = mountedState.textModeration
         screenshotAfterglowFields = mountedState.screenshotAfterglowFields
         screenshotChecked = mountedState.screenshotChecked
         mealSwipeMismatch = mountedState.mealSwipeMismatch
@@ -2284,6 +2299,22 @@ struct RequestFoodView: View {
         // The field errors themselves keep updating live on their own terms.
         .onChange(of: draft) { _, _ in
             showsLocalRejectionPointer = false
+            // W4-U1.1: the first edit to any moderated value — or any change
+            // to which authored text is active — retires the notice for good.
+            textModeration = RequestTextModeration.reconciled(
+                textModeration,
+                draft: draft,
+                authority: identityStore.currentAuthority()
+            )
+        }
+        // A replaced participant cannot inherit a refusal made for the
+        // previous one.
+        .onChange(of: identityStore.identity) { _, _ in
+            textModeration = RequestTextModeration.reconciled(
+                textModeration,
+                draft: draft,
+                authority: identityStore.currentAuthority()
+            )
         }
     }
 
@@ -2520,6 +2551,9 @@ struct RequestFoodView: View {
         ) {
             mealSwipesControl
         }
+
+        // W4-U1.1: directly above the Meal cards the refusal concerns.
+        textModerationSection
 
         // One stable-position card per selected swipe. Fields above the count
         // are not built and their draft contents remain untouched.
@@ -2834,6 +2868,9 @@ struct RequestFoodView: View {
     /// value and a required estimate.
     @ViewBuilder
     private func diningDollarsOnlyFields(errors: [RequestFoodFieldError]) -> some View {
+        // W4-U1.1: directly above the order details the refusal concerns.
+        textModerationSection
+
         // W4-R4 (2026-09-27): the empty control matches the 76pt collapsed
         // Meal Exchange ordering-control target, NOT the compact Dining
         // Dollars amount-field height (supersedes the 2026-09-26 compact
@@ -3171,8 +3208,15 @@ struct RequestFoodView: View {
         submissionError = nil
         showsLocalRejectionPointer = false
         isShowingFailureSummary = false
+        // A new intentional submission supersedes any earlier text-filtering
+        // notice; the backend answers this one afresh.
+        textModeration = nil
 
         let submittedDraft = draftSnapshot ?? draft
+        // Read before the first suspension point, so a refusal that arrives
+        // after the participant was replaced can be recognized as stale rather
+        // than attributed to whoever is current when it lands.
+        let submittedAuthority = identityStore.currentAuthority()
 
         // The gate, and the whole reason it lives here rather than in the
         // store: `draft` is `@State` on a screen that stays mounted behind the
@@ -3218,6 +3262,17 @@ struct RequestFoodView: View {
                 showsLocalRejectionPointer = Self.showsLocalRejectionPointer(for: result)
             }
         } catch {
+            // W4-U1.1: the backend's definitive text-filtering refusal is a
+            // specific form state, not a failure. Nothing was created, the
+            // draft stays whole and editable, and no failure summary, error
+            // haptic, or submission error is produced for it.
+            if RequestTextModeration.isRefusal(error) {
+                presentTextModerationNotice(
+                    refusedDraft: submittedDraft,
+                    submittedAuthority: submittedAuthority
+                )
+                return
+            }
             // W4-R2 2026-09-05 sync item 6: the real catch path calls the
             // same production-owned decision `submissionFailureOutcome(for:
             // hasUnresolvedCreateAmbiguity:)` a test can drive directly with
@@ -3232,6 +3287,64 @@ struct RequestFoodView: View {
                 CommonPlateHaptics.error()
                 isShowingFailureSummary = true
             }
+        }
+    }
+
+    /// W4-U1.1: records the notice for a refusal of `refusedDraft`, but only
+    /// while it still describes the form the requester is looking at — the same
+    /// participant authority, and the same active authored text. A late answer
+    /// for a replaced identity or an already-edited draft is stale and shows
+    /// nothing.
+    @MainActor
+    private func presentTextModerationNotice(
+        refusedDraft: RequestFoodFormDraft,
+        submittedAuthority: String?
+    ) {
+        let refusal = RequestTextModeration.state(
+            afterRefusalOf: refusedDraft,
+            authority: submittedAuthority
+        )
+        guard RequestTextModeration.isCurrent(
+            refusal,
+            draft: draft,
+            authority: identityStore.currentAuthority()
+        ) else {
+            return
+        }
+        textModeration = refusal
+    }
+
+    /// The notice for the current draft and identity, or `nil`. Re-checked at
+    /// render time so a stale notice can never be drawn.
+    private var currentTextModeration: RequestTextModerationState? {
+        RequestTextModeration.isCurrent(
+            textModeration,
+            draft: draft,
+            authority: identityStore.currentAuthority()
+        ) ? textModeration : nil
+    }
+
+    /// The approved section heading with the moderation notice directly
+    /// beneath it. Only drawn after a backend refusal that still applies, and
+    /// placed ahead of the Meal fields it concerns. It names no Meal, field, or
+    /// term; VoiceOver moves to the notice as it appears.
+    @ViewBuilder
+    private var textModerationSection: some View {
+        if currentTextModeration != nil {
+            VStack(alignment: .leading, spacing: CommonPlateStyle.Spacing.s) {
+                Text(RequestTextModeration.sectionHeading)
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("request-text-moderation-heading")
+
+                TextModerationNoticeCard(message: RequestTextModeration.noticeCopy)
+                .accessibilityFocused($isTextModerationNoticeFocused)
+                .accessibilityIdentifier("request-text-moderation-notice")
+                .onAppear { isTextModerationNoticeFocused = true }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("request-text-moderation")
         }
     }
 
@@ -3771,5 +3884,49 @@ struct RequesterFormFieldContainer<Content: View>: View {
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.5), value: isGlowing)
                 .accessibilityIdentifier(provenanceIdentifier ?? "")
         }
+    }
+}
+
+/// The W4-U1.1 requester moderation notice: the approved inline card (Figma
+/// 885:5716) — `#D64045` red border, icon, and copy on a `#FFF7F7` surface,
+/// with dark-mode counterparts that keep it legible on the dark canvas. The
+/// icon is decorative, so VoiceOver reads the card as the copy alone.
+private struct TextModerationNoticeCard: View {
+    let message: String
+
+    private static let content = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 240 / 255, green: 130 / 255, blue: 135 / 255, alpha: 1)
+            : UIColor(red: 214 / 255, green: 64 / 255, blue: 69 / 255, alpha: 1)
+    })
+    private static let surface = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 214 / 255, green: 64 / 255, blue: 69 / 255, alpha: 0.16)
+            : UIColor(red: 255 / 255, green: 247 / 255, blue: 247 / 255, alpha: 1)
+    })
+    private static let cornerRadius: CGFloat = 13
+
+    var body: some View {
+        HStack(spacing: CommonPlateStyle.Spacing.s) {
+            Image(systemName: CommonPlateStatusKind.error.symbolName)
+                .font(.subheadline)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.footnote.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(Self.content)
+        .padding(.horizontal, CommonPlateStyle.Spacing.m)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Self.surface,
+            in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .strokeBorder(Self.content)
+        }
+        .accessibilityElement(children: .combine)
     }
 }

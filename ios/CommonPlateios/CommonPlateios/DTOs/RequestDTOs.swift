@@ -295,10 +295,17 @@ struct ActiveReservationDetailsDTO: Decodable {
 struct PlacedReservationDetailsDTO: Decodable {
     let request: RequestResponseDTO
     let notification: NotificationStatusDTO?
+    /// W4-U1.1 content-free suppression truth: present and `true` only when
+    /// the backend's durable marker proves the helper's optional Message was
+    /// suppressed at placement. Affirmative-only like `isOwnRequest`; absent
+    /// means "not established as suppressed", never a claim about the Message,
+    /// and it carries no Message text at all.
+    let messageSuppressed: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case request
         case notification
+        case messageSuppressed
     }
 
     init(from decoder: Decoder) throws {
@@ -314,6 +321,7 @@ struct PlacedReservationDetailsDTO: Decodable {
 
         self.request = request
         notification = try container.decodeIfPresent(NotificationStatusDTO.self, forKey: .notification)
+        messageSuppressed = try container.decodeIfPresent(Bool.self, forKey: .messageSuppressed)
     }
 }
 
@@ -389,6 +397,12 @@ struct NotificationStatusDTO: Decodable {
 struct FulfillResponseDTO: Decodable {
     let request: RequestResponseDTO
     let notification: NotificationStatusDTO
+    /// W4-U1.1: present and `true` only when the placement committed but the
+    /// helper's optional Message was suppressed by the backend's filter. The
+    /// placement is a success either way; this only says the Message was not
+    /// sent. Absent from every response that suppressed nothing, which
+    /// `decodeIfPresent` tolerates.
+    let messageSuppressed: Bool?
 }
 
 // MARK: - Errors

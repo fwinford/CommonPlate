@@ -111,6 +111,10 @@ struct ActiveReservationOutcome {
 struct PlacedReservationOutcome {
     let request: FoodRequest
     let notificationStatus: NotificationDeliveryStatus?
+    /// W4-U1.1: `true` only when the backend's durable, content-free marker
+    /// proves the helper's optional Message was suppressed at placement.
+    /// `false` means "not established", never "was sent".
+    var messageSuppressed: Bool = false
 }
 
 /// Backend truth for `GET /api/participant/active-reservation` (W3-H1
@@ -129,6 +133,9 @@ enum ParticipantReservationState {
 struct FulfillOutcome {
     let request: FoodRequest
     let notificationStatus: NotificationDeliveryStatus
+    /// W4-U1.1: `true` only when placement committed but the helper's optional
+    /// Message was suppressed. Placement is a success either way.
+    var messageSuppressed: Bool = false
 }
 
 struct RequestService {
@@ -683,7 +690,8 @@ struct RequestService {
             let request = try Self.mapPublicRequest(placement.request, ownership: .unresolved)
             return .placed(PlacedReservationOutcome(
                 request: request,
-                notificationStatus: placement.notification?.status
+                notificationStatus: placement.notification?.status,
+                messageSuppressed: placement.messageSuppressed == true
             ))
         }
         return .none
@@ -769,7 +777,11 @@ struct RequestService {
             try Self.validateResponseRequestID(response.request.id, expected: id)
             let request = try Self.mapPublicRequest(response.request, ownership: .unresolved)
             try Self.validateResponseStatus(request.status, expected: .placed)
-            return FulfillOutcome(request: request, notificationStatus: response.notification.status)
+            return FulfillOutcome(
+                request: request,
+                notificationStatus: response.notification.status,
+                messageSuppressed: response.messageSuppressed == true
+            )
         } catch {
             throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
         }
@@ -825,7 +837,11 @@ struct RequestService {
             try Self.validateResponseRequestID(response.request.id, expected: id)
             let request = try Self.mapPublicRequest(response.request, ownership: .unresolved)
             try Self.validateResponseStatus(request.status, expected: .placed)
-            return FulfillOutcome(request: request, notificationStatus: response.notification.status)
+            return FulfillOutcome(
+                request: request,
+                notificationStatus: response.notification.status,
+                messageSuppressed: response.messageSuppressed == true
+            )
         } catch {
             throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
         }

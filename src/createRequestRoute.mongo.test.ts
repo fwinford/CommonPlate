@@ -40,7 +40,11 @@ import {
   createRequest,
   OPERATION_EXPIRED_CODE,
   OPERATION_IDENTITY_HEADER,
+  OPERATION_NOT_CREATED_CODE,
   OPERATION_UNAUTHORIZED_CODE,
+  REQUEST_TEXT_NOT_ALLOWED_CODE,
+  REQUEST_TEXT_NOT_ALLOWED_MESSAGE,
+  terminalizeOperation,
 } from "./createRequestRoute.js";
 import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
 import {
@@ -647,5 +651,142 @@ describeMongo("real MongoDB durable create-operation identity (W3-D1)", () => {
     expect(second.statusCode).toBe(201);
     expect(second.body.request.id).not.toBe(first.body.request.id);
     expect(await MealRequest.countDocuments({})).toBe(2);
+  });
+
+  // W4-U1.1: a refusal is a definitive pre-mutation non-create. These are the
+  // database-level properties a mocked model cannot prove: nothing at all is
+  // committed (no Request, and no operation ledger row of any kind), and an
+  // exact-operation replay is still answered by reconciliation, never by the
+  // filter.
+  describe("W4-U1.1 requester text filtering is a definitive pre-mutation refusal", () => {
+    const BLOCKED = "you stupid bitch";
+    const refusedPayload = () =>
+      canonicalAsapPayload({
+        mealItems: [{ name: "Vegetable rice bowl" }, { name: BLOCKED }],
+      });
+    const headersFor = (operationId?: string) => ({
+      [PARTICIPANT_AUTHORITY_HEADER]: requesterAAuthority,
+      ...(operationId ? { [OPERATION_IDENTITY_HEADER]: operationId } : {}),
+    });
+
+    it("commits zero Requests and zero operation rows, and starts no confirmation, email, or push", async () => {
+      const context = routeContext(refusedPayload(), headersFor());
+
+      await createRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(422);
+      expect(context.body.error).toEqual({
+        code: REQUEST_TEXT_NOT_ALLOWED_CODE,
+        message: REQUEST_TEXT_NOT_ALLOWED_MESSAGE,
+        fields: null,
+      });
+      expect(JSON.stringify(context.body)).not.toMatch(/stupid|bitch/i);
+      expect(await MealRequest.countDocuments({})).toBe(0);
+      expect(await RequestOperation.countDocuments({})).toBe(0);
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(notifySubscribersForRequest).not.toHaveBeenCalled();
+      expect(startHelperNewRequestPush).not.toHaveBeenCalled();
+    });
+
+    it("with an operation identity, commits no Request and no ledger row (not CREATED, not NO-CREATE)", async () => {
+      const context = routeContext(refusedPayload(), headersFor("mongo-op-u11-fresh-refused"));
+
+      await createRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(422);
+      expect(await MealRequest.countDocuments({})).toBe(0);
+      expect(await RequestOperation.countDocuments({})).toBe(0);
+      expect(
+        await RequestOperation.collection.countDocuments({ operationId: "mongo-op-u11-fresh-refused" })
+      ).toBe(0);
+    });
+
+    it("leaves the refused identity genuinely unused: a corrected submission under it creates normally", async () => {
+      const refused = routeContext(refusedPayload(), headersFor("mongo-op-u11-corrected"));
+      await createRequest(refused.req, refused.res);
+      expect(refused.statusCode).toBe(422);
+
+      const corrected = routeContext(canonicalAsapPayload(), headersFor("mongo-op-u11-corrected"));
+      await createRequest(corrected.req, corrected.res);
+
+      expect(corrected.statusCode).toBe(201);
+      expect(await MealRequest.countDocuments({})).toBe(1);
+      expect(await RequestOperation.countDocuments({ operationId: "mongo-op-u11-corrected" })).toBe(1);
+    });
+
+    it("the existing D2 mechanism still retires a refused identity: terminalization writes NO-CREATE and replay answers OPERATION_NOT_CREATED", async () => {
+      const refused = routeContext(refusedPayload(), headersFor("mongo-op-u11-d2"));
+      await createRequest(refused.req, refused.res);
+      expect(refused.statusCode).toBe(422);
+
+      // What D2 recovery does for a refusal that follows an empty lookup.
+      const outcome = await terminalizeOperation("mongo-op-u11-d2", String(requesterAId));
+      expect(outcome).toEqual({ outcome: "not-created" });
+
+      const replay = routeContext(refusedPayload(), headersFor("mongo-op-u11-d2"));
+      await createRequest(replay.req, replay.res);
+      expect(replay.statusCode).toBe(409);
+      expect(replay.body.error.code).toBe(OPERATION_NOT_CREATED_CODE);
+      expect(await MealRequest.countDocuments({})).toBe(0);
+    });
+
+    it("recovery is not conflated with a fresh refusal: replaying an operation that CREATED answers CREATED even for text the filter would now refuse", async () => {
+      const first = routeContext(canonicalAsapPayload(), headersFor("mongo-op-u11-created"));
+      await createRequest(first.req, first.res);
+      expect(first.statusCode).toBe(201);
+      const createdId = first.body.request.id;
+      resendSend.mockClear();
+      startHelperNewRequestPush.mockClear();
+
+      const replay = routeContext(refusedPayload(), headersFor("mongo-op-u11-created"));
+      await createRequest(replay.req, replay.res);
+
+      expect(replay.statusCode).toBe(200);
+      expect(replay.body.request.id).toBe(createdId);
+      expect(await MealRequest.countDocuments({})).toBe(1);
+      expect(await RequestOperation.countDocuments({})).toBe(1);
+      // A reconciliation re-sends nothing.
+      expect(resendSend).not.toHaveBeenCalled();
+      expect(startHelperNewRequestPush).not.toHaveBeenCalled();
+    });
+
+    it("consumes no quota: repeated refusals leave the full daily allowance available", async () => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const refused = routeContext(refusedPayload(), headersFor(`mongo-op-u11-quota-refused-${attempt}`));
+        await createRequest(refused.req, refused.res);
+        expect(refused.statusCode).toBe(422);
+      }
+      for (let created = 0; created < 3; created += 1) {
+        const ok = routeContext(canonicalAsapPayload(), headersFor(`mongo-op-u11-quota-ok-${created}`));
+        await createRequest(ok.req, ok.res);
+        expect(ok.statusCode).toBe(201);
+      }
+      expect(await MealRequest.countDocuments({})).toBe(3);
+    });
+
+    it("filters before the quota read: a refused attempt at the daily limit is the filtering refusal, not REQUEST_LIMIT_REACHED", async () => {
+      for (let created = 0; created < 3; created += 1) {
+        const ok = routeContext(canonicalAsapPayload(), headersFor(`mongo-op-u11-limit-${created}`));
+        await createRequest(ok.req, ok.res);
+        expect(ok.statusCode).toBe(201);
+      }
+      const refused = routeContext(refusedPayload(), headersFor("mongo-op-u11-limit-refused"));
+      await createRequest(refused.req, refused.res);
+
+      expect(refused.statusCode).toBe(422);
+      expect(refused.body.error.code).toBe(REQUEST_TEXT_NOT_ALLOWED_CODE);
+      expect(await MealRequest.countDocuments({})).toBe(3);
+    });
+
+    it("never persists refused text anywhere in the database", async () => {
+      const refused = routeContext(refusedPayload(), headersFor("mongo-op-u11-nowhere"));
+      await createRequest(refused.req, refused.res);
+
+      const db = mongoose.connection.db!;
+      for (const { name } of await db.listCollections().toArray()) {
+        const documents = await db.collection(name).find({}).toArray();
+        expect(JSON.stringify(documents)).not.toMatch(/stupid|bitch/i);
+      }
+    });
   });
 });

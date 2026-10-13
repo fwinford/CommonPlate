@@ -299,7 +299,8 @@ final class HelperSuccessForegroundProgressionTests: XCTestCase {
         let coordinator = HelperSuccessPresentationCoordinator(
             performResolve: { effects.resolved.append($0.id) },
             planProvider: { _ in tiny },
-            drivesAutomatically: true
+            drivesAutomatically: true,
+            isVoiceOverRunning: { false }
         )
         coordinator.returnHome = { effects.homeReturns.append($0.id) }
         let confirmation = makeConfirmation(kind: .notificationSent)
@@ -332,7 +333,8 @@ final class HelperSuccessForegroundProgressionTests: XCTestCase {
                     HelperSuccessCopy.accessibilityAnnouncement(for: confirmation.kind)
                 )
             },
-            drivesAutomatically: false
+            drivesAutomatically: false,
+            isVoiceOverRunning: { false }
         )
         coordinator.returnHome = { effects.homeReturns.append($0.id) }
         return (coordinator, effects)

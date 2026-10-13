@@ -294,7 +294,9 @@ struct ContentView: View {
                 HelperSuccessView(
                     confirmation: confirmation,
                     phase: helperSuccessPhase(for: confirmation),
-                    reduceMotion: reduceMotion
+                    reduceMotion: reduceMotion,
+                    isAnnouncementPending: helperSuccessCoordinator
+                        .isAnnouncementPending(for: confirmation.id)
                 )
                 .id(confirmation.id)
                 .transition(.opacity)

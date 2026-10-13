@@ -37,6 +37,12 @@ interface ActiveReservationDocument extends PublicRequestDocument {
  */
 interface PlacedParticipationDocument extends PublicRequestDocument {
   notificationStatus?: "pending" | "sent" | "failed";
+  /**
+   * W4-U1.1 content-free marker, `select: false` on the model and requested
+   * explicitly below. Reported to the placing helper only, and only
+   * affirmatively; never part of any public projection.
+   */
+  contactMessageSuppressed?: boolean;
 }
 
 /**
@@ -116,6 +122,10 @@ export async function getActiveReservation(
       undefined,
       { sort: { placedAt: -1 } }
     )
+      // Private and `select: false`: only this participant-scoped read, which
+      // is already bound to the placing helper by `helperParticipantId`, may
+      // ask for the W4-U1.1 suppression marker.
+      .select("+contactMessageSuppressed")
       .lean()
       .exec();
 
@@ -136,6 +146,14 @@ export async function getActiveReservation(
           placedDocument.notificationStatus === "failed"
             ? { status: placedDocument.notificationStatus }
             : null,
+        // W4-U1.1: affirmative-only, like `alreadyParticipated` and
+        // `isOwnRequest`. Present and `true` only when the durable,
+        // content-free marker proves the optional Message was suppressed at
+        // placement; otherwise absent, never an explicit `false`, so a client
+        // can only ever show suppression the backend actually established.
+        ...(placedDocument.contactMessageSuppressed === true
+          ? { messageSuppressed: true }
+          : {}),
       },
     });
   } catch {

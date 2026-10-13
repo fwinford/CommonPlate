@@ -472,6 +472,104 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
         }
     }
 
+    // MARK: - Automatic Home return (narrow H1 closeout)
+
+    /// After success the path is cleared to Home. A later claim/confirmation
+    /// republish must leave Home alone rather than rewriting it to Active
+    /// Requests.
+    func testClearedPostSuccessStackRemainsHome() {
+        XCTAssertEqual(
+            FulfillRequestView.claimedFlowPath(
+                [],
+                activeRequestID: nil,
+                confirmationRequestID: nil,
+                requestID: heldID
+            ),
+            []
+        )
+    }
+
+    func testPathsWithoutThisRequestsHelperDestinationAreUnchanged() {
+        let other = foodRequest(id: otherID)
+        let paths: [[AppRoute]] = [
+            [.settings],
+            [.activeRequests],
+            [.requestDetail(other)],
+            [.activeRequests, .fulfillment(other)]
+        ]
+        for path in paths {
+            for activeRequestID in [nil, otherID] {
+                XCTAssertEqual(
+                    FulfillRequestView.claimedFlowPath(
+                        path,
+                        activeRequestID: activeRequestID,
+                        confirmationRequestID: nil,
+                        requestID: heldID
+                    ),
+                    path,
+                    "\(path) / \(String(describing: activeRequestID))"
+                )
+            }
+        }
+    }
+
+    func testRequestDetailForThisRequestStillUnwindsWhenReservationEndsWithoutSuccess() {
+        let path: [AppRoute] = [.activeRequests, .requestDetail(foodRequest(id: heldID))]
+        XCTAssertEqual(
+            FulfillRequestView.claimedFlowPath(
+                path,
+                activeRequestID: nil,
+                confirmationRequestID: nil,
+                requestID: heldID
+            ),
+            [.activeRequests]
+        )
+    }
+
+    /// claim → fulfill → afterHelperSuccess → dismiss confirmation → sync
+    /// again: the path stays Home with no claim and no confirmation left.
+    func testStoreSuccessOrderingLeavesHomeAfterConfirmationDismissal() async throws {
+        let store = try await makeStoreHolding(heldID)
+        let held = try XCTUnwrap(store.activeClaim?.request)
+        var path: [AppRoute] = [.activeRequests, .fulfillment(held)]
+
+        ClaimFlowURLProtocol.enqueue(.response(data: Data("""
+        {
+          "request": \(requestObject(id: heldID, status: "placed")),
+          "notification": { "status": "sent" }
+        }
+        """.utf8)))
+        try await store.fulfill(
+            requestID: heldID,
+            orderNumber: "70154321",
+            eta: "15 minutes",
+            contactMessage: nil
+        )
+        let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
+
+        // While the success presentation is up, the path is left alone.
+        path = FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: store.fulfillmentConfirmation?.requestID,
+            requestID: heldID
+        )
+        path = AppRoute.afterHelperSuccess(from: path)
+        XCTAssertEqual(path, [])
+
+        store.dismissFulfillmentConfirmation(id: confirmation.id)
+        XCTAssertNil(store.activeClaim)
+        XCTAssertNil(store.fulfillmentConfirmation)
+
+        path = FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: store.fulfillmentConfirmation?.requestID,
+            requestID: heldID
+        )
+        XCTAssertEqual(path, [])
+    }
+
     // MARK: - Helpers
 
     private func back(from path: [AppRoute]) -> [AppRoute] {

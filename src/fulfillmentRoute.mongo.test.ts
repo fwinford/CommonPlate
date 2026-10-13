@@ -34,6 +34,7 @@ import {
   fulfillRequest,
   PLACED_RETENTION_MS,
 } from "./fulfillmentRoute.js";
+import { getActiveReservation } from "./reservationRoute.js";
 import { buildEffectiveAvailabilityFilter } from "./requestAvailability.js";
 import { buildPublicRequestDetailResponse } from "./requestListResponse.js";
 import { getStats } from "./statsRoute.js";
@@ -238,7 +239,11 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(stored?.orderNumber).toBe("70154321");
     expect(stored?.etaText).toBe("15 minutes");
     expect(stored?.fulfillerEmail).toBe(boundHelperEmail);
-    expect(stored?.contactMessage).toBe("Your meal is ready");
+    // W4-U1.1: the allowed Message is transient (email only) and is not
+    // retained on the Request; no marker is written either, since nothing was
+    // suppressed.
+    expect(stored).not.toHaveProperty("contactMessage");
+    expect(stored).not.toHaveProperty("contactMessageSuppressed");
     expect(stored?.notificationStatus).toBe("sent");
     expect(stored?.notificationAttemptedAt).toBeInstanceOf(Date);
     expect(stored).not.toHaveProperty("claimedAt");
@@ -390,11 +395,11 @@ describeMongo("transactional fulfillment against a real replica set", () => {
   });
 
   it("leaves no contact message anywhere when the helper omits one", async () => {
-    // Seeded with a message so the omission has something stale to clear
-    // rather than passing on an already-empty field.
-    const { request, rawToken } = await createClaimedRequest({
-      contactMessage: "stale message from an earlier attempt",
-    });
+    // W4-U1.1: the Message is never persisted at all (the Request schema has no
+    // such field), so there is nothing stale to seed or clear; the stronger
+    // "never stored anywhere, allowed or blocked" proofs live in the W4-U1.1
+    // block below.
+    const { request, rawToken } = await createClaimedRequest();
     const context = routeContext(String(request._id), {
       claimToken: rawToken,
       fulfillment: {
@@ -910,6 +915,230 @@ describeMongo("transactional fulfillment against a real replica set", () => {
         .lean();
       expect(lock?.activeReservationRequestId).toBeNull();
       expect(lock?.activeReservationClaimExpiresAt).toBeNull();
+    });
+  });
+
+  // W4-U1.1: the helper's optional Message is filtered after authority/payload
+  // validation and before the durable placement mutation. A match commits the
+  // real placement exactly once as if no Message existed, stores nothing but a
+  // content-free marker (atomically, in the placement update), and never emails
+  // the Message. An allowed Message is transient email-only context.
+  describe("W4-U1.1 helper Message filtering and content-free suppression", () => {
+    const BLOCKED = "thanks you stupid bitch";
+    const ALLOWED = "I'll shoot you a text when I'm at the front door";
+
+    function bodyWith(rawToken: string, contactMessage?: string) {
+      return {
+        claimToken: rawToken,
+        fulfillment: {
+          orderNumber: "70154321",
+          eta: "15 minutes",
+          ...(contactMessage === undefined ? {} : { contactMessage }),
+        },
+      };
+    }
+
+    /** The raw stored document, bypassing every Mongoose projection default. */
+    function rawRequest(id: unknown) {
+      return MealRequest.collection.findOne({ _id: id as mongoose.Types.ObjectId });
+    }
+
+    /** Whether any document in any collection of this database contains `text`. */
+    async function databaseContains(text: string): Promise<boolean> {
+      const db = mongoose.connection.db!;
+      for (const { name } of await db.listCollections().toArray()) {
+        const documents = await db.collection(name).find({}).toArray();
+        if (JSON.stringify(documents).includes(text)) return true;
+      }
+      return false;
+    }
+
+    it("allowed Message: emailed, never persisted anywhere, no marker", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const context = routeContext(String(request._id), bodyWith(rawToken, ALLOWED));
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      expect(context.body).not.toHaveProperty("messageSuppressed");
+      expect(sendFulfillmentEmail).toHaveBeenCalledOnce();
+      expect(sendFulfillmentEmail.mock.calls[0][3]).toBe(ALLOWED);
+
+      const raw = await rawRequest(request._id);
+      expect(raw).not.toHaveProperty("contactMessage");
+      expect(raw).not.toHaveProperty("contactMessageSuppressed");
+      expect(await databaseContains(ALLOWED)).toBe(false);
+    });
+
+    it("blocked Message: placement commits once, Message neither stored nor emailed, marker written atomically", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      await Participant.updateOne(
+        { _id: helperParticipantId },
+        {
+          $set: {
+            activeReservationRequestId: request._id,
+            activeReservationClaimExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+          },
+        }
+      ).exec();
+      const context = routeContext(String(request._id), bodyWith(rawToken, BLOCKED));
+
+      await fulfillRequest(context.req, context.res);
+
+      // A successful placement, not a refusal.
+      expect(context.statusCode).toBe(200);
+      expect(context.body.request.status).toBe("placed");
+      expect(context.body.notification).toEqual({ status: "sent" });
+      expect(context.body.messageSuppressed).toBe(true);
+
+      // The placement transaction's other effects are exactly as without a Message.
+      const stored = await MealRequest.findById(request._id)
+        .select("+contactMessageSuppressed")
+        .lean();
+      expect(stored?.status).toBe("placed");
+      expect(stored?.orderNumber).toBe("70154321");
+      expect(stored?.contactMessageSuppressed).toBe(true);
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+      const lock = await Participant.findById(helperParticipantId)
+        .select("+activeReservationRequestId")
+        .lean();
+      expect(lock?.activeReservationRequestId).toBeNull();
+
+      // Content-free: the marker is a boolean; the blocked text exists nowhere.
+      const raw = await rawRequest(request._id);
+      expect(raw).not.toHaveProperty("contactMessage");
+      expect(raw?.contactMessageSuppressed).toBe(true);
+      expect(await databaseContains(BLOCKED)).toBe(false);
+      expect(await databaseContains("stupid")).toBe(false);
+      expect(await databaseContains("bitch")).toBe(false);
+
+      // The requester email goes out normally, without the Message.
+      expect(sendFulfillmentEmail).toHaveBeenCalledOnce();
+      expect(sendFulfillmentEmail.mock.calls[0][3]).toBeUndefined();
+      expect(sendFulfillmentEmail.mock.calls[0][4]).toBe(boundHelperEmail);
+    });
+
+    it("a retry after a suppressed placement is REQUEST_ALREADY_PLACED: no second placement, ledger row, or email", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const first = routeContext(String(request._id), bodyWith(rawToken, BLOCKED));
+      await fulfillRequest(first.req, first.res);
+      expect(first.statusCode).toBe(200);
+
+      const retry = routeContext(String(request._id), bodyWith(rawToken, BLOCKED));
+      await fulfillRequest(retry.req, retry.res);
+
+      expect(retry.statusCode).toBe(409);
+      expect(retry.body.error.code).toBe("REQUEST_ALREADY_PLACED");
+      expect(JSON.stringify(retry.body)).not.toMatch(/suppress|stupid|bitch/i);
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+      expect(sendFulfillmentEmail).toHaveBeenCalledOnce();
+    });
+
+    it("requester-email failure cannot undo a suppressed placement or its marker", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      sendFulfillmentEmail.mockRejectedValueOnce(new Error("provider unavailable"));
+      const context = routeContext(String(request._id), bodyWith(rawToken, BLOCKED));
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      expect(context.body.notification).toEqual({ status: "failed" });
+      expect(context.body.messageSuppressed).toBe(true);
+      const raw = await rawRequest(request._id);
+      expect(raw?.status).toBe("placed");
+      expect(raw?.notificationStatus).toBe("failed");
+      expect(raw?.contactMessageSuppressed).toBe(true);
+    });
+
+    it("writes no marker when placement itself is refused (wrong token, expired claim)", async () => {
+      const wrong = await createClaimedRequest();
+      const expired = await createClaimedRequest({ claimExpiresAt: new Date(Date.now() - 1) });
+      const wrongContext = routeContext(
+        String(wrong.request._id),
+        bodyWith(generateClaimToken(), BLOCKED)
+      );
+      const expiredContext = routeContext(
+        String(expired.request._id),
+        bodyWith(expired.rawToken, BLOCKED)
+      );
+
+      await fulfillRequest(wrongContext.req, wrongContext.res);
+      await fulfillRequest(expiredContext.req, expiredContext.res);
+
+      expect(wrongContext.statusCode).toBe(403);
+      expect(expiredContext.statusCode).toBe(409);
+      for (const id of [wrong.request._id, expired.request._id]) {
+        const raw = await rawRequest(id);
+        expect(raw?.status).toBe("claimed");
+        expect(raw).not.toHaveProperty("contactMessageSuppressed");
+      }
+      expect(await Fulfillment.countDocuments()).toBe(0);
+      expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+    });
+
+    it("same-flow placed-result recovery reports suppression only when the durable marker proves it", async () => {
+      const suppressed = await createClaimedRequest();
+      const suppressedContext = routeContext(
+        String(suppressed.request._id),
+        bodyWith(suppressed.rawToken, BLOCKED)
+      );
+      await fulfillRequest(suppressedContext.req, suppressedContext.res);
+      expect(suppressedContext.statusCode).toBe(200);
+
+      // The participant-scoped placed read the helper client uses for recovery.
+      const recovery = routeContext("unused", undefined, continuationHeaders);
+      await getActiveReservation(recovery.req, recovery.res);
+
+      expect(recovery.body.reservation).toBeNull();
+      expect(recovery.body.placement.request.id).toBe(String(suppressed.request._id));
+      expect(recovery.body.placement.request.status).toBe("placed");
+      expect(recovery.body.placement.messageSuppressed).toBe(true);
+      // Never inside the public request projection, and no text anywhere.
+      expect(recovery.body.placement.request).not.toHaveProperty("messageSuppressed");
+      expect(JSON.stringify(recovery.body)).not.toMatch(/stupid|bitch|contactMessage/i);
+
+      // A later placement with an allowed (or no) Message is not suppressed:
+      // the field is simply absent, never an explicit false.
+      await Participant.updateOne(
+        { _id: helperParticipantId },
+        { $unset: { activeReservationRequestId: 1, activeReservationClaimExpiresAt: 1 } }
+      ).exec();
+      const allowed = await createClaimedRequest();
+      const allowedContext = routeContext(
+        String(allowed.request._id),
+        bodyWith(allowed.rawToken, ALLOWED)
+      );
+      await MealRequest.updateOne(
+        { _id: suppressed.request._id },
+        { $set: { placedAt: new Date(Date.now() - 60 * 60 * 1000) } }
+      ).exec();
+      await fulfillRequest(allowedContext.req, allowedContext.res);
+      expect(allowedContext.statusCode).toBe(200);
+
+      const later = routeContext("unused", undefined, continuationHeaders);
+      await getActiveReservation(later.req, later.res);
+      expect(later.body.placement.request.id).toBe(String(allowed.request._id));
+      expect(later.body.placement).not.toHaveProperty("messageSuppressed");
+    });
+
+    it("never exposes the marker through the public request projection", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const context = routeContext(String(request._id), bodyWith(rawToken, BLOCKED));
+      await fulfillRequest(context.req, context.res);
+
+      // Selected explicitly, exactly as only the participant-scoped read does.
+      const withMarker = await MealRequest.findById(request._id)
+        .select("+contactMessageSuppressed")
+        .lean();
+      expect(withMarker?.contactMessageSuppressed).toBe(true);
+      const publicDetail = buildPublicRequestDetailResponse(withMarker as any, new Date());
+      expect(JSON.stringify(publicDetail)).not.toMatch(
+        /suppress|contactMessage|stupid|bitch/i
+      );
+
+      // And an ordinary read does not even carry it.
+      const ordinary = await MealRequest.findById(request._id).lean();
+      expect(ordinary).not.toHaveProperty("contactMessageSuppressed");
     });
   });
 });

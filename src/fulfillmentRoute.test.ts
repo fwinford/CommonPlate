@@ -271,6 +271,91 @@ describe("POST /api/request/:id/fulfill validation", () => {
     expect(startSession).not.toHaveBeenCalled();
   });
 
+  // Pickup ETA is a fixed-option field (W4-H1 closeout): the backend, not the
+  // picker, decides what is accepted. Refusals stop before a session opens.
+  it.each([
+    ["free text", "whenever I get there"],
+    ["a different duration", "20 minutes"],
+    ["a wrong case", "asap"],
+    ["a bare number", "15"],
+    ["a duration with extra text", "15 minutes please"],
+    ["an empty string", ""],
+    ["a non-string", 15],
+  ])("rejects %s as a token-authorized ETA", async (_name, eta) => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext({
+      ...validBody(),
+      fulfillment: { ...validBody().fulfillment, eta },
+    });
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe(
+      "INVALID_FULFILLMENT_PAYLOAD"
+    );
+    expect(startSession).not.toHaveBeenCalled();
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["free text", "whenever I get there"],
+    ["a different duration", "20 minutes"],
+    ["a wrong case", "asap"],
+    ["blank", "   "],
+  ])("rejects %s as a participant-continuation ETA", async (_name, eta) => {
+    const startSession = vi.spyOn(mongoose, "startSession");
+    const context = routeContext(
+      { fulfillment: { ...validBody().fulfillment, eta } },
+      requestId,
+      { [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority }
+    );
+
+    await fulfillRequest(context.req, context.res);
+
+    expect(context.status).toHaveBeenCalledWith(400);
+    expect(responseBody(context).error.code).toBe(
+      "INVALID_FULFILLMENT_PAYLOAD"
+    );
+    expect(startSession).not.toHaveBeenCalled();
+    expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+  });
+
+  // Reaching `startSession` is itself the proof that validation let the value
+  // through, for both authorization shapes.
+  it.each(["ASAP", "15 minutes", "30 minutes", "45 minutes", "60 minutes"])(
+    "accepts the canonical ETA %s in both authorization shapes",
+    async (eta) => {
+      const bodies = [
+        {
+          ...validBody(),
+          fulfillment: { ...validBody().fulfillment, eta },
+        },
+        { fulfillment: { ...validBody().fulfillment, eta: `  ${eta}  ` } },
+      ];
+      for (const body of bodies) {
+        const startSession = vi
+          .spyOn(mongoose, "startSession")
+          .mockRejectedValue(new Error("stop after validation"));
+        const context = routeContext(
+          body,
+          requestId,
+          "claimToken" in body
+            ? {}
+            : { [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority }
+        );
+
+        await fulfillRequest(context.req, context.res);
+
+        expect(startSession).toHaveBeenCalledOnce();
+        expect(responseBody(context).error?.code).not.toBe(
+          "INVALID_FULFILLMENT_PAYLOAD"
+        );
+        startSession.mockRestore();
+      }
+    }
+  );
+
   // A CommonPlate Grubhub order number contains digits only. Every rejection
   // below stops before a session is opened, so nothing about an already-paid
   // real-world order is put at risk by a malformed value.

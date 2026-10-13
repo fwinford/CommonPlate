@@ -55,12 +55,25 @@ function stubVerifiedParticipant() {
   } as unknown as ReturnType<typeof Participant.findOne>);
 }
 
+/**
+ * The placed-result read requests the private W4-U1.1 suppression marker with
+ * `.select("+contactMessageSuppressed")`, so every double here supports both
+ * the bare `.lean()` chain (the active-claim read) and the `.select().lean()`
+ * chain. Each selection is recorded on the returned spy for assertions.
+ */
+function queryDouble(exec: ReturnType<typeof vi.fn>) {
+  const select = vi.fn();
+  const chain = { lean: () => ({ exec }), select };
+  select.mockReturnValue(chain);
+  return { chain, select };
+}
+
 function mockActiveReservationResult(result: unknown) {
-  return vi.spyOn(MealRequest, "findOne").mockReturnValue({
-    lean: () => ({
-      exec: vi.fn().mockResolvedValue(result),
-    }),
-  } as unknown as ReturnType<typeof MealRequest.findOne>);
+  const { chain, select } = queryDouble(vi.fn().mockResolvedValue(result));
+  const spy = vi
+    .spyOn(MealRequest, "findOne")
+    .mockReturnValue(chain as unknown as ReturnType<typeof MealRequest.findOne>);
+  return Object.assign(spy, { select });
 }
 
 /**
@@ -75,9 +88,11 @@ function mockSequentialActiveReservationResults(...results: unknown[]) {
   results.forEach((result) => {
     exec.mockResolvedValueOnce(result);
   });
-  return vi.spyOn(MealRequest, "findOne").mockReturnValue({
-    lean: () => ({ exec }),
-  } as unknown as ReturnType<typeof MealRequest.findOne>);
+  const { chain, select } = queryDouble(exec);
+  const spy = vi
+    .spyOn(MealRequest, "findOne")
+    .mockReturnValue(chain as unknown as ReturnType<typeof MealRequest.findOne>);
+  return Object.assign(spy, { select });
 }
 
 beforeEach(() => {
@@ -224,6 +239,90 @@ describe("GET /api/participant/active-reservation", () => {
       expect(responseBody(context).placement.notification).toBeNull();
     });
 
+    describe("W4-U1.1 content-free Message-suppression marker", () => {
+      const placedFixture = {
+        vendor: "Campus Market",
+        food: "Vegetable rice bowl",
+        pickupWindowText: "ASAP",
+        mealSwipes: 2,
+        windowStart: null,
+        windowEnd: null,
+        status: "placed",
+        createdAt: new Date(now.getTime() - 30 * 60 * 1000),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        placedAt: new Date(now.getTime() - 5 * 60 * 1000),
+        notificationStatus: "sent",
+      };
+
+      it("requests the private marker only on the participant-scoped placed read", async () => {
+        const query = mockSequentialActiveReservationResults(null, {
+          _id: new mongoose.Types.ObjectId("64f0000000000000000000f5"),
+          ...placedFixture,
+        });
+        const context = routeContext();
+
+        await getActiveReservation(context.req, context.res);
+
+        // The active-claim read (first) never selects it; the placed read does.
+        expect(query.select).toHaveBeenCalledTimes(1);
+        expect(query.select).toHaveBeenCalledWith("+contactMessageSuppressed");
+      });
+
+      it("reports messageSuppressed: true when the durable marker proves suppression at placement", async () => {
+        mockSequentialActiveReservationResults(null, {
+          _id: new mongoose.Types.ObjectId("64f0000000000000000000f6"),
+          ...placedFixture,
+          contactMessageSuppressed: true,
+        });
+        const context = routeContext();
+
+        await getActiveReservation(context.req, context.res);
+
+        const body = responseBody(context);
+        expect(body.placement.messageSuppressed).toBe(true);
+        expect(body.placement.request.status).toBe("placed");
+        expect(body.placement.notification).toEqual({ status: "sent" });
+      });
+
+      it("omits the field entirely, never false, when suppression is not established", async () => {
+        for (const marker of [undefined, false, null, "true", 1]) {
+          vi.restoreAllMocks();
+          stubVerifiedParticipant();
+          mockSequentialActiveReservationResults(null, {
+            _id: new mongoose.Types.ObjectId("64f0000000000000000000f7"),
+            ...placedFixture,
+            ...(marker === undefined ? {} : { contactMessageSuppressed: marker }),
+          });
+          const context = routeContext();
+
+          await getActiveReservation(context.req, context.res);
+
+          const body = responseBody(context);
+          expect(Object.keys(body.placement).sort()).toEqual([
+            "notification",
+            "request",
+          ]);
+          expect(JSON.stringify(body)).not.toMatch(/messageSuppressed|contactMessage/);
+        }
+      });
+
+      it("never places the marker inside the public request projection", async () => {
+        mockSequentialActiveReservationResults(null, {
+          _id: new mongoose.Types.ObjectId("64f0000000000000000000f8"),
+          ...placedFixture,
+          contactMessageSuppressed: true,
+        });
+        const context = routeContext();
+
+        await getActiveReservation(context.req, context.res);
+
+        const body = responseBody(context);
+        expect(body.placement.request).not.toHaveProperty("messageSuppressed");
+        expect(body.placement.request).not.toHaveProperty("contactMessageSuppressed");
+        expect(body.reservation).toBeNull();
+      });
+    });
+
     it("resolves null placement when this participant has never placed a still-existing request", async () => {
       const query = mockSequentialActiveReservationResults(null, null);
       const context = routeContext();
@@ -239,11 +338,12 @@ describe("GET /api/participant/active-reservation", () => {
   });
 
   it("answers 503 without leaking detail when the lookup fails", async () => {
-    vi.spyOn(MealRequest, "findOne").mockReturnValue({
-      lean: () => ({
-        exec: vi.fn().mockRejectedValue(new Error("connection reset")),
-      }),
-    } as unknown as ReturnType<typeof MealRequest.findOne>);
+    const { chain } = queryDouble(
+      vi.fn().mockRejectedValue(new Error("connection reset"))
+    );
+    vi.spyOn(MealRequest, "findOne").mockReturnValue(
+      chain as unknown as ReturnType<typeof MealRequest.findOne>
+    );
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const context = routeContext();
 

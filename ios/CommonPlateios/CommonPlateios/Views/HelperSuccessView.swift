@@ -13,6 +13,15 @@
 // is active advances the presentation, so the success haptic, the VoiceOver
 // announcement, the readable dwell, and the Home return are never consumed
 // while the helper cannot perceive them.
+//
+// W4-U1.1 (2026-10-10 VoiceOver success-timing contract): when VoiceOver is
+// running at the resolve — read once per confirmation — the Home return also
+// waits for the matching announcement to finish (never before the readable
+// dwell, bounded by an active-time ceiling), with at most one announcement
+// repost and no second haptic. Without VoiceOver the timing is unchanged. While
+// that announcement is pending the combined success element stays out of the
+// accessibility tree, so VoiceOver focus cannot cut the announcement short; it
+// is exposed once the wait ends.
 import Combine
 import SwiftUI
 import UIKit
@@ -20,6 +29,9 @@ import UIKit
 /// The exact H1 success copy, keyed by the authoritative email outcome.
 enum HelperSuccessCopy {
     static let headline = "Thanks for helping."
+
+    /// W4-U1.1 (2026-10-08) headline for the Message-suppressed variant only.
+    static let messageSuppressedHeadline = "Thanks for helping someone out."
 
     /// `nil` when the email outcome is unknown: that state has a headline
     /// only. `requester` is the intentional noun for this surface.
@@ -34,10 +46,47 @@ enum HelperSuccessCopy {
         }
     }
 
+    /// W4-U1.1 (2026-10-08) approved suppression card copy, shown only when the
+    /// backend established that placement committed but the helper's optional
+    /// Message was suppressed. The card is subordinate to the success headline.
+    static let messageSuppressedCardTitle = "Message not sent"
+    static let messageSuppressedCardBody =
+        "Your message didn’t meet CommonPlate’s guidelines."
+    /// The approved visual line break (after `meet`). Display only; the spoken
+    /// and tested sentence is `messageSuppressedCardBody`.
+    static let messageSuppressedCardBodyDisplay =
+        "Your message didn’t meet\nCommonPlate’s guidelines."
+
+    static func headline(messageSuppressed: Bool) -> String {
+        messageSuppressed ? messageSuppressedHeadline : headline
+    }
+
+    /// The lines under the headline. In the suppression variant the moderation
+    /// card is the secondary content, so there is no requester-email-status
+    /// line (suppression-only; ordinary variants are exactly `secondaryLine`).
+    static func supportingLines(
+        for kind: FulfillmentConfirmationKind,
+        messageSuppressed: Bool
+    ) -> [String] {
+        if messageSuppressed {
+            return []
+        }
+        return [secondaryLine(for: kind)].compactMap { $0 }
+    }
+
     /// One concise, truthful VoiceOver announcement: exactly the visible copy.
-    static func accessibilityAnnouncement(for kind: FulfillmentConfirmationKind) -> String {
-        [headline, secondaryLine(for: kind)]
-            .compactMap { $0 }
+    static func accessibilityAnnouncement(
+        for kind: FulfillmentConfirmationKind,
+        messageSuppressed: Bool = false
+    ) -> String {
+        if messageSuppressed {
+            return [
+                messageSuppressedHeadline,
+                messageSuppressedCardTitle,
+                messageSuppressedCardBody,
+            ].joined(separator: " ")
+        }
+        return ([headline] + supportingLines(for: kind, messageSuppressed: false))
             .joined(separator: " ")
     }
 }
@@ -85,6 +134,18 @@ struct HelperSuccessMotionPlan: Equatable {
     let ticketRotation: Double
     let mealStartScale: CGFloat
     let copyRise: CGFloat
+    /// W4-U1.1 VoiceOver success-timing contract (2026-10-10): the safety
+    /// ceiling on the wait for the spoken announcement to finish, measured in
+    /// active time from the announcement's post. It applies only when
+    /// VoiceOver was running at the resolve and is never the normal timing
+    /// mechanism — Home follows the announcement's own completion event.
+    ///
+    /// 9 s: the longest announcement (the suppression variant, 14 words) is
+    /// estimated at roughly 6 s at VoiceOver's default speech rate, so 9 s
+    /// leaves about 1.5x headroom while staying inside the accepted 10 s cap.
+    /// An estimate, not a measurement: physical-device proof must record the
+    /// real completion time at the normal rate against this value.
+    var announcementCeiling: Duration = .seconds(9)
 
     static let standard = HelperSuccessMotionPlan(
         ticketHold: .milliseconds(350),
@@ -125,6 +186,69 @@ struct HelperSuccessMotionPlan: Equatable {
     }
 }
 
+/// W4-U1.1: the VoiceOver half of the Home gate for one confirmation. It exists
+/// only when VoiceOver was running at the resolve, and then holds the Home
+/// return until the spoken announcement has finished — or, as a bounded
+/// fallback, until the active-time ceiling since its post. Pure: it learns of
+/// the announcement's end only through `finished(wasSuccessful:)`.
+struct HelperSuccessAnnouncementGate: Equatable {
+    /// The complete announcement is re-posted at most once, so it is posted
+    /// at most twice in total.
+    static let maximumReposts = 1
+
+    private(set) var isCompleted = false
+    private(set) var repostsUsed = 0
+    /// A failed or interrupted announcement is waiting for an active scene to
+    /// be re-posted. Never set once the one repost has been used.
+    private(set) var repostIsDue = false
+    /// Active time since the announcement was last posted.
+    private(set) var elapsed: Duration
+
+    init(elapsed: Duration) {
+        self.elapsed = elapsed
+    }
+
+    mutating func credit(_ activeElapsed: Duration) {
+        elapsed += activeElapsed
+    }
+
+    /// The matching announcement finished. Success completes the gate; a
+    /// failure makes the one repost due, if it is still unused. A failure
+    /// after the repost is spent changes nothing: the ceiling decides.
+    mutating func finished(wasSuccessful: Bool) {
+        guard !isCompleted else { return }
+        if wasSuccessful {
+            isCompleted = true
+            repostIsDue = false
+        } else if repostsUsed < Self.maximumReposts {
+            repostIsDue = true
+        }
+    }
+
+    /// The scene became inactive while the announcement was still pending.
+    mutating func interrupted() {
+        guard !isCompleted, repostsUsed < Self.maximumReposts else { return }
+        repostIsDue = true
+    }
+
+    /// `true` at most `maximumReposts` times, and only while pending and due:
+    /// the caller re-posts the announcement only — never the haptic — and the
+    /// ceiling clock restarts from this post.
+    mutating func takeRepost() -> Bool {
+        guard !isCompleted, repostIsDue, repostsUsed < Self.maximumReposts else {
+            return false
+        }
+        repostIsDue = false
+        repostsUsed += 1
+        elapsed = .zero
+        return true
+    }
+
+    func isReleased(ceiling: Duration) -> Bool {
+        isCompleted || elapsed >= ceiling
+    }
+}
+
 /// The success presentation's active-time state machine for one confirmation.
 /// Pure and deterministic: it only moves when told how much *active* time has
 /// passed, and it never moves backwards past the resolve.
@@ -154,6 +278,10 @@ struct HelperSuccessProgression: Equatable {
     private(set) var phase: Phase = .ticket
     /// Active time accumulated in the current phase.
     private(set) var phaseElapsed: Duration = .zero
+    /// W4-U1.1: `nil` unless VoiceOver was running at the resolve, which is
+    /// read exactly once per confirmation. When set, it alone holds the Home
+    /// return beyond the readable dwell; the phases and visuals are unchanged.
+    private(set) var announcement: HelperSuccessAnnouncementGate?
 
     init(confirmationID: UUID, plan: HelperSuccessMotionPlan) {
         self.confirmationID = confirmationID
@@ -164,7 +292,20 @@ struct HelperSuccessProgression: Equatable {
         phase == .dwelling || phase == .finished
     }
 
-    /// Active time remaining until the next milestone, or `nil` once finished.
+    /// The Home return is still waiting on the spoken announcement. `false`
+    /// once the presentation has finished, by completion or by the ceiling.
+    var isAwaitingAnnouncement: Bool {
+        guard phase != .finished, let announcement else { return false }
+        return !announcement.isCompleted
+    }
+
+    private var isAnnouncementReleased: Bool {
+        announcement?.isReleased(ceiling: plan.announcementCeiling) ?? true
+    }
+
+    /// Active time remaining until the next time-driven milestone, or `nil`
+    /// once finished. While an announcement is pending the Home return can
+    /// also come sooner, from the announcement's completion event.
     var timeUntilNextMilestone: Duration? {
         switch phase {
         case .ticket:
@@ -172,7 +313,15 @@ struct HelperSuccessProgression: Equatable {
         case .transforming:
             return max(.zero, plan.transformDuration - phaseElapsed)
         case .dwelling:
-            return max(.zero, plan.readableDwell - phaseElapsed)
+            let dwellRemaining = max(.zero, plan.readableDwell - phaseElapsed)
+            guard let announcement, !announcement.isCompleted else {
+                return dwellRemaining
+            }
+            // Never before the dwell, and otherwise at the ceiling.
+            return max(
+                dwellRemaining,
+                max(.zero, plan.announcementCeiling - announcement.elapsed)
+            )
         case .finished:
             return nil
         }
@@ -180,9 +329,17 @@ struct HelperSuccessProgression: Equatable {
 
     /// Credits `activeElapsed` of foreground time and returns every milestone
     /// crossed, in order. Callers only pass time that was actually active.
-    mutating func advance(by activeElapsed: Duration) -> [Milestone] {
+    ///
+    /// `voiceOverRunningAtResolve` is evaluated at most once, at the moment the
+    /// resolve is crossed; its answer owns this confirmation's Home timing
+    /// until the presentation finishes.
+    mutating func advance(
+        by activeElapsed: Duration,
+        voiceOverRunningAtResolve: () -> Bool = { false }
+    ) -> [Milestone] {
         guard phase != .finished, activeElapsed >= .zero else { return [] }
         phaseElapsed += activeElapsed
+        announcement?.credit(activeElapsed)
         var milestones: [Milestone] = []
         while true {
             switch phase {
@@ -194,7 +351,11 @@ struct HelperSuccessProgression: Equatable {
                 phaseElapsed -= plan.transformDuration
                 phase = .dwelling
                 milestones.append(.resolve)
-            case .dwelling where phaseElapsed >= plan.readableDwell:
+                if voiceOverRunningAtResolve() {
+                    // Time already past the resolve counts from the post.
+                    announcement = HelperSuccessAnnouncementGate(elapsed: phaseElapsed)
+                }
+            case .dwelling where phaseElapsed >= plan.readableDwell && isAnnouncementReleased:
                 phaseElapsed = .zero
                 phase = .finished
                 milestones.append(.returnHome)
@@ -203,6 +364,19 @@ struct HelperSuccessProgression: Equatable {
                 return milestones
             }
         }
+    }
+
+    /// The matching announcement reported its end. A no-op when VoiceOver was
+    /// not running at the resolve.
+    mutating func announcementDidFinish(wasSuccessful: Bool) {
+        announcement?.finished(wasSuccessful: wasSuccessful)
+    }
+
+    /// `true` when a failed or interrupted announcement may be re-posted now.
+    /// At most once per confirmation; the caller never replays the haptic.
+    mutating func takeAnnouncementRepost() -> Bool {
+        guard phase != .finished else { return false }
+        return announcement?.takeRepost() ?? false
     }
 
     /// The scene stopped being active. Nothing already perceived is undone,
@@ -216,9 +390,49 @@ struct HelperSuccessProgression: Equatable {
             phaseElapsed = .zero
         case .dwelling:
             phaseElapsed = .zero
+            announcement?.interrupted()
         case .finished:
             break
         }
+    }
+}
+
+/// One live `UIAccessibility.announcementDidFinishNotification` observation.
+/// Owned by the coordinator for exactly as long as a confirmation is waiting
+/// on its spoken announcement; invalidated explicitly when that wait ends and
+/// again, as a backstop, when it is released.
+private final class HelperSuccessAnnouncementObservation {
+    private let center: NotificationCenter
+    private var token: NSObjectProtocol?
+
+    /// `handler` receives the finished announcement's string and whether it
+    /// completed, on whichever thread the notification was posted from.
+    init(
+        center: NotificationCenter,
+        handler: @escaping (_ announcement: String?, _ wasSuccessful: Bool?) -> Void
+    ) {
+        self.center = center
+        token = center.addObserver(
+            forName: UIAccessibility.announcementDidFinishNotification,
+            object: nil,
+            queue: nil
+        ) { notification in
+            handler(
+                notification.userInfo?[UIAccessibility.announcementStringValueUserInfoKey] as? String,
+                notification.userInfo?[UIAccessibility.announcementWasSuccessfulUserInfoKey] as? Bool
+            )
+        }
+    }
+
+    func invalidate() {
+        if let token {
+            center.removeObserver(token)
+        }
+        token = nil
+    }
+
+    deinit {
+        invalidate()
     }
 }
 
@@ -240,30 +454,69 @@ final class HelperSuccessPresentationCoordinator: ObservableObject {
     private let performResolve: (FulfillmentConfirmation) -> Void
     private let planProvider: (Bool) -> HelperSuccessMotionPlan
     private let drivesAutomatically: Bool
+    private let repostAnnouncement: (FulfillmentConfirmation) -> Void
+    private let isVoiceOverRunning: () -> Bool
+    private let notificationCenter: NotificationCenter
     private let clock = ContinuousClock()
     private var lastTick: ContinuousClock.Instant?
     private var driver: Task<Void, Never>?
+    /// Live only while the current confirmation is waiting on its spoken
+    /// announcement; retired the moment that wait ends, however it ends.
+    private var announcementObservation: HelperSuccessAnnouncementObservation?
 
     /// `drivesAutomatically: false` lets tests step active time explicitly
     /// through `advance(by:)`.
+    ///
+    /// W4-U1.1 seams: `isVoiceOverRunning` is read once per confirmation, at
+    /// the resolve; `repostAnnouncement` posts the announcement alone (never
+    /// the haptic); `notificationCenter` carries
+    /// `announcementDidFinishNotification`.
     init(
         performResolve: @escaping (FulfillmentConfirmation) -> Void = HelperSuccessPresentationCoordinator.productionResolve,
         planProvider: @escaping (Bool) -> HelperSuccessMotionPlan = HelperSuccessMotionPlan.plan(reduceMotion:),
-        drivesAutomatically: Bool = true
+        drivesAutomatically: Bool = true,
+        repostAnnouncement: @escaping (FulfillmentConfirmation) -> Void = HelperSuccessPresentationCoordinator.productionAnnounce,
+        isVoiceOverRunning: @escaping () -> Bool = { UIAccessibility.isVoiceOverRunning },
+        notificationCenter: NotificationCenter = .default
     ) {
         self.performResolve = performResolve
         self.planProvider = planProvider
         self.drivesAutomatically = drivesAutomatically
+        self.repostAnnouncement = repostAnnouncement
+        self.isVoiceOverRunning = isVoiceOverRunning
+        self.notificationCenter = notificationCenter
     }
 
     /// The exactly-once resolve effects: one semantic success haptic and one
     /// concise VoiceOver announcement.
     static func productionResolve(_ confirmation: FulfillmentConfirmation) {
         CommonPlateHaptics.success()
+        productionAnnounce(confirmation)
+    }
+
+    /// The complete announcement alone. The only VoiceOver post of this
+    /// presentation; also what a bounded repost sends.
+    static func productionAnnounce(_ confirmation: FulfillmentConfirmation) {
         UIAccessibility.post(
             notification: .announcement,
-            argument: HelperSuccessCopy.accessibilityAnnouncement(for: confirmation.kind)
+            argument: HelperSuccessCopy.accessibilityAnnouncement(
+                for: confirmation.kind,
+                messageSuppressed: confirmation.messageSuppressed
+            )
         )
+    }
+
+    /// W4-U1.1: `true` while `confirmationID`'s explicit VoiceOver
+    /// announcement is still pending — from the resolve until the matching
+    /// announcement completes or the presentation finishes (including the
+    /// ceiling). Always `false` when VoiceOver was not running at the resolve
+    /// and for any other confirmation. The view uses it to keep the combined
+    /// success element from becoming a competing focus target meanwhile.
+    func isAnnouncementPending(for confirmationID: UUID) -> Bool {
+        guard let progression, progression.confirmationID == confirmationID else {
+            return false
+        }
+        return progression.isAwaitingAnnouncement
     }
 
     /// Mirrors the store's current confirmation. Idempotent for the same
@@ -273,10 +526,13 @@ final class HelperSuccessPresentationCoordinator: ObservableObject {
         guard let newConfirmation else {
             confirmation = nil
             progression = nil
+            endAnnouncementObservation()
             stopDriver()
             return
         }
         guard newConfirmation.id != confirmation?.id else { return }
+        // A previous confirmation's wait can never be observed by this one.
+        endAnnouncementObservation()
         confirmation = newConfirmation
         progression = HelperSuccessProgression(
             confirmationID: newConfirmation.id,
@@ -292,6 +548,9 @@ final class HelperSuccessPresentationCoordinator: ObservableObject {
         guard isActive != isSceneActive else { return }
         isSceneActive = isActive
         if isActive {
+            // An announcement the interruption cut short is re-posted once,
+            // before the active-time wait restarts from that post.
+            postDueAnnouncementRepost()
             restartDriver()
         } else {
             stopDriver()
@@ -308,7 +567,12 @@ final class HelperSuccessPresentationCoordinator: ObservableObject {
               current.confirmationID == confirmation.id else {
             return
         }
-        let milestones = current.advance(by: activeElapsed)
+        // VoiceOver is read once per confirmation, at the resolve; a
+        // confirmation that already resolved is never read, or gated, again.
+        let alreadyResolved = ledger.hasResolved(confirmation.id)
+        let milestones = current.advance(by: activeElapsed) { [isVoiceOverRunning] in
+            !alreadyResolved && isVoiceOverRunning()
+        }
         progression = current
         for milestone in milestones {
             switch milestone {
@@ -316,9 +580,14 @@ final class HelperSuccessPresentationCoordinator: ObservableObject {
                 break
             case .resolve:
                 if ledger.claimSuccessHaptic(for: confirmation.id) {
+                    // Observe before posting, so no finish can be missed.
+                    if current.isAwaitingAnnouncement {
+                        observeAnnouncementFinish(for: confirmation)
+                    }
                     performResolve(confirmation)
                 }
             case .returnHome:
+                endAnnouncementObservation()
                 if let returnHome, ledger.claimHomeReturn(for: confirmation.id) {
                     returnHome(confirmation)
                 }
@@ -327,6 +596,89 @@ final class HelperSuccessPresentationCoordinator: ObservableObject {
         if progression?.phase == .finished {
             stopDriver()
         }
+    }
+
+    // MARK: - VoiceOver announcement completion (W4-U1.1)
+
+    private func observeAnnouncementFinish(for confirmation: FulfillmentConfirmation) {
+        endAnnouncementObservation()
+        let confirmationID = confirmation.id
+        let expected = HelperSuccessCopy.accessibilityAnnouncement(
+            for: confirmation.kind,
+            messageSuppressed: confirmation.messageSuppressed
+        )
+        announcementObservation = HelperSuccessAnnouncementObservation(
+            center: notificationCenter
+        ) { [weak self] announcement, wasSuccessful in
+            // Only a finish for this confirmation's own announcement string
+            // counts; any other announcement is ignored.
+            guard announcement == expected, let wasSuccessful else { return }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self?.announcementDidFinish(
+                        confirmationID: confirmationID,
+                        wasSuccessful: wasSuccessful
+                    )
+                }
+            } else {
+                Task { @MainActor in
+                    self?.announcementDidFinish(
+                        confirmationID: confirmationID,
+                        wasSuccessful: wasSuccessful
+                    )
+                }
+            }
+        }
+    }
+
+    private func endAnnouncementObservation() {
+        announcementObservation?.invalidate()
+        announcementObservation = nil
+    }
+
+    private func announcementDidFinish(confirmationID: UUID, wasSuccessful: Bool) {
+        guard announcementObservation != nil,
+              confirmation?.id == confirmationID else {
+            return
+        }
+        // Bring the active-time clocks current first, so a ceiling or dwell
+        // that has already elapsed is honored before this event is applied.
+        if drivesAutomatically, isSceneActive, lastTick != nil {
+            tick()
+        }
+        guard var current = progression,
+              current.confirmationID == confirmationID,
+              current.isAwaitingAnnouncement else {
+            return
+        }
+        current.announcementDidFinish(wasSuccessful: wasSuccessful)
+        progression = current
+        if wasSuccessful {
+            endAnnouncementObservation()
+            // Home now if the readable dwell is already complete; otherwise
+            // at the dwell's end.
+            advance(by: .zero)
+        } else {
+            postDueAnnouncementRepost()
+        }
+        if progression?.phase != .finished {
+            restartDriver()
+        }
+    }
+
+    /// Re-posts the complete announcement — never the haptic — when a failed
+    /// or interrupted one is due and the scene is active. The progression
+    /// allows this at most once per confirmation.
+    private func postDueAnnouncementRepost() {
+        guard isSceneActive,
+              let confirmation,
+              var current = progression,
+              current.confirmationID == confirmation.id,
+              current.takeAnnouncementRepost() else {
+            return
+        }
+        progression = current
+        repostAnnouncement(confirmation)
     }
 
     private func restartDriver() {
@@ -372,8 +724,14 @@ struct HelperSuccessView: View {
     let confirmation: FulfillmentConfirmation
     let phase: HelperSuccessProgression.Phase
     let reduceMotion: Bool
+    /// W4-U1.1: the explicit VoiceOver announcement is still pending. While it
+    /// is, the combined success element stays out of the accessibility tree so
+    /// VoiceOver cannot move focus onto it and cut the announcement short; it
+    /// is exposed again once the wait ends. Never set without VoiceOver.
+    var isAnnouncementPending: Bool = false
 
     @State private var isVisible = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var plan: HelperSuccessMotionPlan {
         HelperSuccessMotionPlan.plan(reduceMotion: reduceMotion)
@@ -387,8 +745,98 @@ struct HelperSuccessView: View {
         phase == .dwelling || phase == .finished
     }
 
+    /// The combined success element is unavailable to accessibility before the
+    /// resolve and, with VoiceOver running, while the explicit announcement is
+    /// pending (W4-U1.1). Temporary: the element is never removed for good.
+    static func hidesSuccessContentFromAccessibility(
+        phase: HelperSuccessProgression.Phase,
+        isAnnouncementPending: Bool
+    ) -> Bool {
+        let resolved = phase == .dwelling || phase == .finished
+        return !resolved || isAnnouncementPending
+    }
+
     private var transformAnimation: Animation {
         .timingCurve(0.3, 0, 0.2, 1, duration: plan.transformSeconds)
+    }
+
+    /// Suppression variant at an accessibility text size: the taller, wider
+    /// card plus the full-size motif can exceed a short iPhone's height, so only
+    /// decorative height gives way (full motif, then half size, then none).
+    /// Text keeps its full Dynamic Type size and is never truncated.
+    private var usesAccessibilitySuppressionLayout: Bool {
+        confirmation.messageSuppressed && dynamicTypeSize.isAccessibilitySize
+    }
+
+    @ViewBuilder
+    private var successContent: some View {
+        if usesAccessibilitySuppressionLayout {
+            ViewThatFits(in: .vertical) {
+                successStack(motifSize: 96, spacing: 22, compact: false)
+                successStack(motifSize: 48, spacing: 12, compact: false)
+                successStack(motifSize: nil, spacing: 0, compact: true)
+            }
+        } else {
+            successStack(motifSize: 96, spacing: 22, compact: false)
+        }
+    }
+
+    @ViewBuilder
+    private func successStack(motifSize: CGFloat?, spacing: CGFloat, compact: Bool) -> some View {
+        VStack(spacing: spacing) {
+            if let motifSize {
+                motif
+                    .scaleEffect(motifSize / 96)
+                    .frame(width: motifSize, height: motifSize)
+            }
+
+            VStack(spacing: compact ? 4 : 10) {
+                Text(HelperSuccessCopy.headline(messageSuppressed: confirmation.messageSuppressed))
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+                    // Suppression variant only: the taller accessibility-size
+                    // card must not squeeze the headline into an ellipsis.
+                    .fixedSize(horizontal: false, vertical: confirmation.messageSuppressed)
+                    .accessibilityIdentifier("helper-success-headline")
+
+                // Without suppression this is exactly the one existing
+                // requester-email line (or nothing). With suppression the
+                // subordinate moderation card replaces it. No control is
+                // added and the automatic Home return is unchanged.
+                if confirmation.messageSuppressed {
+                    messageSuppressedCard(compact: compact)
+                        .padding(.top, compact ? 0 : 6)
+                } else {
+                    ForEach(
+                        Array(
+                            HelperSuccessCopy.supportingLines(
+                                for: confirmation.kind,
+                                messageSuppressed: false
+                            ).enumerated()
+                        ),
+                        id: \.offset
+                    ) { _, line in
+                        Text(line)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("helper-success-secondary")
+                    }
+                }
+            }
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: CommonPlateStyle.Metrics.stateContentWidth)
+            .opacity(isTransformed ? 1 : 0)
+            .offset(y: isTransformed ? 0 : plan.copyRise)
+            .animation(transformAnimation, value: isTransformed)
+            .accessibilityElement(children: .combine)
+            .accessibilityHidden(
+                Self.hidesSuccessContentFromAccessibility(
+                    phase: phase,
+                    isAnnouncementPending: isAnnouncementPending
+                )
+            )
+        }
     }
 
     var body: some View {
@@ -396,34 +844,14 @@ struct HelperSuccessView: View {
             CommonPlateStyle.Color.baseCanvas
                 .ignoresSafeArea()
 
-            VStack(spacing: 22) {
-                motif
-                    .frame(width: 96, height: 96)
-
-                VStack(spacing: 10) {
-                    Text(HelperSuccessCopy.headline)
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(Color.primary)
-                        .accessibilityIdentifier("helper-success-headline")
-
-                    if let secondary = HelperSuccessCopy.secondaryLine(for: confirmation.kind) {
-                        Text(secondary)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("helper-success-secondary")
-                    }
-                }
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: CommonPlateStyle.Metrics.stateContentWidth)
-                .opacity(isTransformed ? 1 : 0)
-                .offset(y: isTransformed ? 0 : plan.copyRise)
-                .animation(transformAnimation, value: isTransformed)
-                .accessibilityElement(children: .combine)
-                .accessibilityHidden(!hasResolved)
-            }
-            .padding(.horizontal, CommonPlateStyle.Metrics.settingsPageInset)
-            // The approved composition sits a little above the geometric center.
-            .padding(.bottom, 60)
+            successContent
+                .padding(.horizontal, CommonPlateStyle.Metrics.settingsPageInset)
+                // The approved composition sits a little above the geometric center.
+                // The taller accessibility-size suppression card needs that room back.
+                .padding(
+                    .bottom,
+                    usesAccessibilitySuppressionLayout ? 0 : 60
+                )
         }
         .opacity(isVisible ? 1 : 0)
         .accessibilityAddTraits(.isModal)
@@ -442,6 +870,80 @@ struct HelperSuccessView: View {
             }
         }
     }
+
+    /// Compact, centered, soft-red moderation card (Figma `885:5652`, card
+    /// `1070:7082`): 272 pt wide, 12 pt horizontal / 10 pt vertical padding,
+    /// 3 pt content gap, 13 pt corners, `#D64045` 1 pt border on a `#FFF7F7`
+    /// surface; a 16 pt icon and 14 pt semibold title centered together (8 pt
+    /// gap, 18 pt line), the 13 pt regular body centered beneath (18 pt line).
+    /// Sizes scale with Dynamic Type from their Figma values at the default size.
+    ///
+    /// At accessibility text sizes the scaled icon and a single word of the
+    /// title no longer fit together in the fixed 272 pt card, which ellipsized
+    /// the title and broke the body mid-word. There the icon stacks above the
+    /// title and the card takes the available content width instead of the
+    /// fixed width; wrapping and height are free to differ from the default.
+    private func messageSuppressedCard(compact: Bool) -> some View {
+        // Last-resort short-screen variant: only the decorative icon is capped.
+        let icon = compact ? min(iconSize, 24) : iconSize
+        let accessibilityLayout = dynamicTypeSize.isAccessibilitySize
+        let titleLayout = accessibilityLayout
+            ? AnyLayout(VStackLayout(spacing: 3))
+            : AnyLayout(HStackLayout(spacing: 8))
+        return VStack(spacing: 3) {
+            titleLayout {
+                Image(systemName: "info.circle")
+                    .font(.system(size: icon))
+                    .frame(width: icon, height: icon)
+                    .accessibilityHidden(true)
+                Text(HelperSuccessCopy.messageSuppressedCardTitle)
+                    .font(.system(size: titleSize, weight: .semibold))
+                    .lineSpacing(titleLine - titleSize * Self.systemLineFactor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(HelperSuccessCopy.messageSuppressedCardBodyDisplay)
+                .font(.system(size: bodySize))
+                .lineSpacing(bodyLine - bodySize * Self.systemLineFactor)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(Self.moderationContent)
+        .multilineTextAlignment(.center)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(width: accessibilityLayout ? nil : 272)
+        .frame(maxWidth: accessibilityLayout ? .infinity : nil)
+        .background(
+            Self.moderationSurface,
+            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(Self.moderationContent, lineWidth: 1)
+        }
+        .accessibilityIdentifier("helper-success-message-suppressed")
+    }
+
+    // Figma `#D64045` / `#FFF7F7`, with the same dark-mode counterparts as the
+    // requester moderation notice.
+    private static let moderationContent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 240 / 255, green: 130 / 255, blue: 135 / 255, alpha: 1)
+            : UIColor(red: 214 / 255, green: 64 / 255, blue: 69 / 255, alpha: 1)
+    })
+    private static let moderationSurface = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 214 / 255, green: 64 / 255, blue: 69 / 255, alpha: 0.16)
+            : UIColor(red: 255 / 255, green: 247 / 255, blue: 247 / 255, alpha: 1)
+    })
+    /// Approximate natural line height of the system font as a multiple of its
+    /// point size, used to reach the Figma 18 pt lines.
+    private static let systemLineFactor: CGFloat = 1.19
+
+    @ScaledMetric(relativeTo: .footnote) private var iconSize: CGFloat = 16
+    @ScaledMetric(relativeTo: .footnote) private var titleSize: CGFloat = 14
+    @ScaledMetric(relativeTo: .footnote) private var bodySize: CGFloat = 13
+    @ScaledMetric(relativeTo: .footnote) private var titleLine: CGFloat = 18
+    @ScaledMetric(relativeTo: .footnote) private var bodyLine: CGFloat = 18
 
     @ViewBuilder
     private var motif: some View {

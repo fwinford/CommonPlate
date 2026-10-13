@@ -277,7 +277,23 @@ export interface IRequest extends Document {
   etaText?: string;
   placedAt?: Date;
   fulfillerEmail?: string;
-  contactMessage?: string;
+  /**
+   * W4-U1.1 content-free suppression marker: `true` only when the helper's
+   * optional fulfillment Message was refused by the participant-text filter
+   * and the placement committed without it. Written in the same atomic
+   * placement update that sets `status: "placed"`, so it can never disagree
+   * with committed placement, and it carries no Message text, term, or
+   * lexicon content. It exists solely so same-flow placed-result recovery
+   * (`GET /api/participant/active-reservation`) can truthfully report
+   * `placed + Message suppressed`; absence means "not established as
+   * suppressed", never a claim about what was sent.
+   *
+   * There is deliberately no stored Message field at all. The helper Message
+   * is transient fulfillment/email-only context (W4-U1.1): it lives in
+   * request memory for the immediate requester email attempt and is never
+   * persisted on the Request, the Fulfillment ledger, or anywhere else.
+   */
+  contactMessageSuppressed?: boolean;
   notificationStatus?: "pending" | "sent" | "failed";
   notificationAttemptedAt?: Date;
   visibleFrom?: Date;
@@ -351,7 +367,9 @@ const RequestSchema = new Schema<IRequest>({
   etaText: { type: String, trim: true },
   placedAt: { type: Date },
   fulfillerEmail: { type: String, trim: true, lowercase: true },
-  contactMessage: { type: String, trim: true },
+  // Private like every other lifecycle marker: never part of a public
+  // projection, selected explicitly only by the participant-scoped placed read.
+  contactMessageSuppressed: { type: Boolean, select: false },
   notificationStatus: {
     type: String,
     enum: ["pending", "sent", "failed"],

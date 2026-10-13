@@ -45,9 +45,12 @@ import {
 import {
   deriveFoodSummary,
   refineStructuredRequest,
+  structuredAuthoredTexts,
   structuredRequestFields,
   type StructuredRequestInput,
 } from "./structuredRequest.js";
+import { sendDay4Error } from "./day4Errors.js";
+import { isParticipantTextAllowed } from "./participantTextFilter.js";
 
 /**
  * Per-IP create throttle that returns the structured error envelope. Because
@@ -108,6 +111,23 @@ export const OPERATION_EXPIRED_MESSAGE =
 export const OPERATION_NOT_CREATED_CODE = "OPERATION_NOT_CREATED";
 export const OPERATION_NOT_CREATED_MESSAGE =
   "This request was not posted. Submit a new request if you still want one.";
+
+/**
+ * W4-U1.1 definitive pre-mutation refusal: requester-authored request text
+ * matched the participant-text filter (`participantTextFilter.ts`). Returned
+ * only after canonical validation and only for a genuinely new create attempt
+ * — an exact-operation replay is answered by reconciliation before this is
+ * ever reached — and strictly before the daily-limit read, the Request and
+ * `RequestOperation` writes, the requester confirmation, and both helper
+ * notifications. Nothing is written, so the refusal is never ambiguous.
+ *
+ * The message is the approved neutral requester copy. Neither it nor any other
+ * part of the response names the matched text, field, or term, and nothing
+ * about the match is logged.
+ */
+export const REQUEST_TEXT_NOT_ALLOWED_CODE = "REQUEST_TEXT_NOT_ALLOWED";
+export const REQUEST_TEXT_NOT_ALLOWED_MESSAGE =
+  "Keep request details respectful and food-related.";
 
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -921,6 +941,24 @@ export async function createRequest(
       .json(errorEnvelope("INVALID_REQUEST", "Invalid request payload"));
   }
   const validated = validation.request;
+
+  // W4-U1.1: authoritative filtering of requester-authored request text for a
+  // genuinely new create attempt. Deliberately placed after participant
+  // authority, exact-operation reconciliation, and canonical validation, and
+  // before the quota read and every creation side effect: a refusal here
+  // creates no Request, writes no operation ledger row, consumes no quota, and
+  // starts no confirmation, helper email, or helper push. `food` is derived
+  // from these same values, so it is not filtered separately.
+  if (
+    !structuredAuthoredTexts(validated.structured).every(isParticipantTextAllowed)
+  ) {
+    return sendDay4Error(
+      res,
+      422,
+      REQUEST_TEXT_NOT_ALLOWED_CODE,
+      REQUEST_TEXT_NOT_ALLOWED_MESSAGE
+    );
+  }
 
   try {
     // This serial read-before-write is intentionally best-effort abuse control,

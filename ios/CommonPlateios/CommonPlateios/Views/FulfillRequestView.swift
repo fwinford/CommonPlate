@@ -368,6 +368,16 @@ struct FulfillRequestView: View {
             return path
         }
         guard activeRequestID == requestID else {
+            // Once this request's helper destination has left the path (the
+            // post-success Home return clears it), a later claim or
+            // confirmation republish must not rewrite that path back to
+            // Active Requests.
+            guard AppRoute.containsHelperDestination(
+                in: path,
+                requestID: requestID
+            ) else {
+                return path
+            }
             return AppRoute.returningToActiveRequests(from: path)
         }
         return path
