@@ -560,7 +560,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -only-testing:CommonPlateiosTests
 ```
 
-The current accepted W4-F1 complete-iOS proof is **785 passed, 0 failed, 0 skipped, TEST SUCCEEDED**. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
+The W4-F1 acceptance complete-iOS proof was **785 passed, 0 failed, 0 skipped, TEST SUCCEEDED**; the current accepted baseline is recorded in section 13. Compilation alone is not a passing test result: the result bundle must complete and the output must contain `TEST SUCCEEDED`. Xcode GUI and terminal runs use the same shared scheme and `CommonPlateiosTests` target.
 
 **Focused routing and its limits.** After W4-S3, the complete target (1,713 tests) took about 242 seconds of test-action time, with most of that cost concentrated in the hosted Requester UI classes (`RequesterFormHostedFidelityTests`, `RequesterIncompleteVsInvalidHostedTests`, `RequesterMealPresentationHostedTests`, and `RequestCreationContinuityHostedGeometryTests`). Focused `-only-testing:CommonPlateiosTests/<TestClass>` runs are tier 1 and tier 2 proof under [Verification tiers and post-fix invalidation](#verification-tiers-and-post-fix-invalidation); they are acceptance evidence (tier 3) only for change classes that section 11 allows to use them, and never replace a complete-target run that a full-regression trigger or an explicit slice contract requires. Named test groups are listed in [Verification routing manifests](#verification-routing-manifests) below. `-skip-testing` is never acceptance evidence: it may shorten a local loop, and any result obtained with it must be rerun with `-only-testing` filters or the unchanged complete command before it counts. Class names and timings drift; re-check the live test target rather than treating a manifest as a maintained list.
 
@@ -733,9 +733,82 @@ The accepted "fresh data on Home return" physical result is recorded above as
 Faith observed it; it is not documented as a background-to-foreground refresh
 guarantee. See the open question raised at H4 closeout.
 
+### W4-D2 Exact Request-Create Terminal Reconciliation acceptance
+
+W4-D2 is accepted (not yet COMMITTED). It extends W3-D1 (section 9 above,
+`docs/system-contract.md` section 6.3) with exact-operation terminal
+reconciliation, Success→Home continuity, and the exact-created-request Home
+continuity exception (`docs/system-contract.md` section 6.4).
+
+Focused iOS coverage for this acceptance: `RequestCreateTerminalReconciliationTests`
+(the full recovery matrix — stable unresolved, identity-unavailable,
+authority-mismatch, and terminal NO-CREATE Path A/Path B, including the
+confirmed matrix-row-2 payload-unreadable-reaching-NO-CREATE case),
+`RequestCreateDurableOperationTests` and `RequestCreatePendingOperationScopeTests`
+(durable recovery-identity envelope, legacy-record recovery, fresh-submission
+classification unchanged), `RequestCreationViewTests` and
+`RequestFoodDraftSessionTests` (Path A form restoration and Path B honest-empty
+fallback, with no reconstruction/guessing of unreadable fields),
+`RequestFetchingTests` and `HomeOwnershipPartitionRegressionTests` (the
+Success→Home continuity insertion narrowly superseding the prior W4-R2
+no-insertion behavior), `HomeExactCreatedRequestAvailabilityTests` (new — the
+exact-created-request loading/unavailable exception, including that it never
+reports the board as populated and never leaks stale broader/helper/discovery
+content), `RequestCreationContinuityTests`, `RequestCreationContinuityLandingTests`,
+`RequestCreationContinuityFallbackCrossfadeTests`, and
+`RequestCreationContinuityHomeRevealTests` (the coordinated card-to-card
+crossfade fallback and valid-target landing geometry), and
+`RequestCreationContinuityHostedGeometryTests` (new — hosted regression
+coverage, mounting the real production view inside a real `NavigationStack`
+and a real `UIWindow` with a non-zero simulator safe area, for two proven
+physical-device geometry defects: a named `CoordinateSpace` not resolving
+across the `NavigationStack` hosting boundary, fixed by measuring in
+`.global`; and a slot-frame commit reading a captured-once `.task` parameter
+instead of the latest delivered value, fixed by mirroring it into `@State`
+before commit).
+
+At acceptance: complete `CommonPlateiosTests` — **1,381 passed, 0 failed, 0
+skipped**. `git diff --check` passed.
+
+**Hosted (non-UI-test) geometry regression proof.** Per section 10's note that
+this repository has no iOS UI-test target, `RequestCreationContinuityHostedGeometryTests`
+is this repository's established technique for proving rendered end-state
+geometry without one: it mounts the real production `RequestCreationContinuityView`
+and `HomeOwnedRequestSlotFrameKey` wiring inside a real `NavigationStack`-hosted
+Home slot in a `UIWindow` carrying the simulator's own non-zero safe area, and
+reads the actually-drawn pixels. It proves rendered end-state geometry against
+Home's real slot for the covered scenarios; it does not replace physical-device
+proof of smoothness or of the absence of a visible jump mid-travel.
+
+**Physical-device acceptance.** Faith completed a physical-iPhone visual
+acceptance walkthrough and explicitly accepted W4-D2 on that basis. Confirmed
+visually on device: the standard-motion Posting → Success → Home continuity
+sequence landing at Home's real requester-owned slot; the geometry-fallback
+coordinated crossfade when no usable landing target is captured; the
+exact-created-request appearing in `Your request(s)` while broader Home
+content is loading/unavailable; and both standard motion and Reduce Motion for
+this sequence after the geometry repair above.
+
+**Accepted verification limitation.** As recorded in the current weekly spec's
+W4-D2 card, no deterministic, safe, development-only way currently exists to
+exercise D2's physical recovery states (stable unresolved; terminal NO-CREATE
+Path A; terminal NO-CREATE Path B; write-uncertain/response-loss) on a
+physical device. Physical-device termination/relaunch, network-interruption
+timing/recovery, and provider/environment behavior for these recovery states
+were **not** exercised during the acceptance walkthrough above and remain
+unperformed, consistent with the equivalent W3-D1 limitation recorded in this
+document. This is an accepted verification limitation, not evidence that
+these specific recovery states were physically proven, and it does not
+establish Release/Archive/TestFlight signing or environment behavior, which
+remains open (`docs/system-contract.md` section 11). A separate, narrow
+requester-timing observation from the same walkthrough (`Scheduled pickups
+reopen tomorrow.`) is not a D2 behavior and is not covered by this
+acceptance; see the current weekly spec's deferral ledger for its Week HQ
+routing.
+
 ### W4-R4 Structured Meal Requests & Multi-Screenshot Evidence acceptance
 
-**W4-R4 is accepted (not yet COMMITTED).** Faith explicitly accepted W4-R4 on
+**W4-R4 is accepted and COMMITTED (`7fedbfe`).** Faith explicitly accepted W4-R4 on
 2026-09-29 on the basis of the complete implementation, automated
 verification, independent review, and the physical R4 verification recorded
 below. This subsection records the accepted verification state; see the
@@ -769,15 +842,16 @@ request-create operation surfaces R4's structured payload flows through
 `MealSwipeQuantityTests.swift`, `ParticipantContinuationTests.swift`,
 `RemoveEmailTests.swift`).
 
-**Accepted complete iOS target.** The complete `CommonPlateiosTests`
+**Accepted complete iOS target.** The latest complete `CommonPlateiosTests`
 target at R4 acceptance: **1,483 passed, 0 failed, TEST SUCCEEDED**. A final
 focused provenance/badge-unification implementation pass measured **225
-tests, 0 failures**. This was the accepted baseline at R4 acceptance (section 13 below); it
-has since been superseded by the W4-S3 consent-authority revision figure
-(1,744 total, 1,742 passed, 0 failed, 2 configuration skips, TEST SUCCEEDED), which is the current accepted baseline.
-`git diff --check` was clean after the final implementation;
-nothing has been committed for this correction — COMMITTED requires Faith's
-separate approval of the final staging set and an actual commit.
+tests, 0 failures**. At R4 acceptance this result became the accepted
+baseline (section 13 below), superseding the prior W4-D2 acceptance figure
+(1,381 passed, 0 failed, 0 skipped); it has since been superseded by the
+W4-S3 figures, the latest being the consent-authority revision figure
+(1,744 total, 1,742 passed, 0 failed, 2 expected configuration skips), which
+is the current accepted baseline (section 13). `git diff --check` was clean after the final
+implementation. R4 was subsequently committed as `7fedbfe`.
 
 **Physical-device proof.** Distinct from the automated/simulator proof above,
 Faith completed a physical-iPhone requester and Screenshot Assistance
@@ -980,7 +1054,7 @@ These results are reference evidence, not a substitute for rerunning affected ch
 | `npm test` | Passed at W4-Q1 acceptance: 1,537 passed, 335 Mongo-gated skipped |
 | `npm run test:mongo` | Passed at W4-Q1 acceptance: 335 passed across 24 files |
 | `npm run ci-check` | Passed (lint, typecheck, prune, build), at the W4-H2 final ownership rereview — not independently rerun for Q1; see the Q1 coverage subsection above for the checks that were |
-| `CommonPlateiosTests` | At W4-R2 acceptance: **1,104 passed, 0 failed**. At W4-H4 acceptance, measured in isolated worktrees: **1,009 passed, 0 failed, TEST SUCCEEDED** for the clean W4-Q1 commit plus exactly the W4-H4 commit set — the figure the target reported once H4 landed. The same clean Q1 commit alone measures 976, and the full H4 working tree including then-in-progress R2/S1 work measured 1,032. See the W4-H4 subsection in section 9 for the attribution table and for the flagged 1,001-versus-976 discrepancy in the Q1 record. At W4-R4 acceptance: **1,483 passed, 0 failed, TEST SUCCEEDED**; a final focused provenance/badge-unification pass separately measured 225 tests, 0 failures At W4-S3 acceptance, as re-accepted after OBS1/Datadog removal: **1,713 passed, 0 failed, 0 skipped**. At W4-S3 consent-authority revision re-acceptance (current accepted baseline): **1,744 total, 1,742 passed, 0 failed, 2 expected configuration skips** (S2.1 development-evaluation tests gated by configuration), TEST SUCCEEDED. At W4-H3 acceptance (grandfathered complete-target gate, measured on the H3 candidate whose base predates W4-QA1/W4-VP1; not additive to the S3 figure above): **1,993 executed, 0 failed, 0 skipped**. |
+| `CommonPlateiosTests` | At W4-R2 acceptance: **1,104 passed, 0 failed**. At W4-H4 acceptance, measured in isolated worktrees: **1,009 passed, 0 failed, TEST SUCCEEDED** for the clean W4-Q1 commit plus exactly the W4-H4 commit set — the figure the target reported once H4 landed. The same clean Q1 commit alone measures 976, and the full H4 working tree including then-in-progress R2/S1 work measured 1,032. See the W4-H4 subsection in section 9 for the attribution table and for the flagged 1,001-versus-976 discrepancy in the Q1 record. At W4-D2 acceptance: **1,381 passed, 0 failed, 0 skipped**. At W4-R4 acceptance: **1,483 passed, 0 failed, TEST SUCCEEDED**; a final focused provenance/badge-unification pass separately measured 225 tests, 0 failures. At W4-S3 acceptance, as re-accepted after OBS1/Datadog removal: **1,713 passed, 0 failed, 0 skipped**. At W4-S3 consent-authority revision re-acceptance (current accepted baseline): **1,744 total, 1,742 passed, 0 failed, 2 expected configuration skips** (S2.1 development-evaluation tests gated by configuration), TEST SUCCEEDED. At W4-H3 acceptance (grandfathered complete-target gate, measured on the H3 candidate whose base predates W4-QA1/W4-VP1; not additive to the S3 figure above): **1,993 executed, 0 failed, 0 skipped**. |
 | Release generic iOS Simulator build | Succeeded at W4-S3 acceptance and again at the consent-authority revision re-acceptance; succeeded on the W4-H3 acceptance candidate |
 | Release unsigned generic iOS device build | Succeeded at W4-S3 acceptance and again at the consent-authority revision re-acceptance (unsigned; not a signed/Archive/TestFlight result) |
 | `npm run build:client` | Passed; no tracked bundle diff (no browser-client source changed in N2, D1, H2, N0, or Q1) |
@@ -1016,6 +1090,8 @@ W4-R2 acceptance evidence (the pushed Request Food navigation, the Q1-consuming 
 
 W3-H2 durable one-successful-participation enforcement, marketplace/detail privacy isolation, and fulfillment re-entry evidence is recorded above and in `docs/system-contract.md` section 5.1. **W3-H2 was accepted without an iOS UI-test target**, so the literal SwiftUI stale-detail render/tap scheduling sequence was not driven end-to-end through UI automation or physical-device interaction; production predicate/action logic and wiring are covered by unit/source-level tests and the full iOS target instead. That remaining limitation is accepted, not a failed or pending check, and must not be described as UI-test or physical-device proof; it does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document).
 
-W4-R4 acceptance evidence (structured Meal Exchange/Dining Dollars representation, multi-screenshot Assistance proposal validation, per-field manual authority/provenance, incomplete-vs-invalid presentation, requester hosted-geometry fidelity, and the unified Meal-row provenance badge correction) is recorded above (W4-R4 Structured Meal Requests & Multi-Screenshot Evidence acceptance) and in the current weekly spec's W4-R4 card. **Faith explicitly accepted W4-R4 on 2026-09-29.** Its complete `CommonPlateiosTests` result (1,483 passed, 0 failed, TEST SUCCEEDED) was the accepted baseline at R4 acceptance and has since been superseded by the W4-S3 consent-authority revision figure (1,744 total, 1,742 passed, 0 failed, 2 configuration skips, TEST SUCCEEDED), the current accepted baseline recorded in the table above. Hardware-keyboard Tab traversal into the mounted hidden Meal editor remains deferred to W4-A1 and is not an R4 acceptance blocker. This evidence does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document). R4 is ACCEPTED, not yet COMMITTED.
+W4-D2 acceptance evidence (exact-operation terminal reconciliation extending W3-D1, the terminal NO-CREATE Path A/Path B recovery presentation, the Success→Home continuity card handoff including the no-usable-target coordinated-crossfade fallback, and the exact-created-request Home continuity exception during broader board loading/unavailability) is recorded above (W4-D2 Exact Request-Create Terminal Reconciliation acceptance) and in `docs/system-contract.md` section 6.4. Faith's physical-device walkthrough is the authority for the rendered Success→Home continuity, fallback crossfade, and exact-created-request visibility observations; the hosted `RequestCreationContinuityHostedGeometryTests` proof is the authority for rendered end-state geometry absent a UI-test target. D2's physical recovery-state scenarios (stable unresolved, Path A, Path B, write-uncertain) remain an accepted, unperformed verification limitation, consistent with W3-D1's equivalent limitation above. It does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document). D2 is ACCEPTED but not yet COMMITTED.
+
+W4-R4 acceptance evidence (structured Meal Exchange/Dining Dollars representation, multi-screenshot Assistance proposal validation, per-field manual authority/provenance, incomplete-vs-invalid presentation, requester hosted-geometry fidelity, and the unified Meal-row provenance badge correction) is recorded above (W4-R4 Structured Meal Requests & Multi-Screenshot Evidence acceptance) and in the current weekly spec's W4-R4 card. **Faith explicitly accepted W4-R4 on 2026-09-29.** Its complete `CommonPlateiosTests` result (1,483 passed, 0 failed, TEST SUCCEEDED) was the accepted baseline at R4 acceptance, superseding the W4-D2 acceptance figure (1,381 passed, 0 failed, 0 skipped), and has since been superseded by the W4-S3 figures, the latest being the consent-authority revision figure (1,744 total, 1,742 passed, 0 failed, 2 expected configuration skips), the current accepted baseline recorded in the table above. Hardware-keyboard Tab traversal into the mounted hidden Meal editor remains deferred to W4-A1 and is not an R4 acceptance blocker. This evidence does not establish Release/Archive/TestFlight signing or environment behavior, which remains open (section 11 of the same document). R4 is COMMITTED (`7fedbfe`).
 
 W3-I1 physical/environmental verification remains unperformed for real NYU verification-email receipt and real-code redemption; uninstall/reinstall and new-device reverification; remaining Keychain lifecycle behavior; backup/device-migration exclusion where practical; and a real-address Change Email flow. The accepted W3-H1 flow has physically established same-install authority retention through terminate/relaunch continuation; neither that result nor source/simulator inspection proves the remaining outcomes.
