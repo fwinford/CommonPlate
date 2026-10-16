@@ -386,6 +386,16 @@ struct RequestDetailView: View {
         ScrollView {
             requestSummary
         }
+        .modifier(RequestDetailBlockMenu(
+            store: store,
+            requestID: request.id,
+            isOffered: ParticipantBlockAvailability.requestDetailOffersBlock(
+                ownership: currentOwnership,
+                hasVerifiedIdentity: identityStore.identity != nil,
+                holdsReservationForRequest: store.activeClaim?.requestID == request.id
+            ),
+            onBlocked: leaveAfterBlock
+        ))
         .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
         // W4-H1 (Figma 357:1085): the helper action lives in a pinned bottom
         // area beneath the flat request summary. Every gate below is
@@ -604,6 +614,12 @@ struct RequestDetailView: View {
                 }
             }
         )
+    }
+
+    /// The helper's own requester was blocked, so this request is unreachable:
+    /// navigation resets to Home (not Active Requests).
+    private func leaveAfterBlock() {
+        path = AppRoute.afterParticipantBlock(from: path)
     }
 
     /// The approved flat H1 request summary (Figma `Helper / Request Summary`,

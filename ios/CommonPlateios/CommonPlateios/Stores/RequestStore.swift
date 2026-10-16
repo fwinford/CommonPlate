@@ -492,6 +492,23 @@ enum ClaimErrorCode {
     static let internalFailure = "INTERNAL_FAILURE"
 }
 
+/// Whether the caller's own blocked-student list has been read (W4-U1.3).
+/// `failed` is distinct from an empty `loaded` list: a read that did not
+/// succeed is never presented as "you have blocked no one".
+enum BlockedStudentsLoadState: Equatable {
+    case notLoaded
+    case loading
+    case loaded
+    case failed
+}
+
+/// The result of asking the store to record a block. `blocked` carries only
+/// what the backend confirmed about the reservation.
+enum BlockSubmissionResult: Equatable {
+    case blocked(reservationReleased: Bool)
+    case notBlocked
+}
+
 /// Whether `POST /api/request` may be offered to the requester, as resolved
 /// from `GET /api/public-actions`.
 ///
@@ -760,6 +777,43 @@ final class RequestStore: ObservableObject {
 
     @Published private(set) var isReleasingClaim = false
     @Published private(set) var releaseClaimError: RequestServiceError?
+
+    // MARK: Participant blocking (W4-U1.3)
+
+    /// The blocks the current participant owns, as interaction context only.
+    /// Backend-confirmed: nothing is ever added here from a local guess, and a
+    /// list read for one participant is never shown for another.
+    @Published private(set) var blockedStudents: [BlockedStudent] = []
+    @Published private(set) var blockedStudentsLoadState: BlockedStudentsLoadState = .notLoaded
+    @Published private(set) var isBlockingParticipant = false
+    @Published private(set) var blockError: RequestServiceError?
+    @Published private(set) var removingBlockedStudentIDs: Set<String> = []
+    @Published private(set) var unblockError: RequestServiceError?
+    /// Requests whose optional helper Message this helper has already been told
+    /// is unavailable because they blocked the requester while helping. Only
+    /// ever added from a backend-confirmed block, and used purely to stop the
+    /// client offering — and sending — a Message the backend would withhold.
+    @Published private(set) var contactSuppressedRequestIDs: Set<String> = []
+    /// Subset of the above that this process knows this helper blocked itself
+    /// through the still-held "Yes, already placed" Helping path. It is
+    /// ephemeral by design: never reconstructed from the backend (which only
+    /// reports direction-agnostic restriction), so a relaunch correctly falls
+    /// back to the neutral "contact unavailable" presentation.
+    @Published private(set) var callerBlockedRequestIDs: Set<String> = []
+    /// Reservations whose confirmed Stop helping must end at Home because the
+    /// backend holds the post-`Yes, already placed` lifecycle authority for
+    /// them. Lifecycle truth, kept apart from the two Block sets above: it
+    /// outlives this helper's own Unblock and is never inferred from, or
+    /// used to infer, whether or by whom anyone is blocked. Only ever written
+    /// from the authoritative active-reservation read (which reports it only
+    /// once no contact restriction remains), and ends with the claim.
+    @Published private(set) var stopReturnsHomeRequestIDs: Set<String> = []
+    /// The participant authority `blockedStudents` was read for.
+    private var blockedStudentsAuthority: String?
+    private var blockedStudentsGeneration = 0
+    /// Supersedes an in-flight post-Unblock restriction read when the
+    /// restriction state it would write has since been changed another way.
+    private var restrictionReconciliationGeneration = 0
 
     @Published private(set) var isFulfilling = false
     @Published private(set) var fulfillError: RequestServiceError?
@@ -2157,6 +2211,10 @@ final class RequestStore: ObservableObject {
                     request: reservation.request,
                     claimExpiresAt: reservation.claimExpiresAt,
                     claimExtendedAt: reservation.claimExtendedAt,
+                    // W4-U1.3: a Block never withholds the single extension. It is
+                    // offered under exactly the ordinary rules whether or not
+                    // direct contact is restricted, so availability reveals
+                    // nothing about a Block, in either direction.
                     isExtensionAvailable: Self.extensionIsAvailable(
                         claimExpiresAt: reservation.claimExpiresAt,
                         claimExtendedAt: reservation.claimExtendedAt,
@@ -2178,6 +2236,23 @@ final class RequestStore: ObservableObject {
                         participantAuthority: participantAuthority
                     )
                 )
+                // W4-U1.3: contact eligibility comes from the backend read, not
+                // from this process's memory of a Block mutation, so a
+                // relaunch cannot bring the optional Message back. It states
+                // only that contact is unavailable — never by whom or why.
+                if reservation.directContactRestricted {
+                    contactSuppressedRequestIDs.insert(reservation.request.id)
+                }
+                // Where a Stop of this reservation ends is backend lifecycle
+                // truth too, so it survives the relaunch that lost the Yes.
+                // While contact is restricted the read never carries it (Stop
+                // already ends at Home), so only an unrestricted read replaces
+                // what is known.
+                if reservation.stopReturnsHome {
+                    stopReturnsHomeRequestIDs.insert(reservation.request.id)
+                } else if !reservation.directContactRestricted {
+                    stopReturnsHomeRequestIDs.remove(reservation.request.id)
+                }
                 return .active(presentation)
             case .placed:
                 // W4-H1: the backend authoritatively reports no active
@@ -2353,7 +2428,13 @@ final class RequestStore: ObservableObject {
     /// and no release, extension, fulfillment, or ambiguity/recovery operation
     /// currently owns it.
     var canReleaseActiveClaim: Bool {
-        guard !isReleasingClaim,
+        // W4-U1.3: never while a Block for this reservation is still in
+        // flight. A Stop that committed ahead of a `Yes, already placed` would
+        // release the request through the ordinary branch before the backend
+        // could record that the order exists; `canBlockHelpedRequester` holds
+        // the mirror-image exclusion.
+        guard !isBlockingParticipant,
+              !isReleasingClaim,
               activeClaimReleaseAttempt == nil,
               !isExtendingClaim,
               activeClaimExtensionAttempt == nil,
@@ -2431,6 +2512,333 @@ final class RequestStore: ObservableObject {
             applyParticipantVerdict(
                 serviceError,
                 presentedAuthority: authorization.participantAuthority
+            )
+        }
+    }
+
+    // MARK: - Participant blocking (W4-U1.3)
+
+    /// Whether the helper may be asked to block the requester they are helping.
+    /// True only while this store would actually start the operation: a live,
+    /// claimed reservation this participant holds and nothing else owning it.
+    var canBlockHelpedRequester: Bool {
+        guard !isBlockingParticipant,
+              !isReleasingClaim,
+              activeClaimReleaseAttempt == nil,
+              !isExtendingClaim,
+              activeClaimExtensionAttempt == nil,
+              fulfillmentAmbiguityContext == nil,
+              !isFulfilling,
+              activeFulfillmentAttempt == nil,
+              participantAuthorityProvider() != nil,
+              let claim = activeClaim,
+              claim.request.status == .claimed,
+              claim.claimExpiresAt > Date(),
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID else {
+            return false
+        }
+        return true
+    }
+
+    /// Whether a confirmed Stop helping of this reservation ends at Home rather
+    /// than Active Requests: while direct contact is restricted (the existing
+    /// rule), or when the backend reports the post-`Yes` lifecycle for it —
+    /// which also covers the helper's own Unblock and a relaunch. Neither half
+    /// reads Block ownership. Read at the tap: both are cleared with the claim.
+    func stopHelpingEndsAtHome(requestID: String) -> Bool {
+        contactSuppressedRequestIDs.contains(requestID)
+            || stopReturnsHomeRequestIDs.contains(requestID)
+    }
+
+    /// `POST /api/request/:id/block` from the Helping surface, after the helper
+    /// answered whether the real Grubhub order already exists.
+    ///
+    /// - `externalOrderPlaced == false`: the backend ends the reservation in
+    ///   the same transaction that records the block; local reservation state
+    ///   clears only when it *confirms* that it did.
+    /// - `externalOrderPlaced == true`: the block takes effect and the
+    ///   reservation is untouched, so the order can still be recorded through
+    ///   the one placement path, and the helper keeps the ordinary extension
+    ///   and Stop helping. Nothing is released, reopened, or fabricated; the
+    ///   backend also records the private authority that keeps the request from
+    ///   ever being offered to another helper.
+    ///
+    /// An outcome that cannot be confirmed leaves every local state exactly as
+    /// it was and is never retried.
+    @discardableResult
+    func blockHelpedRequester(externalOrderPlaced: Bool) async -> BlockSubmissionResult {
+        guard canBlockHelpedRequester,
+              let claim = activeClaim,
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID,
+              let participantAuthority = participantAuthorityProvider() else {
+            return .notBlocked
+        }
+        let claimID = authorization.claimID
+        let requestID = authorization.requestID
+        isBlockingParticipant = true
+        blockError = nil
+        defer { isBlockingParticipant = false }
+
+        do {
+            let outcome = try await service.blockParticipant(
+                forRequestID: requestID,
+                externalOrderPlaced: externalOrderPlaced,
+                participantAuthority: participantAuthority
+            )
+            recordBlockedStudent(outcome.student, for: participantAuthority)
+            guard participantAuthorityProvider() == participantAuthority else {
+                return .blocked(reservationReleased: outcome.reservationReleased)
+            }
+            let claimIsStillCurrent = activeClaimAuthorization?.claimID == claimID
+                && activeClaim?.requestID == requestID
+
+            if outcome.reservationReleased {
+                if claimIsStillCurrent {
+                    clearActiveClaim()
+                }
+                refreshRequestsAfterClaimConflict()
+                return .blocked(reservationReleased: true)
+            }
+
+            // The block stands and the reservation was not ended. Optional
+            // direct contact is over for this request. The extension is not
+            // touched: a Block does not itself disable it.
+            contactSuppressedRequestIDs.insert(requestID)
+            // A post-Unblock restriction read already in flight predates this
+            // Block and must not clear what it just established.
+            restrictionReconciliationGeneration += 1
+            // The ownership-specific notice is knowledge of this exact live
+            // Helping path only: it is earned by a successful "Yes, already
+            // placed" answer, never inferred from a `No` that raced with a
+            // release or other lifecycle transition.
+            if externalOrderPlaced && claimIsStillCurrent {
+                callerBlockedRequestIDs.insert(requestID)
+            }
+            // A `No` the backend did not turn into a release (the reservation
+            // lapsed or was recorded in the meantime) is deliberately left to
+            // the accepted lifecycle: the local claim is neither cleared nor
+            // reported released here, and it ends only through its own expiry,
+            // the helper's explicit release, or confirmed placement.
+            refreshRequestsAfterClaimConflict()
+            return .blocked(reservationReleased: false)
+        } catch is CancellationError {
+            return .notBlocked
+        } catch {
+            let serviceError = Self.asServiceError(error)
+            blockError = serviceError
+            applyParticipantVerdict(serviceError, presentedAuthority: participantAuthority)
+            return .notBlocked
+        }
+    }
+
+    /// `POST /api/request/:id/block` from Request Detail, for a request the
+    /// participant is not holding. The backend decides who the other party is;
+    /// the client names a request and nothing else.
+    @discardableResult
+    func blockRequesterOfViewedRequest(requestID: String) async -> BlockSubmissionResult {
+        guard !isBlockingParticipant,
+              let participantAuthority = participantAuthorityProvider() else {
+            return .notBlocked
+        }
+        // A reservation this participant holds on the request is blocked only
+        // through the Helping flow, which asks the external-order question.
+        guard activeClaim?.requestID != requestID else {
+            blockError = .serverError(
+                code: ParticipantBlockErrorCode.externalOrderAnswerRequired,
+                message: ""
+            )
+            return .notBlocked
+        }
+        isBlockingParticipant = true
+        blockError = nil
+        defer { isBlockingParticipant = false }
+
+        do {
+            let outcome = try await service.blockParticipant(
+                forRequestID: requestID,
+                externalOrderPlaced: nil,
+                participantAuthority: participantAuthority
+            )
+            recordBlockedStudent(outcome.student, for: participantAuthority)
+            refreshRequestsAfterClaimConflict()
+            return .blocked(reservationReleased: outcome.reservationReleased)
+        } catch is CancellationError {
+            return .notBlocked
+        } catch {
+            let serviceError = Self.asServiceError(error)
+            blockError = serviceError
+            applyParticipantVerdict(serviceError, presentedAuthority: participantAuthority)
+            return .notBlocked
+        }
+    }
+
+    func clearBlockError() {
+        blockError = nil
+    }
+
+    private func recordBlockedStudent(_ student: BlockedStudent, for authority: String) {
+        guard participantAuthorityProvider() == authority else { return }
+        if blockedStudentsAuthority != authority {
+            blockedStudents = []
+            blockedStudentsAuthority = authority
+        }
+        if let index = blockedStudents.firstIndex(where: { $0.id == student.id }) {
+            blockedStudents[index] = student
+        } else {
+            blockedStudents.insert(student, at: 0)
+        }
+    }
+
+    /// The blocks to present *right now*: never a list read for a participant
+    /// who is no longer the current one.
+    var currentBlockedStudents: [BlockedStudent] {
+        guard let authority = participantAuthorityProvider(),
+              blockedStudentsAuthority == authority else {
+            return []
+        }
+        return blockedStudents
+    }
+
+    /// `GET /api/participant/blocks`. A failed or superseded read publishes an
+    /// explicit failed state; it never presents an empty list as truth.
+    func loadBlockedStudents() async {
+        // Entering or reloading Blocked Students is a fresh management
+        // presentation: a transient Unblock failure from an earlier visit is
+        // not carried into it. A failure of the operation currently being
+        // presented is untouched, because loading never runs mid-Unblock.
+        unblockError = nil
+        guard let authority = participantAuthorityProvider() else {
+            blockedStudents = []
+            blockedStudentsAuthority = nil
+            blockedStudentsLoadState = .notLoaded
+            return
+        }
+        blockedStudentsGeneration += 1
+        let generation = blockedStudentsGeneration
+        blockedStudentsLoadState = .loading
+
+        do {
+            let list = try await service.fetchBlockedStudents(participantAuthority: authority)
+            guard generation == blockedStudentsGeneration,
+                  participantAuthorityProvider() == authority else {
+                return
+            }
+            blockedStudents = list
+            blockedStudentsAuthority = authority
+            blockedStudentsLoadState = .loaded
+        } catch is CancellationError {
+            if generation == blockedStudentsGeneration,
+               blockedStudentsLoadState == .loading {
+                blockedStudentsLoadState = blockedStudentsAuthority == authority ? .loaded : .notLoaded
+            }
+        } catch {
+            guard generation == blockedStudentsGeneration else { return }
+            blockedStudentsLoadState = .failed
+            applyParticipantVerdict(
+                Self.asServiceError(error),
+                presentedAuthority: authority
+            )
+        }
+    }
+
+    /// `DELETE /api/participant/blocks/:id`. Removes only a block the backend
+    /// confirms is gone; prospective, so nothing about any request, placement,
+    /// or participation changes — the board simply refreshes.
+    func unblockStudent(id: String) async {
+        guard !removingBlockedStudentIDs.contains(id),
+              let authority = participantAuthorityProvider() else {
+            return
+        }
+        removingBlockedStudentIDs.insert(id)
+        unblockError = nil
+        defer { removingBlockedStudentIDs.remove(id) }
+
+        do {
+            try await service.removeBlockedStudent(id: id, participantAuthority: authority)
+            guard participantAuthorityProvider() == authority else { return }
+            blockedStudents.removeAll { $0.id == id }
+            // Blocked Students intentionally carries no request or ownership
+            // correlation. A current Helping reservation is the only live
+            // place this process can hold the caller-owned marker, so clear
+            // that ephemeral copy knowledge after an authoritative Unblock.
+            // Keep direction-agnostic suppression here: the other participant
+            // may still own a Block. Only the authoritative reservation read
+            // below may lift it.
+            if let activeRequestID = activeClaim?.requestID {
+                callerBlockedRequestIDs.remove(activeRequestID)
+            }
+            // The authoritative restriction read is issued before the board
+            // refresh so the two never race for ordering.
+            await reconcileRestrictionAfterUnblock(authority: authority)
+            refreshRequestsAfterClaimConflict()
+        } catch is CancellationError {
+        } catch {
+            let serviceError = Self.asServiceError(error)
+            if case .serverError(let code, _) = serviceError,
+               code == ParticipantBlockErrorCode.blockNotFound,
+               participantAuthorityProvider() == authority {
+                // Definitively not there any more: the list was stale.
+                blockedStudents.removeAll { $0.id == id }
+                return
+            }
+            unblockError = serviceError
+            applyParticipantVerdict(serviceError, presentedAuthority: authority)
+        }
+    }
+
+    /// After an authoritative Unblock, re-establishes whether direct contact
+    /// is still restricted for the held reservation, through the same
+    /// authoritative active-reservation read reconstruction uses.
+    ///
+    /// The Unblock response cannot say whether another Block remains for the
+    /// pair (it carries no ownership), so the direction-agnostic restriction is
+    /// never cleared by assumption. Only a successful read that confirms the
+    /// same reservation and no restriction lifts it. A failed, ambiguous,
+    /// superseded, or non-matching read leaves every state as it was, which is
+    /// the conservative restricted presentation. Nothing about who blocked
+    /// whom is read, stored, or exposed.
+    private func reconcileRestrictionAfterUnblock(authority: String) async {
+        guard let claim = activeClaim,
+              let authorization = activeClaimAuthorization,
+              authorization.requestID == claim.requestID,
+              contactSuppressedRequestIDs.contains(claim.requestID) else {
+            return
+        }
+        let claimID = authorization.claimID
+        let requestID = claim.requestID
+        restrictionReconciliationGeneration += 1
+        let generation = restrictionReconciliationGeneration
+
+        do {
+            let state = try await service.fetchParticipantReservationState(
+                participantAuthority: authority
+            )
+            guard generation == restrictionReconciliationGeneration,
+                  participantAuthorityProvider() == authority,
+                  activeClaimAuthorization?.claimID == claimID,
+                  activeClaim?.requestID == requestID,
+                  case .reservation(let reservation) = state,
+                  reservation.request.id == requestID,
+                  !reservation.directContactRestricted else {
+                return
+            }
+            contactSuppressedRequestIDs.remove(requestID)
+            callerBlockedRequestIDs.remove(requestID)
+            // With no restriction left, the same authoritative read is also
+            // the authority for where a Stop of this reservation ends.
+            if reservation.stopReturnsHome {
+                stopReturnsHomeRequestIDs.insert(requestID)
+            } else {
+                stopReturnsHomeRequestIDs.remove(requestID)
+            }
+        } catch is CancellationError {
+        } catch {
+            guard generation == restrictionReconciliationGeneration else { return }
+            applyParticipantVerdict(
+                Self.asServiceError(error),
+                presentedAuthority: authority
             )
         }
     }
@@ -2695,6 +3103,9 @@ final class RequestStore: ObservableObject {
         claimExtensionError = nil
         releaseClaimError = nil
         if let clearedRequestID {
+            contactSuppressedRequestIDs.remove(clearedRequestID)
+            callerBlockedRequestIDs.remove(clearedRequestID)
+            stopReturnsHomeRequestIDs.remove(clearedRequestID)
             // Covers every path that ends a claim locally: release, confirmed
             // fulfillment, expiry, and a lost claim conflict. One hook, so
             // "canceled on release/fulfill/expiry/claim-end" cannot drift out
@@ -3231,7 +3642,12 @@ final class RequestStore: ObservableObject {
         let submission = FulfillmentSubmissionSnapshot(
             orderNumber: orderNumber,
             eta: eta,
-            contactMessage: contactMessage
+            // W4-U1.3: after this helper blocked the requester they were
+            // helping, the optional Message is never sent. The backend
+            // withholds it for any blocked pair regardless.
+            contactMessage: contactSuppressedRequestIDs.contains(requestID)
+                ? nil
+                : contactMessage
         )
         let attempt = FulfillmentAttempt(
             id: UUID(),

@@ -274,8 +274,23 @@ final class HelperJourneyFulfillmentTests: XCTestCase {
         ))
         let heading = try XCTUnwrap(section.range(of: "Text(Self.afterYouOrderHeading)"))
         let fields = try XCTUnwrap(section.range(of: "fulfillmentFields"))
-        XCTAssertNil(
-            section.range(of: "Text(", range: heading.upperBound..<fields.lowerBound),
+        // W4-U1.3: the one permitted notice is the restricted-state line,
+        // shown only inside the `isBlockActive` block. Exclude exactly that
+        // span; everything else must contain no `Text(` at all.
+        var between = String(section[heading.upperBound..<fields.lowerBound])
+        let notice = try XCTUnwrap(between.range(of: "if isBlockActive {"))
+        let marker = try XCTUnwrap(between.range(
+            of: ".accessibilityIdentifier(\"helping-block-active-notice\")"
+        ))
+        let close = try XCTUnwrap(between.range(of: "}", range: marker.upperBound..<between.endIndex))
+        XCTAssertLessThan(notice.lowerBound, marker.lowerBound)
+        let span = String(between[notice.lowerBound..<close.upperBound])
+        XCTAssertEqual(span.components(separatedBy: "Text(").count - 1, 1)
+        XCTAssertTrue(span.contains("blockActiveStatus"))
+        XCTAssertTrue(span.contains("ParticipantBlockCopy.directContactUnavailableNotice"))
+        between.removeSubrange(notice.lowerBound..<close.upperBound)
+        XCTAssertFalse(
+            between.contains("Text("),
             "no explanatory paragraph between the heading and the fields"
         )
     }

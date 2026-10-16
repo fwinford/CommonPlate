@@ -892,6 +892,9 @@ struct HomeExchangeView: View {
 
     static let refreshSuccessMarkSide: CGFloat = 18
 
+    /// Interactive footprint of the Home Settings gear (visual ring is 38 pt).
+    static let settingsGearHitSide: CGFloat = 44
+
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
@@ -909,6 +912,11 @@ struct HomeExchangeView: View {
                     .font(.body.weight(.semibold))
                     .frame(width: 38, height: 38)
                     .background(Circle().strokeBorder(.secondary.opacity(0.3)))
+                    // Explicit hit region: the stroked ring above is only a
+                    // background, so without this only glyph/ring pixels
+                    // hit-tested reliably. Appearance is unchanged.
+                    .frame(width: Self.settingsGearHitSide, height: Self.settingsGearHitSide)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Settings")

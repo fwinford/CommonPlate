@@ -7,6 +7,8 @@
 import SwiftUI
 
 struct PrivacySafetyView: View {
+    @ObservedObject var participantIdentityStore: ParticipantIdentityStore
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -34,6 +36,26 @@ struct PrivacySafetyView: View {
 
                     Text("Order details are only used to coordinate food pickup. Contact information should only be used for coordinating the request.")
                         .foregroundStyle(.secondary)
+                }
+
+                // W4-U1.3: the one route to Block management
+                // (Settings → Privacy & Safety → Blocked Students). Offered
+                // only with a verified participant, since a block belongs to
+                // one. The list shows interaction context, never identity.
+                if participantIdentityStore.identity != nil {
+                    NavigationLink(value: AppRoute.blockedStudents) {
+                        HStack(alignment: .center) {
+                            Text(ParticipantBlockCopy.managementRowTitle)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: CommonPlateStyle.Spacing.s)
+                            CommonPlateDisclosureIndicator()
+                        }
+                        .frame(minHeight: CommonPlateStyle.Control.minimumHeight)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("privacy-safety-blocked-students")
                 }
 
                 VStack(alignment: .leading, spacing: 8) {

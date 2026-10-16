@@ -319,6 +319,9 @@ describe("POST /api/request/:id/claim", () => {
         $gt: now,
         $gte: new Date(now.getTime() + 5 * 60 * 1000),
       },
+      // W4-U1.3: a request with the post-Yes external-order-risk authority is
+      // never claimable, inside the same conditional mutation that grants.
+      externalOrderAffirmed: { $ne: true },
       $or: [
         { status: "open" },
         { status: "claimed", claimExpiresAt: { $lte: now } },
@@ -1177,6 +1180,9 @@ describe("POST /api/request/:id/claim/release (W3-H1)", () => {
       },
       claimExtendedAt: { $eq: null, $exists: true },
       claimTokenDigest: digest,
+      // W4-U1.3: the ordinary release matches only a request without the
+      // post-Yes authority; the update itself is unchanged.
+      externalOrderAffirmed: { $ne: true },
     });
     expect(update).toEqual({
       $set: { status: "open", updatedAt: now },
@@ -1338,11 +1344,22 @@ describe("POST /api/request/:id/claim/release (W3-H1)", () => {
     await releaseClaim(context.req, context.res);
 
     expect(sessionMock.withTransaction).toHaveBeenCalledOnce();
-    expect(atomic).toHaveBeenCalledTimes(2);
+    // Each callback attempt runs the ordinary release filter; an attempt whose
+    // ordinary filter misses also tries the W4-U1.3 post-Yes branch (same
+    // version pin, `externalOrderAffirmed: true`). Attempt 1 matches; attempt 2
+    // misses both, so three updates in all: two ordinary, one post-Yes.
+    const calls = atomic.mock.calls as Array<[Record<string, any>]>;
+    expect(calls).toHaveLength(3);
+    expect(
+      calls.filter(([filter]) => filter.externalOrderAffirmed?.$ne === true)
+    ).toHaveLength(2);
+    expect(
+      calls.filter(([filter]) => filter.externalOrderAffirmed === true)
+    ).toHaveLength(1);
     // The second read is the normal post-miss diagnostic classifier, after
     // both callback attempts. Neither callback itself rereads the version.
     expect(versionRead).toHaveBeenCalledTimes(2);
-    for (const [filter] of atomic.mock.calls as Array<[Record<string, any>]>) {
+    for (const [filter] of calls) {
       expect(filter.claimExpiresAt).toEqual({
         $gt: now,
         $eq: originalExpiration,

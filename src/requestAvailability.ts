@@ -11,6 +11,13 @@ export interface AvailabilityDocument {
   expiresAt?: Date | string | null;
   claimExpiresAt?: Date | string | null;
   visibleFrom?: Date | string | null;
+  /**
+   * W4-U1.3 private post-Yes external-order-risk authority. `select: false` on
+   * the model, so a reader that needs a truthful answer must select it; absent
+   * means "not established", which is the only answer an unselected read can
+   * give and is why every availability *query* also carries it as a filter.
+   */
+  externalOrderAffirmed?: boolean | null;
 }
 
 function dateValue(value: Date | string | null | undefined): number {
@@ -101,6 +108,12 @@ export function buildEffectiveAvailabilityFilter(now: Date) {
   return {
     visibleFrom: buildVisibleNowFilter(now),
     expiresAt: buildMinimumRemainingTimeFilter(now),
+    // W4-U1.3: a request carrying the post-Yes external-order-risk authority is
+    // never advertised or notified about again, whatever its stored status or
+    // claim deadline says. `$ne: true` also matches every row that never had
+    // the field, so ordinary requests are untouched. Top-level on purpose: it
+    // fails closed even for a marked row that somehow reads `open`.
+    externalOrderAffirmed: { $ne: true },
     $or: [
       { status: "open" },
       {
@@ -123,9 +136,39 @@ export function isEffectivelyAvailable(
     return false;
   }
 
+  // The in-memory form of the filter's `externalOrderAffirmed` clause.
+  if (document.externalOrderAffirmed === true) {
+    return false;
+  }
+
   return (
     document.status === "open" ||
     (document.status === "claimed" &&
       dateValue(document.claimExpiresAt) <= now.getTime())
+  );
+}
+
+/**
+ * A request whose helper stopped after affirming that the real external order
+ * is already placed (W4-U1.3). The release mutation keeps such a request
+ * `claimed` — never `open` — and removes every piece of reservation authority
+ * (`claimExpiresAt`, the claim token digest, the helper binding), so the one
+ * thing left that distinguishes it from an ordinary lapsed reservation is the
+ * private marker plus the absence of a deadline.
+ *
+ * Failure classifiers use this to answer a stale action exactly as they answer
+ * one against an ordinarily released request (`REQUEST_NOT_CLAIMED`), so a
+ * retried or delayed Stop, extension, or fulfillment reveals nothing about
+ * whether the marker exists.
+ */
+export function isStoppedAfterAffirmedOrder(document: {
+  status?: string | null;
+  claimExpiresAt?: Date | string | null;
+  externalOrderAffirmed?: boolean | null;
+}): boolean {
+  return (
+    document.status === "claimed" &&
+    document.externalOrderAffirmed === true &&
+    document.claimExpiresAt == null
   );
 }

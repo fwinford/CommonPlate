@@ -44,6 +44,11 @@ enum RequestServiceError: Error {
     /// A fulfillment POST may have been applied server-side, but iOS did not
     /// receive and validate a usable success response.
     case ambiguousFulfillmentOutcome(underlying: Error)
+    /// A block POST may have been applied server-side (W4-U1.3), but iOS did
+    /// not receive and validate its confirmation. Never retried automatically
+    /// and never presented as either a success or a release: the owner's own
+    /// blocked-student list is the authoritative place to find out.
+    case ambiguousBlockOutcome(underlying: Error)
     /// Client-side precondition failure, not a backend response: no local
     /// active claim exists for the request being fulfilled.
     case noActiveClaim
@@ -101,6 +106,13 @@ struct ActiveReservationOutcome {
     let request: FoodRequest
     let claimExpiresAt: Date
     let claimExtendedAt: Date?
+    /// W4-U1.3: `true` only when the backend says optional direct contact is
+    /// unavailable for this reservation. `false` is "not established".
+    var directContactRestricted: Bool = false
+    /// W4-U1.3: `true` only when the backend says a confirmed Stop helping of
+    /// this reservation ends at Home. Lifecycle truth, not Block truth: it says
+    /// nothing about whether, or by whom, anyone was blocked.
+    var stopReturnsHome: Bool = false
 }
 
 /// The claimant-private fulfillment re-entry truth for a verified participant
@@ -128,6 +140,14 @@ enum ParticipantReservationState {
     case none
 }
 
+/// Result of a confirmed block (W4-U1.3).
+struct BlockOutcome: Equatable {
+    let student: BlockedStudent
+    /// `true` only when the backend confirmed it ended the helper's reservation
+    /// together with the block. Never inferred from the helper's own answer.
+    let reservationReleased: Bool
+}
+
 /// Result of a successful fulfillment, mirroring the backend's fulfill response shape.
 /// Core placement success (`request`) is independent of notification delivery.
 struct FulfillOutcome {
@@ -140,6 +160,13 @@ struct FulfillOutcome {
 
 struct RequestService {
     let client: APIClient
+
+    /// W4-U1.3: a Message the backend withheld because of the blocked-pair
+    /// contact restriction is not shown to the helper as a suppression card;
+    /// only U1.1's text-filter suppression is presented.
+    static func isFilterSuppression(suppressed: Bool?, withheld: Bool?) -> Bool {
+        suppressed == true && withheld != true
+    }
 
     init(client: APIClient) {
         self.client = client
@@ -683,7 +710,9 @@ struct RequestService {
             return .reservation(ActiveReservationOutcome(
                 request: request,
                 claimExpiresAt: reservation.claimExpiresAt,
-                claimExtendedAt: reservation.claimExtendedAt
+                claimExtendedAt: reservation.claimExtendedAt,
+                directContactRestricted: reservation.directContactRestricted == true,
+                stopReturnsHome: reservation.stopReturnsHome == true
             ))
         }
         if let placement = response.placement {
@@ -691,10 +720,112 @@ struct RequestService {
             return .placed(PlacedReservationOutcome(
                 request: request,
                 notificationStatus: placement.notification?.status,
-                messageSuppressed: placement.messageSuppressed == true
+                messageSuppressed: Self.isFilterSuppression(
+                    suppressed: placement.messageSuppressed,
+                    withheld: placement.messageWithheld
+                )
             ))
         }
         return .none
+    }
+
+    // MARK: - Participant blocking (W4-U1.3)
+
+    private static func mapBlockedStudent(_ dto: ParticipantBlockDTO) -> BlockedStudent {
+        BlockedStudent(
+            id: dto.id,
+            role: dto.blockedRole == .helper ? .helper : .requester,
+            diningLocation: dto.diningLocation,
+            interactionAt: dto.interactionAt
+        )
+    }
+
+    /// `POST /api/request/:id/block`.
+    ///
+    /// The backend resolves the other party from the request itself; nothing
+    /// here names a participant. `externalOrderPlaced` is meaningful only while
+    /// the caller holds the live reservation on `id`.
+    ///
+    /// Idempotent on the backend, but never retried here: an outcome iOS cannot
+    /// confirm is `ambiguousBlockOutcome`, and the caller must neither retry it
+    /// nor present it as a success or as a release.
+    func blockParticipant(
+        forRequestID id: String,
+        externalOrderPlaced: Bool?,
+        participantAuthority: String
+    ) async throws -> BlockOutcome {
+        try Task.checkCancellation()
+
+        let response: CreateParticipantBlockResponseDTO
+        do {
+            response = try await client.send(
+                path: "/api/request/\(id)/block",
+                method: .post,
+                body: CreateParticipantBlockPayload(externalOrderPlaced: externalOrderPlaced),
+                headers: Self.participantHeaders(participantAuthority)
+            )
+        } catch is CancellationError {
+            throw RequestServiceError.ambiguousBlockOutcome(underlying: CancellationError())
+        } catch let error as APIClientError {
+            switch error {
+            // A readable INTERNAL_FAILURE does not prove nothing committed.
+            case .apiError(let code, _) where code == ClaimErrorCode.internalFailure:
+                throw RequestServiceError.ambiguousBlockOutcome(underlying: error)
+            case .transport, .decoding, .unexpectedStatus:
+                throw RequestServiceError.ambiguousBlockOutcome(underlying: error)
+            default:
+                throw Self.translate(error)
+            }
+        } catch {
+            throw Self.translate(error)
+        }
+
+        return BlockOutcome(
+            student: Self.mapBlockedStudent(response.block),
+            reservationReleased: response.reservationReleased
+        )
+    }
+
+    /// `GET /api/participant/blocks` — the caller's own blocks, as context.
+    func fetchBlockedStudents(participantAuthority: String) async throws -> [BlockedStudent] {
+        try Task.checkCancellation()
+        do {
+            let response: ParticipantBlockListResponseDTO = try await client.send(
+                path: "/api/participant/blocks",
+                method: .get,
+                headers: Self.participantHeaders(participantAuthority)
+            )
+            return response.blocks.map(Self.mapBlockedStudent)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
+    }
+
+    /// `DELETE /api/participant/blocks/:blockId`. Prospective only; the
+    /// backend deletes the owner's row and nothing else. Safe to repeat: a
+    /// block that is already gone is a definitive `BLOCK_NOT_FOUND`.
+    func removeBlockedStudent(id: String, participantAuthority: String) async throws {
+        try Task.checkCancellation()
+        do {
+            let response: RemoveParticipantBlockResponseDTO = try await client.send(
+                path: "/api/participant/blocks/\(id)",
+                method: .delete,
+                headers: Self.participantHeaders(participantAuthority)
+            )
+            guard response.removed else {
+                throw APIClientError.decoding(
+                    DecodingError.dataCorrupted(
+                        .init(codingPath: [], debugDescription: "Unblock was not confirmed")
+                    )
+                )
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.translate(error)
+        }
     }
 
     /// `GET /api/participant/request-eligibility` (W4-Q1).
@@ -780,7 +911,10 @@ struct RequestService {
             return FulfillOutcome(
                 request: request,
                 notificationStatus: response.notification.status,
-                messageSuppressed: response.messageSuppressed == true
+                messageSuppressed: Self.isFilterSuppression(
+                    suppressed: response.messageSuppressed,
+                    withheld: response.messageWithheld
+                )
             )
         } catch {
             throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)
@@ -840,7 +974,10 @@ struct RequestService {
             return FulfillOutcome(
                 request: request,
                 notificationStatus: response.notification.status,
-                messageSuppressed: response.messageSuppressed == true
+                messageSuppressed: Self.isFilterSuppression(
+                    suppressed: response.messageSuppressed,
+                    withheld: response.messageWithheld
+                )
             )
         } catch {
             throw RequestServiceError.ambiguousFulfillmentOutcome(underlying: error)

@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { Request as MealRequest } from "../models/db.js";
 import { sendDay4Error } from "./day4Errors.js";
 import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
+import { isParticipantPairFenced } from "./participantBlocks.js";
 import {
   findParticipatedRequestIds,
   resolveCallerForBrowse,
@@ -48,12 +49,67 @@ export async function getPublicRequestDetail(
     // signal below requires selecting it explicitly — exactly as
     // `GET /api/requests` already does. It is read only through
     // `callerOwnershipFor` and never copied onto the response.
+    // `+externalOrderAffirmed` (W4-U1.3) is read only so the effective status
+    // below is truthful for a request that must never read as available; like
+    // the two participant ids it is never copied onto the response.
     const document = await MealRequest.findById(id)
-      .select("+requesterParticipantId")
+      .select("+requesterParticipantId +helperParticipantId +externalOrderAffirmed")
       .lean()
       .exec();
     if (!document) {
       return res.status(404).json({ error: "Request not found" });
+    }
+
+    // Resolved once, ahead of the response build and, since W4-U1.3, ahead of
+    // the visibility gate below: the same authority decides the participant
+    // fence, the W4-H2 caller-relative ownership signal, and the W3-H2
+    // `alreadyParticipated` signal, so they can never describe different
+    // callers for one read.
+    const { participant, ownershipContext } = await resolveCallerForBrowse(req);
+
+    // W4-U1.3 participant-pair fence. Possession of a request id does not
+    // bypass a block: a fenced counterpart's request is answered exactly as a
+    // request that does not exist, and before the not-yet-available refusal
+    // below, so the two answers cannot be compared to learn anything.
+    //
+    // Exempt, because it is not a new interaction: the request's own
+    // requester (their request, whoever their helper is) and the participant
+    // holding it as helper right now — its placement, or its live unexpired
+    // reservation — which a block must not strand. Expiry never clears
+    // `helperParticipantId`, so a bare match is a stale last helper, not
+    // continuity, and is fenced like any other counterpart. Anonymous and
+    // unresolved callers have no participant authority to fence.
+    if (participant) {
+      const requesterId = (document as { requesterParticipantId?: unknown })
+        .requesterParticipantId;
+      const helperId = (document as { helperParticipantId?: unknown })
+        .helperParticipantId;
+      const isRequester =
+        Boolean(requesterId) && String(requesterId) === participant.participantId;
+      const { status, claimExpiresAt } = document as {
+        status?: string;
+        claimExpiresAt?: Date | null;
+      };
+      const holdsRequestNow =
+        status === "placed" ||
+        (status === "claimed" &&
+          Boolean(claimExpiresAt) &&
+          new Date(claimExpiresAt as Date).getTime() > now.getTime());
+      const isBoundHelper =
+        Boolean(helperId) &&
+        String(helperId) === participant.participantId &&
+        holdsRequestNow;
+      if (
+        requesterId &&
+        !isRequester &&
+        !isBoundHelper &&
+        (await isParticipantPairFenced(
+          participant.participantId,
+          String(requesterId)
+        ))
+      ) {
+        return res.status(404).json({ error: "Request not found" });
+      }
     }
 
     // A scheduled request withheld from the list must also be withheld here.
@@ -81,12 +137,6 @@ export async function getPublicRequestDetail(
         REQUEST_NOT_YET_AVAILABLE_MESSAGE
       );
     }
-
-    // Resolved once, ahead of the response build: the same authority decides
-    // both the W4-H2 caller-relative ownership signal below and the W3-H2
-    // `alreadyParticipated` signal further down, so the two can never
-    // describe different callers for one read.
-    const { participant, ownershipContext } = await resolveCallerForBrowse(req);
 
     const response = buildPublicRequestDetailResponse(
       document as unknown as PublicRequestDocument,

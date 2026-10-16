@@ -263,11 +263,22 @@ struct ActiveReservationDetailsDTO: Decodable {
     let request: RequestResponseDTO
     let claimExpiresAt: Date
     let claimExtendedAt: Date?
+    /// W4-U1.3: present and `true` only when optional direct contact is
+    /// unavailable for this reservation. Affirmative-only, like
+    /// `isOwnRequest`: absent is "not established", never "available".
+    let directContactRestricted: Bool?
+    /// W4-U1.3: present and `true` only when a confirmed Stop helping of this
+    /// reservation must end at Home, and only while no direct-contact
+    /// restriction is reported (that case already ends at Home). Affirmative-
+    /// only: absent is "not established", never "ends elsewhere".
+    let stopReturnsHome: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case request
         case claimExpiresAt
         case claimExtendedAt
+        case directContactRestricted
+        case stopReturnsHome
     }
 
     init(from decoder: Decoder) throws {
@@ -284,6 +295,14 @@ struct ActiveReservationDetailsDTO: Decodable {
         self.request = request
         claimExpiresAt = try container.decode(Date.self, forKey: .claimExpiresAt)
         claimExtendedAt = try container.decodeIfPresent(Date.self, forKey: .claimExtendedAt)
+        directContactRestricted = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .directContactRestricted
+        )
+        stopReturnsHome = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .stopReturnsHome
+        )
     }
 }
 
@@ -301,11 +320,14 @@ struct PlacedReservationDetailsDTO: Decodable {
     /// means "not established as suppressed", never a claim about the Message,
     /// and it carries no Message text at all.
     let messageSuppressed: Bool?
+    /// W4-U1.3: affirmative-only refinement; see `FulfillResponseDTO`.
+    let messageWithheld: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case request
         case notification
         case messageSuppressed
+        case messageWithheld
     }
 
     init(from decoder: Decoder) throws {
@@ -322,6 +344,7 @@ struct PlacedReservationDetailsDTO: Decodable {
         self.request = request
         notification = try container.decodeIfPresent(NotificationStatusDTO.self, forKey: .notification)
         messageSuppressed = try container.decodeIfPresent(Bool.self, forKey: .messageSuppressed)
+        messageWithheld = try container.decodeIfPresent(Bool.self, forKey: .messageWithheld)
     }
 }
 
@@ -403,6 +426,11 @@ struct FulfillResponseDTO: Decodable {
     /// sent. Absent from every response that suppressed nothing, which
     /// `decodeIfPresent` tolerates.
     let messageSuppressed: Bool?
+    /// W4-U1.3: present and `true` only when the Message was not shared because
+    /// of the blocked-pair contact restriction rather than the text filter.
+    /// Always accompanies `messageSuppressed`; it only selects the copy, and
+    /// says nothing about direction, reason, or the other participant.
+    let messageWithheld: Bool?
 }
 
 // MARK: - Errors

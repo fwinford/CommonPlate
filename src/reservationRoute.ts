@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { Request as MealRequest } from "../models/db.js";
 import { createDay4MutationRateLimiter } from "./claimRoute.js";
 import { sendDay4Error } from "./day4Errors.js";
+import { isParticipantPairFenced } from "./participantBlocks.js";
 import {
   PARTICIPANT_VERIFICATION_UNAVAILABLE_CODE,
   PARTICIPANT_VERIFICATION_UNAVAILABLE_MESSAGE,
@@ -43,6 +44,8 @@ interface PlacedParticipationDocument extends PublicRequestDocument {
    * affirmatively; never part of any public projection.
    */
   contactMessageSuppressed?: boolean;
+  /** W4-U1.3 content-free refinement; see `IRequest.contactMessageWithheld`. */
+  contactMessageWithheld?: boolean;
 }
 
 /**
@@ -88,6 +91,10 @@ export async function getActiveReservation(
       status: "claimed",
       claimExpiresAt: { $gt: now },
     })
+      // Private and `select: false`: read only to answer whether direct
+      // contact is restricted for this participant's own reservation, and
+      // where a Stop of it ends.
+      .select("+requesterParticipantId +externalOrderAffirmed")
       .lean()
       .exec();
 
@@ -97,11 +104,38 @@ export async function getActiveReservation(
         reservation,
         now
       );
+      // W4-U1.3: truthful contact eligibility from authoritative state, so a
+      // reconstructed reservation (after relaunch, with no in-memory record of
+      // the original Block) does not regain optional direct contact. Either
+      // direction produces the same affirmative-only answer — it states that
+      // contact is unavailable, never who blocked whom — and the requester's
+      // identity is only ever an input here, never an output.
+      const requesterId = (
+        document as unknown as { requesterParticipantId?: unknown }
+      ).requesterParticipantId;
+      const directContactRestricted = requesterId
+        ? await isParticipantPairFenced(participantId, String(requesterId))
+        : false;
+      // W4-U1.3 (C3): a Stop of a reservation carrying the post-Yes authority
+      // ends at Home, and that must survive the helper's own Unblock and a
+      // relaunch. The one consequence is reported, never the authority itself,
+      // and only when no pair restriction remains: while one does, Stop already
+      // ends at Home and this read stays exactly as it is with or without the
+      // authority, so a helper the requester blocked learns nothing by
+      // comparison. Only the helper who answered Yes can ever be bound to a
+      // request carrying it (it is never claimable again), so this tells that
+      // helper only what they did themselves. Affirmative-only.
+      const stopReturnsHome =
+        !directContactRestricted &&
+        (document as unknown as { externalOrderAffirmed?: unknown })
+          .externalOrderAffirmed === true;
       return res.json({
         reservation: {
           request: publicResponse.request,
           claimExpiresAt: reservation.claimExpiresAt,
           claimExtendedAt: reservation.claimExtendedAt ?? null,
+          ...(directContactRestricted ? { directContactRestricted: true } : {}),
+          ...(stopReturnsHome ? { stopReturnsHome: true } : {}),
         },
         placement: null,
       });
@@ -125,7 +159,7 @@ export async function getActiveReservation(
       // Private and `select: false`: only this participant-scoped read, which
       // is already bound to the placing helper by `helperParticipantId`, may
       // ask for the W4-U1.1 suppression marker.
-      .select("+contactMessageSuppressed")
+      .select("+contactMessageSuppressed +contactMessageWithheld")
       .lean()
       .exec();
 
@@ -153,6 +187,11 @@ export async function getActiveReservation(
         // can only ever show suppression the backend actually established.
         ...(placedDocument.contactMessageSuppressed === true
           ? { messageSuppressed: true }
+          : {}),
+        // W4-U1.3: affirmative-only refinement for a Message withheld by the
+        // blocked-pair restriction. Never present for a filter refusal.
+        ...(placedDocument.contactMessageWithheld === true
+          ? { messageWithheld: true }
           : {}),
       },
     });

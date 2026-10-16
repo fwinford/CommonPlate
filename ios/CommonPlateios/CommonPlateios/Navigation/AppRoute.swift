@@ -30,6 +30,10 @@ enum AppRoute: Hashable {
     /// W4-H2 About & Help destination row. Minimal placeholder content —
     /// final trust/support content belongs to T1.
     case support
+    /// W4-U1.3's minimal blocked-student management list, reached from
+    /// Settings → Privacy & Safety. Carries no value: it is rendered from
+    /// `RequestStore`'s own backend-confirmed list.
+    case blockedStudents
     /// The public request screen. Carries the request by value because the
     /// backend removes a placed request from the list, so an ID that had to be
     /// looked up again would resolve to nothing at exactly the moment it matters.
@@ -73,6 +77,30 @@ extension AppRoute {
     static func afterHelperSuccess(from path: [AppRoute]) -> [AppRoute] {
         _ = path
         return []
+    }
+
+    /// W4-U1.3: the one destination after a confirmed Block that makes the
+    /// request unreachable (normal Block, or active `No, not yet` with the
+    /// reservation released) — Home, the empty path; not Active Requests.
+    static func afterParticipantBlock(from path: [AppRoute]) -> [AppRoute] {
+        _ = path
+        return []
+    }
+
+    /// W4-U1.3: the path after a confirmed active-reservation Block with
+    /// `Yes, already placed`. The helper stays on Helping (restricted), but the
+    /// Block transition must not leave legacy Active Requests as its Back
+    /// destination, so everything beneath the Helping route is dropped and Back
+    /// resolves to Home. Only used by the Block-Yes success seam; a path with
+    /// no Helping route is returned unchanged.
+    static func afterParticipantBlockKeepingHelping(from path: [AppRoute]) -> [AppRoute] {
+        guard let index = path.lastIndex(where: {
+            if case .fulfillment = $0 { return true }
+            return false
+        }) else {
+            return path
+        }
+        return Array(path[index...])
     }
 
     /// W4-H1 active-reservation navigation: the path once `activeClaim` is
@@ -119,7 +147,8 @@ extension AppRoute {
             case .requestDetail(let request), .fulfillment(let request):
                 return request.id == requestID
             case .requestFood, .activeRequests, .alerts, .onboardingChooser,
-                 .privacySafety, .settings, .support, .ownRequests:
+                 .privacySafety, .settings, .support, .ownRequests,
+                 .blockedStudents:
                 return false
             }
         }

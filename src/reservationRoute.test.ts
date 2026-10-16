@@ -1,7 +1,11 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Participant, Request as MealRequest } from "../models/db.js";
+import {
+  Participant,
+  ParticipantBlock,
+  Request as MealRequest,
+} from "../models/db.js";
 import {
   PARTICIPANT_AUTHORITY_HEADER,
   PARTICIPANT_VERIFICATION_REQUIRED_CODE,
@@ -164,6 +168,87 @@ describe("GET /api/participant/active-reservation", () => {
     expect(body.placement).toBeNull();
   });
 
+  describe("W4-U1.3 post-Yes Stop destination signal (C3)", () => {
+    const requesterParticipantId = new mongoose.Types.ObjectId(
+      "64f0000000000000000000b7"
+    );
+
+    function heldReservation(extra: Record<string, unknown>) {
+      return {
+        _id: new mongoose.Types.ObjectId("64f0000000000000000000f3"),
+        vendor: "Palladium",
+        food: "Rice bowl",
+        pickupWindowText: "ASAP",
+        windowStart: null,
+        windowEnd: null,
+        status: "claimed",
+        createdAt: new Date(now.getTime() - 5 * 60 * 1000),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        claimExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
+        claimExtendedAt: null,
+        requesterParticipantId,
+        ...extra,
+      };
+    }
+
+    function stubPairFence(fenced: boolean) {
+      return vi.spyOn(ParticipantBlock, "findOne").mockReturnValue({
+        lean: () => ({
+          exec: vi.fn().mockResolvedValue(fenced ? { _id: "row" } : null),
+        }),
+      } as unknown as ReturnType<typeof ParticipantBlock.findOne>);
+    }
+
+    async function read(document: unknown, fenced: boolean) {
+      const query = mockActiveReservationResult(document);
+      stubPairFence(fenced);
+      const context = routeContext();
+      await getActiveReservation(context.req, context.res);
+      return { body: responseBody(context), query };
+    }
+
+    it("reads the private authority on the live-reservation read only", async () => {
+      const { query } = await read(heldReservation({}), false);
+      expect(query.select).toHaveBeenCalledWith(
+        "+requesterParticipantId +externalOrderAffirmed"
+      );
+    });
+
+    it("reports only the Stop consequence, affirmatively, when the authority exists and no pair restriction remains", async () => {
+      const { body } = await read(
+        heldReservation({ externalOrderAffirmed: true }),
+        false
+      );
+      expect(body.reservation.stopReturnsHome).toBe(true);
+      expect(body.reservation).not.toHaveProperty("directContactRestricted");
+      expect(JSON.stringify(body)).not.toMatch(/affirmed|ParticipantId|block/i);
+      expect(body.reservation.request).not.toHaveProperty("stopReturnsHome");
+    });
+
+    it("never reports it while a pair restriction remains, so the restricted read is the same with or without the authority", async () => {
+      const marked = await read(
+        heldReservation({ externalOrderAffirmed: true }),
+        true
+      );
+      vi.restoreAllMocks();
+      stubVerifiedParticipant();
+      const unmarked = await read(heldReservation({}), true);
+
+      expect(marked.body.reservation).not.toHaveProperty("stopReturnsHome");
+      expect(marked.body.reservation.directContactRestricted).toBe(true);
+      expect(marked.body).toEqual(unmarked.body);
+    });
+
+    it("omits it entirely, never false, for an ordinary reservation", async () => {
+      const { body } = await read(heldReservation({}), false);
+      expect(Object.keys(body.reservation).sort()).toEqual([
+        "claimExpiresAt",
+        "claimExtendedAt",
+        "request",
+      ]);
+    });
+  });
+
   it("resolves both null when the verified helper holds neither an active reservation nor a placed request", async () => {
     mockActiveReservationResult(null);
     const context = routeContext();
@@ -263,9 +348,20 @@ describe("GET /api/participant/active-reservation", () => {
 
         await getActiveReservation(context.req, context.res);
 
-        // The active-claim read (first) never selects it; the placed read does.
-        expect(query.select).toHaveBeenCalledTimes(1);
-        expect(query.select).toHaveBeenCalledWith("+contactMessageSuppressed");
+        // The active-claim read (first) never selects the Message markers — it
+        // selects only the requester binding and the post-Yes authority
+        // (W4-U1.3), to answer whether direct contact is restricted and where a
+        // Stop ends; the placed read selects both content-free Message markers
+        // and never the post-Yes authority.
+        expect(query.select).toHaveBeenCalledTimes(2);
+        expect(query.select).toHaveBeenNthCalledWith(
+          1,
+          "+requesterParticipantId +externalOrderAffirmed"
+        );
+        expect(query.select).toHaveBeenNthCalledWith(
+          2,
+          "+contactMessageSuppressed +contactMessageWithheld"
+        );
       });
 
       it("reports messageSuppressed: true when the durable marker proves suppression at placement", async () => {

@@ -1,7 +1,11 @@
 import type { NextFunction, Request, Response } from "express";
 import mongoose from "mongoose";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Participant, RequestParticipation } from "../models/db.js";
+import {
+  Participant,
+  ParticipantBlock,
+  RequestParticipation,
+} from "../models/db.js";
 import { Request as MealRequest } from "../models/db.js";
 import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
 import {
@@ -86,6 +90,12 @@ function mockParticipant(participantId: string): string {
       lean: () => ({ exec: vi.fn().mockResolvedValue([]) }),
     }),
   } as unknown as ReturnType<typeof RequestParticipation.find>);
+
+  // W4-U1.3: no block exists, so the participant fence never masks the
+  // ownership signal these cases are asserting on.
+  vi.spyOn(ParticipantBlock, "findOne").mockReturnValue({
+    lean: () => ({ exec: vi.fn().mockResolvedValue(null) }),
+  } as unknown as ReturnType<typeof ParticipantBlock.findOne>);
 
   return signParticipantAuthority(objectId, 1, SECRET);
 }

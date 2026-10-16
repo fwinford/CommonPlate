@@ -103,6 +103,7 @@ import {
   Fulfillment,
   Installation,
   Participant,
+  ParticipantBlock,
   ParticipantVerification,
   PushDelivery,
   Request as MealRequest,
@@ -117,6 +118,18 @@ import {
   RequestListDocument,
 } from "./src/requestListResponse.js";
 import { PARTICIPANT_AUTHORITY_HEADER } from "./src/participantAuthorityGate.js";
+import { buildParticipantFenceFilter } from "./src/participantBlocks.js";
+import {
+  PARTICIPANT_BLOCK_ROUTE_PATH,
+  PARTICIPANT_BLOCKS_ROUTE_PATH,
+  REQUEST_BLOCK_ROUTE_PATH,
+  createParticipantBlock,
+  createParticipantBlockRateLimiter,
+  deleteParticipantBlock,
+  deleteParticipantBlockRateLimiter,
+  listParticipantBlocks,
+  listParticipantBlocksRateLimiter,
+} from "./src/participantBlockRoute.js";
 import { getPublicRequestDetail } from "./src/requestDetailRoute.js";
 import {
   filterRequestListForParticipant,
@@ -444,12 +457,31 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
     // - ASAP items (no windowStart or windowStart within next hour) come first, ordered by createdAt ascending (earliest first)
     // - Scheduled items come after, ordered by windowStart ascending
     const now = new Date();
+    // One resolution serves the W4-U1.3 participant-pair fence, the W3-H2
+    // participation filter, and the W4-H2 caller-relative ownership context
+    // (which needs to tell an absent credential apart from an unusable one).
+    // Browsing stays open to anyone (W3-I1), so an absent or unusable
+    // credential degrades to the unfiltered anonymous list rather than
+    // refusing the read.
+    const { participant, ownershipContext } = await resolveCallerForBrowse(req);
+
+    // W4-U1.3: a fenced pair does not see each other's otherwise-eligible
+    // requests. Applied in the query, ahead of the fixed `limit`, so excluded
+    // requests can never occupy slots a visible one would have filled. An
+    // anonymous caller has no participant authority and cannot be fenced.
+    const fenceFilter = await buildParticipantFenceFilter(
+      participant ? participant.participantId : null
+    );
+
     // `+requesterParticipantId` (W4-H2): the field is `select: false` on the
     // schema like every other private field; explicitly selecting it here is
     // required to derive the caller-relative ownership signal below.
     // `mapPublicRequestFields` never reads or copies it, so it never reaches
     // the public wire response.
-    const docs = await MealRequest.find(buildEffectiveAvailabilityFilter(now))
+    const docs = await MealRequest.find({
+      ...buildEffectiveAvailabilityFilter(now),
+      ...fenceFilter,
+    })
       .select("+requesterParticipantId")
       .limit(200)
       .lean()
@@ -457,15 +489,9 @@ app.get("/api/requests", async (req: Request, res: Response, next: NextFunction)
 
     // W3-H2 marketplace presentation: a request this verified participant has
     // ever successfully held must no longer appear in their own eligible
-    // list once they no longer hold it. Browsing stays open to anyone
-    // (W3-I1), so an absent or unusable credential here degrades to the
-    // unfiltered anonymous list rather than refusing the read; every other
-    // eligible participant's own list is unaffected, because the filter is
-    // always scoped to exactly the resolved caller's own participant id.
-    // W4-H2: one resolution serves both the W3-H2 participation filter and
-    // the caller-relative ownership context, which needs to tell an absent
-    // credential apart from an unusable one.
-    const { participant, ownershipContext } = await resolveCallerForBrowse(req);
+    // list once they no longer hold it. Every other eligible participant's
+    // own list is unaffected, because the filter is always scoped to exactly
+    // the resolved caller's own participant id.
     const visibleDocs = await filterRequestListForParticipant(
       docs as unknown as RequestListDocument[],
       participant
@@ -532,6 +558,28 @@ app.post(
   pauseDay4Mutation,
   claimReleaseRateLimiter,
   releaseClaim
+);
+
+// W4-U1.3 participant blocking. Block and Unblock are safety controls and are
+// deliberately NOT behind `pauseDay4Mutation` (accepted 2026-10-13
+// operational-pause clarification): `PUBLIC_ACTIONS_PAUSED` governs only the
+// mutations it explicitly names. The one pause-governed part is reservation
+// release, which `createParticipantBlock` checks itself for the `No` branch so
+// that Block and release commit together or not at all.
+app.post(
+  REQUEST_BLOCK_ROUTE_PATH,
+  createParticipantBlockRateLimiter,
+  createParticipantBlock
+);
+app.get(
+  PARTICIPANT_BLOCKS_ROUTE_PATH,
+  listParticipantBlocksRateLimiter,
+  listParticipantBlocks
+);
+app.delete(
+  PARTICIPANT_BLOCK_ROUTE_PATH,
+  deleteParticipantBlockRateLimiter,
+  deleteParticipantBlock
 );
 
 // A read of the caller's own already-granted reservation truth (W3-H1
@@ -635,6 +683,10 @@ await ParticipantVerification.createIndexes();
 // guarantee (W3-H2). Without it, `claimRequest`'s pre-check and insert are
 // only a best-effort race guard, not a durable invariant.
 await RequestParticipation.createIndexes();
+// Do not accept block traffic until the one-owned-block-per-(owner, target)
+// uniqueness (W4-U1.3) is established: it is what makes a repeated Block an
+// idempotent no-op rather than a second row.
+await ParticipantBlock.createIndexes();
 // Do not accept request-create or terminal-reconciliation traffic until the
 // database has established the unique operation-identity index that makes a
 // created operation and a terminal NO-CREATE one-winner (W3-D1/W4-D2), and the

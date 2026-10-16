@@ -216,9 +216,12 @@ async function reconcileOperation(
     return { outcome: "not-created" };
   }
 
+  // `+externalOrderAffirmed` (W4-U1.3): the projection below derives effective
+  // status from this document, and a request that must never read as available
+  // cannot be told apart from one that may unless the private marker is read.
   const existing = await MealRequest.findOne({
     _id: ledgerEntry.requestId,
-  }).select("+requesterParticipantId");
+  }).select("+requesterParticipantId +externalOrderAffirmed");
   if (!existing) return { outcome: "expired" };
   if (!operationBelongsToParticipant(existing, participantId)) {
     // Defensive only: the ledger row is the authority check above already

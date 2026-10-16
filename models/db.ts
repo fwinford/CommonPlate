@@ -294,6 +294,26 @@ export interface IRequest extends Document {
    * persisted on the Request, the Fulfillment ledger, or anywhere else.
    */
   contactMessageSuppressed?: boolean;
+  /**
+   * W4-U1.3 content-free refinement of `contactMessageSuppressed`: `true` only
+   * when the optional Message was not shared because of the blocked-pair
+   * contact restriction rather than the participant-text filter. Always
+   * written together with `contactMessageSuppressed`, in the same placement
+   * update. It carries no direction, no reason beyond "restricted", and no
+   * identity, and is reported only to the placing helper.
+   */
+  contactMessageWithheld?: boolean;
+  /**
+   * W4-U1.3 durable post-Yes external-order-risk authority. Set to `true`,
+   * atomically with the successful Block, only when the helper who holds the
+   * live reservation answered that the real external order is already placed.
+   * Request-scoped, content-free, and never projected: it carries no identity,
+   * no direction, and no timing. While set, this request is never claimable and
+   * never advertised again — not after Stop, not after passive reservation
+   * expiry, not after Unblock — and it ends only with the Request itself
+   * (`deleteAt`). Fulfillment may still commit against a live reservation.
+   */
+  externalOrderAffirmed?: boolean;
   notificationStatus?: "pending" | "sent" | "failed";
   notificationAttemptedAt?: Date;
   visibleFrom?: Date;
@@ -370,6 +390,11 @@ const RequestSchema = new Schema<IRequest>({
   // Private like every other lifecycle marker: never part of a public
   // projection, selected explicitly only by the participant-scoped placed read.
   contactMessageSuppressed: { type: Boolean, select: false },
+  contactMessageWithheld: { type: Boolean, select: false },
+  // W4-U1.3: private like every other lifecycle marker. Read only by the
+  // availability predicate, the claim filter, the release mutation, and the
+  // failure classifiers; never copied onto any response.
+  externalOrderAffirmed: { type: Boolean, select: false },
   notificationStatus: {
     type: String,
     enum: ["pending", "sent", "failed"],
@@ -836,6 +861,14 @@ export interface IParticipant extends Document {
   verifiedAt: Date;
   activeReservationRequestId?: Types.ObjectId | null;
   activeReservationClaimExpiresAt?: Date | null;
+  /**
+   * W4-U1.3 block-fence serialization counter. Never read for its value:
+   * block creation increments it on both participants of the pair so that a
+   * concurrent claim or extension, which always writes the claiming helper's
+   * own Participant document, conflicts with the block and is retried against
+   * a snapshot that contains it. See `src/participantBlocks.ts`.
+   */
+  blockFenceEpoch?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -895,6 +928,8 @@ const ParticipantSchema = new Schema<IParticipant>(
       select: false,
       default: null,
     },
+    // W4-U1.3: a write-conflict anchor, not state. Absent reads as zero.
+    blockFenceEpoch: { type: Number, select: false },
   },
   { timestamps: true }
 );
@@ -967,3 +1002,84 @@ export const ParticipantVerification =
     "ParticipantVerification",
     ParticipantVerificationSchema
   );
+
+
+/* =========================== ParticipantBlock ========================= */
+// One participant's block of one other participant (W4-U1.3).
+//
+// A row is owned by `blockerParticipantId` and is the only thing that blocker
+// may later remove. Two participants who block each other hold two rows, and
+// removing one never restores eligibility while the other remains. Whether a
+// pair is fenced is decided by the existence of a row in *either* direction;
+// nothing here, and nothing on any wire, says who initiated it.
+//
+// Deliberately its own collection, following the `RequestParticipation`
+// precedent, rather than a field on `Request`: `Request` is TTL-deleted
+// (`deleteAt`), and a block has to outlive the interaction it came from. It has
+// no TTL of its own either — a row with a lapsed context is exactly the
+// indistinguishable `Blocked student` entry the contract forbids.
+//
+// The context snapshot is the minimum that lets the owner recognise the block
+// later without learning anything new: the blocked party's role in the
+// interaction, the request's dining location, and the request's creation time.
+// All three were already shown to the owner. No name, address, participant
+// identifier, or order content is stored, and nothing here is copied from a
+// private field. The snapshot is deleted with the row on Unblock.
+export type ParticipantBlockedRole = "requester" | "helper";
+
+export interface IParticipantBlock extends Document {
+  blockerParticipantId: Types.ObjectId;
+  blockedParticipantId: Types.ObjectId;
+  /** The role the *blocked* participant had in the interaction. */
+  blockedRole: ParticipantBlockedRole;
+  diningLocation: string;
+  interactionAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const ParticipantBlockSchema = new Schema<IParticipantBlock>(
+  {
+    // Private identity fields, `select: false` like every other participant
+    // reference in this file: never a public read target and never projected.
+    blockerParticipantId: {
+      type: Schema.Types.ObjectId,
+      ref: "Participant",
+      required: true,
+      select: false,
+    },
+    blockedParticipantId: {
+      type: Schema.Types.ObjectId,
+      ref: "Participant",
+      required: true,
+      select: false,
+    },
+    blockedRole: {
+      type: String,
+      enum: ["requester", "helper"],
+      required: true,
+    },
+    diningLocation: { type: String, required: true, trim: true },
+    interactionAt: { type: Date, required: true },
+  },
+  { timestamps: true }
+);
+
+// One owned row per ordered pair: re-blocking the same participant is an
+// idempotent no-op rather than a second row, and the pair's two directions
+// remain two independent rows.
+ParticipantBlockSchema.index(
+  { blockerParticipantId: 1, blockedParticipantId: 1 },
+  { unique: true, name: "participant_block_owner_target_unique" }
+);
+
+// The reverse direction of the fence: "who has blocked this participant".
+// Fence checks and board exclusion read both directions for one caller.
+ParticipantBlockSchema.index(
+  { blockedParticipantId: 1 },
+  { name: "participant_block_blocked_lookup" }
+);
+
+export const ParticipantBlock =
+  (mongoose.models.ParticipantBlock as mongoose.Model<IParticipantBlock>) ||
+  mongoose.model<IParticipantBlock>("ParticipantBlock", ParticipantBlockSchema);

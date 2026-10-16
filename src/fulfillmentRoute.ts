@@ -15,8 +15,10 @@ import {
   readClaimTokenHmacSecret,
 } from "./claimToken.js";
 import { createDay4MutationRateLimiter } from "./claimRoute.js";
+import { isStoppedAfterAffirmedOrder } from "./requestAvailability.js";
 import { sendDay4Error } from "./day4Errors.js";
 import { sendFulfillmentEmail } from "./emailHelpers.js";
+import { isParticipantPairFenced } from "./participantBlocks.js";
 import { isParticipantTextAllowed } from "./participantTextFilter.js";
 import { startRequesterFulfillmentPush } from "./requesterFulfillmentPush.js";
 import {
@@ -123,6 +125,7 @@ interface FulfillmentDiagnosticDocument {
   claimExpiresAt?: Date | null;
   claimTokenDigest?: string | null;
   helperParticipantId?: Types.ObjectId | null;
+  externalOrderAffirmed?: boolean | null;
 }
 
 /**
@@ -215,7 +218,9 @@ async function diagnosticRequest(
   id: string
 ): Promise<FulfillmentDiagnosticDocument | null> {
   return (await MealRequest.findById(id)
-    .select("status claimExpiresAt +claimTokenDigest +helperParticipantId")
+    .select(
+      "status claimExpiresAt +claimTokenDigest +helperParticipantId +externalOrderAffirmed"
+    )
     .lean()
     .exec()) as FulfillmentDiagnosticDocument | null;
 }
@@ -267,7 +272,10 @@ async function explainConditionalFailure(
       "This request has already been placed."
     );
   }
-  if (document.status !== "claimed") {
+  // A request stopped after an affirmed external order (W4-U1.3) keeps
+  // `claimed` but carries no reservation authority; it is answered exactly like
+  // an ordinarily released request so the private marker is never revealed.
+  if (document.status !== "claimed" || isStoppedAfterAffirmedOrder(document)) {
     return sendDay4Error(
       res,
       409,
@@ -314,12 +322,49 @@ async function persistCorePlacement(
    * the same atomic conditional update that commits placement.
    */
   messageSuppressed: boolean,
+  /** Whether the helper submitted an optional Message at all. */
+  messageSubmitted: boolean,
   session: ClientSession
-): Promise<IRequest> {
+): Promise<{
+  placedRequest: IRequest;
+  /**
+   * W4-U1.3: a block existed between this helper and the requester in the
+   * placement snapshot. Placement itself is never refused or altered by it;
+   * only optional direct participant contact is.
+   */
+  pairFenced: boolean;
+  messageSuppressed: boolean;
+}> {
   let placedRequest: IRequest | null = null;
+  let pairFenced = false;
+  let effectiveMessageSuppressed = messageSuppressed;
 
   await session.withTransaction(
     async () => {
+      // W4-U1.3: read inside the placement snapshot so the durable marker below
+      // is decided against the same state placement commits against. This
+      // never gates placement — a block does not reverse or refuse a real
+      // order — it only decides whether optional direct contact is withheld.
+      // Reset on every callback invocation, because the driver may re-run it.
+      pairFenced = false;
+      effectiveMessageSuppressed = messageSuppressed;
+      if (helper.kind === "verified") {
+        const owner = await MealRequest.findById(id, null, { session })
+          .select("+requesterParticipantId")
+          .lean<{ requesterParticipantId?: Types.ObjectId | null }>()
+          .exec();
+        if (owner?.requesterParticipantId) {
+          pairFenced = await isParticipantPairFenced(
+            helper.participantId,
+            owner.requesterParticipantId,
+            session
+          );
+        }
+      }
+      if (pairFenced && messageSubmitted) {
+        effectiveMessageSuppressed = true;
+      }
+
       const setFields: Record<string, unknown> = {
         status: "placed",
         placedAt,
@@ -344,8 +389,16 @@ async function persistCorePlacement(
       // content-free suppression marker is durable, and only when set — written
       // in this same conditional update so it can never disagree with
       // committed placement.
-      if (messageSuppressed) {
+      if (effectiveMessageSuppressed) {
         setFields.contactMessageSuppressed = true;
+      }
+      // W4-U1.3: a Message not shared because of the blocked-pair restriction is
+      // told apart from a filter refusal by this second content-free marker,
+      // written in the same update. The restriction takes precedence: a
+      // blocked pair never gets a filter verdict about a Message that would not
+      // have been shared whatever it said.
+      if (pairFenced && messageSubmitted) {
+        setFields.contactMessageWithheld = true;
       }
 
       const unsetFields: Record<string, 1> = {
@@ -392,7 +445,10 @@ async function persistCorePlacement(
         // `installationId` is `select: false`; the requester-fulfillment push
         // dispatched after this transaction commits needs it to find the
         // originating installation, so it must be requested explicitly here.
-        .select("+installationId")
+        // `requesterParticipantId` is requested for the same reason: the
+        // post-commit contact re-check below needs the pair, and it is never
+        // projected onto any response.
+        .select("+installationId +requesterParticipantId")
         .exec();
 
       if (!placedRequest) {
@@ -442,7 +498,11 @@ async function persistCorePlacement(
   if (!placedRequest) {
     throw new ConditionalPlacementFailure();
   }
-  return placedRequest;
+  return {
+    placedRequest,
+    pairFenced,
+    messageSuppressed: effectiveMessageSuppressed,
+  };
 }
 
 /**
@@ -609,6 +669,8 @@ export async function fulfillRequest(
   let session: ClientSession | undefined;
   let placedRequest: IRequest;
   let helper: BoundHelper;
+  let pairFenced = false;
+  let finalMessageSuppressed = messageSuppressed;
 
   try {
     // Token mode re-reads the current binding, exactly as before this slice.
@@ -626,15 +688,19 @@ export async function fulfillRequest(
             email: authorization.email,
           };
     session = await mongoose.startSession();
-    placedRequest = await persistCorePlacement(
+    const placement = await persistCorePlacement(
       id,
       payload,
       authorization,
       helper,
       placedAt,
       messageSuppressed,
+      submittedMessage !== undefined,
       session
     );
+    placedRequest = placement.placedRequest;
+    pairFenced = placement.pairFenced;
+    finalMessageSuppressed = placement.messageSuppressed;
   } catch (error) {
     if (error instanceof MissingHelperIdentity) {
       // The named participant no longer resolves, so the conditional update
@@ -690,20 +756,55 @@ export async function fulfillRequest(
     }
   }
 
+  // W4-U1.3: the latest knowledge wins. A block committed after the placement
+  // snapshot but before the email is built still withholds direct contact, and
+  // an unreadable answer withholds it too — failing closed here costs a
+  // Reply-To, failing open would disclose a helper's address across a block.
+  // This never touches placement, which has already durably committed.
+  if (!pairFenced && helper.kind === "verified") {
+    const requesterId = (
+      placedRequest as unknown as {
+        requesterParticipantId?: Types.ObjectId | null;
+      }
+    ).requesterParticipantId;
+    if (requesterId) {
+      try {
+        pairFenced = await isParticipantPairFenced(
+          helper.participantId,
+          requesterId
+        );
+      } catch {
+        pairFenced = true;
+      }
+    }
+  }
+  const contactWithheld = pairFenced;
+  // Reported to the helper only, and only when a Message was actually
+  // submitted: there is nothing to say about a Message that never existed.
+  const messageWithheld = contactWithheld && submittedMessage !== undefined;
+  if (messageWithheld) {
+    finalMessageSuppressed = true;
+  }
+
   let notificationStatus: "sent" | "failed" = "sent";
   try {
     await sendFulfillmentEmail(
       placedRequest,
       validation.data.fulfillment.orderNumber,
       validation.data.fulfillment.eta,
-      emailedMessage,
+      // The Message is withheld for the same two reasons it is ever withheld:
+      // the participant-text filter (U1.1) or a blocked pair (U1.3).
+      finalMessageSuppressed ? undefined : emailedMessage,
       // The Reply-To the requester sees is the claim-bound helper's verified
       // address — the same value persisted above — so the coordination address
       // in that email is one CommonPlate has actually proved. A
       // legacyCompatible placement has no verified address to offer; the
       // payload carries none either, since W3-I1 removed that field, so
       // omitting Reply-To here is the only truthful choice.
-      helper.kind === "verified" ? helper.email : undefined
+      // A blocked pair never receives a helper address: direct
+      // participant-to-participant contact is exactly what a block ends, and
+      // the order facts in the email are complete without it.
+      helper.kind === "verified" && !contactWithheld ? helper.email : undefined
     );
     console.info("[fulfillment] Requester email submitted to provider");
   } catch {
@@ -723,7 +824,11 @@ export async function fulfillRequest(
     // private, content-free signal the helper client needs to say the order was
     // recorded but the Message was not sent. Absent otherwise, so every stale
     // client keeps decoding the unchanged success shape.
-    ...(messageSuppressed ? { messageSuppressed: true } : {}),
+    ...(finalMessageSuppressed ? { messageSuppressed: true } : {}),
+    // W4-U1.3: additional, affirmative-only refinement of the signal above for
+    // a Message withheld by the blocked-pair restriction. Absent for a filter
+    // refusal, so U1.1's presentation is unchanged.
+    ...(messageWithheld ? { messageWithheld: true } : {}),
   });
   // Started after the response is sent and deliberately not awaited, matching
   // `startHelperNewRequestPush`: a slow, timed-out, or misconfigured APNs

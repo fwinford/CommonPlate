@@ -6,6 +6,7 @@ import {
   buildVisibleNowFilter,
   hasMinimumRemainingTime,
   isEffectivelyAvailable,
+  isStoppedAfterAffirmedOrder,
   isVisibleNow,
 } from "./requestAvailability.js";
 
@@ -85,6 +86,10 @@ describe("buildEffectiveAvailabilityFilter", () => {
     expect(buildEffectiveAvailabilityFilter(now)).toEqual({
       visibleFrom: { $not: { $gt: now } },
       expiresAt: { $gt: now, $gte: exactlyFiveMinutesLeft },
+      // W4-U1.3: a request carrying the post-Yes external-order-risk authority
+      // is never advertised again; `$ne: true` leaves every ordinary request,
+      // including rows that never had the field, untouched.
+      externalOrderAffirmed: { $ne: true },
       $or: [
         { status: "open" },
         { status: "claimed", claimExpiresAt: { $lte: now } },
@@ -253,6 +258,65 @@ describe("isEffectivelyAvailable", () => {
         },
         now
       )
+    ).toBe(false);
+  });
+});
+
+describe("the W4-U1.3 post-Yes external-order-risk authority", () => {
+  const lapsed = new Date(now.getTime() - 1000);
+
+  it("never reopens a lapsed claim that carries the authority, while an ordinary lapse still reopens", () => {
+    const base = {
+      status: "claimed",
+      expiresAt: exactlyFiveMinutesLeft,
+      claimExpiresAt: lapsed,
+    };
+
+    expect(isEffectivelyAvailable(base, now)).toBe(true);
+    expect(
+      isEffectivelyAvailable({ ...base, externalOrderAffirmed: true }, now)
+    ).toBe(false);
+    // An absent, null, or false marker is "not established" and changes nothing.
+    for (const marker of [undefined, null, false]) {
+      expect(
+        isEffectivelyAvailable({ ...base, externalOrderAffirmed: marker }, now)
+      ).toBe(true);
+    }
+  });
+
+  it("fails closed even for a marked row that reads open", () => {
+    expect(
+      isEffectivelyAvailable(
+        {
+          status: "open",
+          expiresAt: exactlyFiveMinutesLeft,
+          externalOrderAffirmed: true,
+        },
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("identifies only a claimed, marked request that has no reservation deadline", () => {
+    const stopped = {
+      status: "claimed",
+      externalOrderAffirmed: true,
+      claimExpiresAt: undefined,
+    };
+
+    expect(isStoppedAfterAffirmedOrder(stopped)).toBe(true);
+    expect(isStoppedAfterAffirmedOrder({ ...stopped, claimExpiresAt: null })).toBe(
+      true
+    );
+    // A live or lapsed reservation of a marked request is not "stopped".
+    expect(
+      isStoppedAfterAffirmedOrder({ ...stopped, claimExpiresAt: lapsed })
+    ).toBe(false);
+    expect(isStoppedAfterAffirmedOrder({ ...stopped, status: "placed" })).toBe(false);
+    expect(isStoppedAfterAffirmedOrder({ ...stopped, status: "open" })).toBe(false);
+    // Without the marker an absent deadline is not enough.
+    expect(
+      isStoppedAfterAffirmedOrder({ status: "claimed", claimExpiresAt: undefined })
     ).toBe(false);
   });
 });

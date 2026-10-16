@@ -277,6 +277,18 @@ struct FulfillRequestView: View {
     /// accepted by the system. Changes no lifecycle state.
     @State private var isShowingGrubhubOpenFailure = false
 
+    /// W4-U1.3: set for the duration of a Stop helping attempt made while the
+    /// pair's direct contact is restricted, or on a reservation the backend
+    /// holds the post-`Yes` lifecycle authority for (even after this helper's
+    /// own Unblock, or a relaunch). A confirmed Stop then leaves for Home,
+    /// never for Active Requests, whatever order the store's published claim
+    /// change and this view's own result handling arrive in. Presentation only;
+    /// it is cleared again if the reservation was not actually ended.
+    @State private var stopEndsAtHome = false
+    /// Bumped only by a confirmed `Yes, already placed` Block; drives the
+    /// one-time orientation scroll.
+    @State private var blockYesScrollRequest = 0
+
     /// The claim this screen is showing. Nil once the store ends the flow, so
     /// the body never renders claimant-private data without a live claim
     /// behind it.
@@ -288,17 +300,30 @@ struct FulfillRequestView: View {
         return activeClaim
     }
 
+    /// The Block for this request's pair is active (confirmed by the backend,
+    /// including after relaunch): the restricted completion state.
+    private var isBlockActive: Bool {
+        store.contactSuppressedRequestIDs.contains(request.id)
+    }
+
     var body: some View {
+        ScrollViewReader { scrollProxy in
         ScrollView {
             if let claim {
                 VStack(alignment: .leading, spacing: 0) {
                     reservationStatus(claim: claim)
+                    // W4-U1.3: the extension and Stop helping stay in both the
+                    // unrestricted and the restricted state, composed the same
+                    // way, so the control set reveals nothing about a Block or
+                    // whose it is. A restricted page drops only direct contact
+                    // (Message) and the redundant safety menu.
                     reservationControls(claim: claim)
                         .padding(.top, 16)
                     placeOrderSection(claim: claim)
                         .padding(.top, 20)
                     afterYouOrderSection
                         .padding(.top, 28)
+                        .id(Self.afterYouOrderScrollID)
                 }
                 .padding(.horizontal, CommonPlateStyle.Metrics.settingsPageInset)
                 .padding(.top, 24)
@@ -307,6 +332,14 @@ struct FulfillRequestView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
+        // Orientation only, after a confirmed `Yes, already placed` Block:
+        // bring the status and `After you order` into view. No focus, picker
+        // or navigation change.
+        .onChange(of: blockYesScrollRequest) { _, _ in
+            withAnimation(.easeInOut(duration: 0.4)) {
+                scrollProxy.scrollTo(Self.afterYouOrderScrollID, anchor: .top)
+            }
+        }
         .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
         .safeAreaInset(edge: .bottom) {
             if claim != nil {
@@ -315,6 +348,26 @@ struct FulfillRequestView: View {
         }
         .navigationTitle(Self.navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
+        // W4-U1.3: the contextual safety menu while the reservation is held.
+        // The Message warning reads this page's live draft; nothing about the
+        // draft is kept for Block.
+        .modifier(HelpingBlockMenu(
+            store: store,
+            isOffered: ParticipantBlockAvailability.helpingOffersBlock(
+                canBlockHelpedRequester: claim != nil && store.canBlockHelpedRequester,
+                blockIsActive: isBlockActive
+            ),
+            draftMessage: draft.contactMessage,
+            onBlockedAndReleased: {
+                path = AppRoute.afterParticipantBlock(from: path)
+            },
+            onBlockedKeepingReservation: {
+                path = AppRoute.afterParticipantBlockKeepingHelping(from: path)
+                // The only scroll trigger: a confirmed Yes. Reconstruction,
+                // Cancel, No and failure never reach this closure.
+                blockYesScrollRequest += 1
+            }
+        ))
         .onChange(of: focusedField) { previousField, currentField in
             validationPresentation.handleFocusTransition(
                 from: previousField,
@@ -339,6 +392,7 @@ struct FulfillRequestView: View {
                 isShowingGrubhubOpenFailure = false
             }
         }
+        }
     }
 
     private func synchronizeClaimedFlowPath() {
@@ -346,7 +400,8 @@ struct FulfillRequestView: View {
             path,
             activeRequestID: store.activeClaim?.requestID,
             confirmationRequestID: store.fulfillmentConfirmation?.requestID,
-            requestID: request.id
+            requestID: request.id,
+            endsAtHome: stopEndsAtHome
         )
     }
 
@@ -358,20 +413,30 @@ struct FulfillRequestView: View {
     /// The success presentation covers it and performs the single automatic
     /// Home return (`AppRoute.afterHelperSuccess`); truncating here as well
     /// would be a second, competing destination.
+    ///
+    /// A path that no longer holds a helper destination for this request has
+    /// already been unwound (for example by the Home return, whose dismissal of
+    /// the confirmation re-enters here), so it is left exactly as it is.
+    ///
+    /// W4-U1.3: `endsAtHome` is a confirmed Stop helping taken while direct
+    /// contact was restricted, or on a post-`Yes` reservation (including after
+    /// the helper's own Unblock). That non-success end is not a lost reservation to
+    /// be explained on Active Requests — the helper chose to leave — so it
+    /// resolves to Home, with no Active Requests destination beneath it.
     static func claimedFlowPath(
         _ path: [AppRoute],
         activeRequestID: String?,
         confirmationRequestID: String?,
-        requestID: String
+        requestID: String,
+        endsAtHome: Bool = false
     ) -> [AppRoute] {
         if confirmationRequestID == requestID {
             return path
         }
         guard activeRequestID == requestID else {
-            // Once this request's helper destination has left the path (the
-            // post-success Home return clears it), a later claim or
-            // confirmation republish must not rewrite that path back to
-            // Active Requests.
+            if endsAtHome {
+                return AppRoute.afterParticipantBlock(from: path)
+            }
             guard AppRoute.containsHelperDestination(
                 in: path,
                 requestID: requestID
@@ -476,8 +541,20 @@ struct FulfillRequestView: View {
 
     private var stopHelpingControl: some View {
         Button {
+            // Captured at the tap: the restricted state and the post-Yes
+            // lifecycle are cleared together with the reservation, so they
+            // cannot be read afterwards. Neither reads Block ownership.
+            let endsAtHome = store.stopHelpingEndsAtHome(requestID: request.id)
             Task {
+                stopEndsAtHome = endsAtHome
                 await store.releaseActiveClaim()
+                if store.activeClaim?.requestID == request.id {
+                    // The reservation was not ended (failure, ambiguity, or a
+                    // lost race): nothing about navigation changes.
+                    stopEndsAtHome = false
+                } else {
+                    synchronizeClaimedFlowPath()
+                }
             }
         } label: {
             HStack(spacing: 6) {
@@ -659,6 +736,20 @@ struct FulfillRequestView: View {
                 .foregroundStyle(HelpingPalette.primaryText)
                 .accessibilityAddTraits(.isHeader)
 
+            if isBlockActive {
+                if store.callerBlockedRequestIDs.contains(request.id) {
+                    blockActiveStatus
+                        .padding(.top, 8)
+                } else {
+                    Text(ParticipantBlockCopy.directContactUnavailableNotice)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8)
+                        .accessibilityIdentifier("helping-block-active-notice")
+                }
+            }
+
             // No email field (W3-I1): the helper is the verified participant
             // this reservation is bound to. The V1 email-sharing / Reply-To
             // disclosure is presented by W4-T1, not on this page.
@@ -679,6 +770,26 @@ struct FulfillRequestView: View {
                         .accessibilityIdentifier("fulfillment-error")
                 }
             }
+        }
+    }
+
+    /// The caller-known Block status: a compact tint pill and one muted line.
+    /// No icon, and no warning or error styling.
+    private var blockActiveStatus: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(ParticipantBlockCopy.blockActivePill)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(HelpingPalette.extendTint)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(HelpingPalette.extendTint.opacity(0.14), in: Capsule())
+                .accessibilityIdentifier("helping-block-active-pill")
+
+            Text(ParticipantBlockCopy.blockActiveSupporting)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("helping-block-active-supporting")
         }
     }
 
@@ -732,24 +843,29 @@ struct FulfillRequestView: View {
                 .accessibilityIdentifier("fulfillment-eta")
             }
 
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(alignment: .firstTextBaseline) {
-                    HelpingFieldLabel(text: Self.messageLabel)
-                    Spacer()
-                    Text(Self.messageOptionalLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            // W4-U1.3: once this helper has blocked the requester they are
+            // helping, the optional Message is not offered — it would be
+            // withheld by the backend anyway.
+            if !store.contactSuppressedRequestIDs.contains(request.id) {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(alignment: .firstTextBaseline) {
+                        HelpingFieldLabel(text: Self.messageLabel)
+                        Spacer()
+                        Text(Self.messageOptionalLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    TextField(
+                        Self.messagePlaceholder,
+                        text: $draft.contactMessage,
+                        axis: .vertical
+                    )
+                    .lineLimit(3...6)
+                    .font(.subheadline)
+                    .modifier(HelpingFieldChrome(minHeight: 80, alignment: .topLeading))
+                    .accessibilityLabel(Text(Self.messageLabel))
+                    .accessibilityIdentifier("fulfillment-contact-message")
                 }
-                TextField(
-                    Self.messagePlaceholder,
-                    text: $draft.contactMessage,
-                    axis: .vertical
-                )
-                .lineLimit(3...6)
-                .font(.subheadline)
-                .modifier(HelpingFieldChrome(minHeight: 80, alignment: .topLeading))
-                .accessibilityLabel(Text(Self.messageLabel))
-                .accessibilityIdentifier("fulfillment-contact-message")
             }
         }
     }
@@ -1012,6 +1128,7 @@ struct FulfillRequestView: View {
         "Couldn't open Grubhub. Open the Grubhub app to place the order."
 
     static let afterYouOrderHeading = "After you order"
+    static let afterYouOrderScrollID = "helping-after-you-order"
     static let orderNumberLabel = "Order number"
     static let orderNumberPlaceholder = "Enter order number"
     static let pickupETALabel = "Pickup ETA"

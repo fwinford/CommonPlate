@@ -23,11 +23,13 @@ import {
   sendParticipantAuthorityRefusal,
   type ParticipantAuthorityRefusal,
 } from "./participantAuthorityGate.js";
+import { isParticipantPairFenced } from "./participantBlocks.js";
 import { isPublicActionsPaused } from "./publicActionsPause.js";
 import {
   buildMinimumRemainingTimeFilter,
   buildVisibleNowFilter,
   hasMinimumRemainingTime,
+  isStoppedAfterAffirmedOrder,
   isVisibleNow,
   REQUEST_NOT_YET_AVAILABLE_CODE,
   REQUEST_NOT_YET_AVAILABLE_MESSAGE,
@@ -74,6 +76,7 @@ interface ClaimDiagnosticDocument {
   claimExtendedAt?: Date | null;
   claimTokenDigest?: string | null;
   helperParticipantId?: mongoose.Types.ObjectId | null;
+  externalOrderAffirmed?: boolean | null;
 }
 
 function isInvalidId(id: unknown): boolean {
@@ -83,7 +86,7 @@ function isInvalidId(id: unknown): boolean {
 function diagnosticRequest(id: string) {
   return MealRequest.findById(id)
     .select(
-      "status visibleFrom expiresAt claimExpiresAt claimExtendedAt +claimTokenDigest +helperParticipantId"
+      "status visibleFrom expiresAt claimExpiresAt claimExtendedAt +claimTokenDigest +helperParticipantId +externalOrderAffirmed"
     )
     .lean()
     .exec() as Promise<ClaimDiagnosticDocument | null>;
@@ -143,10 +146,15 @@ async function explainClaimFailure(
       "This request does not have five full minutes remaining."
     );
   }
+  // W4-U1.3: a request carrying the post-Yes external-order-risk authority is
+  // never claimable again. It is answered as the existing reserved-request
+  // refusal — the same sentence a live reservation gets — so a helper learns
+  // nothing new, and nothing about why or whose.
   if (
-    document.status === "claimed" &&
-    document.claimExpiresAt &&
-    document.claimExpiresAt.getTime() > now.getTime()
+    document.externalOrderAffirmed === true ||
+    (document.status === "claimed" &&
+      document.claimExpiresAt &&
+      document.claimExpiresAt.getTime() > now.getTime())
   ) {
     return sendDay4Error(
       res,
@@ -188,6 +196,14 @@ class AlreadyParticipatedConflict extends Error {}
  * self-claim is never granted.
  */
 class SelfClaimConflict extends Error {}
+
+/**
+ * A block exists between the claimant and the request's requester, in either
+ * direction (W4-U1.3). Rolled back with the rest of the transaction exactly
+ * like `SelfClaimConflict`, and answered as an ordinary missing request so the
+ * response cannot tell the claimant that a block, let alone whose, is why.
+ */
+class BlockedPairConflict extends Error {}
 
 function isDuplicateKeyError(error: unknown): boolean {
   return (
@@ -299,6 +315,23 @@ export async function claimRequest(
           throw new SelfClaimConflict();
         }
 
+        // The W4-U1.3 participant-pair fence, read in the same snapshot as the
+        // grant and serialized against a concurrent block by the Participant
+        // write below (see `src/participantBlocks.ts`). Consulted ahead of the
+        // participation check so a fenced pair is answered identically however
+        // its history with this request looks. `requesterParticipantId` is
+        // absent only on legacy rows, which have no participant to fence.
+        if (
+          ownershipCheck?.requesterParticipantId &&
+          (await isParticipantPairFenced(
+            participantId,
+            ownershipCheck.requesterParticipantId,
+            session
+          ))
+        ) {
+          throw new BlockedPairConflict();
+        }
+
         // The W3-H2 one-successful-participation invariant, consulted before
         // the conditional grant below: a participant who has ever
         // successfully acquired this exact request is refused regardless of
@@ -329,6 +362,12 @@ export async function claimRequest(
             // claimable either.
             visibleFrom: buildVisibleNowFilter(now),
             expiresAt: buildMinimumRemainingTimeFilter(now),
+            // W4-U1.3: the post-Yes external-order-risk authority makes this
+            // request permanently unclaimable. Evaluated inside the same
+            // conditional mutation that grants, so a marker committed by a
+            // concurrent Yes Block either is seen here or conflicts with this
+            // write; there is no window that grants it afterwards.
+            externalOrderAffirmed: { $ne: true },
             $or: [
               { status: "open" },
               {
@@ -458,6 +497,15 @@ export async function claimRequest(
         409,
         REQUEST_OWN_REQUEST_CODE,
         REQUEST_OWN_REQUEST_MESSAGE
+      );
+    }
+    if (error instanceof BlockedPairConflict) {
+      // Byte-for-byte the answer for a request that does not exist.
+      return sendDay4Error(
+        res,
+        404,
+        "REQUEST_NOT_FOUND",
+        "This request could not be found."
       );
     }
     if (error instanceof ConditionalClaimFailure) {
@@ -645,7 +693,9 @@ async function explainExtensionFailure(
       "This request is no longer available."
     );
   }
-  if (document.status !== "claimed") {
+  // `isStoppedAfterAffirmedOrder` (W4-U1.3) is answered exactly like a request
+  // that was ordinarily released: nothing about it reveals the private marker.
+  if (document.status !== "claimed" || isStoppedAfterAffirmedOrder(document)) {
     return sendDay4Error(
       res,
       409,
@@ -783,6 +833,13 @@ export async function extendClaim(
         }
         const extended = document as unknown as ExtendedRequestDocument;
 
+        // W4-U1.3: deliberately no participant-pair fence here. A Block fences
+        // *new* interaction — a claim, another request, another helper — and
+        // extending the reservation its holder already legitimately has begins
+        // none. Extension is governed only by the ordinary timing and one-use
+        // rules in the conditional update above, so it can never answer
+        // differently because a Block exists, in either direction.
+
         // Mirrors the new deadline onto the one-active-reservation lock so a
         // just-extended claim cannot be mistaken for a stale one that no
         // longer blocks a fresh claim by the same principal. A
@@ -895,7 +952,10 @@ async function explainReleaseFailure(
       "This request has already been placed."
     );
   }
-  if (document.status !== "claimed") {
+  // A request already stopped after an affirmed external order (W4-U1.3) is
+  // classified as an ordinarily released one, so a retried Stop is
+  // indistinguishable between the two.
+  if (document.status !== "claimed" || isStoppedAfterAffirmedOrder(document)) {
     return sendDay4Error(
       res,
       409,
@@ -930,12 +990,12 @@ async function explainReleaseFailure(
 
 class ConditionalReleaseFailure extends Error {}
 
-interface ReleaseReservationVersion {
+export interface ReleaseReservationVersion {
   claimExpiresAt: Date;
   claimExtendedAt?: Date | null;
 }
 
-interface ReleasedRequestDocument {
+export interface ReleasedRequestDocument {
   _id: mongoose.Types.ObjectId;
   helperParticipantId?: mongoose.Types.ObjectId | null;
 }
@@ -950,7 +1010,7 @@ interface ReleasedRequestDocument {
  * `claimExtendedAt` records the one-use transition, so together they are the
  * existing reservation-version CAS without adding persistence or wire state.
  */
-async function readReleaseReservationVersion(
+export async function readReleaseReservationVersion(
   id: string
 ): Promise<ReleaseReservationVersion | null> {
   const document = (await MealRequest.findById(id)
@@ -988,6 +1048,112 @@ function releaseVersionFilter(
           ? { $eq: null, $exists: true }
           : version.claimExtendedAt,
   };
+}
+
+/**
+ * The release mutation itself, shared by `releaseClaim` and the W4-U1.3
+ * helper block-while-helping `No` branch so the two can never diverge: one
+ * conditional, version-pinned, authorization-pinned update plus the matching
+ * lock clear, inside the caller's transaction.
+ *
+ * `new: false` (the default) returns the pre-release document, which still
+ * carries `helperParticipantId` — needed a moment later to clear that
+ * participant's reservation lock. The unset fields put this request back
+ * exactly where an unclaimed request already stands: nothing here
+ * distinguishes a released request from one that was never claimed.
+ *
+ * ## Post-Yes branch (W4-U1.3)
+ *
+ * A request carrying `externalOrderAffirmed` — written atomically with the
+ * successful Yes Block — must never return to ordinary availability, because a
+ * real external order may exist and another helper claiming it would place a
+ * second one. That is the one case the ordinary update above deliberately does
+ * not match (its filter carries `externalOrderAffirmed: { $ne: true }`), so a
+ * request without the marker releases byte-for-byte as it always has.
+ *
+ * For a marked request the same conditional, version-pinned,
+ * authorization-pinned filter is applied, and the mutation instead *retires*
+ * the reservation: it removes every piece of reservation authority (deadline,
+ * claim-token digest, helper binding, one-use marker) and clears the helper's
+ * lock, but leaves `status` as `claimed`, never `open`. With no deadline and
+ * no binding no extension or fulfillment can match it; with the marker the
+ * shared availability predicate and the claim filter never offer it again. The
+ * caller's observable result is identical either way.
+ *
+ * Returns `null` when neither update matched; the caller owns what that means.
+ */
+export async function releaseReservationWithinSession(
+  session: mongoose.ClientSession,
+  input: {
+    requestId: string;
+    version: ReleaseReservationVersion;
+    now: Date;
+    authorization: ClaimActionAuthorization;
+  }
+): Promise<ReleasedRequestDocument | null> {
+  const { requestId, version, now, authorization } = input;
+  const pinned = {
+    _id: requestId,
+    status: "claimed",
+    // The exact version captured before the transaction started.
+    ...releaseVersionFilter(version, now),
+    ...claimActionFilter(authorization),
+  };
+  const retiredFields = {
+    claimedAt: 1,
+    claimExpiresAt: 1,
+    claimExtendedAt: 1,
+    claimTokenDigest: 1,
+    helperParticipantId: 1,
+  } as const;
+
+  let document = await MealRequest.findOneAndUpdate(
+    { ...pinned, externalOrderAffirmed: { $ne: true } },
+    {
+      $set: { status: "open", updatedAt: now },
+      $unset: retiredFields,
+    },
+    { session }
+  )
+    .select("+helperParticipantId")
+    .lean()
+    .exec();
+
+  if (!document) {
+    document = await MealRequest.findOneAndUpdate(
+      { ...pinned, externalOrderAffirmed: true },
+      {
+        // `status` is deliberately untouched: it stays `claimed`.
+        $set: { updatedAt: now },
+        $unset: retiredFields,
+      },
+      { session }
+    )
+      .select("+helperParticipantId")
+      .lean()
+      .exec();
+  }
+
+  if (!document) return null;
+  const releasedDocument = document as unknown as ReleasedRequestDocument;
+
+  if (releasedDocument.helperParticipantId) {
+    await Participant.updateOne(
+      {
+        _id: releasedDocument.helperParticipantId,
+        activeReservationRequestId: releasedDocument._id,
+      },
+      {
+        $set: {
+          activeReservationRequestId: null,
+          activeReservationClaimExpiresAt: null,
+        },
+      },
+      { session }
+    ).exec();
+  }
+
+  return releasedDocument;
 }
 
 /**
@@ -1046,57 +1212,18 @@ export async function releaseClaim(
 
     await session.withTransaction(
       async () => {
-        // `new: false` (the default) returns the pre-release document, which
-        // still carries `helperParticipantId` — needed a moment later to
-        // clear that participant's reservation lock. The unset fields put
-        // this request back exactly where an unclaimed request already
-        // stands: nothing here distinguishes a released request from one
-        // that was never claimed.
-        const document = await MealRequest.findOneAndUpdate(
+        const releasedDocument = await releaseReservationWithinSession(
+          session as mongoose.ClientSession,
           {
-            _id: id,
-            status: "claimed",
-            // The exact version captured before this transaction started.
-            ...releaseVersionFilter(originalVersion, now),
-            ...claimActionFilter(authorization),
-          },
-          {
-            $set: { status: "open", updatedAt: now },
-            $unset: {
-              claimedAt: 1,
-              claimExpiresAt: 1,
-              claimExtendedAt: 1,
-              claimTokenDigest: 1,
-              helperParticipantId: 1,
-            },
-          },
-          { session }
-        )
-          .select("+helperParticipantId")
-          .lean()
-          .exec();
-
-        if (!document) {
+            requestId: id,
+            version: originalVersion,
+            now,
+            authorization,
+          }
+        );
+        if (!releasedDocument) {
           throw new ConditionalReleaseFailure();
         }
-        const releasedDocument = document as unknown as ReleasedRequestDocument;
-
-        if (releasedDocument.helperParticipantId) {
-          await Participant.updateOne(
-            {
-              _id: releasedDocument.helperParticipantId,
-              activeReservationRequestId: releasedDocument._id,
-            },
-            {
-              $set: {
-                activeReservationRequestId: null,
-                activeReservationClaimExpiresAt: null,
-              },
-            },
-            { session }
-          ).exec();
-        }
-
         released = releasedDocument;
       },
       {

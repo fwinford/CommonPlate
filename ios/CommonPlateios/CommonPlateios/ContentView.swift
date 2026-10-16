@@ -790,7 +790,7 @@ struct ContentView: View {
                     onboardingFlowCoordinator.beginReplay()
                 }
         case .privacySafety:
-            PrivacySafetyView()
+            PrivacySafetyView(participantIdentityStore: participantIdentityStore)
         case .settings:
             SettingsView(
                 requestStore: requestStore,
@@ -803,6 +803,11 @@ struct ContentView: View {
             )
         case .support:
             SupportView()
+        case .blockedStudents:
+            BlockedStudentsView(
+                store: requestStore,
+                identityStore: participantIdentityStore
+            )
         case .requestDetail(let request):
             RequestDetailView(
                 request: request,

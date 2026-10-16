@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   Request as MealRequest,
   Participant,
+  ParticipantBlock,
   RequestParticipation,
 } from "../models/db.js";
 import {
@@ -198,6 +199,10 @@ beforeEach(() => {
   } as unknown as ReturnType<typeof Participant.updateOne>);
   mockExistingActiveReservation();
   mockExistingParticipation();
+  // W4-U1.3: no block exists between any pair unless a case says otherwise.
+  vi.spyOn(ParticipantBlock, "findOne").mockReturnValue({
+    lean: () => ({ exec: vi.fn().mockResolvedValue(null) }),
+  } as unknown as ReturnType<typeof ParticipantBlock.findOne>);
   mockParticipationInsert();
   mockOwnershipCheck();
 });

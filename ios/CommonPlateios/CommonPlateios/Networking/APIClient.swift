@@ -15,6 +15,7 @@ enum HTTPMethod: String {
     case get = "GET"
     case post = "POST"
     case put = "PUT"
+    case delete = "DELETE"
 }
 
 /// Client-side representation of a failed request. Preserves the backend's

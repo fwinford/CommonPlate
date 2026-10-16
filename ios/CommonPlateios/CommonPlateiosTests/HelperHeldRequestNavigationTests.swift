@@ -472,12 +472,13 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
         }
     }
 
-    // MARK: - Automatic Home return (narrow H1 closeout)
+    // MARK: - Post-success Home return re-entry
 
-    /// After success the path is cleared to Home. A later claim/confirmation
-    /// republish must leave Home alone rather than rewriting it to Active
-    /// Requests.
-    func testClearedPostSuccessStackRemainsHome() {
+    /// The Home return clears the path and then dismisses the confirmation,
+    /// and the still-mounted Helping view reacts to that dismissal. With no
+    /// claim and no confirmation, the already-cleared path must stay Home
+    /// rather than being rebuilt as `[.activeRequests]`.
+    func testClearedPathStaysHomeWhenConfirmationIsDismissedAfterSuccess() {
         XCTAssertEqual(
             FulfillRequestView.claimedFlowPath(
                 [],
@@ -489,15 +490,16 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
         )
     }
 
-    func testPathsWithoutThisRequestsHelperDestinationAreUnchanged() {
-        let other = foodRequest(id: otherID)
-        let paths: [[AppRoute]] = [
+    /// A path with no helper destination for this request is not this
+    /// request's flow to unwind.
+    func testPathWithoutThisRequestsHelperDestinationIsLeftAlone() {
+        let unrelated: [[AppRoute]] = [
             [.settings],
             [.activeRequests],
-            [.requestDetail(other)],
-            [.activeRequests, .fulfillment(other)]
+            [.activeRequests, .fulfillment(foodRequest(id: otherID))],
+            [.requestDetail(foodRequest(id: otherID))]
         ]
-        for path in paths {
+        for path in unrelated {
             for activeRequestID in [nil, otherID] {
                 XCTAssertEqual(
                     FulfillRequestView.claimedFlowPath(
@@ -513,7 +515,9 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
         }
     }
 
-    func testRequestDetailForThisRequestStillUnwindsWhenReservationEndsWithoutSuccess() {
+    /// A request detail for this request still counts as its helper
+    /// destination, so the non-success unwind is unchanged for it.
+    func testRequestDetailForThisRequestStillUnwindsToActiveRequests() {
         let path: [AppRoute] = [.activeRequests, .requestDetail(foodRequest(id: heldID))]
         XCTAssertEqual(
             FulfillRequestView.claimedFlowPath(
@@ -526,9 +530,9 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
         )
     }
 
-    /// claim → fulfill → afterHelperSuccess → dismiss confirmation → sync
-    /// again: the path stays Home with no claim and no confirmation left.
-    func testStoreSuccessOrderingLeavesHomeAfterConfirmationDismissal() async throws {
+    /// Real store: claim → fulfill → the Home return clears the path and
+    /// dismisses the confirmation → Helping's re-sync leaves the path Home.
+    func testHomeReturnThenConfirmationDismissalKeepsPathHome() async throws {
         let store = try await makeStoreHolding(heldID)
         let held = try XCTUnwrap(store.activeClaim?.request)
         var path: [AppRoute] = [.activeRequests, .fulfillment(held)]
@@ -547,27 +551,30 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
         )
         let confirmation = try XCTUnwrap(store.fulfillmentConfirmation)
 
-        // While the success presentation is up, the path is left alone.
+        // While the confirmation is displayed, Helping leaves the path alone.
         path = FulfillRequestView.claimedFlowPath(
             path,
             activeRequestID: store.activeClaim?.requestID,
             confirmationRequestID: store.fulfillmentConfirmation?.requestID,
             requestID: heldID
         )
-        path = AppRoute.afterHelperSuccess(from: path)
-        XCTAssertEqual(path, [])
+        XCTAssertEqual(path, [.activeRequests, .fulfillment(held)])
 
+        // ContentView's success return: replace the path, then dismiss.
+        path = AppRoute.afterHelperSuccess(from: path)
         store.dismissFulfillmentConfirmation(id: confirmation.id)
+
+        // Helping's onChange re-sync after the dismissal.
+        path = FulfillRequestView.claimedFlowPath(
+            path,
+            activeRequestID: store.activeClaim?.requestID,
+            confirmationRequestID: store.fulfillmentConfirmation?.requestID,
+            requestID: heldID
+        )
+
+        XCTAssertEqual(path, [])
         XCTAssertNil(store.activeClaim)
         XCTAssertNil(store.fulfillmentConfirmation)
-
-        path = FulfillRequestView.claimedFlowPath(
-            path,
-            activeRequestID: store.activeClaim?.requestID,
-            confirmationRequestID: store.fulfillmentConfirmation?.requestID,
-            requestID: heldID
-        )
-        XCTAssertEqual(path, [])
     }
 
     // MARK: - Helpers
