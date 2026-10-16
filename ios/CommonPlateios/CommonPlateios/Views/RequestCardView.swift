@@ -31,6 +31,9 @@ struct RequestCardView: View {
     /// board, before this zone existed) keeps the eyebrow. Has no effect for
     /// `.open`/`.helping`, which never show it regardless.
     var showsOwnershipEyebrow: Bool = true
+    /// W4-O1 temporary first-use discovery emphasis: reuses the existing
+    /// lavender helping surface/border tokens; no geometry change.
+    var isDiscoveryEmphasized: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -81,6 +84,7 @@ struct RequestCardView: View {
     }
 
     private var surfaceColor: Color {
+        if isDiscoveryEmphasized { return CommonPlateStyle.Color.helpingCardSurface }
         switch kind {
         case .open, .own:
             return CommonPlateStyle.Color.requestCardSurface
@@ -90,6 +94,7 @@ struct RequestCardView: View {
     }
 
     private var borderColor: Color {
+        if isDiscoveryEmphasized { return CommonPlateStyle.Color.helpingCardBorder }
         switch kind {
         case .open, .own:
             return CommonPlateStyle.Color.requestCardBorder

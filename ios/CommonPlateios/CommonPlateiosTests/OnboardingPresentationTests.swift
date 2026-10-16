@@ -38,153 +38,6 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertTrue(OnboardingPresentationStore(storage: reconstructedStorage).hasCompletedOnboarding)
     }
 
-    func testRequesterWalkthroughKeepsItsRequiredOrderedContent() throws {
-        let requester = OnboardingWalkthroughView.content(for: .gettingAMeal)
-
-        XCTAssertEqual(requester.title, "Getting a meal")
-        XCTAssertEqual(requester.steps, [
-            "Build your order in Grubhub",
-            "Add your order details to CommonPlate",
-            "A student reserves and places your order",
-            "CommonPlate emails you the pickup details"
-        ])
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
-        XCTAssertTrue(source.contains("WalkthroughStepRow("))
-        XCTAssertTrue(source.contains("Text(\"\\(number)\")"))
-        XCTAssertTrue(source.contains("Color.accentColor.opacity(0.12)"))
-        XCTAssertTrue(source.contains(".frame(width: 46, height: 46)"))
-        XCTAssertTrue(source.contains("HStack(alignment: .center, spacing: CommonPlateStyle.Spacing.l)"))
-        XCTAssertTrue(source.contains(".padding(.horizontal, CommonPlateStyle.Spacing.s)"))
-        XCTAssertFalse(source.contains("You build the order you want."))
-        XCTAssertFalse(source.contains("CommonPlate helps another student place it for you."))
-    }
-
-    func testChooserUsesTheApprovedSmallTicketArrowBowlMotif() throws {
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
-
-        XCTAssertTrue(source.contains("Image(\"TicketToMealMotif\")"))
-        XCTAssertTrue(source.contains(".renderingMode(.template)"))
-        XCTAssertTrue(source.contains(".foregroundStyle(Color.accentColor)"))
-        XCTAssertTrue(source.contains(".frame(width: 118, height: 46)"))
-        XCTAssertFalse(source.contains("TicketOutline"))
-        XCTAssertFalse(source.contains("BowlOutline"))
-    }
-
-    func testHelperWalkthroughKeepsItsRequiredOrderedContentAndAlertNote() throws {
-        let helper = OnboardingWalkthroughView.content(for: .usingExtraSwipes)
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
-
-        XCTAssertEqual(helper.title, "Using your extra swipes")
-        XCTAssertEqual(helper.steps, [
-            "Browse available requests",
-            "Choose a request",
-            "Place the order in Grubhub",
-            "Add the pickup details to CommonPlate"
-        ])
-        XCTAssertTrue(source.contains("CommonPlateStyle.Color.warmSurface"))
-        XCTAssertFalse(source.contains("Choose a request, place the order in Grubhub, and give CommonPlate the pickup details."))
-        XCTAssertTrue(source.contains("No requests available?"))
-        XCTAssertTrue(source.contains("Turn on request alerts from Home."))
-        XCTAssertFalse(source.contains("CommonPlate sends you the pickup details you need."))
-        XCTAssertFalse(source.contains("CommonPlate sends the student the pickup details you entered."))
-    }
-
-    func testWalkthroughUsesSystemTitlesAndResponsiveBoundedContinuePlacement() throws {
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
-        let walkthrough = try declarationSource(
-            startMarker: "struct OnboardingWalkthroughView: View {",
-            endMarker: "private enum OnboardingWalkthroughLayout",
-            in: source
-        )
-
-        XCTAssertTrue(walkthrough.contains("GeometryReader { geometry in"))
-        XCTAssertTrue(walkthrough.contains("ScrollView {"))
-        XCTAssertTrue(walkthrough.contains(".font(.title.weight(.bold))"))
-        XCTAssertTrue(walkthrough.contains(".multilineTextAlignment(.center)"))
-        XCTAssertFalse(walkthrough.contains("commonPlateBrandDisplay"))
-        XCTAssertTrue(walkthrough.contains("Spacer(minLength: 0)"))
-        XCTAssertTrue(walkthrough.contains(".frame(maxHeight: OnboardingWalkthroughLayout.continueSeparationMaximum)"))
-        XCTAssertTrue(walkthrough.contains(".padding(.top, CommonPlateStyle.Spacing.l)"))
-        XCTAssertTrue(walkthrough.contains(".frame(minHeight: geometry.size.height, alignment: .top)"))
-        XCTAssertTrue(source.contains("static let continueSeparationMaximum: CGFloat = 128"))
-    }
-
-    func testHomeReplaysTheSameExperienceWithoutChangingCompletionOrIdentity() throws {
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/ContentView.swift")
-        let onboarding = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
-        // W4-H2: the "How CommonPlate Works" entry point relocated from
-        // Home's inline utility group to the shared Settings route; the
-        // replay wiring itself (`onboardingChooser` destination/coordinator)
-        // is unchanged and remains owned by `ContentView`.
-        let settings = try fileSource("ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift")
-
-        XCTAssertTrue(source.contains("if onboardingStore.hasCompletedOnboarding"))
-        XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.onboardingChooser)"))
-        XCTAssertTrue(settings.contains("\"How CommonPlate Works\""))
-        XCTAssertTrue(source.contains("onboardingFlowCoordinator.beginReplay()"))
-        XCTAssertTrue(source.contains("case .onboardingChooser:"))
-        XCTAssertTrue(source.contains(".onAppear {\n                    onboardingFlowCoordinator.beginReplay()"))
-        XCTAssertFalse(source.contains(".simultaneousGesture"))
-        let storageSource = try fileSource("ios/CommonPlateios/CommonPlateios/Stores/OnboardingPresentationStorage.swift")
-        let beginReplay = try declarationSource(
-            startMarker: "func beginReplay() {",
-            endMarker: "func replayNavigationChanged",
-            in: storageSource
-        )
-        XCTAssertFalse(beginReplay.contains("selectedIntent = nil"))
-        XCTAssertTrue(source.contains("completeOnboardingFromWalkthrough()"))
-        XCTAssertFalse(onboarding.contains("@Environment(\\.dismiss) private var dismiss"))
-        XCTAssertFalse(onboarding.contains("await Task.yield()"))
-
-        let storage = InMemoryOnboardingPresentationStorage()
-        let store = OnboardingPresentationStore(storage: storage)
-        store.completeOnboarding()
-        let coordinator = OnboardingFlowCoordinator(presentationStore: store)
-
-        coordinator.beginReplay()
-        coordinator.selectedIntent = .usingExtraSwipes
-        coordinator.continueFromWalkthrough()
-
-        XCTAssertTrue(store.hasCompletedOnboarding)
-        XCTAssertTrue(storage.hasCompletedOnboarding)
-        XCTAssertFalse(coordinator.isReplaying)
-        XCTAssertNil(coordinator.selectedIntent)
-        XCTAssertEqual(coordinator.completionPresentationIntent, .usingExtraSwipes)
-        coordinator.finishCompletionPresentation()
-        XCTAssertFalse(coordinator.isCompletingOnboarding)
-    }
-
-    func testFirstLaunchActionsAreTitleOnlyAndBothContinuePathsSynchronouslyReachPersistedHomeState() throws {
-        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
-
-        for intent in [OnboardingIntent.gettingAMeal, .usingExtraSwipes] {
-            let storage = InMemoryOnboardingPresentationStorage()
-            let store = OnboardingPresentationStore(storage: storage)
-            let coordinator = OnboardingFlowCoordinator(presentationStore: store)
-            coordinator.selectedIntent = intent
-            coordinator.continueFromWalkthrough()
-
-            XCTAssertNil(coordinator.selectedIntent)
-            XCTAssertFalse(coordinator.isReplaying)
-            XCTAssertTrue(coordinator.isCompletingOnboarding)
-            XCTAssertTrue(store.hasCompletedOnboarding)
-            XCTAssertTrue(storage.hasCompletedOnboarding)
-        }
-
-        XCTAssertTrue(source.contains("onStartFlow(intent)"))
-        XCTAssertTrue(source.contains("padding(.bottom, CommonPlateStyle.Spacing.m)"))
-        XCTAssertTrue(source.contains("padding(.top, CommonPlateStyle.Spacing.s)"))
-        XCTAssertTrue(source.contains(".frame(maxWidth: 520)"))
-        XCTAssertTrue(source.contains(".frame(minHeight: geometry.size.height, alignment: .top)"))
-        XCTAssertGreaterThanOrEqual(
-            source.components(separatedBy: ".commonPlateMajorActionFrame()").count - 1,
-            2
-        )
-        XCTAssertFalse(source.contains("See how getting a meal works"))
-        XCTAssertFalse(source.contains("See how using extra swipes works"))
-        XCTAssertFalse(source.contains("subtitle:"))
-    }
-
     /// W4-H2 supersedes R1's two-zone static composition with the live
     /// exchange board (E1). This now proves the board-first replacement
     /// structure instead of the retired zone layout.
@@ -210,8 +63,8 @@ final class OnboardingPresentationTests: XCTestCase {
         let storageSource = try fileSource("ios/CommonPlateios/CommonPlateios/Stores/OnboardingPresentationStorage.swift")
 
         XCTAssertTrue(source.contains("SoftBrandSettlePresentation("))
-        XCTAssertTrue(source.contains("completionPresentationIntent"))
-        XCTAssertTrue(source.contains("OnboardingWalkthroughView(intent: intent, onContinue: {})"))
+        XCTAssertTrue(source.contains("onboardingFlowCoordinator.isCompletingOnboarding"))
+        XCTAssertTrue(source.contains("OnboardingWelcomeView(onContinue: {})"))
         XCTAssertTrue(source.contains("home(hasArrived)"))
         XCTAssertTrue(source.contains("hasArrived || reduceMotion ? 0 : -7"))
         XCTAssertTrue(source.contains(".easeInOut(duration: 0.31)"))
@@ -224,7 +77,7 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertTrue(source.contains("withTransaction(transaction)"))
         XCTAssertTrue(source.contains("path = []"))
         XCTAssertTrue(storageSource.contains("@Published private(set) var isCompletingOnboarding = false"))
-        XCTAssertTrue(storageSource.contains("completionPresentationIntent = selectedIntent"))
+        XCTAssertTrue(storageSource.contains("isCompletingOnboarding = true"))
         XCTAssertFalse(storageSource.contains("Task.yield"))
         XCTAssertFalse(storageSource.contains("sleep("))
     }
@@ -240,7 +93,6 @@ final class OnboardingPresentationTests: XCTestCase {
         let settings = try fileSource("ios/CommonPlateios/CommonPlateios/Views/SettingsView.swift")
 
         XCTAssertTrue(source.contains("SoftFlowEnterDestination"))
-        XCTAssertTrue(source.contains("case walkthrough(OnboardingIntent)"))
         XCTAssertTrue(source.contains("case route(AppRoute)"))
         XCTAssertTrue(source.contains("duration: 0.28"))
         // W4-R2 2026-09-05 sync item 8: `SoftFlowEnterDestination` gained a
@@ -253,10 +105,8 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertTrue(source.contains("var playsOwnSettle: Bool = true"))
         XCTAssertTrue(source.contains("playsOwnSettle: route != .requestFood"))
         XCTAssertTrue(source.contains(".allowsHitTesting(playsOwnSettle ? hasEntered : true)"))
-        XCTAssertTrue(source.contains("flowPresentation = .walkthrough(intent)\n            onboardingFlowCoordinator.selectedIntent = intent"))
         XCTAssertTrue(source.contains("flowPresentation = .route(route)\n            path = AppRoute.appending(route, to: path)"))
         XCTAssertTrue(source.contains("if case .route(let route)? = flowPresentation, newPath.last != route"))
-        XCTAssertTrue(source.contains("if case .walkthrough? = flowPresentation, intent == nil"))
         // W4-R2: Request Food is now pushed through the same typed
         // `AppRoute.requestFood` destination every other route uses —
         // superseding the former Home-owned sheet special-case — and exits
@@ -278,13 +128,9 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertFalse(requestEntry.contains("NavigationStack {"))
         XCTAssertFalse(source.contains("flowDestination(for:"))
         XCTAssertFalse(source.contains("if let flowPresentation {"))
-        XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.onboardingChooser)"))
+        XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.howCommonPlateWorks)"))
         XCTAssertTrue(settings.contains("NavigationLink(value: AppRoute.privacySafety)"))
-        XCTAssertTrue(source.contains(".toolbar(.hidden, for: .navigationBar)"))
-        XCTAssertTrue(onboarding.contains(".overlay(alignment: .topLeading)"))
-        XCTAssertTrue(onboarding.contains("navigationBarBackButtonHidden(onBack != nil)"))
-        XCTAssertTrue(onboarding.contains(".toolbar(onBack == nil ? .automatic : .hidden, for: .navigationBar)"))
-        XCTAssertTrue(onboarding.contains("CommonPlateWarmGhostBackButton"))
+                XCTAssertTrue(onboarding.contains("CommonPlateWarmGhostBackButton"))
         XCTAssertTrue(onboarding.contains("Image(systemName: \"chevron.left\")"))
         XCTAssertTrue(onboarding.contains(".font(.system(size: 17, weight: .semibold))"))
         XCTAssertFalse(onboarding.contains(".font(.body.weight(.semibold))"))
@@ -318,6 +164,24 @@ final class OnboardingPresentationTests: XCTestCase {
         XCTAssertTrue(source.contains("RequestFoodFormDraft.mealSwipeOptions"))
     }
 
+    /// W4-O1 F1: the Welcome `Grubhub` badge text must stay legible in dark
+    /// appearance (the approved H1 light/dark Grubhub text values) while
+    /// remaining text-only with no logo or third-party asset.
+    func testGrubhubBadgeTextIsAppearanceAwareAndStaysTextOnly() throws {
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/OnboardingExperienceView.swift")
+        let badge = try declarationSource(
+            startMarker: "private struct GrubhubTextBadge: View {",
+            endMarker: "/// One shared top anchor",
+            in: source
+        )
+
+        XCTAssertTrue(badge.contains("traits.userInterfaceStyle == .dark"))
+        XCTAssertTrue(badge.contains("UIColor(red: 1, green: 170 / 255, blue: 90 / 255, alpha: 1)"))
+        XCTAssertTrue(badge.contains("UIColor(red: 156 / 255, green: 71 / 255, blue: 0, alpha: 1)"))
+        XCTAssertTrue(badge.contains(".foregroundStyle(Self.text)"))
+        XCTAssertFalse(badge.contains("Image("))
+    }
+
     private func fileSource(_ relativePath: String) throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -340,4 +204,5 @@ final class OnboardingPresentationTests: XCTestCase {
 
 private final class InMemoryOnboardingPresentationStorage: OnboardingPresentationStoring {
     var hasCompletedOnboarding = false
+    var helpingDiscoveryRecord: HelpingDiscoveryRecord?
 }

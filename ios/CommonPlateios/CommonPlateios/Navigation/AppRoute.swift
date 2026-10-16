@@ -19,9 +19,12 @@ enum AppRoute: Hashable {
     case requestFood
     case activeRequests
     case alerts
-    /// The completed-onboarding replay chooser. Keeping it in the same typed
-    /// path as Privacy & Safety gives its chevron row the same native push.
-    case onboardingChooser
+    /// W4-O1 How CommonPlate Works reference hub and its two detail screens.
+    /// Typed routes keep the Settings row on the same native push as Privacy
+    /// & Safety, and let `Return to Home` clear the path.
+    case howCommonPlateWorks
+    case howRequestingWorks
+    case howHelpingWorks
     case privacySafety
     /// W4-H2's one shared secondary utility route, reached from Home's gear.
     /// Owns compact identity presentation, the Request Alerts management row
@@ -146,9 +149,9 @@ extension AppRoute {
             switch route {
             case .requestDetail(let request), .fulfillment(let request):
                 return request.id == requestID
-            case .requestFood, .activeRequests, .alerts, .onboardingChooser,
-                 .privacySafety, .settings, .support, .ownRequests,
-                 .blockedStudents:
+            case .requestFood, .activeRequests, .alerts, .howCommonPlateWorks,
+                 .howRequestingWorks, .howHelpingWorks, .privacySafety,
+                 .settings, .support, .ownRequests, .blockedStudents:
                 return false
             }
         }

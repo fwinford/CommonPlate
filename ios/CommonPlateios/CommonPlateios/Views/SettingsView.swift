@@ -582,7 +582,7 @@ struct SettingsView: View {
             sectionHeading("ABOUT & HELP")
 
             VStack(spacing: 0) {
-                NavigationLink(value: AppRoute.onboardingChooser) {
+                NavigationLink(value: AppRoute.howCommonPlateWorks) {
                     SettingsRow(title: "How CommonPlate Works")
                 }
                 .buttonStyle(.plain)

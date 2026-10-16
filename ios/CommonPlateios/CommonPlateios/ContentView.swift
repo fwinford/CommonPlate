@@ -77,6 +77,10 @@ struct ContentView: View {
     /// can leave a finished flow by rewriting the path rather than by asking a
     /// view below it to dismiss.
     @State private var path: [AppRoute] = []
+    /// W4-O1: the request whose Home card was just tapped while the first-use
+    /// discovery treatment was active. Consumed by the next path change; never
+    /// set by notification or other non-card navigation.
+    @State private var homeCardOpenedRequestID: String?
     /// A presentation-only handoff for major actions that start a task. Unlike
     /// `path` and onboarding completion, this never establishes app truth.
     @State private var flowPresentation: FlowPresentation?
@@ -215,21 +219,7 @@ struct ContentView: View {
                     if onboardingStore.hasCompletedOnboarding {
                         recurringHome(brandHasSettled: true)
                     } else {
-                        OnboardingExperienceView(onStartFlow: startWalkthroughFlow)
-                    }
-                }
-                .navigationDestination(item: $onboardingFlowCoordinator.selectedIntent) { intent in
-                    SoftFlowEnterDestination(
-                        reduceMotion: reduceMotion,
-                        shouldAnimate: flowPresentation == .walkthrough(intent)
-                    ) {
-                        OnboardingWalkthroughView(intent: intent) {
-                            completeOnboardingFromWalkthrough()
-                        } onBack: {
-                            onboardingFlowCoordinator.selectedIntent = nil
-                        }
-                    } onFinished: {
-                        finishSoftFlowEntrance(.walkthrough(intent))
+                        OnboardingWelcomeView(onContinue: completeOnboardingFromWelcome)
                     }
                 }
                 .navigationDestination(for: AppRoute.self) { route in
@@ -254,9 +244,8 @@ struct ContentView: View {
                 }
             }
 
-            if let intent = onboardingFlowCoordinator.completionPresentationIntent {
+            if onboardingFlowCoordinator.isCompletingOnboarding {
                 SoftBrandSettlePresentation(
-                    intent: intent,
                     reduceMotion: reduceMotion,
                     home: { brandHasSettled in
                         recurringHome(brandHasSettled: brandHasSettled)
@@ -455,14 +444,7 @@ struct ContentView: View {
             if case .route(let route)? = flowPresentation, newPath.last != route {
                 flowPresentation = nil
             }
-            onboardingFlowCoordinator.replayNavigationChanged(
-                isChooserInPath: newPath.contains(.onboardingChooser)
-            )
-        }
-        .onChange(of: onboardingFlowCoordinator.selectedIntent) { _, intent in
-            if case .walkthrough? = flowPresentation, intent == nil {
-                flowPresentation = nil
-            }
+            completeHelpingDiscoveryIfEligibleRequestOpened(newPath: newPath)
         }
     }
 
@@ -482,7 +464,21 @@ struct ContentView: View {
             pushSubscriptionStore: pushSubscriptionStore,
             unsubscribeStore: participantEmailUnsubscribeStore,
             isRevealingLandingContinuityCard: isRevealingLandingContinuityCard,
-            onRequestMeal: { startRouteFlow(.requestFood) }
+            onRequestMeal: { startRouteFlow(.requestFood) },
+            discoverySelectedRequestID: HelpingDiscovery.selectedRequestID(
+                isPending: onboardingStore.isHelpingDiscoveryPending,
+                hasActiveReservation: requestStore.activeClaim != nil,
+                store: requestStore
+            ),
+            onOpenEligibleRequestCard: { homeCardOpenedRequestID = $0 },
+            onActivateEligibleRequestCard: { request in
+                // Accessibility activation of the highlighted Home card: the
+                // same marker a touch tap records, then the same route push
+                // the card's NavigationLink performs. Only from Home itself.
+                guard path.isEmpty else { return }
+                homeCardOpenedRequestID = request.id
+                path.append(.requestDetail(request))
+            }
         )
         .opacity(brandHasSettled ? 1 : 0)
         .offset(y: brandHasSettled || reduceMotion ? 0 : 2)
@@ -500,7 +496,6 @@ struct ContentView: View {
     /// already-correct Home alive in the same render pass. Navigation and
     /// persistence finish before this appears; it owns only the visible handoff.
     private struct SoftBrandSettlePresentation<Home: View>: View {
-        let intent: OnboardingIntent
         let reduceMotion: Bool
         @ViewBuilder let home: (Bool) -> Home
         let onFinished: () -> Void
@@ -514,7 +509,7 @@ struct ContentView: View {
                     .offset(y: hasArrived || reduceMotion ? 0 : 9)
                     .animation(homeArrivalAnimation, value: hasArrived)
 
-                OnboardingWalkthroughView(intent: intent, onContinue: {})
+                OnboardingWelcomeView(onContinue: {})
                     .background(CommonPlateStyle.Color.baseCanvas.ignoresSafeArea())
                     .opacity(hasArrived ? 0 : 1)
                     .offset(y: hasArrived || reduceMotion ? 0 : -7)
@@ -552,18 +547,7 @@ struct ContentView: View {
     }
 
     private enum FlowPresentation: Hashable {
-        case walkthrough(OnboardingIntent)
         case route(AppRoute)
-    }
-
-    private func startWalkthroughFlow(_ intent: OnboardingIntent) {
-        guard flowPresentation == nil else { return }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            flowPresentation = .walkthrough(intent)
-            onboardingFlowCoordinator.selectedIntent = intent
-        }
     }
 
     private func startRouteFlow(_ route: AppRoute) {
@@ -779,16 +763,24 @@ struct ContentView: View {
             )
             .navigationTitle(AlertSignupView.title)
             .navigationBarTitleDisplayMode(.inline)
-        case .onboardingChooser:
-            OnboardingExperienceView(
-                onStartFlow: startWalkthroughFlow,
-                onBack: { path.removeLast() }
+        case .howCommonPlateWorks:
+            HowCommonPlateWorksHubView()
+        case .howRequestingWorks:
+            HowCommonPlateWorksDetailView(
+                title: HowCommonPlateWorksCopy.requestingDestinationTitle,
+                lede: HowCommonPlateWorksCopy.requestingLede,
+                steps: HowCommonPlateWorksCopy.requestingSteps,
+                identifier: "how-works-requesting-detail",
+                onReturnHome: returnHomeFromHowCommonPlateWorks
             )
-                .navigationBarBackButtonHidden(true)
-                .toolbar(.hidden, for: .navigationBar)
-                .onAppear {
-                    onboardingFlowCoordinator.beginReplay()
-                }
+        case .howHelpingWorks:
+            HowCommonPlateWorksDetailView(
+                title: HowCommonPlateWorksCopy.helpingDestinationTitle,
+                lede: HowCommonPlateWorksCopy.helpingLede,
+                steps: HowCommonPlateWorksCopy.helpingSteps,
+                identifier: "how-works-helping-detail",
+                onReturnHome: returnHomeFromHowCommonPlateWorks
+            )
         case .privacySafety:
             PrivacySafetyView(participantIdentityStore: participantIdentityStore)
         case .settings:
@@ -823,14 +815,39 @@ struct ContentView: View {
         }
     }
 
-    private func completeOnboardingFromWalkthrough() {
+    private func returnHomeFromHowCommonPlateWorks() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            path = []
+        }
+    }
+
+    /// W4-O1: discovery completes when the student successfully opens any
+    /// eligible request's detail *from a Home card* while the treatment is
+    /// active. The card tap records the marker; the resulting path change
+    /// consumes it. Presentation-only: it reads existing board truth and
+    /// writes only the local discovery record.
+    private func completeHelpingDiscoveryIfEligibleRequestOpened(newPath: [AppRoute]) {
+        let cardID = homeCardOpenedRequestID
+        homeCardOpenedRequestID = nil
+        guard HelpingDiscovery.shouldComplete(
+            isPending: onboardingStore.isHelpingDiscoveryPending,
+            openedFromHomeCardID: cardID,
+            newPath: newPath,
+            eligible: HelpingDiscovery.eligibleRequests(store: requestStore)
+        ) else { return }
+        onboardingStore.completeHelpingDiscovery()
+    }
+
+    private func completeOnboardingFromWelcome() {
         // Product truth changes now, independently of the presentation-only
         // Soft Brand Settle. Disabling native stack animation prevents a pop
         // from taking ownership while the overlay performs the visible exit.
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            onboardingFlowCoordinator.continueFromWalkthrough()
+            onboardingFlowCoordinator.continueFromWelcome()
             path = []
         }
     }

@@ -30,6 +30,22 @@ struct HomeExchangeView: View {
     /// unaffected.
     let isRevealingLandingContinuityCard: Bool
     let onRequestMeal: () -> Void
+    /// W4-O1: the one request currently receiving the temporary first-use
+    /// discovery treatment, or nil. Derived by `HelpingDiscovery` from this
+    /// same board's own order; Home never reorders or invents a request.
+    var discoverySelectedRequestID: String? = nil
+    /// W4-O1: reports the request whose Home `Needs help` card the student
+    /// just tapped, only while the discovery treatment is active. This is
+    /// the one completion source for discovery; navigation that does not go
+    /// through a Home card (a notification tap, Settings) never reports.
+    var onOpenEligibleRequestCard: (String) -> Void = { _ in }
+    /// W4-O1: the accessibility-activation counterpart of
+    /// `onOpenEligibleRequestCard`. SwiftUI handles a `NavigationLink`'s
+    /// VoiceOver activation natively and never runs the card's touch
+    /// gesture, so while the discovery treatment is active the card's
+    /// default accessibility action calls this once to report the card open
+    /// and push the same request detail the link would.
+    var onActivateEligibleRequestCard: (FoodRequest) -> Void = { _ in }
 
     /// H2's Request Alerts quick entry (Section 12): a focused centered
     /// overlay presented directly over Home, never a navigation push and
@@ -1390,9 +1406,23 @@ struct HomeExchangeView: View {
             VStack(spacing: CommonPlateStyle.Spacing.m) {
                 ForEach(needsHelpRequests) { request in
                     NavigationLink(value: AppRoute.requestDetail(request)) {
-                        RequestCardView(request: request, kind: .open)
+                        RequestCardView(
+                            request: request,
+                            kind: .open,
+                            isDiscoveryEmphasized: request.id == discoverySelectedRequestID
+                        )
+                            .modifier(HelpingDiscoveryTreatment(
+                                isActive: request.id == discoverySelectedRequestID,
+                                reduceMotion: reduceMotion
+                            ))
                     }
                     .buttonStyle(.plain)
+                    .modifier(HelpingDiscoveryCardOpenReport(
+                        isActive: discoverySelectedRequestID != nil,
+                        requestID: request.id,
+                        onOpen: onOpenEligibleRequestCard,
+                        onAccessibilityActivate: { onActivateEligibleRequestCard(request) }
+                    ))
                     .accessibilityIdentifier("home-request-card-\(request.id)")
                 }
             }
@@ -1726,5 +1756,75 @@ private actor RefreshOutcomeRecorder {
 
     func record(_ outcome: RequestFetchOutcome) {
         self.outcome = outcome
+    }
+}
+
+/// W4-O1 temporary first-use discovery treatment (Figma P4). The whole card
+/// and its attached `View request` cue move together as one unit: lavender
+/// emphasis (drawn by `RequestCardView` from existing helping tokens), an overlapping cue, and a restrained
+/// ~3 pt float over ~2.8 s with rest. Reduce Motion shows the same emphasized
+/// state statically. Adds no hit target and no layout change (overlay only),
+/// and the cue is hidden from accessibility so the card's canonical label and
+/// trait are unchanged.
+private struct HelpingDiscoveryTreatment: ViewModifier {
+    let isActive: Bool
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        if isActive {
+            let withCue = content
+                .overlay(alignment: .topLeading) {
+                    Text("View request")
+                        .font(.caption.weight(.semibold))
+                        // Decorative teaching cue, hidden from VoiceOver: capped so
+                        // accessibility sizes cannot grow it over the card's text.
+                        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, CommonPlateStyle.Spacing.m)
+                        .padding(.vertical, CommonPlateStyle.Spacing.xs)
+                        .background(Color.accentColor, in: Capsule())
+                        .offset(x: CommonPlateStyle.Spacing.m, y: -12)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            if reduceMotion {
+                withCue
+            } else {
+                withCue.keyframeAnimator(initialValue: CGFloat(0), repeating: true) { view, lift in
+                    view.offset(y: lift)
+                } keyframes: { _ in
+                    KeyframeTrack {
+                        LinearKeyframe(0, duration: 1.2)
+                        CubicKeyframe(-3, duration: 0.8)
+                        CubicKeyframe(0, duration: 0.8)
+                    }
+                }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// W4-O1: observes the existing card open without adding a hit target or
+/// a second visible action. A touch tap is observed alongside the link's own
+/// action; an accessibility activation (VoiceOver double-tap) never reaches
+/// that gesture, so the same card's default accessibility action reports and
+/// opens instead. Attached only while the treatment is active, so ordinary
+/// cards carry neither.
+private struct HelpingDiscoveryCardOpenReport: ViewModifier {
+    let isActive: Bool
+    let requestID: String
+    let onOpen: (String) -> Void
+    let onAccessibilityActivate: () -> Void
+
+    func body(content: Content) -> some View {
+        if isActive {
+            content
+                .simultaneousGesture(TapGesture().onEnded { onOpen(requestID) })
+                .accessibilityAction(.default) { onAccessibilityActivate() }
+        } else {
+            content
+        }
     }
 }

@@ -33,17 +33,68 @@ quiet inline code-lifetime help, not stacked form/section cards or decorative
 containers. These presentation rules do not change identity or verification
 runtime semantics.
 
-### 1.2 Accepted Home and requester presentation (W4-R1)
+### 1.2 Accepted first-use, Home, and requester presentation (W4-R1, W4-O1)
 
-On a fresh installation, iOS presents one educational CommonPlate-at-NYU
-entry with the slogan `Extra swipes. More meals.`, the accepted explanation of
-CommonPlate's two paths, and exactly two choices: `I need a meal` and `I have
-extra meal swipes`. The choice is presentation-only: it creates no role,
-account, authority, or later-action restriction. Each choice opens its exact
-four-step walkthrough; Continue completes the local onboarding presentation
-record and arrives at the same recurring Home. From recurring Home, `How
-CommonPlate works` reopens either walkthrough without changing completion or
-participant identity and returns to that Home.
+CommonPlate has one shared, role-free first-use experience (W4-O1). On a
+fresh installation, iOS presents a single scrolling Welcome / How CommonPlate
+Works story with no requester/helper chooser, role, account, or authority;
+requesting and helping are actions, not permanent roles. The story teaches, in
+order: someone posts a meal request; other students can find it on Home (and
+can get notified when a new request is posted); someone chooses to help; the
+helper places the order using their extra swipes (a text-only `Grubhub`
+badge, no logo or brand asset); pickup details come back through CommonPlate,
+which notifies the requester; and the requester then picks it up. The
+helper-provided pickup timing is described only as approximate ("about
+when") and is never represented as provider-confirmed readiness. The story
+names no notification channel, claims no guarantee, prompts for no permission,
+links to no alert setup, and teaches no in-app helper-message flow or
+Screenshot Assistance. `Continue to Home` synchronously records local
+completion and enters canonical Home; correctness never waits on a
+presentation animation. The earlier slogan, ticket → arrow → bowl motif,
+`I need a meal` / `I have extra meal swipes` chooser, and four-step
+walkthroughs no longer exist.
+
+Installations that had already completed the prior onboarding are
+grandfathered: they are shown neither the new Welcome nor the discovery
+treatment below. First-use completion and the helping-discovery record are
+local, presentation-only state: neither is identity, a role, or backend
+authority, neither is synchronized across devices, sent to the backend, or
+required for any action, and no analytics authority is created. Completing
+the Welcome records discovery as pending before or together with completion;
+completed onboarding with no discovery record means grandfathered (discovery
+complete), never pending. iOS exposes one local reset operation that clears
+first-use completion first and then the discovery record, so the next first
+use shows the Welcome again and an interrupted reset cannot produce
+completed-without-record. Nothing in the app invokes it today; it is reserved
+for a deletion slice (W4-P2) to invoke after its own accepted deletion
+behavior, and onboarding neither detects nor owns deletion.
+
+**First eligible request discovery.** After the Welcome is completed and while
+discovery is pending, Home waits for a real eligible request and never
+fabricates, reorders, or inserts one. Eligible means an ordinary open card in
+the `Needs help` board; the student's own requests, the actively held
+`Continue Helping` request, placed-order continuations, and any non-populated
+board state (loading, unavailable, empty) are not eligible. The first
+eligible request under the existing authoritative Home ordering is selected
+(moving to the next eligible request if it disappears), and the treatment is
+suppressed while the student holds an active helping reservation, returning
+afterward if still pending. The treatment is temporary and presentation-only:
+the real card gets lavender emphasis and an overlapping `View request` cue and
+floats gently; the whole request card remains the single interaction surface,
+no hit target or layout is added, and its accessibility label and trait are
+unchanged. With Reduce Motion the same emphasized state is shown statically.
+Discovery completes, and is persisted locally, when the student opens any
+eligible request card from Home's `Needs help` board while the treatment is
+active (touch or accessibility activation); deep-link or notification
+navigation does not itself complete it. After completion the treatment does
+not recur in ordinary use.
+
+**Settings → How CommonPlate Works.** The existing Settings row opens a
+two-destination reference hub rather than replaying onboarding: `Requesting a
+meal` and `Helping someone`, each a concise reference path ending in `Return to
+Home`, which returns to the canonical Home root. The hub is reachable
+regardless of onboarding state, neither reads nor changes completion or
+discovery state, and includes no Screenshot Assistance education.
 
 Recurring Home presents `Request a meal`, `Find a request`, and the secondary
 `Request alerts` action, followed by the utility/identity group. When a usable
@@ -57,14 +108,14 @@ successful verification continues directly into the form without a second
 participant-email field. The requester form's accepted timing, meal-swipe,
 pickup-name, submission, refusal, and ambiguity semantics are unchanged.
 
-The first-launch ticket → arrow → bowl motif remains the accepted small,
-secondary motif and adapts its appearance for the current system appearance.
 Back controls retain stable native-looking chevron geometry and accessible
 Back behavior across supported text sizes. Change email remains a quiet inline
-action with an at-least-44-point touch target. Home and both walkthroughs retain
-their accepted responsive, scrolling, Dynamic Type, dark-appearance, and
-Reduce Motion fallbacks; functional walkthrough titles use system typography,
-while Quiet Fraunces remains limited to accepted brand/display moments.
+action with an at-least-44-point touch target. Home and the Welcome and
+reference screens retain their accepted responsive, scrolling, Dynamic Type,
+and Reduce Motion fallbacks; functional titles use system typography, while
+Quiet Fraunces remains limited to accepted brand/display moments. Dark-appearance
+design for the first-use surfaces is not yet design-accepted (see the W4-O1
+card in the weekly spec).
 
 Routine/passive states default to native or inline treatment; important
 non-failure states may use restrained inline emphasis; success is lightweight

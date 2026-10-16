@@ -1864,14 +1864,9 @@ final class RequestCreationViewTests: XCTestCase {
         XCTAssertTrue(source.contains("playsOwnSettle: route != .requestFood"))
         XCTAssertTrue(source.contains(".opacity(playsOwnSettle ? (hasEntered ? 1 : 0) : 1)"))
         XCTAssertTrue(source.contains(".allowsHitTesting(playsOwnSettle ? hasEntered : true)"))
-        // The onboarding walkthrough destination passes no `playsOwnSettle`
-        // argument at all, so it keeps the wrapper's own default (`true`) —
-        // its existing settle/hit-testing gate is unchanged by this fix.
-        let walkthroughCallSite = String(repeating: " ", count: 20) + "SoftFlowEnterDestination(\n"
-            + String(repeating: " ", count: 24) + "reduceMotion: reduceMotion,\n"
-            + String(repeating: " ", count: 24) + "shouldAnimate: flowPresentation == .walkthrough(intent)\n"
-            + String(repeating: " ", count: 20) + ") {"
-        XCTAssertTrue(source.contains(walkthroughCallSite))
+        // W4-O1: the onboarding walkthrough destination is retired; the
+        // typed-route destination is now the shared wrapper's only call site.
+        XCTAssertFalse(source.contains("shouldAnimate: flowPresentation == .walkthrough"))
     }
 
     /// W4-R4 (2026-09-26): the segment pill itself carries no animation

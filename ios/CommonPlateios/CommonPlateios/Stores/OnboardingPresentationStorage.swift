@@ -2,20 +2,31 @@
 //  OnboardingPresentationStorage.swift
 //  CommonPlateios
 //
-// The onboarding record is deliberately only a local presentation preference.
-// It is not participant identity, a role, or backend authority.
+// The onboarding and discovery records are deliberately only local
+// presentation preferences. They are not participant identity, a role, or
+// backend authority, and they are never synchronized or sent anywhere.
 
 import Combine
 import Foundation
 import SwiftUI
 
+/// W4-O1 helping-discovery record. `nil` (no record) combined with completed
+/// onboarding means a grandfathered installation, which is treated as
+/// discovery-complete and never pending.
+enum HelpingDiscoveryRecord: String, Equatable {
+    case pending
+    case complete
+}
+
 protocol OnboardingPresentationStoring: AnyObject {
     var hasCompletedOnboarding: Bool { get set }
+    var helpingDiscoveryRecord: HelpingDiscoveryRecord? { get set }
 }
 
 final class UserDefaultsOnboardingPresentationStorage: OnboardingPresentationStoring {
     private let defaults: UserDefaults
     private let key = "commonplate.onboarding.completed"
+    private let discoveryKey = "commonplate.onboarding.helpingDiscovery"
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
@@ -25,40 +36,75 @@ final class UserDefaultsOnboardingPresentationStorage: OnboardingPresentationSto
         get { defaults.bool(forKey: key) }
         set { defaults.set(newValue, forKey: key) }
     }
+
+    var helpingDiscoveryRecord: HelpingDiscoveryRecord? {
+        get {
+            defaults.string(forKey: discoveryKey).flatMap(HelpingDiscoveryRecord.init(rawValue:))
+        }
+        set {
+            if let newValue {
+                defaults.set(newValue.rawValue, forKey: discoveryKey)
+            } else {
+                defaults.removeObject(forKey: discoveryKey)
+            }
+        }
+    }
 }
 
 @MainActor
 final class OnboardingPresentationStore: ObservableObject {
     @Published private(set) var hasCompletedOnboarding: Bool
+    @Published private(set) var helpingDiscoveryRecord: HelpingDiscoveryRecord?
 
     private let storage: OnboardingPresentationStoring
 
     init(storage: OnboardingPresentationStoring) {
         self.storage = storage
         hasCompletedOnboarding = storage.hasCompletedOnboarding
+        helpingDiscoveryRecord = storage.helpingDiscoveryRecord
     }
 
+    /// Discovery is pending only for a fresh-install completion that wrote its
+    /// record. Completed onboarding with no record is grandfathered.
+    var isHelpingDiscoveryPending: Bool {
+        hasCompletedOnboarding && helpingDiscoveryRecord == .pending
+    }
+
+    /// Welcome completion. The discovery record is written *before* the
+    /// completion flag so no interruption can produce completed-without-record.
     func completeOnboarding() {
+        guard !hasCompletedOnboarding else { return }
+        storage.helpingDiscoveryRecord = .pending
+        helpingDiscoveryRecord = .pending
         storage.hasCompletedOnboarding = true
         hasCompletedOnboarding = true
     }
+
+    /// pending → complete only; a grandfathered or already-complete install is
+    /// left untouched.
+    func completeHelpingDiscovery() {
+        guard isHelpingDiscoveryPending else { return }
+        storage.helpingDiscoveryRecord = .complete
+        helpingDiscoveryRecord = .complete
+    }
+
+    /// The narrow local seam W4-P2 invokes after authoritative deletion
+    /// success. Completion is cleared first, so an interrupted reset can never
+    /// leave completed-without-record (which would read as grandfathered).
+    /// Nothing in O1 calls this.
+    func resetFirstUsePresentation() {
+        storage.hasCompletedOnboarding = false
+        hasCompletedOnboarding = false
+        storage.helpingDiscoveryRecord = nil
+        helpingDiscoveryRecord = nil
+    }
 }
 
-/// Owns the ephemeral navigation state above the chooser and walkthrough.
-/// `continueFromWalkthrough()` deliberately clears the destination and changes
-/// the root presentation state synchronously, rather than relying on a child
-/// view's dismissal or an animation completion.
+/// Owns only the presentation-only latch for the Welcome → Home completion
+/// transition. Completion truth is recorded synchronously by the store.
 @MainActor
 final class OnboardingFlowCoordinator: ObservableObject {
-    @Published var selectedIntent: OnboardingIntent?
-    @Published private(set) var isReplaying = false
-    /// Presentation-only latch for the one completion transition. It is never
-    /// persisted and never contributes to whether onboarding is complete.
     @Published private(set) var isCompletingOnboarding = false
-    /// The outgoing screen retained only for the completion presentation.
-    /// `selectedIntent` still clears synchronously, so this value owns no
-    /// navigation or correctness state.
-    @Published private(set) var completionPresentationIntent: OnboardingIntent?
 
     private let presentationStore: OnboardingPresentationStore
 
@@ -66,41 +112,12 @@ final class OnboardingFlowCoordinator: ObservableObject {
         self.presentationStore = presentationStore
     }
 
-    func beginReplay() {
-        isCompletingOnboarding = false
-        completionPresentationIntent = nil
-        isReplaying = true
-    }
-
-    func replayNavigationChanged(isChooserInPath: Bool) {
-        if !isChooserInPath && selectedIntent == nil && !isCompletingOnboarding {
-            isReplaying = false
-        }
-    }
-
-    func continueFromWalkthrough() {
-        completionPresentationIntent = selectedIntent
+    func continueFromWelcome() {
         isCompletingOnboarding = true
-
-        // The root replacement owns the visible completion transition. The
-        // navigation destination still clears immediately, but doing so in a
-        // disabled transaction prevents a native pop animation from competing
-        // with that one root-level moment. Correctness remains entirely
-        // synchronous and does not wait for either presentation to finish.
-        var navigationClearTransaction = Transaction()
-        navigationClearTransaction.disablesAnimations = true
-        withTransaction(navigationClearTransaction) {
-            selectedIntent = nil
-        }
-
-        if !presentationStore.hasCompletedOnboarding {
-            presentationStore.completeOnboarding()
-        }
-        isReplaying = false
+        presentationStore.completeOnboarding()
     }
 
     func finishCompletionPresentation() {
-        completionPresentationIntent = nil
         isCompletingOnboarding = false
     }
 }
