@@ -456,7 +456,7 @@ final class ReservationWarningTests: XCTestCase {
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse()))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "12345",
             eta: "15 minutes",
@@ -495,7 +495,7 @@ final class ReservationWarningTests: XCTestCase {
         _ = try await reconstructedProcess.continueActiveReservationIfNeeded()
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse()))
 
-        try await reconstructedProcess.fulfill(
+        try await reconstructedProcess.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "12345",
             eta: "15 minutes",
@@ -624,7 +624,7 @@ final class ReservationWarningTests: XCTestCase {
             gate: fulfillmentGate
         ))
         let fulfillment = Task {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "12345",
                 eta: "15 minutes",

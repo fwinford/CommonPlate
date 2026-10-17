@@ -379,6 +379,12 @@ struct RequestEligibilityResponseDTO: Decodable {
 /// `eta` is the request-body key; `etaText` is backend persistence vocabulary
 /// and must not be sent by iOS. `contactMessage` is the only optional field.
 ///
+/// W4-H1a: `placedOrderScreenshot` is REQUIRED on every new fulfillment, in both
+/// authorization shapes. It is deliberately not optional here: the type system,
+/// not a convention, is what keeps a screenshot-less new placement from being
+/// expressible. There is no evidence ID, URL, or path — the bytes travel inline
+/// in this one POST, and nothing about them is persisted by the client.
+///
 /// There is deliberately no `fulfillerEmail` (W3-I1): the helper is the
 /// verified participant the claim is already bound to, the backend reads that
 /// binding, and the strict schema refuses an address here — which is what stops
@@ -387,6 +393,20 @@ struct FulfillmentPayload: Encodable {
     let orderNumber: String
     let eta: String
     let contactMessage: String?
+    let placedOrderScreenshot: PlacedOrderScreenshotPayload
+}
+
+/// The wire form of the helper's placed-order screenshot: a MIME type
+/// (`image/jpeg` or `image/png`) and standard base64 of the exact normalized
+/// bytes. Built only from an already-validated `PlacedOrderScreenshot`.
+struct PlacedOrderScreenshotPayload: Encodable {
+    let mimeType: String
+    let imageBase64: String
+
+    init(_ screenshot: PlacedOrderScreenshot) {
+        mimeType = screenshot.mimeType
+        imageBase64 = screenshot.imageBase64
+    }
 }
 
 /// Payload for `POST /api/request/:id/fulfill`.

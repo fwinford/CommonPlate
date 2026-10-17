@@ -101,6 +101,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import {
   Fulfillment,
+  PlacementEvidence,
   Installation,
   Participant,
   ParticipantBlock,
@@ -140,11 +141,7 @@ import {
   createRequestRateLimiter,
 } from "./src/createRequestRoute.js";
 import { scheduleEligibilityNotificationSweep } from "./src/eligibilityNotificationSweep.js";
-import {
-  FULFILLMENT_ROUTE_PATH,
-  fulfillRequest,
-  fulfillmentRateLimiter,
-} from "./src/fulfillmentRoute.js";
+import { registerFulfillmentRoute } from "./src/fulfillmentRoute.js";
 import { assertMongoTransactionsSupported } from "./src/mongoTransactions.js";
 import { getStats } from "./src/statsRoute.js";
 import {
@@ -388,6 +385,16 @@ registerParticipantEmailUnsubscribeRoute(app);
 // than widening the shared one every other route uses.
 registerScreenshotProposalRoute(app);
 
+// api: W4-H1a fulfillment, which now carries one base64 placed-order screenshot
+// and therefore needs a larger body limit than the global 100 KB parser. The
+// route owns a bounded 3 MB parser and is registered ahead of the global
+// parsers for the same reason as the S1 route above: a global parser would
+// refuse the body first, answering through the global error handler. A valid
+// active claim is still the only authorization for placement. This route is
+// intentionally not exposed through the disabled legacy web ordering UI, and is
+// not paused by PUBLIC_ACTIONS_PAUSED.
+registerFulfillmentRoute(app);
+
 // api: W4-D2 exact-operation terminal reconciliation for an already-issued
 // request-create operation, and the ledger authority identity a create
 // records. Registered ahead of the global parsers for the same reason as the
@@ -616,14 +623,8 @@ app.get(
   )
 );
 
-// A valid active claim is the only authorization for placement. This route is
-// intentionally not exposed through the disabled legacy web ordering UI.
-app.post(
-  FULFILLMENT_ROUTE_PATH,
-  fulfillmentRateLimiter,
-  fulfillRequest
-);
-
+// The fulfillment route (`registerFulfillmentRoute`) is registered above,
+// ahead of the global body parsers.
 
 // ---- node-cron: cleanup expired documents (backup to TTL) ----
 // Runs every hour to delete expired requests
@@ -662,6 +663,10 @@ await assertMongoTransactionsSupported(mongoose.connection);
 // one-request/one-ledger-record uniqueness guarantee. Existing duplicates make
 // this fail visibly at startup instead of weakening the contract.
 await Fulfillment.createIndexes();
+// Same for the placed-order evidence row (W4-H1a): its unique requestId index is
+// the database-level backstop that one Request can never hold two screenshots,
+// whatever a resend or a race attempts.
+await PlacementEvidence.createIndexes();
 // Do not accept installation push-state traffic until the database has
 // established the single-eligible-owner-per-token guarantee that the
 // installation push route relies on instead of a race-prone read-then-write.

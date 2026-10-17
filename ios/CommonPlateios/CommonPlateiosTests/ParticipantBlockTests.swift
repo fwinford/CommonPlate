@@ -309,7 +309,7 @@ final class ParticipantBlockTests: XCTestCase {
         )
         ParticipantBlockURLProtocol.enqueue(.response(data: fulfillmentResponse()))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",

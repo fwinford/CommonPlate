@@ -303,13 +303,26 @@ describe("public action routes are mounted behind the pause", () => {
   });
 
   it("registers only the claim-authorized fulfillment handler", () => {
-    expect(appSource).toMatch(
-      /app\.post\(\s*FULFILLMENT_ROUTE_PATH,\s*fulfillmentRateLimiter,\s*fulfillRequest\s*\)/
+    // W4-H1a: the route owns its bounded body parser, so it is registered by
+    // its own function (rate limiter, 3 MB parser, handler, parser-error
+    // boundary — proven in `fulfillmentEvidenceRoute.test.ts`) AHEAD of the
+    // global 100 KB parser. A second, plain registration would be refused by
+    // that global parser first.
+    expect(appSource.match(/registerFulfillmentRoute\(app\);/g)).toHaveLength(1);
+    expect(appSource.indexOf("registerFulfillmentRoute(app);")).toBeLessThan(
+      appSource.indexOf("app.use(express.json({ limit: '100kb' }));")
     );
+    expect(appSource).not.toMatch(/app\.post\(\s*FULFILLMENT_ROUTE_PATH/);
     expect(appSource).not.toContain("registerFulfillmentPause");
     expect(appSource).not.toContain(
       'app.post("/api/request/:id/fulfill"'
     );
+    // Still not paused: a helper holding a real order must be able to record it.
+    const registration = appSource.slice(
+      appSource.indexOf("registerFulfillmentRoute(app);") - 60,
+      appSource.indexOf("registerFulfillmentRoute(app);") + 40
+    );
+    expect(registration).not.toContain("pausePublicAction");
   });
 
   it("guards claim and extension before independent rate-limit buckets", () => {

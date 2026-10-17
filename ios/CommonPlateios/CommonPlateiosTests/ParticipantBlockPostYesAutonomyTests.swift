@@ -353,7 +353,7 @@ final class ParticipantBlockPostYesAutonomyTests: XCTestCase {
         let store = try await heldAndBlockedViaYes()
         ParticipantBlockURLProtocol.enqueue(.response(data: fulfillmentResponse()))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",

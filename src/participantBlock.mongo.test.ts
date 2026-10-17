@@ -14,6 +14,7 @@ import {
   Fulfillment,
   Participant,
   ParticipantBlock,
+  PlacementEvidence,
   Request as MealRequest,
   RequestParticipation,
 } from "../models/db.js";
@@ -126,6 +127,14 @@ async function release(requestId: unknown, as: mongoose.Types.ObjectId) {
   await releaseClaim(req, res);
   return call;
 }
+// Smallest well-formed 1x1 PNG: the required W4-H1a placed-order screenshot,
+// valid under the same structural checks a real one meets.
+const PLACED_ORDER_SCREENSHOT = {
+  mimeType: "image/png",
+  imageBase64:
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+};
+
 async function fulfill(
   requestId: unknown,
   as: mongoose.Types.ObjectId,
@@ -137,6 +146,7 @@ async function fulfill(
       fulfillment: {
         orderNumber: "000123",
         eta: "ASAP",
+        placedOrderScreenshot: PLACED_ORDER_SCREENSHOT,
         ...(contactMessage === undefined ? {} : { contactMessage }),
       },
     },
@@ -224,6 +234,7 @@ describeMongo("real MongoDB W4-U1.3 participant blocking and fencing", () => {
     await Participant.createIndexes();
     await RequestParticipation.syncIndexes();
     await Fulfillment.syncIndexes();
+    await PlacementEvidence.syncIndexes();
     await ParticipantBlock.syncIndexes();
     for (const id of [ada, bea, cy]) {
       await Participant.updateOne(
@@ -250,6 +261,7 @@ describeMongo("real MongoDB W4-U1.3 participant blocking and fencing", () => {
     await MealRequest.deleteMany({});
     await RequestParticipation.deleteMany({});
     await Fulfillment.deleteMany({});
+    await PlacementEvidence.deleteMany({});
     await ParticipantBlock.deleteMany({});
     await Participant.updateMany(
       {},

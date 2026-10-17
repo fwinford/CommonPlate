@@ -124,7 +124,7 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
             "extendActiveClaim",
             "releaseActiveClaim",
             "Open Grubhub",
-            "store.fulfill(",
+            "store.fulfillWithFixtureScreenshot(",
             "isShowingReservationWarning",
             "Finish helping"
         ] {
@@ -543,7 +543,7 @@ final class HelperHeldRequestNavigationTests: XCTestCase {
           "notification": { "status": "sent" }
         }
         """.utf8)))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: heldID,
             orderNumber: "70154321",
             eta: "15 minutes",

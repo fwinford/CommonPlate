@@ -13,6 +13,7 @@ import {
 import {
   Fulfillment,
   Participant,
+  PlacementEvidence,
   Request as MealRequest,
 } from "../models/db.js";
 import {
@@ -106,6 +107,15 @@ const continuationHeaders = {
   [PARTICIPANT_AUTHORITY_HEADER]: participantAuthority,
 };
 
+// Smallest well-formed 1x1 PNG: passes the same structural validation a real
+// screenshot does without shipping a real fixture (W4-H1a).
+const ONE_PIXEL_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const validScreenshot = () => ({
+  mimeType: "image/png",
+  imageBase64: ONE_PIXEL_PNG_BASE64,
+});
+
 function fulfillmentBody(rawToken: string) {
   return {
     claimToken: rawToken,
@@ -113,6 +123,7 @@ function fulfillmentBody(rawToken: string) {
       orderNumber: "70154321",
       eta: "15 minutes",
       contactMessage: "Your meal is ready",
+      placedOrderScreenshot: validScreenshot(),
     },
   };
 }
@@ -124,6 +135,7 @@ function continuationFulfillmentBody() {
       orderNumber: "70154321",
       eta: "15 minutes",
       contactMessage: "Your meal is ready",
+      placedOrderScreenshot: validScreenshot(),
     },
   };
 }
@@ -169,6 +181,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     await mongoose.connect(mongoUri!);
     await MealRequest.syncIndexes();
     await Fulfillment.syncIndexes();
+    await PlacementEvidence.syncIndexes();
     await Participant.createIndexes();
     await Participant.updateOne(
       { _id: helperParticipantId },
@@ -189,6 +202,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     await Promise.all([
       MealRequest.deleteMany({}),
       Fulfillment.deleteMany({}),
+      PlacementEvidence.deleteMany({}),
     ]);
   });
 
@@ -258,6 +272,21 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     });
     expect(ledger?.placedAt).toEqual(stored?.placedAt);
     expect(await Fulfillment.countDocuments()).toBe(1);
+
+    // W4-H1a: the private evidence row committed with the placement, bound to
+    // this exact Request, holding the exact bytes and the Request's own horizon.
+    const evidence = await PlacementEvidence.findOne({ requestId: request._id })
+      .select("+image")
+      .lean();
+    expect(evidence).not.toBeNull();
+    expect(Buffer.isBuffer((evidence!.image as any).buffer ?? evidence!.image)).toBe(true);
+    expect(Buffer.from((evidence!.image as any).buffer ?? evidence!.image).equals(
+      Buffer.from(ONE_PIXEL_PNG_BASE64, "base64")
+    )).toBe(true);
+    expect(evidence?.mimeType).toBe("image/png");
+    expect(evidence?.byteLength).toBe(Buffer.from(ONE_PIXEL_PNG_BASE64, "base64").length);
+    expect(evidence?.deleteAt).toEqual(stored?.deleteAt);
+    expect(await PlacementEvidence.countDocuments()).toBe(1);
 
     expect(sendFulfillmentEmail).toHaveBeenCalledOnce();
     expect(sendFulfillmentEmail).toHaveBeenCalledWith(
@@ -338,6 +367,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       fulfillment: {
         orderNumber: "00070154321",
         eta: "ASAP",
+        placedOrderScreenshot: validScreenshot(),
       },
     });
 
@@ -405,6 +435,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       fulfillment: {
         orderNumber: "70154321",
         eta: "15 minutes",
+        placedOrderScreenshot: validScreenshot(),
       },
     });
 
@@ -543,6 +574,11 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       expect(
         await Fulfillment.countDocuments({ requestId: request._id })
       ).toBe(0);
+      // W4-H1a: nothing of the placement survives a ledger failure — no
+      // evidence row either.
+      expect(
+        await PlacementEvidence.countDocuments({ requestId: request._id })
+      ).toBe(0);
       expect(sendFulfillmentEmail).not.toHaveBeenCalled();
     } finally {
       await Fulfillment.collection.dropIndex(forcedFailureIndex);
@@ -639,6 +675,8 @@ describeMongo("transactional fulfillment against a real replica set", () => {
     expect(stored?.notificationStatus).toBe("failed");
     expect(stored?.notificationAttemptedAt).toBeInstanceOf(Date);
     expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+    // Email failure is a post-commit outcome: the evidence stays.
+    expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(1);
   });
 
   // Week 3 Day 6 Slice 6E: the requester-fulfillment push dispatcher reads
@@ -933,6 +971,7 @@ describeMongo("transactional fulfillment against a real replica set", () => {
         fulfillment: {
           orderNumber: "70154321",
           eta: "15 minutes",
+          placedOrderScreenshot: validScreenshot(),
           ...(contactMessage === undefined ? {} : { contactMessage }),
         },
       };
@@ -1139,6 +1178,385 @@ describeMongo("transactional fulfillment against a real replica set", () => {
       // And an ordinary read does not even carry it.
       const ordinary = await MealRequest.findById(request._id).lean();
       expect(ordinary).not.toHaveProperty("contactMessageSuppressed");
+    });
+
+    it("a suppressed Message still commits the placement AND its evidence together", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const context = routeContext(String(request._id), bodyWith(rawToken, BLOCKED));
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      expect(context.body.messageSuppressed).toBe(true);
+      expect((await MealRequest.findById(request._id).lean())?.status).toBe("placed");
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+      expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(1);
+    });
+  });
+
+  describe("W4-H1a required placed-order evidence", () => {
+    const bigPngWithSize = (totalBytes: number) => {
+      // Reuse the 1x1 PNG header/IHDR and stretch a valid IDAT: built by hand so
+      // the cap boundary is exercised with a structurally valid image.
+      const crcTable = new Uint32Array(256).map((_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        return c >>> 0;
+      });
+      const crc32 = (buffer: Buffer) => {
+        let crc = 0xffffffff;
+        for (const byte of buffer) crc = crcTable[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
+        return (crc ^ 0xffffffff) >>> 0;
+      };
+      const chunk = (type: string, data: Buffer) => {
+        const length = Buffer.alloc(4);
+        length.writeUInt32BE(data.length);
+        const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+        const crc = Buffer.alloc(4);
+        crc.writeUInt32BE(crc32(body));
+        return Buffer.concat([length, body, crc]);
+      };
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(1, 0);
+      ihdr.writeUInt32BE(1, 4);
+      ihdr[8] = 8;
+      return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        chunk("IHDR", ihdr),
+        chunk("IDAT", Buffer.alloc(totalBytes - 57, 0x2a)),
+        chunk("IEND", Buffer.alloc(0)),
+      ]);
+    };
+
+    const withoutEvidence = (rawToken: string) => {
+      const body = fulfillmentBody(rawToken);
+      delete (body.fulfillment as Record<string, unknown>).placedOrderScreenshot;
+      return body;
+    };
+
+    it("creates the unique requestId and TTL indexes with the contracted names", async () => {
+      const indexes = await PlacementEvidence.collection.indexes();
+      expect(indexes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "placement_evidence_request_unique",
+            key: { requestId: 1 },
+            unique: true,
+          }),
+          expect.objectContaining({
+            name: "placement_evidence_deleteAt_ttl",
+            key: { deleteAt: 1 },
+            expireAfterSeconds: 0,
+          }),
+        ])
+      );
+    });
+
+    it("refuses a new fulfillment without evidence, in both shapes, leaving the claim untouched", async () => {
+      for (const shape of ["token", "continuation"] as const) {
+        const { request, rawToken } = await createClaimedRequest();
+        const context =
+          shape === "token"
+            ? routeContext(String(request._id), withoutEvidence(rawToken))
+            : routeContext(
+                String(request._id),
+                { fulfillment: { orderNumber: "70154321", eta: "15 minutes" } },
+                continuationHeaders
+              );
+
+        await fulfillRequest(context.req, context.res);
+
+        expect(context.statusCode).toBe(400);
+        expect(context.body.error.code).toBe("INVALID_PLACED_ORDER_SCREENSHOT");
+        const stored = await MealRequest.findById(request._id)
+          .select("+claimTokenDigest")
+          .lean();
+        expect(stored?.status).toBe("claimed");
+        expect(stored?.claimTokenDigest).toBeDefined();
+        expect(stored).not.toHaveProperty("placedAt");
+        expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(0);
+        expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(0);
+      }
+      expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+    });
+
+    it("refuses invalid and oversized evidence before any mutation", async () => {
+      const invalid: unknown[] = [
+        { ...validScreenshot(), mimeType: "image/heic" },
+        { mimeType: "image/png", imageBase64: "!!not-base64!!" },
+        { ...validScreenshot(), mimeType: "image/jpeg" },
+        { mimeType: "image/png", imageBase64: bigPngWithSize(1_500_001).toString("base64") },
+      ];
+      for (const screenshot of invalid) {
+        const { request, rawToken } = await createClaimedRequest();
+        const body = fulfillmentBody(rawToken);
+        body.fulfillment.placedOrderScreenshot = screenshot as never;
+        const context = routeContext(String(request._id), body);
+
+        await fulfillRequest(context.req, context.res);
+
+        expect(context.statusCode).toBe(400);
+        expect(context.body.error.code).toBe("INVALID_PLACED_ORDER_SCREENSHOT");
+        expect((await MealRequest.findById(request._id).lean())?.status).toBe("claimed");
+      }
+      expect(await Fulfillment.countDocuments()).toBe(0);
+      expect(await PlacementEvidence.countDocuments()).toBe(0);
+      expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+    });
+
+    it("stores an image exactly at the 1,500,000-byte cap", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const body = fulfillmentBody(rawToken);
+      body.fulfillment.placedOrderScreenshot = {
+        mimeType: "image/png",
+        imageBase64: bigPngWithSize(1_500_000).toString("base64"),
+      };
+      const context = routeContext(String(request._id), body);
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      const evidence = await PlacementEvidence.findOne({ requestId: request._id }).lean();
+      expect(evidence?.byteLength).toBe(1_500_000);
+    });
+
+    it("keeps the image private: select:false by default, absent from every public projection and response", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const context = routeContext(String(request._id), fulfillmentBody(rawToken));
+      await fulfillRequest(context.req, context.res);
+
+      const ordinary = await PlacementEvidence.findOne({ requestId: request._id }).lean();
+      expect(ordinary).not.toBeNull();
+      expect(ordinary).not.toHaveProperty("image");
+
+      const stored = await MealRequest.findById(request._id).lean();
+      const publicDetail = buildPublicRequestDetailResponse(stored as any, new Date());
+      const surfaces = JSON.stringify([
+        context.body,
+        publicDetail,
+        sendFulfillmentEmail.mock.calls,
+      ]);
+      expect(surfaces).not.toContain(ONE_PIXEL_PNG_BASE64);
+      expect(surfaces).not.toMatch(/placedOrderScreenshot|placementEvidence|imageBase64/i);
+      // The Request document itself carries no copy either.
+      expect(JSON.stringify(await MealRequest.collection.findOne({ _id: request._id as mongoose.Types.ObjectId }))).not.toContain(
+        ONE_PIXEL_PNG_BASE64
+      );
+    });
+
+    it("enforces one evidence row per Request at the database, and the size cap at the schema", async () => {
+      const requestId = new mongoose.Types.ObjectId();
+      const row = (overrides: Record<string, unknown> = {}) => ({
+        requestId,
+        image: Buffer.from("evidence"),
+        mimeType: "image/jpeg",
+        byteLength: 8,
+        deleteAt: new Date(Date.now() + 60_000),
+        ...overrides,
+      });
+      await PlacementEvidence.create(row());
+      await expect(PlacementEvidence.create(row())).rejects.toMatchObject({ code: 11000 });
+      expect(await PlacementEvidence.countDocuments({ requestId })).toBe(1);
+
+      const other = new mongoose.Types.ObjectId();
+      await expect(
+        PlacementEvidence.create(
+          row({ requestId: other, image: Buffer.alloc(1_500_001), byteLength: 1_500_001 })
+        )
+      ).rejects.toThrow(/exceeds the size cap|outside the size cap/);
+      await expect(
+        PlacementEvidence.create(row({ requestId: other, byteLength: 1_500_001 }))
+      ).rejects.toThrow();
+      await expect(
+        PlacementEvidence.create(row({ requestId: other, mimeType: "image/heic" }))
+      ).rejects.toThrow();
+      expect(await PlacementEvidence.countDocuments({ requestId: other })).toBe(0);
+    });
+
+    it("aborts the WHOLE placement when the evidence insert fails: no placed Request, no ledger row, no evidence, lock intact, no email", async () => {
+      // Forces only the evidence insert to fail: a unique index on `byteLength`
+      // plus a pre-existing row of the same length for ANOTHER request.
+      const forcedFailureIndex = "test_force_evidence_failure";
+      await PlacementEvidence.collection.createIndex(
+        { byteLength: 1 },
+        { unique: true, name: forcedFailureIndex }
+      );
+      try {
+        const byteLength = Buffer.from(ONE_PIXEL_PNG_BASE64, "base64").length;
+        await PlacementEvidence.create({
+          requestId: new mongoose.Types.ObjectId(),
+          image: Buffer.alloc(byteLength, 1),
+          mimeType: "image/png",
+          byteLength,
+          deleteAt: new Date(Date.now() + 60_000),
+        });
+        const lockExpiry = new Date(Date.now() + 15 * 60 * 1000);
+        const { request, rawToken } = await createClaimedRequest();
+        await Participant.updateOne(
+          { _id: helperParticipantId },
+          {
+            $set: {
+              activeReservationRequestId: request._id,
+              activeReservationClaimExpiresAt: lockExpiry,
+            },
+          }
+        ).exec();
+        const context = routeContext(String(request._id), fulfillmentBody(rawToken));
+
+        await fulfillRequest(context.req, context.res);
+
+        expect(context.statusCode).toBe(500);
+        expect(context.body.error.code).toBe("INTERNAL_FAILURE");
+        const stored = await MealRequest.findById(request._id)
+          .select("+claimTokenDigest")
+          .lean();
+        expect(stored?.status).toBe("claimed");
+        expect(stored?.claimTokenDigest).toBeDefined();
+        expect(stored).not.toHaveProperty("placedAt");
+        expect(stored).not.toHaveProperty("orderNumber");
+        expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(0);
+        expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(0);
+        // The reservation lock is part of the same transaction and is not cleared.
+        const participant = await Participant.findById(helperParticipantId)
+          .select("+activeReservationRequestId")
+          .lean();
+        expect(String(participant?.activeReservationRequestId)).toBe(String(request._id));
+        expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+      } finally {
+        await PlacementEvidence.collection.dropIndex(forcedFailureIndex);
+        await Participant.updateOne(
+          { _id: helperParticipantId },
+          { $set: { activeReservationRequestId: null, activeReservationClaimExpiresAt: null } }
+        ).exec();
+      }
+    });
+
+    it("rolls back an evidence row that WAS inserted when the transaction aborts afterwards (the insert shares the placement session)", async () => {
+      // The previous case fails the insert itself, which a session-less insert
+      // would also survive. This one lets the insert succeed and then aborts the
+      // transaction: the row can only disappear if it was written with the same
+      // session as the placement.
+      const realCreate = PlacementEvidence.create.bind(PlacementEvidence) as (
+        ...args: unknown[]
+      ) => Promise<unknown>;
+      const spy = vi
+        .spyOn(PlacementEvidence, "create")
+        .mockImplementationOnce((async (...args: unknown[]) => {
+          await realCreate(...args);
+          expect(await PlacementEvidence.countDocuments({})).toBe(0); // uncommitted: invisible outside the session
+          throw new Error("forced abort after the evidence insert");
+        }) as never);
+      try {
+        const { request, rawToken } = await createClaimedRequest();
+        const context = routeContext(String(request._id), fulfillmentBody(rawToken));
+
+        await fulfillRequest(context.req, context.res);
+
+        expect(spy).toHaveBeenCalledOnce();
+        expect(context.statusCode).toBe(500);
+        const stored = await MealRequest.findById(request._id).lean();
+        expect(stored?.status).toBe("claimed");
+        expect(stored).not.toHaveProperty("placedAt");
+        expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(0);
+        expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(0);
+        expect(sendFulfillmentEmail).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("cannot replace or duplicate evidence after placement: a resend is REQUEST_ALREADY_PLACED and the original bytes remain", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const original = routeContext(String(request._id), fulfillmentBody(rawToken));
+      await fulfillRequest(original.req, original.res);
+      expect(original.statusCode).toBe(200);
+      const before = await PlacementEvidence.findOne({ requestId: request._id })
+        .select("+image")
+        .lean();
+
+      const replacement = fulfillmentBody(rawToken);
+      replacement.fulfillment.placedOrderScreenshot = {
+        mimeType: "image/png",
+        imageBase64: bigPngWithSize(5_000).toString("base64"),
+      };
+      const resend = routeContext(String(request._id), replacement);
+      await fulfillRequest(resend.req, resend.res);
+
+      expect(resend.statusCode).toBe(409);
+      expect(resend.body.error.code).toBe("REQUEST_ALREADY_PLACED");
+      expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(1);
+      const after = await PlacementEvidence.findOne({ requestId: request._id })
+        .select("+image")
+        .lean();
+      expect(after?.byteLength).toBe(before?.byteLength);
+      expect(Buffer.from((after!.image as any).buffer ?? after!.image).equals(
+        Buffer.from((before!.image as any).buffer ?? before!.image)
+      )).toBe(true);
+    });
+
+    it("two concurrent attempts with different images leave exactly one winner's evidence", async () => {
+      const { request, rawToken } = await createClaimedRequest();
+      const first = fulfillmentBody(rawToken);
+      const second = fulfillmentBody(rawToken);
+      second.fulfillment.placedOrderScreenshot = {
+        mimeType: "image/png",
+        imageBase64: bigPngWithSize(4_000).toString("base64"),
+      };
+      const attempts = [
+        routeContext(String(request._id), first),
+        routeContext(String(request._id), second),
+      ];
+
+      await Promise.all(attempts.map((attempt) => fulfillRequest(attempt.req, attempt.res)));
+
+      const winners = attempts.filter((attempt) => attempt.statusCode === 200);
+      expect(winners).toHaveLength(1);
+      expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(1);
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+      const winnerBytes = winners[0] === attempts[0]
+        ? Buffer.from(ONE_PIXEL_PNG_BASE64, "base64")
+        : bigPngWithSize(4_000);
+      const stored = await PlacementEvidence.findOne({ requestId: request._id })
+        .select("+image")
+        .lean();
+      expect(Buffer.from((stored!.image as any).buffer ?? stored!.image).equals(winnerBytes)).toBe(true);
+    });
+
+    it("a wrong token or a wrong participant writes no evidence", async () => {
+      const { request } = await createClaimedRequest();
+      const wrongToken = routeContext(String(request._id), fulfillmentBody(generateClaimToken()));
+      await fulfillRequest(wrongToken.req, wrongToken.res);
+      expect(wrongToken.statusCode).toBe(403);
+
+      const { request: otherOwned } = await createClaimedRequest({
+        helperParticipantId: new mongoose.Types.ObjectId(),
+      });
+      const wrongParticipant = routeContext(
+        String(otherOwned._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+      await fulfillRequest(wrongParticipant.req, wrongParticipant.res);
+      expect(wrongParticipant.statusCode).toBe(403);
+
+      expect(await PlacementEvidence.countDocuments()).toBe(0);
+      expect(await Fulfillment.countDocuments()).toBe(0);
+    });
+
+    it("commits evidence in the participant-continuation shape, bound to the placed Request", async () => {
+      const { request } = await createClaimedRequest();
+      const context = routeContext(
+        String(request._id),
+        continuationFulfillmentBody(),
+        continuationHeaders
+      );
+
+      await fulfillRequest(context.req, context.res);
+
+      expect(context.statusCode).toBe(200);
+      const evidence = await PlacementEvidence.findOne({ requestId: request._id }).lean();
+      expect(evidence?.mimeType).toBe("image/png");
+      expect((await MealRequest.findById(request._id).lean())?.deleteAt).toEqual(evidence?.deleteAt);
     });
   });
 });

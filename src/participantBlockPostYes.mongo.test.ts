@@ -14,6 +14,7 @@ import {
   Fulfillment,
   Participant,
   ParticipantBlock,
+  PlacementEvidence,
   Request as MealRequest,
   RequestParticipation,
 } from "../models/db.js";
@@ -151,16 +152,31 @@ async function release(
   await releaseClaim(req, res);
   return call;
 }
+// Smallest well-formed 1x1 PNG: the required W4-H1a placed-order screenshot,
+// valid under the same structural checks a real one meets.
+const PLACED_ORDER_SCREENSHOT = {
+  mimeType: "image/png",
+  imageBase64:
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+};
+
 async function fulfill(
   requestId: unknown,
   as: mongoose.Types.ObjectId,
-  claimToken?: string
+  claimToken?: string,
+  extra: Record<string, unknown> = {},
+  withScreenshot = true
 ) {
   const { req, res, call } = makeCall(
     { id: String(requestId) },
     {
       ...(claimToken ? { claimToken } : {}),
-      fulfillment: { orderNumber: "000123", eta: "ASAP" },
+      fulfillment: {
+        orderNumber: "000123",
+        eta: "ASAP",
+        ...(withScreenshot ? { placedOrderScreenshot: PLACED_ORDER_SCREENSHOT } : {}),
+        ...extra,
+      },
     },
     claimToken ? null : as
   );
@@ -317,6 +333,7 @@ describeMongo(
     await MealRequest.deleteMany({});
     await RequestParticipation.deleteMany({});
     await Fulfillment.deleteMany({});
+    await PlacementEvidence.deleteMany({});
     await ParticipantBlock.deleteMany({});
     await Participant.updateMany(
       {},
@@ -337,6 +354,7 @@ describeMongo(
     await Participant.createIndexes();
     await RequestParticipation.syncIndexes();
     await Fulfillment.syncIndexes();
+    await PlacementEvidence.syncIndexes();
     await ParticipantBlock.syncIndexes();
     for (const id of [ada, bea, cy, dee]) {
       await Participant.updateOne(
@@ -636,6 +654,7 @@ describeMongo(
       expect(reservationFields(await row(request._id))).toEqual(requestBefore);
       expect((await row(request._id))!.status).toBe("placed");
       expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+      expect(await PlacementEvidence.countDocuments({ requestId: request._id })).toBe(1);
     });
 
     it("refuses a repeated Yes after a post-Yes Stop retired the reservation (C1)", async () => {
@@ -1517,6 +1536,46 @@ describeMongo(
           )
         ).not.toMatch(/stopReturnsHome|affirmed/i);
       }
+    });
+  });
+
+  // ------------------------------------------- W4-H1a required evidence
+
+  describe("W4-H1a required placed-order evidence under an active Block", () => {
+    it("still requires the screenshot after Yes: a screenshot-less completion is refused and the reservation survives", async () => {
+      const { request, claimToken } = await holdAndAnswerYes(bea, ada);
+      const requestBefore = reservationFields(await row(request._id));
+
+      for (const result of [
+        await fulfill(request._id, ada, undefined, {}, false),
+        await fulfill(request._id, ada, claimToken, {}, false),
+      ]) {
+        expect(result.statusCode).toBe(400);
+        expect(result.body.error.code).toBe("INVALID_PLACED_ORDER_SCREENSHOT");
+      }
+
+      expect(reservationFields(await row(request._id))).toEqual(requestBefore);
+      expect((await row(request._id))!.status).toBe("claimed");
+      expect(await Fulfillment.countDocuments({})).toBe(0);
+      expect(await PlacementEvidence.countDocuments({})).toBe(0);
+    });
+
+    it("completes with the screenshot after Yes: placement, ledger and evidence commit, and the Message stays withheld", async () => {
+      const { request } = await holdAndAnswerYes(bea, ada);
+
+      const placed = await fulfill(request._id, ada, undefined, {
+        contactMessage: "Thanks, text me when you are outside",
+      });
+
+      expect(placed.statusCode).toBe(200);
+      expect(placed.body.request.status).toBe("placed");
+      expect(placed.body.messageSuppressed).toBe(true);
+      expect(placed.body.messageWithheld).toBe(true);
+      expect(await Fulfillment.countDocuments({ requestId: request._id })).toBe(1);
+      const evidence = await PlacementEvidence.findOne({ requestId: request._id }).lean();
+      expect(evidence?.mimeType).toBe("image/png");
+      // Nothing about the evidence reaches the helper response.
+      expect(JSON.stringify(placed.body)).not.toContain(PLACED_ORDER_SCREENSHOT.imageBase64);
     });
   });
 

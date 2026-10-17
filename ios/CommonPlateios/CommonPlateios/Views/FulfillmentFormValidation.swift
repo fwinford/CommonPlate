@@ -15,6 +15,11 @@ struct FulfillmentFormDraft: Equatable {
     var readyTime: FulfillmentReadyTime?
     var contactMessage: String
 
+    // W4-H1a: the placed-order screenshot is deliberately NOT part of this
+    // view-local draft. Its pre-submit selection is owned by `RequestStore`'s
+    // private in-memory state (`selectPlacedOrderScreenshot`), and the view
+    // reads only whether one is selected.
+
     init(
         orderNumber: String = "",
         eta: String = "",

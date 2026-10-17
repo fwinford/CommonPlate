@@ -588,7 +588,7 @@ final class RemoveEmailTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: Data(#"{"request":\#(requestObject(status: "claimed"))}"#.utf8)))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",

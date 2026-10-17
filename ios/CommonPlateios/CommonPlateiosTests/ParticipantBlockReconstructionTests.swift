@@ -119,7 +119,7 @@ final class ParticipantBlockReconstructionTests: XCTestCase {
         ParticipantBlockURLProtocol.enqueue(.response(
             data: fulfillmentResponse(suppressed: false, withheld: false)
         ))
-        try await relaunched.fulfill(
+        try await relaunched.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -153,7 +153,7 @@ final class ParticipantBlockReconstructionTests: XCTestCase {
         ParticipantBlockURLProtocol.enqueue(.response(
             data: fulfillmentResponse(suppressed: false, withheld: false)
         ))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -188,7 +188,7 @@ final class ParticipantBlockReconstructionTests: XCTestCase {
         ParticipantBlockURLProtocol.enqueue(.response(
             data: fulfillmentResponse(suppressed: true, withheld: true)
         ))
-        try await blockDriven.fulfill(
+        try await blockDriven.fulfillWithFixtureScreenshot(
             requestID: requestID, orderNumber: "70154321", eta: "15 minutes", contactMessage: "hi"
         )
         let restricted = try XCTUnwrap(blockDriven.fulfillmentConfirmation)
@@ -203,7 +203,7 @@ final class ParticipantBlockReconstructionTests: XCTestCase {
         ParticipantBlockURLProtocol.enqueue(.response(
             data: fulfillmentResponse(suppressed: true, withheld: false)
         ))
-        try await filterDriven.fulfill(
+        try await filterDriven.fulfillWithFixtureScreenshot(
             requestID: requestID, orderNumber: "70154321", eta: "15 minutes", contactMessage: "x"
         )
         let filtered = try XCTUnwrap(filterDriven.fulfillmentConfirmation)
@@ -222,7 +222,7 @@ final class ParticipantBlockReconstructionTests: XCTestCase {
             data: placementResponse(suppressed: true, withheld: true)
         ))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID, orderNumber: "70154321", eta: "15 minutes", contactMessage: "hi"
         )
 

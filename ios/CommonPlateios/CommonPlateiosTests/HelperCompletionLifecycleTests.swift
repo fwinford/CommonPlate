@@ -198,7 +198,7 @@ final class HelperCompletionLifecycleTests: XCTestCase {
 
         let before = HelperCompletionURLProtocol.capturedPaths
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestA,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -227,7 +227,7 @@ final class HelperCompletionLifecycleTests: XCTestCase {
             .response(data: detailResponse(requestID: requestA, status: "claimed"))
         )
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestA,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -262,7 +262,7 @@ final class HelperCompletionLifecycleTests: XCTestCase {
         HelperCompletionURLProtocol.enqueue(
             .response(data: detailResponse(requestID: requestA, status: "claimed"))
         )
-        try? await store.fulfill(
+        try? await store.fulfillWithFixtureScreenshot(
             requestID: requestA,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -293,7 +293,7 @@ final class HelperCompletionLifecycleTests: XCTestCase {
             data: errorResponse(code: "TRANSACTIONS_UNAVAILABLE", message: "Unavailable.")
         ))
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestA,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -455,7 +455,7 @@ final class HelperCompletionLifecycleTests: XCTestCase {
         ))
 
         let submission = Task {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestA,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -495,7 +495,7 @@ final class HelperCompletionLifecycleTests: XCTestCase {
         ))
 
         let submission = Task {
-            try? await store.fulfill(
+            try? await store.fulfillWithFixtureScreenshot(
                 requestID: requestA,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -622,7 +622,7 @@ final class HelperCompletionLifecycleTests: XCTestCase {
             requestID: requestID,
             notificationStatus: notificationStatus
         )))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",

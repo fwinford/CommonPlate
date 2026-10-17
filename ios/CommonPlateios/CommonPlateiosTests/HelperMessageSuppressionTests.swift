@@ -235,7 +235,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
         ))
 
         // The client never pre-filters: the helper's Message is sent as typed.
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -272,7 +272,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
             data: fulfillmentResponse(notificationStatus: "failed")
         ))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -293,7 +293,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
             data: fulfillmentResponse(notificationStatus: "failed", messageSuppressed: true)
         ))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -326,7 +326,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
             data: placementResponse(requestID: requestID, messageSuppressed: true)
         ))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -379,7 +379,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
             HelperMessageSuppressionURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
             HelperMessageSuppressionURLProtocol.enqueue(stub)
 
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -405,7 +405,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
         HelperMessageSuppressionURLProtocol.enqueue(.failure(.networkConnectionLost))
         HelperMessageSuppressionURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -423,7 +423,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
         HelperMessageSuppressionURLProtocol.enqueue(.failure(.timedOut))
         HelperMessageSuppressionURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
-        try? await store.fulfill(
+        try? await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -450,7 +450,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
         HelperMessageSuppressionURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
         HelperMessageSuppressionURLProtocol.enqueue(.held(heldLookup))
         let fulfilling = Task { @MainActor in
-            _ = try? await store.fulfill(
+            _ = try? await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -601,7 +601,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
                 data: placementResponse(requestID: requestID, messageSuppressed: true)
             ))
 
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -629,7 +629,7 @@ final class HelperMessageSuppressionTests: XCTestCase {
             data: placementResponse(requestID: requestID, messageSuppressed: true)
         ))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",

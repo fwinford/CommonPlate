@@ -325,7 +325,7 @@ final class ParticipantBlockPostYesStopHomeTests: XCTestCase {
         _ = try await store.continueActiveReservationIfNeeded()
         ParticipantBlockURLProtocol.enqueue(.response(data: fulfillmentResponse()))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",

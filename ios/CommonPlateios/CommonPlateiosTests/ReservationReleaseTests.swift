@@ -203,7 +203,7 @@ final class ReservationReleaseTests: XCTestCase {
 
         await store.extendActiveClaim()
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -265,7 +265,7 @@ final class ReservationReleaseTests: XCTestCase {
         ))
 
         let fulfillment = Task {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -291,7 +291,7 @@ final class ReservationReleaseTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",

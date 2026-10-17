@@ -731,18 +731,11 @@ struct RequestDetailView: View {
         // withdraws it because the POST may already have been applied.
         if Self.showsClaimAction(for: inlineClaimError) {
             // W4-H1 physical acceptance: no explanatory reservation copy sits
-            // above `Start helping`.
-
-            // Browsing needed no identity, so the first mention of verification
-            // belongs here, beside the action that needs one — before the tap,
-            // not after it.
-            if !identityStore.isVerified {
-                Text(Self.verificationRequiredNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("claim-verification-notice")
-            }
+            // above `Start helping`. W4-H1a (Faith D-A2): that includes the
+            // retired verification prerequisite note — there is no replacement
+            // paragraph. Verification itself is unchanged: an unverified helper
+            // still taps `Start helping`, which enters the existing verification
+            // flow before any claim is made (see `startClaim`).
 
             Button {
                 startClaim()
@@ -784,10 +777,6 @@ struct RequestDetailView: View {
         "We’re still reserving another request. Try this one again in a moment."
 
     static let pauseRecoveryActionTitle = "Check again"
-
-    /// Shown beside the claim action while this installation is unverified.
-    static let verificationRequiredNotice =
-        "You’ll verify your NYU email once before helping. Nothing is reserved until it’s verified."
 
     static func showsPauseRecoveryAction(for error: ClaimPresentationError?) -> Bool {
         error == .publicActionsPaused

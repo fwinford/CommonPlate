@@ -25,6 +25,7 @@ import mongoose, { Types } from "mongoose";
 import {
   Fulfillment,
   Participant,
+  PlacementEvidence,
   PushDelivery,
   Request as MealRequest,
   RequestOperation,
@@ -281,17 +282,19 @@ async function withEnvironment<T>(
 /* ============================== normal reset ============================== */
 
 // Every collection that points at a Request, and what a normal reset does with
-// it. `PlacementEvidence` is intentionally absent: no such model exists in this
-// branch. The guard test discovers every schema path with `ref: "Request"` and
-// fails if one is missing from this table, so a later accepted request-scoped
-// model must be classified here deliberately rather than silently surviving or
-// being silently deleted.
+// it. The guard test discovers every schema path with `ref: "Request"` and
+// fails if one is missing from this table, so a request-scoped model must be
+// classified here deliberately rather than silently surviving or being
+// silently deleted. `PlacementEvidence` (W4-H1a) is deleted with its Request:
+// it exists only to support that placement, so leaving it behind would orphan
+// a private screenshot with nothing left to authorize reading it.
 export type RequestReferenceHandling = "delete" | "clear-lock" | "preserve";
 export const REQUEST_REFERENCE_HANDLING: Readonly<
   Record<string, RequestReferenceHandling>
 > = {
   "RequestParticipation.requestId": "delete",
   "Fulfillment.requestId": "delete",
+  "PlacementEvidence.requestId": "delete",
   "PushDelivery.requestId": "delete",
   "SendLog.requestId": "delete",
   "Participant.activeReservationRequestId": "clear-lock",
@@ -303,6 +306,7 @@ export type ResetSummary = {
   requestsRemoved: number;
   participationsRemoved: number;
   fulfillmentsRemoved: number;
+  placementEvidenceRemoved: number;
   pushDeliveriesRemoved: number;
   sendLogsRemoved: number;
   manifestEntriesRemoved: number;
@@ -330,6 +334,7 @@ export async function resetEnvironment(): Promise<ResetSummary> {
     requestsRemoved: 0,
     participationsRemoved: 0,
     fulfillmentsRemoved: 0,
+    placementEvidenceRemoved: 0,
     pushDeliveriesRemoved: 0,
     sendLogsRemoved: 0,
     manifestEntriesRemoved: 0,
@@ -348,6 +353,7 @@ export async function resetEnvironment(): Promise<ResetSummary> {
         requestsRemoved: 0,
         participationsRemoved: 0,
         fulfillmentsRemoved: 0,
+        placementEvidenceRemoved: 0,
         pushDeliveriesRemoved: 0,
         sendLogsRemoved: 0,
         manifestEntriesRemoved: 0,
@@ -376,6 +382,9 @@ export async function resetEnvironment(): Promise<ResetSummary> {
       ).deletedCount;
       summary.fulfillmentsRemoved = (
         await Fulfillment.collection.deleteMany(byRequest, { session })
+      ).deletedCount;
+      summary.placementEvidenceRemoved = (
+        await PlacementEvidence.collection.deleteMany(byRequest, { session })
       ).deletedCount;
       summary.pushDeliveriesRemoved = (
         await PushDelivery.collection.deleteMany(byRequest, { session })
@@ -606,6 +615,7 @@ const COLLECTION_COUNTS = [
   ["requests", MealRequest],
   ["requestParticipations", RequestParticipation],
   ["fulfillments", Fulfillment],
+  ["placementEvidence", PlacementEvidence],
   ["pushDeliveries", PushDelivery],
   ["sendLogs", SendLog],
   ["participants", Participant],
@@ -639,6 +649,7 @@ function printResetSummary(config: QaEnvironmentConfig, summary: ResetSummary) {
   console.log(`requests removed: ${summary.requestsRemoved}`);
   console.log(`request participations removed: ${summary.participationsRemoved}`);
   console.log(`fulfillments removed: ${summary.fulfillmentsRemoved}`);
+  console.log(`placement evidence removed: ${summary.placementEvidenceRemoved}`);
   console.log(`push deliveries removed: ${summary.pushDeliveriesRemoved}`);
   console.log(`send logs removed: ${summary.sendLogsRemoved}`);
   console.log(`fixture manifest entries removed: ${summary.manifestEntriesRemoved}`);

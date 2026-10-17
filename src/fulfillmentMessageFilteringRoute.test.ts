@@ -5,6 +5,7 @@ import { generateClaimToken } from "./claimToken.js";
 import {
   Fulfillment,
   Participant,
+  PlacementEvidence,
   Request as MealRequest,
 } from "../models/db.js";
 import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
@@ -44,10 +45,20 @@ const placedAt = new Date("2026-08-01T12:00:00.000Z");
 const BLOCKED_MESSAGE = "Thanks, you stupid bitch";
 const ALLOWED_MESSAGE = "I'll shoot you a text when I'm at the front door";
 
+// Smallest well-formed 1x1 PNG. W4-H1a makes a valid placed-order screenshot
+// part of every new fulfillment; evidence validity is independent of the Message
+// filter, so every case here carries one.
+const ONE_PIXEL_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 function fulfillment(contactMessage?: string) {
   return {
     orderNumber: "70154321",
     eta: "15 minutes",
+    placedOrderScreenshot: {
+      mimeType: "image/png",
+      imageBase64: ONE_PIXEL_PNG_BASE64,
+    },
     ...(contactMessage === undefined ? {} : { contactMessage }),
   };
 }
@@ -122,6 +133,7 @@ function stubCommittedPlacement() {
     select: () => ({ exec: vi.fn().mockResolvedValue(placed) }),
   } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
   const ledger = vi.spyOn(Fulfillment, "create").mockResolvedValue([{}] as never);
+  const evidence = vi.spyOn(PlacementEvidence, "create").mockResolvedValue([{}] as never);
   const recordOutcome = vi.spyOn(MealRequest, "updateOne").mockReturnValue({
     exec: vi.fn().mockResolvedValue({}),
   } as unknown as ReturnType<typeof MealRequest.updateOne>);
@@ -131,7 +143,7 @@ function stubCommittedPlacement() {
     }),
     endSession: vi.fn().mockResolvedValue(undefined),
   } as never);
-  return { findOneAndUpdate, ledger, recordOutcome, startSession };
+  return { findOneAndUpdate, ledger, evidence, recordOutcome, startSession };
 }
 
 let consoleError: ReturnType<typeof vi.spyOn>;
@@ -327,6 +339,10 @@ describe("stale clients still receive truthful placement success", () => {
         orderNumber: "70154321",
         eta: "15 minutes",
         contactMessage: BLOCKED_MESSAGE,
+        placedOrderScreenshot: {
+          mimeType: "image/png",
+          imageBase64: ONE_PIXEL_PNG_BASE64,
+        },
       },
     });
 

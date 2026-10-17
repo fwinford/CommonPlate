@@ -29,6 +29,13 @@ struct ActiveClaimPresentation {
     fileprivate(set) var claimExpiresAt: Date
     fileprivate(set) var claimExtendedAt: Date?
     fileprivate(set) var isExtensionAvailable: Bool
+    /// W4-H1a: `true` only when this reservation was restored from
+    /// authoritative backend state (continuation after a relaunch or a fresh
+    /// process) rather than claimed in this process. The Helping page uses it
+    /// for exactly one purpose: this process never held the helper's pre-submit
+    /// screenshot, which is never persisted, so the helper is told it needs to be
+    /// added again. It says nothing about the reservation itself.
+    fileprivate(set) var wasRestoredByContinuation: Bool = false
 
     var requestID: String {
         request.id
@@ -111,6 +118,13 @@ private struct FulfillmentSubmissionSnapshot: Equatable {
     let orderNumber: String
     let eta: String
     let contactMessage: String?
+    /// W4-H1a: the normalized placed-order screenshot, captured ONCE when the
+    /// submission is created. The single permitted CommonPlate-only repeat after
+    /// an ambiguous outcome re-sends this exact value — never a re-selected,
+    /// re-normalized, or re-encoded image — so the repeat is byte-for-byte the
+    /// original request. It lives only in this in-memory snapshot, is never
+    /// persisted, and is gone with the attempt or the ambiguity context.
+    let placedOrderScreenshot: PlacedOrderScreenshot
 }
 
 private struct FulfillmentAttempt: Equatable {
@@ -469,6 +483,11 @@ enum RequestCreateRecoveryPresentation: Equatable {
 /// Stable backend claim and extension error codes, centralized so handling
 /// cannot drift into scattered string literals.
 enum ClaimErrorCode {
+    /// W4-H1a: the backend's definitive refusal of the helper's placed-order
+    /// screenshot (missing, unsupported, oversized, or structurally invalid),
+    /// returned before any mutation. It is the only code that maps back to the
+    /// "choose another screenshot" message; nothing else ever does.
+    static let invalidPlacedOrderScreenshot = "INVALID_PLACED_ORDER_SCREENSHOT"
     static let invalidRequestID = "INVALID_REQUEST_ID"
     static let requestNotFound = "REQUEST_NOT_FOUND"
     static let requestAlreadyClaimed = "REQUEST_ALREADY_CLAIMED"
@@ -820,6 +839,19 @@ final class RequestStore: ObservableObject {
     @Published private(set) var confirmedFulfillmentOutcome: FulfillOutcome?
     @Published private(set) var fulfillmentAmbiguity: FulfillmentAmbiguityPresentation?
     @Published private(set) var fulfillmentConfirmation: FulfillmentConfirmation?
+
+    /// W4-H1a: which request, if any, currently has a selected placed-order
+    /// screenshot. Presentation reads ONLY this identity: the image bytes stay in
+    /// `selectedPlacedOrderScreenshot` below and are never observable state.
+    @Published private(set) var screenshotSelectedRequestID: String?
+    /// W4-H1a: the helper's selected, already-normalized pre-submit screenshot,
+    /// for the one active reservation. Private in-memory state only — never
+    /// persisted (no UserDefaults, file, cache, or database), so a process death
+    /// loses it and the helper re-selects. It is the pre-submit half of the
+    /// evidence; once `fulfill` issues a submission, the immutable
+    /// `FulfillmentSubmissionSnapshot` is the sole authority for that attempt and
+    /// any ambiguous resend, and later selection changes are refused.
+    private var selectedPlacedOrderScreenshot: PlacedOrderScreenshot?
 
     /// Non-secret presentation for the helper's active claim, if any. The
     /// matching raw token is held separately in private store-only state.
@@ -2219,7 +2251,9 @@ final class RequestStore: ObservableObject {
                         claimExpiresAt: reservation.claimExpiresAt,
                         claimExtendedAt: reservation.claimExtendedAt,
                         requestExpiresAt: reservation.request.expiresAt
-                    )
+                    ),
+                    // W4-H1a: this process never held the helper's screenshot.
+                    wasRestoredByContinuation: true
                 )
                 beginActiveClaim(
                     presentation: presentation,
@@ -3060,6 +3094,9 @@ final class RequestStore: ObservableObject {
         invalidateActiveExtensionAttempt()
         activeClaim = presentation
         activeClaimAuthorization = authorization
+        // A new or restored reservation starts with no selected screenshot:
+        // this process never persisted one.
+        setSelectedPlacedOrderScreenshot(nil, requestID: nil)
         claimExtensionError = nil
         fulfillError = nil
         fulfillmentAmbiguity = nil
@@ -3088,7 +3125,36 @@ final class RequestStore: ObservableObject {
         startClaimLifecycleTimer()
     }
 
+    /// Whether the helper has a selected placed-order screenshot for
+    /// `requestID`. Identity only; the bytes are never exposed.
+    func hasPlacedOrderScreenshot(requestID: String) -> Bool {
+        screenshotSelectedRequestID == requestID
+    }
+
+    /// W4-H1a: selects (or, with `nil`, clears) the pre-submit screenshot for
+    /// the active reservation. Ignored — nothing changes — unless this exact
+    /// request is the active reservation and no submission has been issued: a
+    /// selection can never mutate an in-flight or ambiguous submission, create
+    /// evidence for a reservation that is not held, or reappear after
+    /// placement.
+    func selectPlacedOrderScreenshot(_ screenshot: PlacedOrderScreenshot?, requestID: String) {
+        guard activeClaim?.requestID == requestID,
+              !isFulfilling,
+              activeFulfillmentAttempt == nil,
+              fulfillmentAmbiguityContext == nil,
+              fulfillmentConfirmation?.requestID != requestID else {
+            return
+        }
+        setSelectedPlacedOrderScreenshot(screenshot, requestID: requestID)
+    }
+
+    private func setSelectedPlacedOrderScreenshot(_ screenshot: PlacedOrderScreenshot?, requestID: String?) {
+        selectedPlacedOrderScreenshot = screenshot
+        screenshotSelectedRequestID = screenshot == nil ? nil : requestID
+    }
+
     private func clearActiveClaim() {
+        setSelectedPlacedOrderScreenshot(nil, requestID: nil)
         let clearedClaimID = activeClaimAuthorization?.claimID
         let clearedRequestID = activeClaimAuthorization?.requestID ?? activeClaim?.requestID
         claimLifecycleTask?.cancel()
@@ -3639,6 +3705,14 @@ final class RequestStore: ObservableObject {
             throw error
         }
 
+        // W4-H1a: the evidence is the CURRENT selection held by this store. A
+        // new fulfillment cannot be issued without one, so no screenshot-less
+        // placement is expressible from here.
+        guard screenshotSelectedRequestID == requestID,
+              let placedOrderScreenshot = selectedPlacedOrderScreenshot else {
+            throw RequestServiceError.placedOrderScreenshotRequired
+        }
+
         let submission = FulfillmentSubmissionSnapshot(
             orderNumber: orderNumber,
             eta: eta,
@@ -3647,7 +3721,9 @@ final class RequestStore: ObservableObject {
             // withholds it for any blocked pair regardless.
             contactMessage: contactSuppressedRequestIDs.contains(requestID)
                 ? nil
-                : contactMessage
+                : contactMessage,
+            // Captured here, once, as part of the exact submission.
+            placedOrderScreenshot: placedOrderScreenshot
         )
         let attempt = FulfillmentAttempt(
             id: UUID(),
@@ -3769,7 +3845,8 @@ final class RequestStore: ObservableObject {
                     claimToken: claimToken,
                     orderNumber: attempt.submission.orderNumber,
                     eta: attempt.submission.eta,
-                    contactMessage: attempt.submission.contactMessage
+                    contactMessage: attempt.submission.contactMessage,
+                    placedOrderScreenshot: attempt.submission.placedOrderScreenshot
                 )
             case .participant(let participantAuthority):
                 outcome = try await service.fulfillRequest(
@@ -3777,7 +3854,8 @@ final class RequestStore: ObservableObject {
                     participantAuthority: participantAuthority,
                     orderNumber: attempt.submission.orderNumber,
                     eta: attempt.submission.eta,
-                    contactMessage: attempt.submission.contactMessage
+                    contactMessage: attempt.submission.contactMessage,
+                    placedOrderScreenshot: attempt.submission.placedOrderScreenshot
                 )
             }
             guard fulfillmentAttemptIsCurrent(attempt) else { return }
@@ -3797,6 +3875,15 @@ final class RequestStore: ObservableObject {
             guard fulfillmentAttemptIsCurrent(attempt) else { return }
             let serviceError = Self.asServiceError(error)
             fulfillError = serviceError
+            // W4-H1a: a definitive refusal of the screenshot (before anything
+            // was committed) discards the refused selection so the helper must
+            // choose another. The snapshot is untouched; this only ends the
+            // pre-submit selection.
+            if attempt.originatingAmbiguityID == nil,
+               case .serverError(let code, _) = serviceError,
+               code == ClaimErrorCode.invalidPlacedOrderScreenshot {
+                setSelectedPlacedOrderScreenshot(nil, requestID: nil)
+            }
             applyParticipantVerdict(
                 serviceError,
                 presentedAuthority: attempt.authorization.participantAuthority

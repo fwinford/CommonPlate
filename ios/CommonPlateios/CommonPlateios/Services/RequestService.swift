@@ -58,6 +58,10 @@ enum RequestServiceError: Error {
     /// A prior fulfillment POST is unresolved. The raw token and claimant
     /// context stay in memory, but another POST is forbidden.
     case unresolvedFulfillment
+    /// W4-H1a store-level precondition failure: no placed-order screenshot is
+    /// currently selected for this reservation, so no fulfillment POST was
+    /// started. Not a backend response and never a fabricated placement state.
+    case placedOrderScreenshotRequired
     /// Store-level precondition failure: an operation of the same kind is
     /// already running, so no second service call was started.
     case operationInProgress
@@ -866,14 +870,16 @@ struct RequestService {
         claimToken: String,
         orderNumber: String,
         eta: String,
-        contactMessage: String?
+        contactMessage: String?,
+        placedOrderScreenshot: PlacedOrderScreenshot
     ) async throws -> FulfillOutcome {
         let payload = FulfillRequestPayload(
             claimToken: claimToken,
             fulfillment: FulfillmentPayload(
                 orderNumber: orderNumber,
                 eta: eta,
-                contactMessage: contactMessage
+                contactMessage: contactMessage,
+                placedOrderScreenshot: PlacedOrderScreenshotPayload(placedOrderScreenshot)
             )
         )
         try Task.checkCancellation()
@@ -933,13 +939,15 @@ struct RequestService {
         participantAuthority: String,
         orderNumber: String,
         eta: String,
-        contactMessage: String?
+        contactMessage: String?,
+        placedOrderScreenshot: PlacedOrderScreenshot
     ) async throws -> FulfillOutcome {
         let payload = FulfillContinuationRequestPayload(
             fulfillment: FulfillmentPayload(
                 orderNumber: orderNumber,
                 eta: eta,
-                contactMessage: contactMessage
+                contactMessage: contactMessage,
+                placedOrderScreenshot: PlacedOrderScreenshotPayload(placedOrderScreenshot)
             )
         )
         try Task.checkCancellation()

@@ -29,6 +29,10 @@ import {
   MEAL_EXCHANGE_PATH,
   type MenuPath,
 } from "../src/structuredRequest.js";
+import {
+  PLACEMENT_EVIDENCE_MAX_BYTES,
+  PLACEMENT_EVIDENCE_MIME_TYPES,
+} from "../src/placedOrderEvidence.js";
 
 // Subscriber model
 export interface ISubscriber extends Document {
@@ -756,6 +760,91 @@ export const Request =
 export const Fulfillment = 
   (mongoose.models.Fulfillment as mongoose.Model<IFulfillment>) || 
   mongoose.model<IFulfillment>("Fulfillment", FulfillmentSchema);
+
+
+/* ========================== PlacementEvidence ========================== */
+// The helper's required placed-order screenshot (W4-H1a): one private row per
+// placed Request, inserted in the SAME transaction that places the Request and
+// writes its Fulfillment ledger row, so the three commit or abort together. It
+// is deliberately not a general attachment system — no upload lifecycle, object
+// storage, signed URL, or filesystem path exists, and the image is a BSON
+// Buffer on this row alone.
+//
+// Private by construction: `image` is `select: false`, and nothing in the public
+// Request projection, the helper success response, the fulfillment email, or any
+// log reads this collection. A requester-authorized read is a later slice's
+// concern (W4-R3).
+//
+// Retention: `deleteAt` is the exact `placedAt + PLACED_RETENTION_MS` horizon the
+// placed Request carries — one value computed once and written to both — so the
+// evidence is never kept longer, or shorter, than the placement it supports.
+export interface IPlacementEvidence extends Document {
+  requestId: mongoose.Types.ObjectId;
+  image: Buffer;
+  mimeType: (typeof PLACEMENT_EVIDENCE_MIME_TYPES)[number];
+  byteLength: number;
+  deleteAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const PlacementEvidenceSchema = new Schema<IPlacementEvidence>(
+  {
+    requestId: { type: Schema.Types.ObjectId, ref: "Request", required: true },
+    image: {
+      type: Buffer,
+      required: true,
+      select: false,
+      // The persistence-boundary half of the 1.5 MB cap: a bypass of the route
+      // validator still cannot store an oversized or empty image.
+      validate: {
+        validator: (value: Buffer) =>
+          value.length > 0 && value.length <= PLACEMENT_EVIDENCE_MAX_BYTES,
+        message: "Placement evidence image is empty or exceeds the size cap.",
+      },
+    },
+    mimeType: {
+      type: String,
+      enum: PLACEMENT_EVIDENCE_MIME_TYPES,
+      required: true,
+    },
+    byteLength: {
+      type: Number,
+      required: true,
+      validate: {
+        validator: (value: number) =>
+          Number.isInteger(value) &&
+          value > 0 &&
+          value <= PLACEMENT_EVIDENCE_MAX_BYTES,
+        message: "Placement evidence byteLength is outside the size cap.",
+      },
+    },
+    deleteAt: {
+      type: Date,
+      required: true,
+      index: {
+        expireAfterSeconds: 0,
+        name: "placement_evidence_deleteAt_ttl",
+      },
+    },
+  },
+  { timestamps: true }
+);
+
+// One evidence row per Request. The placement transaction inserts it exactly
+// once; this index is the final database-level guard that a resend or a race can
+// never produce a second row (or replace the first).
+PlacementEvidenceSchema.index(
+  { requestId: 1 },
+  { unique: true, name: "placement_evidence_request_unique" }
+);
+
+export const PlacementEvidence =
+  (mongoose.models.PlacementEvidence as mongoose.Model<IPlacementEvidence>) ||
+  mongoose.model<IPlacementEvidence>(
+    "PlacementEvidence",
+    PlacementEvidenceSchema
+  );
 
 
 /* =========================== PushDelivery ============================ */

@@ -146,6 +146,11 @@ describeMongo("W4-QA1 QA environment tool against real MongoDB", () => {
     await db.collection("fulfillments").insertMany(
       forRequests(() => ({ orderNumber: "A1", placedAt: new Date() })) as never[]
     );
+    // W4-H1a: private placed-order evidence is Request-scoped, so a normal reset
+    // removes it with its Request and leaves any row for an absent Request alone.
+    await db.collection("placementevidences").insertMany(
+      forRequests(() => ({ image: Buffer.from("qa-evidence"), mimeType: "image/jpeg", byteLength: 11, deleteAt: expiresAt })) as never[]
+    );
     await db.collection("pushdeliveries").insertMany(
       forRequests(() => ({ installationId: id(), purpose: "helper-new-request", status: "accepted", deleteAt: expiresAt })) as never[]
     );
@@ -241,7 +246,7 @@ describeMongo("W4-QA1 QA environment tool against real MongoDB", () => {
 
       // Request graph: gone.
       expect(await count(SLUG_A, "requests")).toBe(0);
-      for (const collection of ["requestparticipations", "fulfillments", "pushdeliveries", "sendlogs"]) {
+      for (const collection of ["requestparticipations", "fulfillments", "placementevidences", "pushdeliveries", "sendlogs"]) {
         expect(await count(SLUG_A, collection, { requestId: { $in: [seeded.requestA, seeded.requestB] } })).toBe(0);
         // The row pointing at a Request that was never in this database survives.
         expect(await count(SLUG_A, collection, { requestId: seeded.ghostRequestId })).toBe(1);
@@ -281,6 +286,7 @@ describeMongo("W4-QA1 QA environment tool against real MongoDB", () => {
 
       // Reported counts match what was done.
       expect(printed()).toContain("requests removed: 3");
+      expect(printed()).toContain("placement evidence removed: 2");
       expect(printed()).toContain("participant reservation locks cleared: 1");
     });
 

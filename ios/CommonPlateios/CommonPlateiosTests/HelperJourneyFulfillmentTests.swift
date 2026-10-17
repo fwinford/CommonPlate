@@ -202,8 +202,8 @@ final class HelperJourneyFulfillmentTests: XCTestCase {
             readyTime: .thirtyMinutes,
             contactMessage: ""
         )
-        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(draft: complete, isOperationallyAvailable: true))
-        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(draft: complete, isOperationallyAvailable: false))
+        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(draft: complete, hasPlacedOrderScreenshot: true, isOperationallyAvailable: true))
+        XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(draft: complete, hasPlacedOrderScreenshot: true, isOperationallyAvailable: false))
 
         var noETA = complete
         noETA.readyTime = nil
@@ -216,7 +216,7 @@ final class HelperJourneyFulfillmentTests: XCTestCase {
         tooLong.orderNumber = String(repeating: "1", count: 51)
         for draft in [noETA, lettersInOrderNumber, emptyOrderNumber, tooLong] {
             XCTAssertFalse(
-                FulfillRequestView.isSubmissionEnabled(draft: draft, isOperationallyAvailable: true),
+                FulfillRequestView.isSubmissionEnabled(draft: draft, hasPlacedOrderScreenshot: true, isOperationallyAvailable: true),
                 "\(draft)"
             )
         }
@@ -224,7 +224,7 @@ final class HelperJourneyFulfillmentTests: XCTestCase {
         // Message is optional.
         var withMessage = complete
         withMessage.contactMessage = "By the pickup shelf"
-        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(draft: withMessage, isOperationallyAvailable: true))
+        XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(draft: withMessage, hasPlacedOrderScreenshot: true, isOperationallyAvailable: true))
     }
 
     /// The manual fields map onto the unchanged `orderNumber` / `eta` /
@@ -238,6 +238,7 @@ final class HelperJourneyFulfillmentTests: XCTestCase {
                 readyTime: .asap,
                 contactMessage: "  "
             ),
+            hasPlacedOrderScreenshot: true,
             presentation: FulfillmentValidationPresentation()
         ) { values in
             submitted = values
@@ -245,7 +246,11 @@ final class HelperJourneyFulfillmentTests: XCTestCase {
         XCTAssertTrue(result.didSubmit)
         XCTAssertEqual(
             submitted,
-            FulfillmentSubmissionValues(orderNumber: "0070154321", eta: "ASAP", contactMessage: nil)
+            FulfillmentSubmissionValues(
+                orderNumber: "0070154321",
+                eta: "ASAP",
+                contactMessage: nil
+            )
         )
     }
 
@@ -371,11 +376,28 @@ final class HelperJourneyFulfillmentTests: XCTestCase {
         XCTAssertFalse(claim.contains("claimConsequenceNotice"))
     }
 
+    /// W4-H1a introduces the helper's REQUIRED placed-order screenshot, so the
+    /// page now legitimately names a screenshot and uses the native picker. What
+    /// must still be absent is any Screenshot ASSISTANCE: no analysis, proposal,
+    /// recognition, or AI path is reachable from this page (that is a later
+    /// slice, and selecting the evidence must never start one).
     func testNoHelperScreenshotAssistanceIsIntroduced() throws {
-        let source = try appSource("Views/FulfillRequestView.swift")
-        for term in ["Screenshot", "PhotosPicker", "ScreenshotProposal"] {
-            XCTAssertFalse(source.contains(term), term)
+        for path in [
+            "Views/FulfillRequestView.swift",
+            "Services/PlacedOrderScreenshot.swift"
+        ] {
+            let source = try appSource(path)
+            for term in [
+                "ScreenshotProposal", "ScreenshotAssistance", "ScreenshotInputPreparer",
+                "ScreenshotImageNormalizer", "ScreenshotSelection", "ScreenshotLocal",
+                "ScreenshotTextRecognizing", "isAIAssistanceEnabled",
+                "import Vision", "VNRecognize", "FoundationModels"
+            ] {
+                XCTAssertFalse(source.contains(term), "\(path): \(term)")
+            }
         }
+        // The only screenshot concept on the page is the required evidence.
+        XCTAssertTrue(try appSource("Views/FulfillRequestView.swift").contains("PlacedOrderScreenshot"))
     }
 
     // MARK: - Success

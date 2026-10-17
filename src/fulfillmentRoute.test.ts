@@ -7,6 +7,7 @@ import {
   Fulfillment,
   Installation,
   Participant,
+  PlacementEvidence,
   Request as MealRequest,
 } from "../models/db.js";
 import { PARTICIPANT_AUTHORITY_HEADER } from "./participantAuthorityGate.js";
@@ -65,6 +66,16 @@ function stubVerifiedParticipant(email: string = boundHelperEmail) {
   } as unknown as ReturnType<typeof Participant.findOne>);
 }
 
+// Smallest possible well-formed 1x1 PNG: it passes the same structural
+// validation a real screenshot does without shipping a real fixture.
+const ONE_PIXEL_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+/** The required W4-H1a placed-order screenshot, in its wire shape. */
+function validScreenshot() {
+  return { mimeType: "image/png", imageBase64: ONE_PIXEL_PNG_BASE64 };
+}
+
 function validBody() {
   return {
     claimToken: generateClaimToken(),
@@ -72,6 +83,7 @@ function validBody() {
       orderNumber: "70154321",
       eta: "15 minutes",
       contactMessage: "Your meal is ready",
+      placedOrderScreenshot: validScreenshot(),
     },
   };
 }
@@ -430,6 +442,7 @@ describe("POST /api/request/:id/fulfill validation", () => {
       "contactMessage",
       "eta",
       "orderNumber",
+      "placedOrderScreenshot",
     ]);
     expect(typeof body.fulfillment.orderNumber).toBe("string");
 
@@ -531,6 +544,7 @@ describe("POST /api/request/:id/fulfill validation", () => {
       }),
     });
     const ledger = vi.spyOn(Fulfillment, "create").mockResolvedValue([] as never);
+    vi.spyOn(PlacementEvidence, "create").mockResolvedValue([] as never);
     vi.spyOn(MealRequest, "findOneAndUpdate").mockImplementation(placement as never);
     vi.spyOn(MealRequest, "updateOne").mockImplementation(update as never);
     const session = {
@@ -587,6 +601,7 @@ describe("POST /api/request/:id/fulfill reuses the claim-bound helper identity (
         select: () => ({ exec: vi.fn().mockResolvedValue(placed) }),
       } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
     vi.spyOn(Fulfillment, "create").mockResolvedValue([{}] as never);
+    vi.spyOn(PlacementEvidence, "create").mockResolvedValue([{}] as never);
     vi.spyOn(MealRequest, "updateOne").mockReturnValue({
       exec: vi.fn().mockResolvedValue({}),
     } as unknown as ReturnType<typeof MealRequest.updateOne>);
@@ -730,13 +745,23 @@ describe("POST /api/request/:id/fulfill reuses the claim-bound helper identity (
    * `contactMessage` is a synthesized optional, which Swift encodes with
    * `encodeIfPresent` — a nil note omits the key entirely rather than sending
    * `null`, so `contactMessage: null` is a shape this client never produced.
+   *
+   * W4-H1a: the legacy `fulfillerEmail` KEY stays tolerated as wire shape, but a
+   * new fulfillment now requires the placed-order screenshot. A build that
+   * predates the screenshot cannot send one, and there is deliberately no
+   * compatibility path for it (see the refusal case below); `withScreenshot`
+   * lets these cases prove the key is still tolerated beside valid evidence.
    */
-  function preI1Body({ note = "Your meal is ready" as string | null } = {}) {
+  function preI1Body({
+    note = "Your meal is ready" as string | null,
+    withScreenshot = true,
+  } = {}) {
     const fulfillment: Record<string, unknown> = {
       fulfillerEmail: "someone-else@nyu.edu",
       orderNumber: "70154321",
       eta: "15 minutes",
     };
+    if (withScreenshot) fulfillment.placedOrderScreenshot = validScreenshot();
     if (note !== null) fulfillment.contactMessage = note;
     return { claimToken, fulfillment };
   }
@@ -850,6 +875,7 @@ describe("POST /api/request/:id/fulfill participant-authority continuation (W3-H
         orderNumber: "70154321",
         eta: "15 minutes",
         contactMessage: "Your meal is ready",
+        placedOrderScreenshot: validScreenshot(),
       },
     };
   }
@@ -877,6 +903,7 @@ describe("POST /api/request/:id/fulfill participant-authority continuation (W3-H
         select: () => ({ exec: vi.fn().mockResolvedValue(placed) }),
       } as unknown as ReturnType<typeof MealRequest.findOneAndUpdate>);
     vi.spyOn(Fulfillment, "create").mockResolvedValue([{}] as never);
+    vi.spyOn(PlacementEvidence, "create").mockResolvedValue([{}] as never);
     vi.spyOn(MealRequest, "updateOne").mockReturnValue({
       exec: vi.fn().mockResolvedValue({}),
     } as unknown as ReturnType<typeof MealRequest.updateOne>);
@@ -1064,6 +1091,7 @@ describe("POST /api/request/:id/fulfill requester push isolation (Slice 6E)", ()
       exec: async () => ({}),
     } as never);
     vi.spyOn(Fulfillment, "create").mockResolvedValue([] as never);
+    vi.spyOn(PlacementEvidence, "create").mockResolvedValue([] as never);
     vi.spyOn(mongoose, "startSession").mockResolvedValue({
       withTransaction: async (operation: () => Promise<void>) => operation(),
       endSession: async () => {},

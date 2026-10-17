@@ -72,7 +72,7 @@ final class ParticipantGateTests: XCTestCase {
         try await store.claim(requestID: "64b000000000000000000001")
         RequestFetchingURLProtocol.enqueue(.response(statusCode: 200, data: placedResponse()))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: "64b000000000000000000001",
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -88,7 +88,7 @@ final class ParticipantGateTests: XCTestCase {
         // be refused, and it is exactly how the requester's coordination email
         // could otherwise name someone else.
         XCTAssertNil(fulfillment["fulfillerEmail"])
-        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta", "placedOrderScreenshot"])
     }
 
     // MARK: - Applying the backend's verdict on a stored credential
@@ -253,17 +253,20 @@ final class ParticipantGateTests: XCTestCase {
 
     // MARK: - Copy
 
-    func testTheGateIsAnnouncedBeforeTheFirstSubmit() {
-        // The requester-side standing notice moved to Home (W3-I3): Request
-        // Food no longer restates the requirement inside its own Contact
-        // section, since entry sequencing (W3-I2) already verifies before the
-        // form is ever shown. The helper side is unaffected — Help/Reserve
-        // still states its own requirement in place.
-        let helperNotice = RequestDetailView.verificationRequiredNotice.lowercased()
-        XCTAssertTrue(helperNotice.contains("verify"))
-        // And it says nothing is reserved yet, which is the helper's actual
-        // question at that moment.
-        XCTAssertTrue(helperNotice.contains("nothing is reserved"))
+    func testRequestDetailNoLongerPreannouncesVerificationBesideStartHelping() throws {
+        // The requester-side standing notice moved to Home (W3-I3). W4-H1a
+        // (Faith D-A2) retires the helper-side note too: Request Detail shows no
+        // prerequisite paragraph and no replacement. Verification BEHAVIOR is
+        // unchanged and proved by the gate tests in this file and the claim
+        // flow tests; only the copy is gone.
+        let source = try fileSource("ios/CommonPlateios/CommonPlateios/Views/RequestDetailView.swift")
+        XCTAssertFalse(source.contains("verificationRequiredNotice"))
+        XCTAssertFalse(source.contains("claim-verification-notice"))
+        XCTAssertFalse(source.contains("You’ll verify your NYU email once before helping"))
+        XCTAssertFalse(source.contains("Nothing is reserved until it’s verified"))
+        // Start helping itself is untouched.
+        XCTAssertTrue(source.contains("static let claimActionTitle = \"Start helping\""))
+        XCTAssertTrue(source.contains("startClaim()"))
     }
 
     func testHomeDoesNotPreannounceVerificationBeforeAnActionNeedsIt() throws {

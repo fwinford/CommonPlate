@@ -177,8 +177,16 @@ final class ParticipantBlockEntryTests: XCTestCase {
         for kept in ["finishHelpingBar", "fulfillment-eta", "orderNumberLabel", "placeOrderSection(claim: claim)"] {
             XCTAssertTrue(fulfill.contains(kept), kept)
         }
-        // No new screenshot chooser was invented.
-        XCTAssertFalse(fulfill.lowercased().contains("screenshotchooser"))
+        // W4-H1a: the placed-order screenshot is required for every new
+        // fulfillment, including this restricted state, so the one existing
+        // field stays and is NOT gated on the Block. U1.3 itself still adds no
+        // chooser of its own: there is exactly one chooser, owned by H1a.
+        XCTAssertEqual(fulfill.components(separatedBy: "private var screenshotChooser").count - 1, 1)
+        let fieldsBody = try XCTUnwrap(fulfill.range(of: "private var fulfillmentFields: some View {"))
+        let screenshotField = try XCTUnwrap(fulfill.range(of: "placedOrderScreenshotField\n"))
+        let messageGate = try XCTUnwrap(fulfill.range(of: "if !store.contactSuppressedRequestIDs.contains(request.id)"))
+        XCTAssertLessThan(fieldsBody.lowerBound, screenshotField.lowerBound)
+        XCTAssertLessThan(screenshotField.lowerBound, messageGate.lowerBound)
     }
 
     // MARK: - Blocked Students

@@ -4,6 +4,7 @@
 //
 //  Created by faith on 7/9/26.
 //
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -196,6 +197,13 @@ enum FulfillmentPresentationError: Equatable {
             switch code {
             case "INVALID_FULFILLMENT_PAYLOAD":
                 return .invalidDetails
+            // W4-H1a: a definitive refusal of the screenshot is explained at the
+            // screenshot chooser (`PlacedOrderScreenshotNotice`), in its own
+            // words — never as a form-level "couldn't record" message, which
+            // would be false (nothing was committed) and would point at the
+            // wrong field.
+            case ClaimErrorCode.invalidPlacedOrderScreenshot:
+                return nil
             case ClaimErrorCode.rateLimited:
                 return .rateLimited
             case "TRANSACTIONS_UNAVAILABLE":
@@ -217,6 +225,42 @@ enum FulfillmentPresentationError: Equatable {
     }
 }
 
+/// The one inline explanation the order-screenshot chooser can show (W4-H1a).
+///
+/// A screenshot that has simply not been chosen yet is NOT represented here: it
+/// is an incomplete state, communicated by the right-side `Required` label, the
+/// chooser itself, and a disabled `Finish helping` — never a red message.
+enum PlacedOrderScreenshotNotice: Equatable {
+    /// The chosen image could not be used: it could not be decoded, could not
+    /// be normalized within the size cap, or the backend definitively refused
+    /// it before committing anything.
+    case invalid
+    /// The reservation is still held but this process never had the helper's
+    /// screenshot (it is never persisted), so it must be added again.
+    case needsReselection
+
+    var message: String {
+        switch self {
+        case .invalid:
+            return FulfillRequestView.invalidScreenshotNotice
+        case .needsReselection:
+            return FulfillRequestView.screenshotNeedsReselectionNotice
+        }
+    }
+
+    /// What the chooser explains right now. Only an unattached chooser ever
+    /// shows a notice, and a failed attempt outranks the relaunch reminder
+    /// (the helper has already tried again).
+    static func resolve(
+        hasAttachedScreenshot: Bool,
+        lastSelectionWasInvalid: Bool,
+        reservationWasRestoredByContinuation: Bool
+    ) -> PlacedOrderScreenshotNotice? {
+        guard !hasAttachedScreenshot else { return nil }
+        if lastSelectionWasInvalid { return .invalid }
+        return reservationWasRestoredByContinuation ? .needsReselection : nil
+    }
+}
 
 /// The Helping page's single extension control state (W4-H1). Derived only
 /// from backend-confirmed reservation truth; the one extension is never
@@ -276,6 +320,18 @@ struct FulfillRequestView: View {
     /// Presentation only: the most recent Open Grubhub attempt was not
     /// accepted by the system. Changes no lifecycle state.
     @State private var isShowingGrubhubOpenFailure = false
+
+    /// W4-H1a: the native photo picker's transient selection, consumed (and
+    /// reset) as soon as it is handled so the same photo can be chosen again.
+    @State private var screenshotPickerItem: PhotosPickerItem?
+    /// Identifies the latest selection, so a slower earlier decode can never
+    /// overwrite a later choice.
+    @State private var screenshotSelectionToken = UUID()
+    /// True while a chosen image is being read and normalized. Finish helping
+    /// stays unavailable meanwhile, so a half-replaced attachment is never sent.
+    @State private var isPreparingScreenshot = false
+    /// The last chosen image could not be used (local or backend refusal).
+    @State private var lastScreenshotChoiceWasInvalid = false
 
     /// W4-U1.3: set for the duration of a Stop helping attempt made while the
     /// pair's direct contact is restricted, or on a reservation the backend
@@ -795,6 +851,9 @@ struct FulfillRequestView: View {
 
     private var fulfillmentFields: some View {
         VStack(alignment: .leading, spacing: 15) {
+            // W4-H1a: the first item. Required for every new fulfillment.
+            placedOrderScreenshotField
+
             VStack(alignment: .leading, spacing: 7) {
                 HelpingFieldLabel(text: Self.orderNumberLabel)
                 // A digits-only contract, so the keypad matches it. The
@@ -868,6 +927,170 @@ struct FulfillRequestView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Order screenshot (W4-H1a)
+
+    private var screenshotNotice: PlacedOrderScreenshotNotice? {
+        PlacedOrderScreenshotNotice.resolve(
+            hasAttachedScreenshot: isScreenshotAttached,
+            lastSelectionWasInvalid: lastScreenshotChoiceWasInvalid,
+            reservationWasRestoredByContinuation: claim?.wasRestoredByContinuation ?? false
+        )
+    }
+
+    /// Whether the store currently holds a selected screenshot for this
+    /// reservation. Identity only; the bytes are never visible to the view.
+    private var isScreenshotAttached: Bool {
+        store.hasPlacedOrderScreenshot(requestID: request.id)
+    }
+
+    private var isScreenshotPickerEnabled: Bool {
+        !store.isFulfilling && !isPreparingScreenshot
+    }
+
+    private var placedOrderScreenshotField: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(Self.orderScreenshotLabel)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HelpingPalette.primaryText)
+                Spacer()
+                Text(Self.requiredLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+
+            if isScreenshotAttached {
+                attachedScreenshotRow
+            } else {
+                screenshotChooser
+
+                if let notice = screenshotNotice {
+                    Text(notice.message)
+                        .font(.footnote)
+                        .foregroundStyle(notice == .invalid ? Color.red : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("fulfillment-screenshot-notice")
+                }
+            }
+        }
+        .onChange(of: screenshotPickerItem) { _, item in
+            guard let item else { return }
+            handlePickedScreenshot(item)
+        }
+        // A definitive backend refusal of the screenshot (before anything was
+        // committed): the store has already discarded the refused selection, so
+        // the helper is back at a chooser that can pick another.
+        .onChange(of: Self.isPlacedOrderScreenshotRefusal(store.fulfillError)) { _, isRefusal in
+            guard isRefusal else { return }
+            lastScreenshotChoiceWasInvalid = true
+        }
+    }
+
+    private var screenshotChooser: some View {
+        PhotosPicker(
+            selection: $screenshotPickerItem,
+            matching: .images,
+            photoLibrary: .shared()
+        ) {
+            HStack {
+                Text(Self.chooseScreenshotTitle)
+                    .font(.subheadline)
+                    .foregroundStyle(HelpingPalette.primaryText)
+                Spacer(minLength: CommonPlateStyle.Spacing.s)
+                Image(systemName: "photo")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color.accentColor.opacity(0.72))
+                    .accessibilityHidden(true)
+            }
+            .modifier(HelpingFieldChrome(minHeight: 44))
+        }
+        .disabled(!isScreenshotPickerEnabled)
+        .accessibilityIdentifier("fulfillment-screenshot-choose")
+    }
+
+    private var attachedScreenshotRow: some View {
+        let attached = HStack(spacing: 6) {
+            Image(systemName: "checkmark")
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
+            Text(Self.screenshotAttachedTitle)
+                .font(.subheadline)
+                .foregroundStyle(HelpingPalette.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("fulfillment-screenshot-attached")
+
+        let change = PhotosPicker(
+            selection: $screenshotPickerItem,
+            matching: .images,
+            photoLibrary: .shared()
+        ) {
+            Text(Self.changeScreenshotTitle)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(isScreenshotPickerEnabled ? Color.accentColor : Color.secondary)
+                .frame(minHeight: 44)
+        }
+        .disabled(!isScreenshotPickerEnabled)
+        .accessibilityLabel(Text(Self.changeScreenshotAccessibilityLabel))
+        .accessibilityIdentifier("fulfillment-screenshot-change")
+
+        // Side by side when it fits; stacked at the largest accessibility sizes
+        // so neither the status nor the action is ever truncated.
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: CommonPlateStyle.Spacing.s) {
+                attached
+                Spacer(minLength: CommonPlateStyle.Spacing.s)
+                change
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                attached
+                change
+            }
+        }
+        .modifier(HelpingFieldChrome(minHeight: 44))
+    }
+
+    /// Reads and normalizes the chosen image off the main thread. Only the
+    /// latest selection may apply its result; a failure at any step fails
+    /// closed to an unattached, chooser-capable state.
+    private func handlePickedScreenshot(_ item: PhotosPickerItem) {
+        let token = UUID()
+        screenshotSelectionToken = token
+        screenshotPickerItem = nil
+        isPreparingScreenshot = true
+        Task {
+            let data = try? await item.loadTransferable(type: Data.self)
+            let normalized: PlacedOrderScreenshot? = if let data {
+                await Task.detached(priority: .userInitiated) {
+                    PlacedOrderScreenshotNormalizer.normalize(data)
+                }.value
+            } else {
+                nil
+            }
+            guard token == screenshotSelectionToken else { return }
+            isPreparingScreenshot = false
+            applyPickedScreenshot(normalized)
+        }
+    }
+
+    /// Replaces the store's selection (or, for an unusable image, clears it).
+    /// Touches nothing else: the Order number, Pickup ETA, and Message are never
+    /// cleared or rewritten by choosing or changing the screenshot.
+    private func applyPickedScreenshot(_ screenshot: PlacedOrderScreenshot?) {
+        store.selectPlacedOrderScreenshot(screenshot, requestID: request.id)
+        lastScreenshotChoiceWasInvalid = screenshot == nil
+    }
+
+    /// Whether `error` is the backend's definitive refusal of the screenshot —
+    /// the only service error that maps back to the "choose another" message.
+    static func isPlacedOrderScreenshotRefusal(_ error: RequestServiceError?) -> Bool {
+        guard case .serverError(let code, _)? = error else { return false }
+        return code == ClaimErrorCode.invalidPlacedOrderScreenshot
     }
 
     /// Writes the backend `eta` string only from the chosen option, so the
@@ -1016,20 +1239,25 @@ struct FulfillRequestView: View {
     private var isSubmissionEnabled: Bool {
         Self.isSubmissionEnabled(
             draft: draft,
+            hasPlacedOrderScreenshot: isScreenshotAttached,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: request.id)
+                && !isPreparingScreenshot
         )
     }
 
     /// `Finish helping` is enabled only when every required field is valid
-    /// under the existing fulfillment validation and the store permits a
-    /// submission. There is no tap-to-validate path on a disabled button.
+    /// under the existing fulfillment validation — including the attached
+    /// placed-order screenshot (W4-H1a) — and the store permits a submission.
+    /// There is no tap-to-validate path on a disabled button.
     static func isSubmissionEnabled(
         draft: FulfillmentFormDraft,
+        hasPlacedOrderScreenshot: Bool,
         isOperationallyAvailable: Bool
     ) -> Bool {
         guard isOperationallyAvailable else { return false }
 
         return FulfillmentFormValidator.validate(orderNumber: draft.orderNumber).isEmpty
+            && hasPlacedOrderScreenshot
             && draft.readyTime != nil
             && !draft.eta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -1042,6 +1270,7 @@ struct FulfillRequestView: View {
             do {
                 let result = try await Self.orchestrateSubmission(
                     draft: submittedDraft,
+                    hasPlacedOrderScreenshot: isScreenshotAttached,
                     presentation: currentPresentation
                 ) { values in
                     try await store.fulfill(
@@ -1067,6 +1296,7 @@ struct FulfillRequestView: View {
     /// duplicate protection remain entirely store-owned.
     static func orchestrateSubmission(
         draft: FulfillmentFormDraft,
+        hasPlacedOrderScreenshot: Bool,
         presentation: FulfillmentValidationPresentation,
         submission: (FulfillmentSubmissionValues) async throws -> Void
     ) async throws -> FulfillmentSubmissionResult {
@@ -1076,6 +1306,17 @@ struct FulfillRequestView: View {
         let errors = FulfillmentFormValidator.validate(orderNumber: number)
         var updatedPresentation = presentation
         updatedPresentation.presentAll(errors)
+
+        // W4-H1a: defense in depth beside the disabled button. Without an
+        // attached screenshot nothing is submitted — and there is no message:
+        // a missing screenshot is an incomplete state, not a validation error.
+        guard hasPlacedOrderScreenshot else {
+            return FulfillmentSubmissionResult(
+                presentation: updatedPresentation,
+                firstInvalidTextField: errors.first?.field,
+                didSubmit: false
+            )
+        }
 
         guard errors.isEmpty else {
             return FulfillmentSubmissionResult(
@@ -1129,6 +1370,19 @@ struct FulfillRequestView: View {
 
     static let afterYouOrderHeading = "After you order"
     static let afterYouOrderScrollID = "helping-after-you-order"
+
+    // W4-H1a order screenshot (Faith D-A1, 2026-10-15). Exact approved copy.
+    static let orderScreenshotLabel = "Order screenshot"
+    static let requiredLabel = "Required"
+    static let chooseScreenshotTitle = "Choose Grubhub screenshot"
+    static let screenshotAttachedTitle = "Screenshot attached"
+    static let changeScreenshotTitle = "Change"
+    static let changeScreenshotAccessibilityLabel = "Change order screenshot"
+    static let invalidScreenshotNotice =
+        "This image can’t be used. Choose another screenshot to continue."
+    static let screenshotNeedsReselectionNotice =
+        "The order screenshot needs to be added again before you continue."
+
     static let orderNumberLabel = "Order number"
     static let orderNumberPlaceholder = "Enter order number"
     static let pickupETALabel = "Pickup ETA"

@@ -461,15 +461,16 @@ describe("W4-QA1 reset ownership table", () => {
         }
       });
     }
-    // A new request-scoped model (e.g. a future PlacementEvidence) must be
-    // added to REQUEST_REFERENCE_HANDLING on purpose: deleted with its Request,
-    // lock-cleared, or explicitly preserved. Until then this fails.
+    // A new request-scoped model must be added to REQUEST_REFERENCE_HANDLING on
+    // purpose: deleted with its Request, lock-cleared, or explicitly preserved.
+    // Until then this fails.
     expect([...discovered].sort()).toEqual(Object.keys(REQUEST_REFERENCE_HANDLING).sort());
   });
 
-  it("preserves the D1/D2 operation ledger and has no PlacementEvidence model to consume yet", () => {
+  it("preserves the D1/D2 operation ledger and deletes PlacementEvidence with its Request", () => {
     expect(REQUEST_REFERENCE_HANDLING["RequestOperation.requestId"]).toBe("preserve");
-    expect(mongoose.modelNames()).not.toContain("PlacementEvidence");
+    expect(mongoose.modelNames()).toContain("PlacementEvidence");
+    expect(REQUEST_REFERENCE_HANDLING["PlacementEvidence.requestId"]).toBe("delete");
   });
 });
 

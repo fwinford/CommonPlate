@@ -996,7 +996,7 @@ final class ClaimFlowTests: XCTestCase {
 
         let refreshesBeforeExpiration = requestListFetchCount
         ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
-        try? await store.fulfill(
+        try? await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -1589,6 +1589,7 @@ final class ClaimFlowTests: XCTestCase {
                 eta: FulfillmentReadyTime.asap.etaValue,
                 readyTime: .asap
             ),
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
         XCTAssertNil(store.claimUnavailableNotice)
@@ -2393,7 +2394,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -2409,7 +2410,7 @@ final class ClaimFlowTests: XCTestCase {
         let fulfillment = try XCTUnwrap(body["fulfillment"] as? [String: Any])
         XCTAssertEqual(
             Set(fulfillment.keys),
-            ["orderNumber", "eta", "contactMessage"]
+            ["orderNumber", "eta", "contactMessage", "placedOrderScreenshot"]
         )
         XCTAssertEqual(fulfillment["orderNumber"] as? String, "70154321")
         XCTAssertEqual(fulfillment["eta"] as? String, "15 minutes")
@@ -2427,7 +2428,7 @@ final class ClaimFlowTests: XCTestCase {
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -2436,7 +2437,7 @@ final class ClaimFlowTests: XCTestCase {
 
         let request = try XCTUnwrap(ClaimFlowURLProtocol.capturedRequests.last)
         let fulfillment = try XCTUnwrap(request.bodyObject?["fulfillment"] as? [String: Any])
-        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta", "placedOrderScreenshot"])
     }
 
     func testEmptyClaimTokenNeverCreatesSubmittableClaimState() async {
@@ -2460,6 +2461,7 @@ final class ClaimFlowTests: XCTestCase {
                 eta: FulfillmentReadyTime.asap.etaValue,
                 readyTime: .asap
             ),
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
         XCTAssertFalse(ClaimFlowURLProtocol.capturedPaths.contains { $0.hasSuffix("/fulfill") })
@@ -2469,6 +2471,7 @@ final class ClaimFlowTests: XCTestCase {
         let empty = FulfillmentFormDraft()
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: empty,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: true
         ))
 
@@ -2488,6 +2491,7 @@ final class ClaimFlowTests: XCTestCase {
         for draft in [missingEmail, missingOrderNumber, missingETA] {
             XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
                 draft: draft,
+                hasPlacedOrderScreenshot: true,
                 isOperationallyAvailable: true
             ))
         }
@@ -2503,6 +2507,7 @@ final class ClaimFlowTests: XCTestCase {
 
         XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(
             draft: complete,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: true
         ))
     }
@@ -2522,6 +2527,7 @@ final class ClaimFlowTests: XCTestCase {
         ).isEmpty)
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: malformed,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: true
         ))
     }
@@ -2541,6 +2547,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertFalse(store.canSubmitFulfillment(requestID: requestID))
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: complete,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
 
@@ -2548,16 +2555,19 @@ final class ClaimFlowTests: XCTestCase {
         try await store.claim(requestID: requestID)
         XCTAssertTrue(FulfillRequestView.isSubmissionEnabled(
             draft: complete,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
 
         // Wrong request, and a past deadline, still close it.
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: complete,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: "different-request")
         ))
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: complete,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(
                 requestID: requestID,
                 now: Date().addingTimeInterval(60 * 60)
@@ -2575,7 +2585,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
-        try? await store.fulfill(
+        try? await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -2601,7 +2611,7 @@ final class ClaimFlowTests: XCTestCase {
 
         // And a further submission attempt is still refused, unchanged.
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2623,7 +2633,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -2651,7 +2661,7 @@ final class ClaimFlowTests: XCTestCase {
         try await resolved.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
-        try await resolved.fulfill(
+        try await resolved.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -2677,7 +2687,7 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         let first = Task {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2694,12 +2704,13 @@ final class ClaimFlowTests: XCTestCase {
         )
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: completeDraft,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
         XCTAssertNotNil(store.activeClaim)
         XCTAssertEqual(store.requests.map(\.id), [requestID])
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2719,6 +2730,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertNotNil(store.fulfillmentConfirmation)
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: completeDraft,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
         XCTAssertTrue(store.requests.isEmpty)
@@ -2737,7 +2749,7 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         let fulfillment = Task {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2769,7 +2781,7 @@ final class ClaimFlowTests: XCTestCase {
             try await store.claim(requestID: requestID)
             ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: status)))
 
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2838,7 +2850,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2879,7 +2891,7 @@ final class ClaimFlowTests: XCTestCase {
             ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
 
             do {
-                try await store.fulfill(
+                try await store.fulfillWithFixtureScreenshot(
                     requestID: requestID,
                     orderNumber: "70154321",
                     eta: "15 minutes",
@@ -2910,7 +2922,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2939,6 +2951,7 @@ final class ClaimFlowTests: XCTestCase {
                 eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
                 readyTime: .fifteenMinutes
             ),
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
         let message = FulfillRequestView.ambiguousDetail(isCheckingStatus: false)
@@ -2960,7 +2973,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(fulfillmentBodies[0], fulfillmentBodies[1])
         XCTAssertEqual(store.fulfillmentConfirmation?.kind, .notificationSent)
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -2981,7 +2994,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -3003,6 +3016,7 @@ final class ClaimFlowTests: XCTestCase {
                 eta: FulfillmentReadyTime.fifteenMinutes.etaValue,
                 readyTime: .fifteenMinutes
             ),
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
         XCTAssertEqual(ClaimFlowURLProtocol.capturedPaths, [
@@ -3012,7 +3026,7 @@ final class ClaimFlowTests: XCTestCase {
         ])
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -3051,7 +3065,7 @@ final class ClaimFlowTests: XCTestCase {
             ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
             do {
-                try await store.fulfill(
+                try await store.fulfillWithFixtureScreenshot(
                     requestID: requestID,
                     orderNumber: "70154321",
                     eta: "15 minutes",
@@ -3079,7 +3093,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "open")))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -3127,7 +3141,7 @@ final class ClaimFlowTests: XCTestCase {
                 ClaimFlowURLProtocol.enqueue(.failure(.notConnectedToInternet))
             }
 
-            try? await store.fulfill(
+            try? await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -3149,7 +3163,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed")))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -3366,7 +3380,7 @@ final class ClaimFlowTests: XCTestCase {
             gate: oldGate
         ))
         let oldFulfillment = Task {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70150001",
                 eta: "10 minutes",
@@ -3402,7 +3416,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "placed"), gate: readGate))
         let oldFulfillment = Task {
-            try? await store.fulfill(
+            try? await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70150001",
                 eta: "10 minutes",
@@ -3460,7 +3474,7 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         let submission = Task {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -3500,7 +3514,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "failed")))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -3543,7 +3557,7 @@ final class ClaimFlowTests: XCTestCase {
             notificationStatus: "sent",
             responseRequestID: otherRequestID
         )))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: otherRequestID,
             orderNumber: "70159876",
             eta: "20 minutes",
@@ -3607,7 +3621,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -3632,7 +3646,7 @@ final class ClaimFlowTests: XCTestCase {
             notificationStatus: "sent",
             responseRequestID: otherRequestID
         )))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: otherRequestID,
             orderNumber: "70159876",
             eta: "20 minutes",
@@ -3659,7 +3673,7 @@ final class ClaimFlowTests: XCTestCase {
         await waitUntil { staleFetchGate.isWaiting }
 
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -3691,7 +3705,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
         ClaimFlowURLProtocol.enqueue(.response(data: listResponse([])))
 
-        try? await store.fulfill(
+        try? await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -3736,7 +3750,7 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         let submission = Task {
-            try? await store.fulfill(
+            try? await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -4165,7 +4179,7 @@ final class ClaimFlowTests: XCTestCase {
                 // Expected.
             }
             do {
-                try await store.fulfill(
+                try await store.fulfillWithFixtureScreenshot(
                     requestID: requestID,
                     orderNumber: "70154321",
                     eta: "15 minutes",
@@ -4319,7 +4333,7 @@ final class ClaimFlowTests: XCTestCase {
                 // Expected.
             }
             do {
-                try await store.fulfill(
+                try await store.fulfillWithFixtureScreenshot(
                     requestID: requestID,
                     orderNumber: "70154321",
                     eta: "15 minutes",
@@ -4472,7 +4486,7 @@ final class ClaimFlowTests: XCTestCase {
             gate: conflictGate
         ))
         let oldAttempt = Task {
-            try? await store.fulfill(
+            try? await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70150001",
                 eta: "10 minutes",
@@ -4710,7 +4724,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: claimResponse()))
         try await store.claim(requestID: requestID)
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse(notificationStatus: "sent")))
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -4775,7 +4789,7 @@ final class ClaimFlowTests: XCTestCase {
             statusCode: 429,
             data: errorResponse(code: ClaimErrorCode.rateLimited, message: "Too many attempts")
         ))
-        try? await store.fulfill(
+        try? await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -4881,7 +4895,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: orderNumber,
                 eta: eta,
@@ -4939,7 +4953,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(
             .response(data: fulfillmentResponse(notificationStatus: "sent"))
         )
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
@@ -5001,7 +5015,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(
             .response(data: fulfillmentResponse(notificationStatus: "failed"))
         )
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.thirtyMinutes.etaValue,
@@ -5159,7 +5173,7 @@ final class ClaimFlowTests: XCTestCase {
         ))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -5192,7 +5206,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "open")))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",
@@ -5242,6 +5256,7 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertEqual(FulfillRequestView.pickupETAPlaceholder, "Choose time")
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: draft,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: true
         ))
         // Free text that predates this control is not one of the choices, so it
@@ -5260,7 +5275,7 @@ final class ClaimFlowTests: XCTestCase {
             .response(data: fulfillmentResponse(notificationStatus: "sent"))
         )
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
@@ -5273,7 +5288,7 @@ final class ClaimFlowTests: XCTestCase {
         let body = try XCTUnwrap(sent.bodyObject)
         XCTAssertEqual(Set(body.keys), ["claimToken", "fulfillment"])
         let fulfillment = try XCTUnwrap(body["fulfillment"] as? [String: Any])
-        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta", "placedOrderScreenshot"])
         XCTAssertEqual(fulfillment["eta"] as? String, "ASAP")
         // The control's own vocabulary never reaches the wire.
         XCTAssertNil(fulfillment["readyTime"])
@@ -5323,7 +5338,7 @@ final class ClaimFlowTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(
             .response(data: fulfillmentResponse(notificationStatus: "sent"))
         )
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: FulfillmentReadyTime.asap.etaValue,
@@ -5378,6 +5393,7 @@ final class ClaimFlowTests: XCTestCase {
 
         let result = try await FulfillRequestView.orchestrateSubmission(
             draft: draft,
+            hasPlacedOrderScreenshot: true,
             presentation: FulfillmentValidationPresentation()
         ) { _ in
             submissionCount += 1
@@ -5437,6 +5453,7 @@ final class ClaimFlowTests: XCTestCase {
 
         let result = try await FulfillRequestView.orchestrateSubmission(
             draft: draft,
+            hasPlacedOrderScreenshot: true,
             presentation: FulfillmentValidationPresentation()
         ) { values in
             submissions.append(values)
@@ -5617,13 +5634,15 @@ final class ClaimFlowTests: XCTestCase {
         XCTAssertTrue(store.canSubmitFulfillment(requestID: requestID))
         XCTAssertFalse(FulfillRequestView.isSubmissionEnabled(
             draft: draft,
+            hasPlacedOrderScreenshot: true,
             isOperationallyAvailable: store.canSubmitFulfillment(requestID: requestID)
         ))
         let result = try await FulfillRequestView.orchestrateSubmission(
             draft: draft,
+            hasPlacedOrderScreenshot: true,
             presentation: FulfillmentValidationPresentation()
         ) { values in
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: values.orderNumber,
                 eta: values.eta,
@@ -5683,9 +5702,10 @@ final class ClaimFlowTests: XCTestCase {
         do {
             _ = try await FulfillRequestView.orchestrateSubmission(
                 draft: draft,
+                hasPlacedOrderScreenshot: true,
                 presentation: FulfillmentValidationPresentation()
             ) { values in
-                try await store.fulfill(
+                try await store.fulfillWithFixtureScreenshot(
                     requestID: requestID,
                     orderNumber: values.orderNumber,
                     eta: values.eta,
@@ -5743,9 +5763,10 @@ final class ClaimFlowTests: XCTestCase {
         do {
             let result = try await FulfillRequestView.orchestrateSubmission(
                 draft: draft,
+                hasPlacedOrderScreenshot: true,
                 presentation: presentation
             ) { values in
-                try await store.fulfill(
+                try await store.fulfillWithFixtureScreenshot(
                     requestID: requestID,
                     orderNumber: values.orderNumber,
                     eta: values.eta,
@@ -5881,7 +5902,7 @@ final class ClaimFlowTests: XCTestCase {
             .response(data: fulfillmentResponse(notificationStatus: "sent"))
         )
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "00070154321",
             eta: FulfillmentReadyTime.asap.etaValue,
@@ -5905,7 +5926,7 @@ final class ClaimFlowTests: XCTestCase {
 
         // The structure itself is untouched by the format change.
         XCTAssertEqual(Set(body.keys), ["claimToken", "fulfillment"])
-        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta"])
+        XCTAssertEqual(Set(fulfillment.keys), ["orderNumber", "eta", "placedOrderScreenshot"])
     }
 
     /// A non-numeric order number is refused locally, so a helper who has

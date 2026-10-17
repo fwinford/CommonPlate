@@ -28,7 +28,7 @@ final class ReservationFulfillmentContinuationTests: XCTestCase {
         let store = try await makeStoreWithActiveClaim(claimToken: "the-raw-token")
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse()))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -55,7 +55,7 @@ final class ReservationFulfillmentContinuationTests: XCTestCase {
         currentAuthority = replacementParticipantAuthorityFixture
         ClaimFlowURLProtocol.enqueue(.response(data: fulfillmentResponse()))
 
-        try await store.fulfill(
+        try await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -79,7 +79,7 @@ final class ReservationFulfillmentContinuationTests: XCTestCase {
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "00070154321",
                 eta: "30 minutes",
@@ -134,7 +134,7 @@ final class ReservationFulfillmentContinuationTests: XCTestCase {
             data: authorityInvalidResponse()
         ))
 
-        try? await store.fulfill(
+        try? await store.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -158,7 +158,7 @@ final class ReservationFulfillmentContinuationTests: XCTestCase {
         _ = try await replacementStore.continueActiveReservationIfNeeded()
         ClaimFlowURLProtocol.enqueue(.failure(.networkConnectionLost))
         ClaimFlowURLProtocol.enqueue(.response(data: detailResponse(status: "claimed")))
-        try? await replacementStore.fulfill(
+        try? await replacementStore.fulfillWithFixtureScreenshot(
             requestID: requestID,
             orderNumber: "70154321",
             eta: "15 minutes",
@@ -201,7 +201,7 @@ final class ReservationFulfillmentContinuationTests: XCTestCase {
         ))
 
         do {
-            try await store.fulfill(
+            try await store.fulfillWithFixtureScreenshot(
                 requestID: requestID,
                 orderNumber: "70154321",
                 eta: "15 minutes",

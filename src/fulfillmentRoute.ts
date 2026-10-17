@@ -1,8 +1,14 @@
-import type { Request, Response } from "express";
+import express, {
+  type Express,
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
 import mongoose, { type ClientSession, type Types } from "mongoose";
 import { z } from "zod";
 import {
   Fulfillment,
+  PlacementEvidence,
   Request as MealRequest,
   Participant,
   type IRequest,
@@ -17,6 +23,12 @@ import {
 import { createDay4MutationRateLimiter } from "./claimRoute.js";
 import { isStoppedAfterAffirmedOrder } from "./requestAvailability.js";
 import { sendDay4Error } from "./day4Errors.js";
+import {
+  INVALID_PLACED_ORDER_SCREENSHOT_CODE,
+  INVALID_PLACED_ORDER_SCREENSHOT_MESSAGE,
+  validatePlacedOrderScreenshot,
+  type ValidatedPlacedOrderScreenshot,
+} from "./placedOrderEvidence.js";
 import { sendFulfillmentEmail } from "./emailHelpers.js";
 import { isParticipantPairFenced } from "./participantBlocks.js";
 import { isParticipantTextAllowed } from "./participantTextFilter.js";
@@ -33,6 +45,17 @@ import {
 export const FULFILLMENT_ROUTE_PATH = "/api/request/:id/fulfill";
 export const PLACED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const fulfillmentRateLimiter = createDay4MutationRateLimiter(10);
+
+/**
+ * The route-owned JSON ceiling (W4-H1a). A fulfillment now carries one
+ * base64-encoded placed-order screenshot, which the shared 100 KB parser in
+ * `app.ts` cannot hold. The decoded image is capped at 1.5 MB
+ * (`PLACEMENT_EVIDENCE_MAX_BYTES`); base64 expands that by a third, so this
+ * larger HTTP ceiling exists only to carry it. The decoded cap, not this limit,
+ * is what bounds the image — and the shared parser stays at 100 KB for every
+ * other route.
+ */
+export const FULFILLMENT_BODY_LIMIT = "3mb";
 
 // A CommonPlate Grubhub order number contains digits only. Validated as a
 // string and stored as one — never coerced to a number — so a leading zero
@@ -85,6 +108,12 @@ const fulfillmentPayloadSchema = z
       .trim()
       .optional()
       .transform((value) => value || undefined),
+    // W4-H1a: the placed-order screenshot's wire value. Deliberately only a key
+    // allowlist entry here: its absence or malformation must answer with the
+    // dedicated evidence code rather than `INVALID_FULFILLMENT_PAYLOAD`, so the
+    // value is checked on its own by `validatePlacedOrderScreenshot` right
+    // after this schema, before any filter or mutation.
+    placedOrderScreenshot: z.unknown().optional(),
   })
   .strict()
   // The explicit allowlist of what a fulfillment payload actually supplies.
@@ -92,6 +121,7 @@ const fulfillmentPayloadSchema = z
     orderNumber: fulfillment.orderNumber,
     eta: fulfillment.eta,
     contactMessage: fulfillment.contactMessage,
+    placedOrderScreenshot: fulfillment.placedOrderScreenshot,
   }));
 
 const tokenFulfillmentRequestSchema = z
@@ -324,6 +354,11 @@ async function persistCorePlacement(
   messageSuppressed: boolean,
   /** Whether the helper submitted an optional Message at all. */
   messageSubmitted: boolean,
+  /**
+   * W4-H1a: the already-validated placed-order screenshot, committed with the
+   * placement and its ledger row in this same transaction.
+   */
+  evidence: ValidatedPlacedOrderScreenshot,
   session: ClientSession
 ): Promise<{
   placedRequest: IRequest;
@@ -338,6 +373,10 @@ async function persistCorePlacement(
   let placedRequest: IRequest | null = null;
   let pairFenced = false;
   let effectiveMessageSuppressed = messageSuppressed;
+  // One horizon, computed once: the placed Request and its evidence expire
+  // together, so evidence is never retained longer or shorter than the
+  // placement it supports.
+  const retainUntil = new Date(placedAt.getTime() + PLACED_RETENTION_MS);
 
   await session.withTransaction(
     async () => {
@@ -368,7 +407,7 @@ async function persistCorePlacement(
       const setFields: Record<string, unknown> = {
         status: "placed",
         placedAt,
-        deleteAt: new Date(placedAt.getTime() + PLACED_RETENTION_MS),
+        deleteAt: retainUntil,
         orderNumber: payload.fulfillment.orderNumber,
         etaText: payload.fulfillment.eta,
         notificationStatus: "pending",
@@ -484,6 +523,24 @@ async function persistCorePlacement(
             orderNumber: payload.fulfillment.orderNumber,
             etaText: payload.fulfillment.eta,
             placedAt,
+          },
+        ],
+        { session }
+      );
+
+      // W4-H1a: the private evidence row, bound to the exact placed Request and
+      // inserted with the same session immediately after the ledger row, so
+      // Request placed + Fulfillment + PlacementEvidence commit or abort
+      // together. A failure here (including a unique-index violation) aborts the
+      // whole transaction: a placed Request never exists without its evidence.
+      await PlacementEvidence.create(
+        [
+          {
+            requestId: placedRequest._id,
+            image: evidence.image,
+            mimeType: evidence.mimeType,
+            byteLength: evidence.byteLength,
+            deleteAt: retainUntil,
           },
         ],
         { session }
@@ -649,6 +706,25 @@ export async function fulfillRequest(
   }
   const payload: FulfillmentRequestPayload = validation.data;
 
+  // W4-H1a: every NEW fulfillment needs exactly one valid placed-order
+  // screenshot. Checked here — after participant authority and the ordinary
+  // payload, before the U1.1 Message filter and before any mutation — so a
+  // missing, malformed, oversized, or wrong-type image is a definitive 400 that
+  // touches nothing, in both authorization shapes. Content-free by design: the
+  // response never says which check failed, and nothing is logged.
+  const evidenceCheck = validatePlacedOrderScreenshot(
+    payload.fulfillment.placedOrderScreenshot
+  );
+  if (!evidenceCheck.ok) {
+    return sendDay4Error(
+      res,
+      400,
+      INVALID_PLACED_ORDER_SCREENSHOT_CODE,
+      INVALID_PLACED_ORDER_SCREENSHOT_MESSAGE
+    );
+  }
+  const evidence = evidenceCheck.evidence;
+
   // W4-U1.1: the optional helper Message is filtered after fulfillment
   // authority/payload validation and before the durable placement mutation.
   // A match is NOT a fulfillment failure: the real Grubhub order is already
@@ -696,6 +772,7 @@ export async function fulfillRequest(
       placedAt,
       messageSuppressed,
       submittedMessage !== undefined,
+      evidence,
       session
     );
     placedRequest = placement.placedRequest;
@@ -839,4 +916,82 @@ export async function fulfillRequest(
   // flushed.
   startRequesterFulfillmentPush(placedRequest);
   return res;
+}
+
+/**
+ * Whether `error` is something the body parser itself raised (`body-parser` /
+ * `raw-body` errors are `http-errors` carrying a string `type` and a 4xx
+ * status). Anything else — notably a rejection from the async handler, which
+ * Express 5 also forwards to this route's error middleware — is NOT a parse
+ * failure and must never be answered as one: it can follow a committed
+ * placement, so calling it a definitive 400 would be false.
+ */
+function isBodyParserError(error: unknown): error is { type: string } {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { type?: unknown; status?: unknown };
+  return (
+    typeof candidate.type === "string" &&
+    typeof candidate.status === "number" &&
+    candidate.status >= 400 &&
+    candidate.status < 500
+  );
+}
+
+/**
+ * Final error boundary for this route's own body parser. A malformed or
+ * oversized body makes `express.json` call `next(err)` instead of running the
+ * handler; without this, that error would reach the global error handler in
+ * `app.ts`, which logs the error object — and a body-parser error can carry a
+ * slice of the raw request body, which here may be screenshot bytes. Nothing
+ * about the error is logged. An over-limit body can only be an oversized image
+ * (a legitimate client stays far under the ceiling), so it answers with the
+ * evidence code; any other unreadable body is an ordinary invalid payload. A
+ * non-parser error is passed on untouched (see `isBodyParserError`).
+ */
+export function fulfillmentParserError(
+  error: unknown,
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  if (res.headersSent || !isBodyParserError(error)) {
+    next(error);
+    return;
+  }
+  if (error.type === "entity.too.large") {
+    sendDay4Error(
+      res,
+      400,
+      INVALID_PLACED_ORDER_SCREENSHOT_CODE,
+      INVALID_PLACED_ORDER_SCREENSHOT_MESSAGE
+    );
+    return;
+  }
+  sendDay4Error(
+    res,
+    400,
+    "INVALID_FULFILLMENT_PAYLOAD",
+    "The fulfillment details are invalid."
+  );
+}
+
+/**
+ * Registers the fulfillment route with its own bounded JSON parser. Must be
+ * called BEFORE the global `express.json({ limit: "100kb" })` in `app.ts`: a
+ * global parser runs ahead of route middleware and would refuse this body (and
+ * answer through the global error handler) before this route's larger ceiling
+ * could apply. Order here is the rate limiter first — so a throttled caller
+ * costs no body parsing — then the route-scoped parser, the handler, and the
+ * content-free parser-error boundary. The route is deliberately not paused by
+ * `PUBLIC_ACTIONS_PAUSED`: a helper holding a real order must be able to
+ * record it.
+ */
+export function registerFulfillmentRoute(app: Express): void {
+  app.post(
+    FULFILLMENT_ROUTE_PATH,
+    fulfillmentRateLimiter,
+    express.json({ limit: FULFILLMENT_BODY_LIMIT }),
+    fulfillRequest,
+    fulfillmentParserError
+  );
 }
